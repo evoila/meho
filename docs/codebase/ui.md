@@ -61,6 +61,7 @@ own page:
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
 | `/ui/checks`, `/ui/conventions`, `/ui/operations`, `/ui/connectors/registry` (menu entry "Connectors") | the `meho_backplane.ui.routes` row of "Key types" below |
 | `/ui/event-sources` | no section yet (`ui/routes/event_source/`) |
+| `/ui/settings` | [`settings.md`](settings.md#the-settings-file-page-of-the-web-console) |
 
 ## List-surface detail-navigation convention (#2463)
 
@@ -4056,14 +4057,23 @@ admin block list (`docs/codebase/principal-block.md`):
   values and the message next to its field.
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
-  the scope (all tenants for a platform admin). With `confirm=yes`: 303
-  back to the page. The admin's own login: 403 `own_login`. The console
-  never removes a block on the admin's own login. A platform admin removes
-  a block on their own login with `meho principal unblock <sub> --reason
-  <text>`, run in the tenant of that block, with a fresh sign-in. It
-  removes only the block of that tenant. A block in every tenant stays
-  until another platform admin removes it. A tenant admin cannot remove a
-  block on their own login. Another tenant admin of that tenant removes a block of that tenant, and a platform admin removes any block, on this page or with `meho principal unblock`. Only a platform admin removes a block in every tenant.
+  the scope (all tenants for a platform admin). The confirm form carries
+  the set of blocks the page showed (`shown`). With `confirm=yes`, MEHO
+  removes only those blocks: 303 back to the page. When the blocks of the
+  login changed in between (a block was added, removed or set again),
+  MEHO removes nothing and answers 200 with the confirm page again, the
+  new blocks and a note, so the admin confirms again. The audit row
+  `principal.unblock` names only the removed blocks. The admin's own
+  login: 403 `own_login`. The console never removes a block on the
+  admin's own login. A platform admin removes a block on their own login
+  with `meho principal unblock <sub> --reason <text>`, run in the tenant
+  of that block, with a fresh sign-in. It removes only the block of that
+  tenant. A block in every tenant stays until another platform admin
+  removes it. A tenant admin cannot remove a block on their own login.
+  Another tenant admin of that tenant removes a block of that tenant, and
+  a platform admin removes any block, on this page or with
+  `meho principal unblock`. Only a platform admin removes a block in
+  every tenant.
   No block to remove: 404. The blocks cannot be read: 503.
 
 Every form is a plain `POST` form with the CSRF token and the page's

@@ -2327,6 +2327,42 @@ The read checks no agent grant.
   [evoila/meho#6803](https://github.com/evoila/meho/issues/6803).
 - Tests: `tests/test_mcp_call_operation_own_request_status.py`.
 
+## Strict tool schemas (no `null` in an `enum`)
+
+A strict model gateway refuses a tool schema that holds `null` inside an
+`enum`, and then refuses the whole tool list. 16 fields in 11 tools are
+written as `{"type": ["string", "null"], "enum": [..., null]}`. There is no
+switch. The copy of an input schema and of an output schema that `tools/list`
+sends never has `null` in an `enum`. One output field has the form: `delivery`
+of `call_operation`.
+
+- `_wire_safe_input_schema` in `mcp/registry.py` walks the whole schema
+  (`properties`, `items`, `$defs`, and so on) and drops `None` from each
+  `enum`. Nothing else changes: a `type` list such as `["string", "null"]`
+  stays. Values under `default`, `const` and `examples` are data and stay as
+  they are. The members of an `enum` are data too: only a direct `null` member
+  goes, and an object among the members stays as it is. An `enum` of only
+  `null` becomes `const: null`, so the sent schema does not accept more than
+  the server does. An `enum` without `null`, also an empty one, stays. No
+  registered tool has these special forms.
+- `_wire_safe_output_schema` does the same walk for `outputSchema`, with one
+  difference. MEHO answers `null` for `delivery`, and a client may check the
+  answer against the sent schema (the MCP Python SDK does). So `null` is not
+  just dropped. The rule `{"enum": [..., null]}` becomes
+  `{"anyOf": [{"enum": [...]}, {"type": "null"}]}`, and the other keywords stay.
+  An `anyOf` that the schema already has stays inside an `allOf`. The full
+  `outputSchema` on the tool does not change.
+- The server checks each call against `inputSchema`, not the wire copy. A
+  call that sends `null` for such a field still passes, and the handler
+  treats it like a missing field.
+- MEHO's own hosted agent reuses `to_wire()`, so it gets the same copy.
+- No tool is added, removed or renamed.
+- Tests: `tests/test_mcp_strict_output_schemas.py` checks every kind of
+  `call_operation` answer against the sent output schema.
+  `tests/test_mcp_strict_tool_schemas.py` runs the real handler of
+  each of the 11 tools with `null` and with the field left out. Only the call
+  below the handler (service or database) is a stand-in.
+
 ## Short tool texts (`MCP_SHORT_TOOL_TEXTS`, off by default)
 
 The biggest tools on the default list have a short text. A session sees it

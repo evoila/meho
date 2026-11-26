@@ -18,18 +18,22 @@ MEHO cannot read the block list, the page and both steps of an unblock
 answer ``503`` with ``principal_block_check_unavailable``. A
 change answers ``303`` back to the page. The unblock button of a row
 opens a confirm page first; only the form of that page (``confirm=yes``)
-removes blocks. The console never removes a block on the admin's own
-login. A platform admin removes a block on their own login with
-`meho principal unblock <sub> --reason <text>`, run in the tenant of that
-block, with a fresh sign-in. It removes only the block of that tenant. A
-block in every tenant stays until another platform admin removes it. A
-tenant admin cannot remove a block on their own login. Another tenant admin of
-that tenant removes a block of that tenant, and a platform admin removes any
-block, on this page or with `meho principal unblock`. Only a platform admin
-removes a block in every tenant. Each block and unblock writes one audit
-row named ``principal.block`` or ``principal.unblock``. The row names the
-console route of the form, not the REST route; the request record of the
-form keeps its own ``http.post:`` name.
+removes blocks. That form carries the set of blocks the page showed
+(``shown``), and the confirm removes only those blocks. When the blocks of
+the login changed in between, the confirm removes nothing and shows the
+confirm page again with the new blocks. The console never removes a block
+on the admin's own login. A platform admin removes a block on their own
+login with `meho principal unblock <sub> --reason <text>`, run in the
+tenant of that block, with a fresh sign-in. It removes only the block of
+that tenant. A block in every tenant stays until another platform admin
+removes it. A tenant admin cannot remove a block on their own login.
+Another tenant admin of that tenant removes a block of that tenant, and a
+platform admin removes any block, on this page or with
+`meho principal unblock`. Only a platform admin removes a block in every
+tenant. Each block and unblock writes one audit row named
+``principal.block`` or ``principal.unblock``. The row names the console
+route of the form, not the REST route; the request record of the form
+keeps its own ``http.post:`` name.
 """
 
 from __future__ import annotations
@@ -46,10 +50,12 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import (
     BLOCK_SCOPE_ALL,
     BlockedPerson,
+    BlockSetChangedError,
     CannotBlockSelfError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
+    block_set_digest,
     list_blocked,
     unblock_principal,
 )
@@ -87,6 +93,7 @@ _OWN_LOGIN_UNBLOCK = (
     "Only a platform admin removes a block in every tenant."
 )
 _CONFIRMED = "yes"
+_SET_CHANGED = "The blocks of this login changed. Check the blocks below and confirm again."
 _FIELD_MESSAGES = {
     "sub": "Enter the login id of the person.",
     "reason": "Enter a reason (at most 500 characters).",
@@ -191,6 +198,8 @@ async def _confirm_page(
     operator: Operator,
     sub: str,
     blocks: list[BlockedPerson],
+    *,
+    changed: bool = False,
 ) -> HTMLResponse:
     token = mint_csrf_token(str(session.session_id))
     context = {
@@ -198,6 +207,8 @@ async def _confirm_page(
         "active_surface": "blocked-people",
         "sub": sub,
         "blocks": blocks,
+        "shown": block_set_digest(blocks),
+        "changed_message": _SET_CHANGED if changed else "",
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
         "confirmed": _CONFIRMED,
@@ -225,23 +236,29 @@ async def unblock_person(
     request: Request,
     sub: str = Form(min_length=1, max_length=255),
     confirm: str = Form(default=""),
+    shown: str = Form(default=""),
     session: UISessionContext = _session,
     operator: Operator = _admin,
 ) -> HTMLResponse | RedirectResponse:
     if sub == operator.sub:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_LOGIN_UNBLOCK)
-    if confirm != _CONFIRMED:
-        blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
-        if not blocks:
-            raise _not_blocked()
-        return await _confirm_page(request, session, operator, sub, blocks)
-    try:
-        await unblock_principal(operator, sub, route=("POST", _UNBLOCK_PAGE))
-    except PrincipalBlockUnavailableError as exc:
-        raise _unavailable() from exc
-    except PrincipalNotBlockedError as exc:
-        raise _not_blocked() from exc
-    return _back_to_page()
+    if confirm == _CONFIRMED:
+        try:
+            await unblock_principal(operator, sub, shown=shown, route=("POST", _UNBLOCK_PAGE))
+        except PrincipalBlockUnavailableError as exc:
+            raise _unavailable() from exc
+        except PrincipalNotBlockedError as exc:
+            raise _not_blocked() from exc
+        except BlockSetChangedError:
+            pass
+        else:
+            return _back_to_page()
+    blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
+    if not blocks:
+        raise _not_blocked()
+    return await _confirm_page(
+        request, session, operator, sub, blocks, changed=confirm == _CONFIRMED
+    )
 
 
 _HTML = {"text/html": {"schema": {"type": "string"}}}
@@ -299,7 +316,10 @@ def build_principal_blocks_router() -> APIRouter:
         responses={
             **_BACK_TO_PAGE,
             200: {
-                "description": "The confirm page (the form has no confirm=yes).",
+                "description": (
+                    "The confirm page: the form has no confirm=yes, or the blocks "
+                    "of the login are not the blocks the confirm page showed."
+                ),
                 "content": _HTML,
             },
             403: {"description": "The login is the admin's own login.", "content": _JSON_DETAIL},

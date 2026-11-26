@@ -59,7 +59,10 @@ A platform admin's way back:
   `meho principal unblock <sub> --reason <text>`, run in the tenant of that
   block, with a fresh sign-in. It removes only the block of that tenant. A
   block in every tenant stays until another platform admin removes it. A
-  tenant admin cannot remove a block on their own login. Another tenant admin of that tenant removes a block of that tenant, and a platform admin removes any block, on this page or with `meho principal unblock`. Only a platform admin removes a block in every tenant.
+  tenant admin cannot remove a block on their own login. Another tenant
+  admin of that tenant removes a block of that tenant, and a platform admin
+  removes any block, on this page or with `meho principal unblock`. Only a
+  platform admin removes a block in every tenant.
 
 To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
@@ -74,7 +77,8 @@ The text names no admin and no reason.
   for each `(sub, scope)`. `scope` is `*` or the tenant id. It holds the
   reason, the admin's `sub` and the time.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,
-  and `block_principal`, `unblock_principal`, `list_blocked`.
+  and `block_principal`, `unblock_principal`, `list_blocked`,
+  `block_set_digest`.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
@@ -216,16 +220,26 @@ block. The admin check uses the signed-in session only. The unblock
 button of a row opens a confirm page; only its form (`confirm=yes`)
 removes blocks. The confirm page names the login, its blocks and the
 scope: for a platform admin the button reads "Unblock in all tenants",
-and the page says that every block of the login goes, also the blocks of
-tenant admins. The page shows no button on the admin's own login row, and
-the unblock form answers 403 `own_login` for it. The console never removes
-a block on the admin's own login. A platform admin removes a block on their
-own login with `meho principal unblock <sub> --reason <text>`, run in the
-tenant of that block, with a fresh sign-in. It removes only the block of
-that tenant. A block in every tenant stays until another platform admin
-removes it. A tenant admin cannot remove a block on their own login.
-Another tenant admin of that tenant removes a block of that tenant, and a platform admin removes any block, on this page or with `meho principal unblock`. Only a platform admin removes a block in every tenant. The own-login hint of the page
-says the rule for the role of the viewer. When MEHO cannot read the blocks, the page and
+and the page says that the blocks it lists go, in all tenants, also the
+blocks of tenant admins. The confirm removes only the blocks the confirm
+page showed: its form carries that set (`shown`, from
+`block_set_digest`), and `unblock_principal(..., shown=...)` compares it
+with the blocks in the table before it removes anything. When the set
+changed in between (a block was added, removed, or set again with a new
+reason, admin or time), MEHO removes nothing, shows the confirm page
+again with the new blocks and a note, and asks again. The audit row
+`principal.unblock` names only the removed blocks. The page shows no
+button on the admin's own login row, and the unblock form answers 403
+`own_login` for it. The console never removes a block on the admin's own
+login. A platform admin removes a block on their own login with
+`meho principal unblock <sub> --reason <text>`, run in the tenant of that
+block, with a fresh sign-in. It removes only the block of that tenant. A
+block in every tenant stays until another platform admin removes it. A
+tenant admin cannot remove a block on their own login. Another tenant
+admin of that tenant removes a block of that tenant, and a platform admin
+removes any block, on this page or with `meho principal unblock`. Only a
+platform admin removes a block in every tenant. The own-login hint of
+the page says the rule for the role of the viewer. When MEHO cannot read the blocks, the page and
 both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)
 in hidden fields, so it works without JavaScript, and a form from a page
@@ -238,6 +252,21 @@ REST calls name the REST method and path. The request row of the form keeps
 its own `http.post:` name. The menu entry "Blocked people" shows only for a
 person with `tenant_admin` (the session context holds it, set at login and
 at each token check); the page and both forms keep their own 403.
+
+Block and unblock of one login at the same moment: an unblock reads the
+blocks of the login with a row lock (`SELECT ... FOR UPDATE`, in the order
+of the scope) and holds it until it ends. A second unblock of the same
+login waits, then finds no block and answers 404 `principal_not_blocked`.
+A block writes its row in one statement (insert, or update when the row
+is there). When it meets an unblock of the same login, it waits for the
+unblock to end and then writes the block, so a block that a person asks
+for is always written. The audit rows are in the order the two took
+effect. The delete of an unblock also removes a block only while it is
+still the block that was read (same reason, admin and time). When one was
+set again in the meantime, MEHO removes nothing: the console shows the
+confirm page again with the current blocks, and the REST route answers
+409 `principal_block_changed`. Tests on PostgreSQL:
+`tests/integration/test_principal_unblock_row_lock_pg.py`.
 
 ## Dependencies
 

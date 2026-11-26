@@ -10,8 +10,10 @@ what changed.
 The design is the internal note `core.md` §5. The code is in
 `backend/src/meho_backplane/instance_settings/` (`schema.py`, `diff.py`,
 `service.py`) and `backend/src/meho_backplane/api/v1/instance_settings.py`.
-MEHO 0.45.0 ships the REST endpoints below. The command line and the
-console do not have the settings file yet.
+MEHO 0.45.0 ships the REST endpoints below. The web console has the
+settings file page (`/ui/settings`, see
+[The settings file page of the web console](#the-settings-file-page-of-the-web-console)).
+The command line does not have the settings file yet.
 
 The policy file (categories and classifications) is a separate file with
 its own import that waits for an admin's approval: see [policy.md](policy.md).
@@ -156,10 +158,16 @@ Tenant rows and conventions change no approval or gate.
 - The preview with a token works. It shows the change in `diff` and names
   each such path in `warnings`. It writes nothing.
 - A value equal to the stored one is no change and is not refused.
-- The web console cannot apply a settings file yet. Until it has a
-  settings page, these two changes cannot be made at all; they have no
-  REST route of their own. Turning the gate on applies with a token, so
-  after that the gate stays on until then.
+- A person makes these two changes on the settings file page of the web
+  console (`/ui/settings`). They have no REST route of their own. The
+  403 reason and the preview warning name that page.
+- The person gives a reason (`loosening_refusal`), by the reason step of
+  turning approval off for an operation (`ui/reason.py`). A reason that is
+  empty or only blanks is no reason. Without one, the apply answers 403 with
+  a sentence that names the Reason field, and writes nothing, also not the
+  other parts of the file. The other direction needs no reason, and the page
+  asks for no fresh sign-in. A tenant admin makes these changes in their own
+  tenant, a platform admin in any tenant, both with a reason.
 
 - The apply locks the rows of the tenants in the file before it reads
   their policies, and holds the lock until its commit. A second import of
@@ -170,7 +178,7 @@ Tenant rows and conventions change no approval or gate.
   made, so the plan starts from the defaults. Right after the apply
   creates the row (or waits for another import that creates it), it locks
   the row, plans the file's policies again from what is stored, and runs
-  the console-only check again.
+  the console-only check and the reason check again.
 
 Tests: `tests/test_settings_import_console_policies.py`, and on PostgreSQL
 `tests/integration/test_settings_import_overlap_pg.py`.
@@ -312,8 +320,10 @@ them at once.
 
 All four endpoints need a login; without a token they answer 401. There is
 no page before login. The first admin signs in and calls the endpoints with
-their own token. The console and the command line do not have the settings
-file yet.
+their own token. The web console has the settings file page for the
+preview and the import (see
+[The settings file page of the web console](#the-settings-file-page-of-the-web-console)).
+The command line does not have the settings file yet.
 
 | Caller | Export | Preview / import | History |
 |---|---|---|---|
@@ -337,10 +347,11 @@ file yet.
   a script, an AI tool with a person's login) that applies such a file gets
   403 with the reason "A settings file that adds or changes targets is
   applied in the web console. A call with a token cannot write targets at
-  once." Nothing is written, and no approval request is made. While the
-  console has no settings page, add or change targets through the target
-  routes (a call with a token waits for approval there), then import the
-  file: its target entries then match and are no change. The preview
+  once." Nothing is written, and no approval request is made. A person
+  applies such a file on the settings file page of the web console
+  (`/ui/settings`); with a token, add or change targets through the
+  target routes (a call with a token waits for approval there), then
+  import the file: its target entries then match and are no change. The preview
   works with a token, and so does a file that changes no target (a target
   entry equal to the stored one is no change). Two policies also change
   only in the web console: `run_approval_target_kinds` turned on and
@@ -422,6 +433,58 @@ nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
 - `diff` in the answer is what actually changed; `revision_id` is the new
   revision.
 - An unchanged file gives an empty diff and writes no revision.
+
+### The settings file page of the web console
+
+`ui/routes/settings.py`, templates in `ui/templates/settings/`:
+
+- `GET /ui/settings`: the page with the upload form.
+- `POST /ui/settings/preview`: runs `build_plan` and shows every mistake
+  with its reason, the warnings (also next to the mistakes), a note for
+  each change that only a person in the web console may make (the two
+  policies, with the note that they need a reason, and each target the file
+  adds or changes), and every row of the diff. The apply form has a Reason
+  field when the file makes one of the two policy changes. Writes nothing. It calls `note_preview`, so it writes no
+  execution audit row.
+- `POST /ui/settings/apply`: runs `apply_import` and shows what really
+  changed, the items in `failed`, and the revision id. The main message
+  says whether MEHO wrote all of the file, part of it, or nothing. It shows
+  the reason. A reason longer than 1024 characters answers 422.
+
+The console operator has `web_session` true, so targets,
+`run_approval_target_kinds` turned on and `announce_gate_enabled` turned
+off apply here, the two policy changes with a reason. The gate (`require_ui_settings_admin`) asks for a person
+first (403 `human_principal_required` for an agent, service or runner
+login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`).
+`build_plan` refuses a file that names another tenant for a
+`tenant_admin`. Such a refusal answers 403 with the reason as an HTML
+fragment, so the audit log keeps a refusal row for the preview and the
+apply. `static/src/app/settings-file.js` swaps every error answer of the
+two forms into the page (htmx does not swap an error on its own); an
+answer that is not HTML becomes a fixed error text. The CSRF check of the console
+runs on both POST routes.
+
+The upload is multipart (the CSRF middleware caps a url-encoded body at
+256 KiB). The preview keeps no state: its apply form sends the same file
+bytes as base64, and the apply checks the file again before it writes.
+The apply binds `op_id=settings.import` and owns its transaction
+(`get_raw_session`). `audit.commit_with_request_audit_row` adds the
+request's one audit row, with the id that the revision keeps, to the same
+transaction as the settings and the revision, and commits them together.
+The row is the one the audit middleware would write: `legacy_request`, or
+`operation_execution` with `AUDIT_WRAPPER_ROWS_RETIRED=true`, with the
+`target_id` of a changed target, the `client` block of the login
+(`AUDIT_CLIENT_IDENTITY`) and the time since the request started. The
+middleware then writes no row of its own in either mode, and sends this
+id in the `Meho-Audit-Id` header. The row holds the reason under `reason`.
+When any step of the apply fails (a read, a write, the revision or the
+commit; a database error or any other error), MEHO rolls back and answers
+500 with an error text: nothing is saved. The middleware records the failed
+request in one row. That row names only the attempt: `op_id`,
+`settings_import`, `settings_file_sha256` and `settings_tenant_ids`, and no
+change of the file. A refusal, a file
+with mistakes and a file that changes nothing roll back. Tests: `tests/test_ui_settings_file.py`,
+`tests/test_ui_settings_file_js.py`.
 
 ### `POST /api/v1/settings/conventions-drift`
 

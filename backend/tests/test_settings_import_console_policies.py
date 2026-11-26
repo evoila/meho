@@ -10,7 +10,8 @@
 * The preview with a token works, shows the change in the diff and names it
   in ``warnings``. It writes nothing.
 * The opposite direction (target kinds off, gate on) applies with a token.
-* A person in a web session applies every change at once.
+* A person in a web session needs a reason for the loosening direction. The
+  settings file page passes one (``test_ui_settings_file.py``).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import respx
 import yaml
 from fastapi import Depends
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from meho_backplane.api.v1 import instance_settings as settings_api
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -33,6 +34,7 @@ from meho_backplane.db.models import InstanceSettingsRevision, Tenant, TenantCon
 from meho_backplane.instance_settings.console_only import console_only_changes
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
@@ -110,7 +112,14 @@ def _file(policies: dict[str, Any] | None, **extra: Any) -> str:
     return yaml.safe_dump(doc, sort_keys=False)
 
 
-def _post(client: TestClient, content: str, *, preview: bool = False) -> Any:
+def _post(
+    client: TestClient,
+    content: str,
+    *,
+    preview: bool = False,
+    params: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
     key = make_rsa_keypair("kid-settings-console-policies")
     token = mint_token(
         key, sub="admin-person", tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT)
@@ -119,9 +128,13 @@ def _post(client: TestClient, content: str, *, preview: bool = False) -> Any:
         mock_discovery_and_jwks(mock, public_jwks(key))
         return client.post(
             _URL,
-            params={"preview": "true"} if preview else None,
+            params={**({"preview": "true"} if preview else {}), **(params or {})},
             content=content.encode(),
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/yaml"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/yaml",
+                **(headers or {}),
+            },
         )
 
 
@@ -154,7 +167,7 @@ async def test_token_import_that_loosens_a_policy_is_refused(
     detail = resp.json()["detail"]
     assert f"`{path}`" in detail
     assert "applies only for a person in the web console" in detail
-    assert "The web console cannot apply a settings file yet" in detail
+    assert "Apply it on the settings file page (/ui/settings)." in detail
     await _assert_nothing_written()
 
 
@@ -203,7 +216,7 @@ async def test_token_preview_names_the_change_and_writes_nothing(
     assert path.rsplit(".", 1)[1] in changed
     (warning,) = [w for w in body["warnings"] if f"`{path}`" in w]
     assert "only for a person in the web console" in warning
-    assert "The web console cannot apply a settings file yet" in warning
+    assert "apply the file on the settings file page (/ui/settings)" in warning
     await _assert_nothing_written()
 
 
@@ -220,20 +233,32 @@ async def test_web_console_preview_has_no_console_warning(client: TestClient) ->
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("web_console")
 @pytest.mark.parametrize(("policies", "path"), _LOOSENING)
-async def test_web_console_applies_the_change_at_once(
+async def test_web_console_change_without_a_reason_is_refused(
     client: TestClient, policies: dict[str, Any] | None, path: str
 ) -> None:
     await _seed()
     resp = _post(client, _file(policies))
 
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["applied"] is True
-    tenant = await _tenant()
-    if path == _KINDS:
-        assert tenant.run_approval_target_kinds_enabled is True
-    else:
-        assert tenant.announce_gate_enabled is False
-    assert len(await _rows(InstanceSettingsRevision)) == 1
+    assert resp.status_code == 403, resp.text
+    assert f"`{path}`" in resp.json()["detail"]
+    assert "needs a reason" in resp.json()["detail"]
+    await _assert_nothing_written()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("policies", "path"), _LOOSENING)
+@pytest.mark.parametrize("params", [{}, {"reason": "Planned"}], ids=["no-reason", "reason"])
+async def test_token_import_is_refused_with_or_without_a_reason(
+    client: TestClient, policies: dict[str, Any] | None, path: str, params: dict[str, str]
+) -> None:
+    await _seed()
+    headers = {"Reason": "Planned"} if params else {}
+    resp = _post(client, _file(policies), params=params, headers=headers)
+
+    assert resp.status_code == 403, resp.text
+    assert f"`{path}`" in resp.json()["detail"]
+    assert "applies only for a person in the web console" in resp.json()["detail"]
+    await _assert_nothing_written()
 
 
 @pytest.mark.asyncio
@@ -248,6 +273,36 @@ async def test_token_import_that_narrows_applies(client: TestClient) -> None:
     tenant = await _tenant()
     assert tenant.run_approval_target_kinds_enabled is False
     assert tenant.announce_gate_enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapper_rows_retired", [False, True], ids=["audit-rows", "cutover"])
+async def test_failed_revision_insert_keeps_the_stored_policies(
+    monkeypatch: pytest.MonkeyPatch, wrapper_rows_retired: bool
+) -> None:
+    """The policies are written in a savepoint; a failed revision insert rolls them back too."""
+    if wrapper_rows_retired:
+        monkeypatch.setenv("REQUEST_USAGE_RETENTION_DAYS", "30")
+        monkeypatch.setenv("AUDIT_WRAPPER_ROWS_RETIRED", "true")
+        get_settings.cache_clear()
+    install_fake_vault(monkeypatch)
+    await _seed(kinds=True, gate=False)
+
+    def _refuse(*_args: Any) -> None:
+        raise RuntimeError("revision insert refused")
+
+    event.listen(InstanceSettingsRevision, "before_insert", _refuse)
+    try:
+        content = _file({"run_approval_target_kinds": False, "announce_gate_enabled": True})
+        resp = _post(TestClient(app, raise_server_exceptions=False), content)
+    finally:
+        event.remove(InstanceSettingsRevision, "before_insert", _refuse)
+
+    assert resp.status_code == 500, resp.text
+    tenant = await _tenant()
+    assert tenant.run_approval_target_kinds_enabled is True
+    assert tenant.announce_gate_enabled is False
+    assert await _rows(InstanceSettingsRevision) == []
 
 
 @pytest.mark.asyncio

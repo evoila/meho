@@ -314,6 +314,24 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
                 self.assertEqual(before, self.files())
                 self.assertEqual(1, self.host.deployment_restarts())
 
+    def test_only_root_may_open_the_lock(self) -> None:
+        # flock takes the lock on a file that is open only for reading, so
+        # another account must not be able to open the folder or the file.
+        lock = self.host.host_path(HOST_LOCK)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.parent.chmod(0o755)
+        lock.write_text("")
+        lock.chmod(0o644)
+        old = os.umask(0o022)
+        try:
+            result = self.run_command(LIST)
+        finally:
+            os.umask(old)
+
+        self.assertEqual(0, result.returncode, self.output(result))
+        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+        self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
+
     def test_the_lock_comes_before_the_record_is_read(self) -> None:
         self.host.host_path(RECORD_PATH).unlink()
         before = self.files()

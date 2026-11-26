@@ -100,8 +100,13 @@ take_host_lock() {
     command -v flock >/dev/null ||
         fail "the command flock is missing, so install.sh cannot make sure that no meho-host command changes the machine at the same time. Nothing was changed." \
             "install the package util-linux, then run install.sh again."
+    # flock takes the lock on a file that is open only for reading too. So
+    # only root may open the folder and the file, or another local account
+    # could hold the lock and block every update.
     mkdir -p "${lock%/*}"
+    chmod 0700 "${lock%/*}"
     exec {MEHO_HOST_LOCK_FD}>>"$lock"
+    chmod 0600 "$lock"
     flock -n "$MEHO_HOST_LOCK_FD" ||
         fail "another install.sh or meho-host command changes this machine now (lock $MEHO_HOST_LOCK). Nothing was changed." \
             "run install.sh again after the other command ends."

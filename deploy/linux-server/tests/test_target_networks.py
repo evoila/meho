@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import unittest
 
@@ -230,6 +231,36 @@ class HostLockTests(InstallTestCase):
         self.assertEqual(LOCK_HELD_LINE.format(command="install.sh"), line)
         self.assertEqual([], self.written_files())
         self.assertNotIn("helm", self.machine.calls())
+
+    def run_with_umask_022(self) -> None:
+        old = os.umask(0o022)
+        try:
+            self.assert_succeeds(self.machine.run("--target-networks", LIST))
+        finally:
+            os.umask(old)
+
+    def assert_only_root_may_open_the_lock(self) -> None:
+        # flock takes the lock on a file that is open only for reading, so
+        # another account must not be able to open the folder or the file.
+        lock = self.machine.host_path(HOST_LOCK)
+        self.assertEqual(0o700, stat.S_IMODE(lock.parent.stat().st_mode))
+        self.assertEqual(0o600, stat.S_IMODE(lock.stat().st_mode))
+
+    def test_only_root_may_open_a_new_lock(self) -> None:
+        self.run_with_umask_022()
+
+        self.assert_only_root_may_open_the_lock()
+
+    def test_an_old_lock_that_others_may_read_is_closed(self) -> None:
+        lock = self.machine.host_path(HOST_LOCK)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock.parent.chmod(0o755)
+        lock.write_text("")
+        lock.chmod(0o644)
+
+        self.run_with_umask_022()
+
+        self.assert_only_root_may_open_the_lock()
 
     def test_the_lock_ends_with_the_run(self) -> None:
         self.assert_succeeds(self.machine.run("--target-networks", LIST))

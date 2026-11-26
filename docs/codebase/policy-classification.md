@@ -351,10 +351,8 @@ connector kit (kit 1.7 or higher).
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
-- Today no rule reads them, so they change no answer. They are for the
-  switch `CUSTOM_POLICY`: with it on, an operation with `hard_to_undo`
-  counts as a delete, so no standing grant and no run approval covers it.
-  A change of rights waits by default. With the switch off, nothing changes.
+- No rule of MEHO reads the two fields. No call waits, runs or is refused
+  because of them.
 
 ## Known limits
 

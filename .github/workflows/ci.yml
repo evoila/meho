@@ -728,9 +728,12 @@ jobs:
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
       # not-yet-provisioned repos) the directory does not exist, the
-      # resolver returns None, and the spec-backed lanes pytest.skip
-      # exactly as they did before #2949. When the checkout ran, the
-      # seconds-cheap reconcile lanes run for real in this job.
+      # resolver returns None, and the spec-backed tests skip. The step
+      # "Check the skipped tests of this shard" then checks the skips with
+      # the without_secrets numbers of tests/_skip_limits.json, so a run
+      # without the shelf passes, and a skip of any other test still fails.
+      # When the checkout ran, the seconds-cheap reconcile lanes run for
+      # real in this job and the check takes the with_secrets numbers.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -820,8 +823,8 @@ jobs:
         #
         # SPEC_SHELF_TOKEN is a fine-grained PAT: Contents read-only on
         # the single private shelf repo, nothing else. Secret absent →
-        # this step skips → the spec lanes pytest.skip exactly as
-        # before this step existed. Fork PRs never reach this step (the
+        # this step skips → the spec lanes skip, and the skip limit check
+        # takes the without_secrets numbers. Fork PRs never reach this step (the
         # job-level fork guard skips the whole job) and would not see
         # the secret anyway (GitHub withholds secrets from fork-PR
         # runs). Dependabot runs read the Dependabot secret store,
@@ -860,7 +863,8 @@ jobs:
         # job — otherwise the resolvers would return None and the spec
         # lanes would silently go back to skipping, undetected (the
         # exact regression #2949 closes). Without the secret this step
-        # skips and lane-skip stays the documented degraded mode.
+        # skips, the spec tests skip, and the skip limit check takes the
+        # without_secrets numbers of tests/_skip_limits.json.
         # Prints file *presence* only — never spec content.
         if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
@@ -1444,11 +1448,21 @@ jobs:
       - name: Check the skipped tests of this shard
         # A skipped test shows as green. This step fails when a test file
         # skipped more tests than tests/_skip_limits.json allows for it (0
-        # when it is not listed). A file that skipped fewer gives a notice
-        # to lower its number. The count is per test file, so it holds for
+        # when it is not listed). The count is per test file, so it holds for
         # any split and for the short runs. See tests/_skip_limit_check.py.
+        # A run without the spec shelf takes the without_secrets numbers
+        # (the spec tests skip there); this step runs in both kinds of run.
+        # --selection: a file that ran whole and skipped fewer tests gives a
+        # notice to lower its number; a file picked by test id (test map
+        # run) gives none.
         shell: bash
-        run: uv run python tests/_skip_limit_check.py --lane unit pytest-unit-shard.xml
+        run: |
+          set -euo pipefail
+          args=(--lane unit --selection "${RUNNER_TEMP}/unit-files.txt")
+          if [ "${SPEC_SHELF_READY}" != "true" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-unit-shard.xml
 
       - name: Upload per-test times (input for the shard split)
         # #4809: tests/_unit_shard_split.py balances the shards with the
@@ -2897,8 +2911,10 @@ jobs:
         # The Keycloak image has no Docker Hub fallback: the image is about
         # 600 MB, and anonymous pulls would use up the shared pull limit. So
         # without the proxy (only in another repository) it is empty, and
-        # the live Keycloak test skips (tests/integration/
-        # test_auth_keycloak_client_credentials.py). The k3s image uses the
+        # the live Keycloak tests skip (tests/integration/
+        # test_auth_keycloak_client_credentials.py and the other files that
+        # use the image). The skip limit check then takes the
+        # without_secrets numbers of tests/_skip_limits.json. The k3s image uses the
         # tag of the fixture's own default, so the proxy serves the exact
         # tag the tests ask for.
         env:
@@ -3073,8 +3089,17 @@ jobs:
         # Same check as in python-unit-shard, with the integration numbers
         # of tests/_skip_limits.json. Some k3s skips depend on how fast pods
         # start, so a file that skipped fewer tests gives only a notice.
+        # Without the Keycloak test image (empty without the image proxy)
+        # the live Keycloak tests skip, so the check takes the
+        # without_secrets numbers; this step runs in both kinds of run.
         shell: bash
-        run: uv run python tests/_skip_limit_check.py --lane integration pytest-integration-shard.xml
+        run: |
+          set -euo pipefail
+          args=(--lane integration)
+          if [ -z "${MEHO_TEST_KEYCLOAK_IMAGE:-}" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-integration-shard.xml
 
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these

@@ -2279,12 +2279,22 @@ shape (deterministic file-level matrix + fan-in):
   number per test file and lane. A file that is not in it may skip 0
   tests. The step fails when a file skips more than its number. A pull
   request that adds a skip raises the number in the same pull request.
-  A file that skips fewer tests gives only a notice to lower the number,
-  because some k3s skips depend on how fast pods start. The step also
-  fails when the JUnit file or the count file is missing or broken, and
-  when the count file names a test file that is not in the repo. The
-  count is per test file, not per shard, so it holds for any shard split
-  and for the short runs (one connector, test map).
+  A file that ran whole and skips fewer tests gives only a notice to
+  lower the number, because some k3s skips depend on how fast pods start.
+  A file that a test map run picked by test id gives no such notice: the
+  unit step passes the list of what pytest ran (`--selection`).
+  A row is one number, or two numbers (`with_secrets` and
+  `without_secrets`). A run without the repository secrets takes the
+  second number: in the unit lane when `SPEC_SHELF_READY` is not `true`
+  (no vendor API files, so the spec tests skip), in the integration lane
+  when `MEHO_TEST_KEYCLOAK_IMAGE` is empty (no image proxy, so the live
+  Keycloak tests skip). The step runs in both kinds of run. A row names a
+  test file in the plain form `tests/<path>.py`. The step also fails
+  when the JUnit file or the count file is missing or broken, when a row
+  name is absolute or holds a `.` or `..` part, and when the count file
+  names a test file that is not in the repo. The count is per test file,
+  not per shard, so it holds for any shard split and for the short runs
+  (one connector, test map).
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
@@ -2674,7 +2684,9 @@ on a secret:
   skips, the directory doesn't exist, and the resolvers
   (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
   return `None` → the lanes
-  `pytest.skip()`. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
+  `pytest.skip()`. The skip limit check then takes the `without_secrets`
+  numbers of `backend/tests/_skip_limits.json`, so such a run passes, and a
+  skip of any other test still fails. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep. Full-ingest tests of a real vendor spec (minutes per

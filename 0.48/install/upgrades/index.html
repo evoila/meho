@@ -4182,6 +4182,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The policy file reserves seven top-level keys: <code>limits</code>, <code>agents</code>, <code>approvers</code>, <code>role_bindings</code>, <code>risk_levels</code>, <code>custom_roles</code> and <code>baseline</code>. A file that holds one of them is refused, whatever its value. The answer is one sentence, for example "This version of MEHO does not read <code>agents</code> in a policy file; remove it." So no stored policy holds them, and v0.48 reads every stored policy after a roll-back (it also skips a key it does not know).</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A new run approval request that lists an operation that reads a credential (the <code>credential_read</code> class, for example <code>k8s.secret.read_to_ref</code>) is refused, with the reason and "Leave it out.". For a request made before the upgrade, <code>meho approvals runs show</code> and <code>meho approvals runs approve</code> name such an entry under <code>entries_that_wait</code>, and each of its calls waits for a person.</td>
 <td>Leave operations that read a credential out of new run approval requests. Approve each such call in the console or the CLI. No schema action.</td>
 </tr>

@@ -248,11 +248,13 @@ async def assert_connector_declarations_valid(
 async def ready_test_operations(
     tenant_id: UUID, classes: Iterable[type[Connector]]
 ) -> set[type[Connector]]:
-    """The classes whose declared test read is ``safe`` and enabled for *tenant_id*.
+    """Read each test read's stored row (risk level, turned-off mark) and overrides.
 
-    Reads the stored row and the overrides that apply to the tenant (the
-    install's and its own). A class with no row, or with a problem from
-    :func:`stored_state_problems`, is not in the set.
+    The overrides read are those of the install and of *tenant_id*. A class is
+    in the set when the stored row has risk level ``safe`` and is not turned
+    off, and no override raises its risk level or makes it wait for approval.
+    A class with no row, or with a problem from :func:`stored_state_problems`,
+    is not in the set.
     """
     wanted = [cls for cls in classes if cls.test_operation is not None]
     if not wanted:

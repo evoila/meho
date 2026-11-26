@@ -7,8 +7,10 @@ Returns what the connector classes of one product declare: the extra settings
 of a target, the ways to log in with the fields of each, and the test read.
 The console uses it to build the target form and the credential form.
 
-Role: ``operator``. The answer holds names and labels only. The route never
-reads the secret store and never returns a value of any secret.
+Role: ``operator``. The answer holds what the classes declare: names, labels,
+help texts, kinds, choices and the declared defaults of target settings. A
+credential field has no default and no example value. The route never reads
+the secret store and never returns a value of any secret.
 
 Errors: 404 with a plain message when no connector serves the product.
 

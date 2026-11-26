@@ -95,8 +95,11 @@ while an override of the install or of the caller's tenant raises its risk
 level or makes it wait for approval (`ready_test_operations`). Then the
 console offers no test read for that class. Otherwise the route names the
 test read the connector declares; whether the caller may run it is decided
-when it is called. The answer holds names and labels only. It never reads the secret
-store. The router is included before the `/{connector_id}` routes of the
+when it is called. The answer holds what the classes declare: names,
+labels, help texts, kinds, choices and the declared defaults of target
+settings. A credential field has no default and no example value. The
+route never reads the secret store and never returns a value of any
+secret. The router is included before the `/{connector_id}` routes of the
 ingest router, so `target-form` is not read as a connector id.
 
 ## Dependencies

@@ -502,8 +502,10 @@ For each setting it shows:
   a step with no row a call can use. A policy file entry makes an
   operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
   the dry run lists its matches with every switch;
-- a warning when an operation is a step of a multi-step operation, with
-  every multi-step operation that runs it, at every level. As
+- a warning when the setting makes a step of a multi-step operation
+  wait, with every multi-step operation that runs it, at every level. A
+  policy file entry that makes only the direct call wait gives no such
+  warning. As
   `destructive`, a step is refused, not held for approval, so such a run
   stops at that step;
 - a warning when the install is in sandbox mode. There a delete grant of

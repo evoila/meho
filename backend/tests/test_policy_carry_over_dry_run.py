@@ -36,7 +36,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from meho_backplane import op_classes
 from meho_backplane.auth.operator import TenantRole
@@ -47,6 +47,7 @@ from meho_backplane.db.models import (
     TenantOperationSetting,
 )
 from meho_backplane.main import app
+from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.policy.carry_over import DRY_RUN_MESSAGE
 from meho_backplane.policy.store import classify_step
 from meho_backplane.sandbox_mode import set_sandbox_mode_active
@@ -357,6 +358,86 @@ async def test_a_turned_off_operation_is_not_listed_as_a_call(
 
     answer = call(client, key, "cowapi.vm.list")
     assert answer["status"] == "error" and answer["error"].startswith("unknown_op"), answer
+
+
+async def _imported_next_to_a_missing_handler() -> None:
+    """``cowapi.vm.list``'s handler is in no module here; ``GET:/api/imported`` is imported."""
+    async with get_sessionmaker()() as session:
+        typed = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "cowapi.vm.list")
+            )
+        ).scalar_one()
+        typed.handler_ref = "cowapi_gone.handlers.vm_list"
+        session.add(
+            EndpointDescriptor(
+                product="cowapi",
+                version="1.x",
+                impl_id="cowapi",
+                op_id="GET:/api/imported",
+                source_kind="ingested",
+                method="GET",
+                path="/api/imported",
+                group_id=typed.group_id,
+                safety_level="safe",
+                requires_approval=False,
+                parameter_schema={"type": "object", "properties": {}},
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on")
+async def test_an_imported_operation_is_listed_next_to_a_missing_handler(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await _imported_next_to_a_missing_handler()
+    await policy(TENANT, [{"match": {"connector": CONNECTOR}, "always_wait": True}])
+
+    (entry,) = dry_run(client, _admin_key("imported")).json()["settings"]
+
+    assert entry["operations"] == [op("GET:/api/imported")]
+    found = {
+        op_id: await lookup_descriptor(
+            tenant_id=TENANT, product="cowapi", version="1.x", impl_id="cowapi", op_id=op_id
+        )
+        for op_id in ("GET:/api/imported", "cowapi.vm.list")
+    }
+    imported = found["GET:/api/imported"]
+    assert imported is not None and imported.requires_approval is True
+    assert found["cowapi.vm.list"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on", "a_step")
+async def test_an_entry_that_holds_only_the_direct_call_gives_no_step_warning(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await register(embedding, "cowapi.vm.update", "compute", "caution")
+    await tenant_row("cowapi.vm.update", TENANT)
+    await policy(
+        TENANT,
+        [
+            {"match": {"connector": CONNECTOR}, "always_wait": True},
+            {"match": {"group": "compute"}, "always_wait": False},
+        ],
+    )
+    key = _admin_key("direct-only")
+
+    (entry,) = dry_run(client, key).json()["settings"]
+
+    assert entry["operations"] == [op("cowapi.vm.update")]
+    assert entry["warnings"] == [PREVIEW]
+    step = EndpointDescriptor(
+        product="cowapi", version="1.x", impl_id="cowapi", op_id="cowapi.vm.update"
+    )
+    async with get_sessionmaker()() as session:
+        classified = await classify_step(session, tenant_id=TENANT, step=step)
+    assert classified.always_wait is False
+    answer = call(client, key, "cowapi.vm.update")
+    assert answer["status"] == "awaiting_approval", answer
 
 
 @pytest.mark.asyncio

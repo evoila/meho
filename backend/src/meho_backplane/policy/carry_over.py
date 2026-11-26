@@ -27,9 +27,10 @@ Per setting it says:
   (:mod:`~meho_backplane.operations.governed_subops`). A policy file
   entry is matched against the operations a call of the scope can use,
   and against every declared step with the group the step gate finds
-  for it, also a step with no row a call can use. As
-  ``destructive``, a step of a multi-step operation is refused, not held
-  for approval;
+  for it, also a step with no row a call can use. An entry names the
+  multi-step operations of an operation only when it makes the step
+  wait, not only the direct call. As ``destructive``, a step of a
+  multi-step operation is refused, not held for approval;
 * whether the install is in sandbox mode. There a delete grant of a
   service login can cover some ``destructive`` operations;
 * that, as ``destructive``, a call needs a matching preview first.
@@ -52,7 +53,7 @@ from meho_backplane.db.models import (
     OperationPolicyOverride,
     TenantPolicy,
 )
-from meho_backplane.operations._code_presence import code_missing_connectors
+from meho_backplane.operations._code_presence import row_code_missing
 from meho_backplane.operations._lookup import (
     enabled_for_tenant_clause,
     installed_owner_clause,
@@ -107,7 +108,8 @@ class CarryOverOperation(BaseModel):
     """One operation a saved setting matches.
 
     ``step_of`` lists every multi-step operation that runs it as a step,
-    at every level, each once (empty when none does).
+    at every level, each once. It is empty when none does, or when the
+    setting makes only the direct call wait, not the step.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -162,20 +164,22 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
     the rows the tenant sees (:func:`visible_scope_clause`, so with its own
     copy of a connector only its own rows count), turned on for the tenant
     (:func:`enabled_for_tenant_clause`), of an installed package
-    (:func:`installed_owner_clause`), and of a connector whose code is in
-    this MEHO (:func:`code_missing_connectors`). The install's settings
-    reach every operation.
+    (:func:`installed_owner_clause`), and, row by row, not of a connector
+    whose code is not in this MEHO (:func:`row_code_missing`). So an
+    imported operation stays, also next to a handler that is not here.
+    The install's settings reach every operation.
     """
     group = aliased(OperationGroup)
     stmt = select(
-        EndpointDescriptor.tenant_id,
         EndpointDescriptor.product,
         EndpointDescriptor.version,
         EndpointDescriptor.impl_id,
+        EndpointDescriptor.source_kind,
+        EndpointDescriptor.handler_ref,
+        EndpointDescriptor.owner_package,
         group.group_key,
         EndpointDescriptor.op_id,
     ).outerjoin(group, EndpointDescriptor.group_id == group.id)
-    missing: set[tuple[UUID | None, str, str, str]] = set()
     if scope == "tenant":
         stmt = stmt.where(
             visible_scope_clause(
@@ -188,14 +192,22 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
             enabled_for_tenant_clause(tenant_id=tenant_id),
             installed_owner_clause(),
         )
-        missing = await code_missing_connectors(session, operator_tenant_id=tenant_id)
-    found = {
-        OpCoordinates(f"{impl_id}-{version}", group_key, op_id)
-        for row_tenant, product, version, impl_id, group_key, op_id in (
-            await session.execute(stmt)
-        ).tuples()
-        if (row_tenant, product, version, impl_id) not in missing
-    }
+    found: set[OpCoordinates] = set()
+    for product, version, impl_id, kind, ref, owner, group_key, op_id in (
+        await session.execute(stmt)
+    ).tuples():
+        row = EndpointDescriptor(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+            source_kind=kind,
+            handler_ref=ref,
+            owner_package=owner,
+        )
+        if scope == "tenant" and await row_code_missing(session, tenant_id=tenant_id, row=row):
+            continue
+        found.add(OpCoordinates(f"{impl_id}-{version}", group_key, op_id))
     return sorted(found, key=lambda c: (c.connector_id, c.op_id, c.group_key or ""))
 
 
@@ -339,12 +351,16 @@ async def _file_settings(
     # A declared step, with the group the step gate finds for it: the
     # tenant's row first, then the built-in row, none without a row.
     step_tenant = tenant_id if scope == "tenant" else None
-    as_steps = [
-        OpCoordinates(connector_id, await _stored_group_key(session, step_tenant, row), op_id)
-        for (connector_id, op_id), row in sorted(step_rows.items())
-    ]
+    as_steps = {
+        key: OpCoordinates(key[0], await _stored_group_key(session, step_tenant, row), key[1])
+        for key, row in sorted(step_rows.items())
+    }
+    # The entries that make each step wait: only they name its multi-step operations.
+    step_waits = {
+        key: {e.ref for e in _waiting_entries(entries, coords)} for key, coords in as_steps.items()
+    }
     candidates = sorted(
-        {*stored, *as_steps}, key=lambda c: (c.connector_id, c.op_id, c.group_key or "")
+        {*stored, *as_steps.values()}, key=lambda c: (c.connector_id, c.op_id, c.group_key or "")
     )
     reached: dict[str, list[CarryOverOperation]] = {e.ref: [] for e in waits}
     listed: dict[str, set[_StepKey]] = {e.ref: set() for e in waits}
@@ -354,7 +370,8 @@ async def _file_settings(
             # One operation can have two stored rows with different groups.
             if key not in listed[entry.ref]:
                 listed[entry.ref].add(key)
-                reached[entry.ref].append(_operation(coords, steps))
+                as_step = entry.ref in step_waits.get(key, set())
+                reached[entry.ref].append(_operation(coords, steps if as_step else {}))
     settings: list[CarryOverSetting] = []
     for entry in waits:
         operations = reached[entry.ref]

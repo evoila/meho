@@ -3749,9 +3749,18 @@ When the dry run of a `k8s.apply` fails, the stored request has the
 still has the `manifest` echo and the `subject` line, built from the
 manifest text with the same hiding as on a preview that worked
 (`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
-line and `dry_run_stop` use the names after that hiding, so they never
-show what the echo hides. Dates and times that YAML reads from the
-manifest are stored as their ISO text. For a manifest of more than one
+line and `dry_run_stop` take the names from the documents after that
+hiding, in their own shape, so a redaction rule for a field path such as
+`manifest.*.metadata.name` hides the name in both too. Before anything is
+hidden or measured, each value that YAML does not read as text becomes
+plain text (`card_documents` in `ops_write_preview.py`): a date or time
+becomes its ISO text, `.nan` and `.inf` become that YAML text, and
+`!!binary` becomes its base64 text. So each filter hides such a value as
+text, and the stored request holds only values the database accepts. In
+a Secret, also one inside another object, the card hides each value of
+`data`, `stringData` and `binaryData`: the same fields that make the
+stored request keep the manifest only in the encrypted handoff. For a
+manifest of more than one
 document, `dry_run_stop` names the document the dry run stopped at and
 says that the documents after it had no dry run. A caller that is not a
 person (the agent REST view and the MCP approvals tools) reads the failed

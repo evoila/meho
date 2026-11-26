@@ -86,6 +86,7 @@ from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
     summarize_applied_object,
 )
 from meho_backplane.redaction import get_default_policy, redact
+from meho_backplane.redaction.command_line import hide_in_text
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -190,12 +191,32 @@ class KubernetesSecretRefError(ValueError):
     """
 
 
-def _yaml_error_place(exc: yaml.YAMLError) -> str:
-    """`` (line L, column C)`` of a YAML error, or empty text when it names no place."""
-    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+def _yaml_mark_place(mark: Any) -> str:
+    """`` (line L, column C)`` of a YAML mark, or empty text when there is no mark."""
     if mark is None:
         return ""
     return f" (line {mark.line + 1}, column {mark.column + 1})"
+
+
+def _yaml_error_text(exc: yaml.YAMLError) -> str:
+    """What the parser found wrong and where, without the text of the manifest.
+
+    The parser's own message also quotes the lines around the error, which
+    can hold a Secret value. This text keeps only the parser's explanation
+    (for example "expected ',' or ']', but got '<stream end>'") with the line
+    and the column of each part. A secret shape in it is still hidden
+    (:func:`~meho_backplane.redaction.command_line.hide_in_text`). An error
+    without that explanation gives an empty text.
+    """
+    parts = [
+        f"{text}{_yaml_mark_place(getattr(exc, mark, None))}"
+        for text, mark in (
+            (getattr(exc, "context", None), "context_mark"),
+            (getattr(exc, "problem", None), "problem_mark"),
+        )
+        if isinstance(text, str) and text
+    ]
+    return f": {hide_in_text('; '.join(parts))}" if parts else ""
 
 
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
@@ -211,10 +232,8 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     try:
         docs = list(yaml.safe_load_all(manifest))
     except yaml.YAMLError as exc:
-        # The parser's own text quotes the manifest line, which can hold a
-        # Secret value: name only where the error is.
         raise ApplyManifestError(
-            f"manifest is not valid YAML/JSON{_yaml_error_place(exc)}"
+            f"manifest is not valid YAML/JSON{_yaml_error_text(exc)}"
         ) from None
 
     parsed: list[dict[str, Any]] = []

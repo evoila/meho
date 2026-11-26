@@ -230,6 +230,8 @@ def test_a_manifest_with_a_secret_or_that_meho_cannot_read_counts(manifest: Any)
         "apiVersion: example.com/v1\nkind: Playlist\nmetadata: {name: a}\nitems: [one, two]\n",
         "apiVersion: example.com/v1\nkind: Basket\nmetadata: {name: a}\n"
         + "items:\n  - {kind: Secret, name: not-a-k8s-object}\n",
+        "apiVersion: v1\nkind: ServiceAccount\nmetadata: {name: builder}\n"
+        + "secrets: [{apiVersion: v1, kind: Secret, name: builder-token}]\n",
     ],
     ids=[
         "config-map",
@@ -237,6 +239,7 @@ def test_a_manifest_with_a_secret_or_that_meho_cannot_read_counts(manifest: Any)
         "list-of-config-maps",
         "custom-resource-with-items",
         "custom-resource-items-are-spec",
+        "service-account-that-names-a-secret",
     ],
 )
 def test_a_manifest_of_other_kinds_does_not_count(manifest: str) -> None:

@@ -1230,12 +1230,12 @@ def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, 
     cannot be built is left out; the others stay. The card still says that
     the preview is not available.
     """
-    from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
         apply_manifest_echo,
         apply_run_commands,
         apply_subject,
+        card_documents,
     )
 
     manifest = ctx.params.get("manifest")
@@ -1244,8 +1244,10 @@ def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, 
     redactor = _k8s_apply_redactor(ctx)
 
     def _identities() -> list[dict[str, Any]]:
-        # Redacted like the manifest echo, so a label never shows what the echo hides.
-        return redactor([_identity(doc) for doc in _parse_manifest(manifest)])
+        # The whole documents are redacted in their own shape, as for the
+        # manifest echo, so a rule for a field path such as
+        # ``manifest.*.metadata.name`` hides the same name in each label.
+        return [_identity(doc) for doc in redactor(card_documents(manifest))]
 
     builders: dict[str, Callable[[], Any]] = {
         "manifest": lambda: apply_manifest_echo(manifest, redact=redactor),

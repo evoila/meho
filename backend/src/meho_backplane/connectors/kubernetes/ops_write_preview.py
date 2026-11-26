@@ -99,13 +99,16 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
 from kubernetes_asyncio import client
 
+from meho_backplane.connectors.kubernetes.op_classes import SECRET_VALUE_FIELDS
 from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest
 from meho_backplane.operations._preview import (
@@ -318,14 +321,15 @@ def _hide_command_line(node: dict[str, Any]) -> dict[str, list[Any]]:
     return out
 
 
-#: Fields of a Secret whose values are hidden; the key names stay.
-_SECRET_VALUE_FIELDS = ("data", "stringData")
-
-
 def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
-    """Copy a ``kind: Secret`` dict with every ``data`` / ``stringData`` value hidden."""
+    """Copy a ``kind: Secret`` dict with every value of its value fields hidden.
+
+    The fields are :data:`~.op_classes.SECRET_VALUE_FIELDS`, the same ones
+    the check of the stored params reads (``data``, ``stringData`` and
+    ``binaryData``); the key names stay.
+    """
     out = dict(secret)
-    for field in _SECRET_VALUE_FIELDS:
+    for field in SECRET_VALUE_FIELDS:
         if field in out:
             value = out[field]
             out[field] = (
@@ -346,7 +350,7 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
       secret values on them are hidden, with ``command`` and ``args`` read
       as one command line (:func:`_hide_command_line`).
     * Every dict with ``kind: Secret`` keeps only the key names of its
-      ``data`` and ``stringData``. This catches a Secret nested in another
+      ``data``, ``stringData`` and ``binaryData``. This catches a Secret nested in another
       object, not only a top-level Secret document.
     * The last-applied annotation is hidden in every ``annotations`` map,
       so a pod template's copy is caught too.
@@ -408,23 +412,66 @@ def _entry_bytes(entry: dict[str, Any]) -> int:
     each entry adds a ``, `` separator, and the ``[`` and ``]`` of the list
     take the place of the separator the last entry does not need.
     """
-    return len(json.dumps(entry, default=_as_text).encode("utf-8")) + 2
+    return len(json.dumps(entry).encode("utf-8")) + 2
 
 
-def _json_safe(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """*entries* safe to store as JSON.
+#: The text of a number YAML reads as not a number or as endless.
+_NOT_FINITE = {"nan": ".nan", "inf": ".inf", "-inf": "-.inf"}
 
-    YAML reads an unquoted date or time as a date object, which the database
-    cannot store. Each one becomes its ISO text, as the client sends it. Run
-    on the result only, which the size limit keeps small.
+
+def _plain_scalar(value: Any) -> Any:
+    """*value* as a value the database can store as JSON.
+
+    YAML reads an unquoted date or time as a date object, ``.nan`` and
+    ``.inf`` as numbers that JSON cannot hold, and ``!!binary`` as bytes.
+    A date or time becomes its ISO text, as the client sends it; such a
+    number becomes its YAML text; bytes become their base64 text, as the
+    manifest has them. Text, a whole number, a finite number, a yes/no
+    value and ``None`` stay; any other value becomes its text.
     """
-    safe: list[dict[str, Any]] = json.loads(json.dumps(entries, default=_as_text))
-    return safe
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else _NOT_FINITE[str(value)]
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    return str(value)
 
 
-def _as_text(value: Any) -> str:
-    """A date or time in ISO form, and any other value as its text."""
-    return value.isoformat() if isinstance(value, datetime.date) else str(value)
+def _plain(node: Any, done: dict[int, Any]) -> Any:
+    """A copy of *node* with each key and value made plain (:func:`_plain_scalar`).
+
+    A YAML alias names one object many times, or names an object inside
+    itself: *done* holds the copy of each dict and list already made, so
+    the copy keeps the same sharing and a loop ends.
+    """
+    if isinstance(node, dict):
+        if id(node) not in done:
+            out: dict[Any, Any] = {}
+            done[id(node)] = out
+            for key, item in node.items():
+                out[_plain_scalar(key)] = _plain(item, done)
+        return done[id(node)]
+    if isinstance(node, list):
+        if id(node) not in done:
+            items: list[Any] = []
+            done[id(node)] = items
+            items.extend(_plain(item, done) for item in node)
+        return done[id(node)]
+    return _plain_scalar(node)
+
+
+def card_documents(manifest: str) -> list[dict[str, Any]]:
+    """The documents of *manifest* for the approval card, each value made plain.
+
+    Every value is plain before anything is hidden or measured
+    (:func:`_plain`). So a date or a ``.nan`` is hidden as text by each
+    filter, and the stored request holds only values the database accepts.
+    """
+    done: dict[int, Any] = {}
+    return [_plain(doc, done) for doc in _parse_manifest(manifest)]
 
 
 def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
@@ -441,7 +488,7 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
     keeps only its identity, and once not even an identity fits, one last
     entry counts the documents left out.
     """
-    docs = redact([_hide_values(doc) for doc in _parse_manifest(manifest)])
+    docs = redact([_hide_values(doc) for doc in card_documents(manifest)])
     # Room is kept for the closing summary while documents may still follow,
     # so the whole echo stays within the budget, summary included.
     summary_bytes = _entry_bytes(_omitted_summary(len(docs)))
@@ -462,7 +509,7 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
             continue
         echo.append(_omitted_summary(len(docs) - index))
         break
-    return _json_safe(echo)
+    return echo
 
 
 def apply_subject(applied: Any) -> str | None:
@@ -604,16 +651,10 @@ _RUN_KEYS = ("command", "args", "exec_commands")
 
 def _command_text(entry: dict[str, Any]) -> str:
     """What *entry* runs as one text: its command line and its hook and probe commands."""
-    parts = [
-        f"{key}: {json.dumps(entry[key], default=_as_text)}"
-        for key in ("command", "args")
-        if key in entry
-    ]
+    parts = [f"{key}: {json.dumps(entry[key])}" for key in ("command", "args") if key in entry]
     exec_commands = entry.get("exec_commands")
     if isinstance(exec_commands, dict):
-        parts.extend(
-            f"{where}: {json.dumps(cmd, default=_as_text)}" for where, cmd in exec_commands.items()
-        )
+        parts.extend(f"{where}: {json.dumps(cmd)}" for where, cmd in exec_commands.items())
     return "; ".join(parts)
 
 
@@ -686,7 +727,7 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     """
     entries = [
         _run_command_entry(_object_label(doc), container)
-        for doc in _parse_manifest(manifest)
+        for doc in card_documents(manifest)
         for container in _containers_in(doc)
     ]
     redacted = redact(entries) if entries else []
@@ -712,7 +753,7 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
             break
         shown.append(fitted)
         used += _entry_bytes(fitted)
-    return _json_safe(shown)
+    return shown
 
 
 def _run_commands_shown_to_agents() -> bool:

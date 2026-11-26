@@ -165,8 +165,10 @@ def _is_credential_kind(doc: Mapping[str, Any]) -> bool:
     return str(doc["kind"]).lower() in CREDENTIAL_KINDS
 
 
-#: The fields of an object whose keys name the values they hold.
-_NAMED_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData", "binaryData")
+#: The fields of an object whose keys name the values they hold. In a Secret
+#: these hold its values: the approval card hides each of them too
+#: (``ops_write_preview``).
+SECRET_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData", "binaryData")
 
 
 def _is_secret_shaped(value: Any) -> bool:
@@ -177,15 +179,16 @@ def _is_secret_shaped(value: Any) -> bool:
 def _is_nested_secret(node: Any) -> bool:
     """True for a Secret object held inside another object (a template, for example).
 
-    It has the kind ``Secret`` and either the core ``apiVersion`` ``v1`` or a
-    ``data``, ``stringData`` or ``binaryData`` field. A mapping that only
-    names a Secret (a reference with a ``kind`` and a ``name``) does not count.
+    It has the kind ``Secret`` and either its own ``metadata`` or a ``data``,
+    ``stringData`` or ``binaryData`` field. A reference to a Secret (for
+    example an entry of a ServiceAccount's ``secrets``, with ``apiVersion``,
+    ``kind`` and ``name``) has neither, and does not count.
     """
     return (
         isinstance(node, Mapping)
         and isinstance(node.get("kind"), str)
         and node["kind"].lower() in CREDENTIAL_KINDS
-        and (node.get("apiVersion") == "v1" or any(f in node for f in _NAMED_VALUE_FIELDS))
+        and any(field in node for field in ("metadata", *SECRET_VALUE_FIELDS))
     )
 
 
@@ -246,7 +249,7 @@ class _SecretValueCheck:
         )
 
     def __call__(self, doc: Mapping[str, Any]) -> bool:
-        if any(self._has_secret_key(doc.get(field)) for field in _NAMED_VALUE_FIELDS):
+        if any(self._has_secret_key(doc.get(field)) for field in SECRET_VALUE_FIELDS):
             return True
         if not self._first_visit(doc, self._seen):
             return False

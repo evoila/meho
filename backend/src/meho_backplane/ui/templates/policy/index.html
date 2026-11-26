@@ -1,0 +1,98 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The "Policy" page (``GET /ui/policy``), read only. Shown only with the
+  switch CUSTOM_POLICY on. It has no form and no save.
+
+  Context contract:
+    * ``fixed_rules`` -- list[(id, sentence)]: each fixed rule, with its
+                  id ``floor:<id>``, from ``policy/fixed_rules.py``.
+    * ``rows`` -- list[dict]: the risk-level edits, the rows of the
+                  override report ({connector_id, op_id, scope, tenant_id,
+                  safety_level, requires_approval, reason, set_by_sub,
+                  set_at, ...}).
+-#}
+
+{% extends "base.html" %}
+
+{% block page_title %}Policy &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6" data-policy-page>
+  <header class="space-y-1">
+    <h1 class="text-2xl font-semibold">Policy</h1>
+    <p class="text-sm text-muted">
+      The rules that decide which operations run at once and which wait for
+      a person. This page only shows them.
+    </p>
+  </header>
+
+  <section class="space-y-2" data-policy-fixed-rules>
+    <h2 class="text-lg font-semibold">Fixed rules</h2>
+    <p class="text-sm text-muted">
+      These rules always hold, whatever the policy says. No policy and no
+      admin can lower them.
+    </p>
+    <ul class="space-y-2">
+      {% for rule_id, sentence in fixed_rules %}
+        <li class="rounded-box border border-base-300 p-3" data-policy-fixed-rule="{{ rule_id }}">
+          <span class="block font-mono text-xs text-muted">{{ rule_id }}</span>
+          <span class="text-sm">{{ sentence }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="space-y-2" data-policy-risk-edits>
+    <h2 class="text-lg font-semibold">Risk-level edits</h2>
+    <p class="text-sm text-muted">
+      The operations whose risk level or approval an admin changed, with the
+      reason, who did it and when. A row with the scope "whole install" holds
+      for every tenant.
+    </p>
+    {% if rows %}
+      <div class="overflow-x-auto">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Connector</th>
+              <th>Operation</th>
+              <th>Risk level</th>
+              <th>Approval</th>
+              <th>Scope</th>
+              <th>Who</th>
+              <th>When</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr data-policy-risk-edit data-op-id="{{ row.op_id }}">
+                <td class="font-mono text-xs">{{ row.connector_id }}</td>
+                <td class="font-mono text-xs">{{ row.op_id }}</td>
+                <td>{{ row.safety_level or "(from code)" }}</td>
+                <td>
+                  {% if row.requires_approval is none %}
+                    (from code)
+                  {% elif row.requires_approval %}
+                    required
+                  {% else %}
+                    not required
+                  {% endif %}
+                </td>
+                <td>{{ "whole install" if row.scope == "install" else "tenant " ~ row.tenant_id }}</td>
+                <td class="text-xs">{{ row.set_by_sub }}</td>
+                <td class="text-xs">{{ row.set_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+                <td class="text-xs">{{ row.reason or "" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-sm text-muted" data-policy-risk-edits-empty>No risk-level edits.</p>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

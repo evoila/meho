@@ -69,7 +69,9 @@ from jinja2 import (
 from starlette.requests import Request
 
 from meho_backplane.connector_packages import installed_connector_packages
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.settings import get_settings
 from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import templates_dir
 from meho_backplane.version import deployed_version_label
@@ -255,6 +257,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
             "session_tenant": None,
             "session_operator_sub": None,
             "ready": ready,
+            "policy_menu": False,
             **sandbox,
         }
     return {
@@ -276,6 +279,9 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         # itself does not pay a per-render token verify just to label a role.
         "session_operator_sub": session_ctx.operator_sub,
         "ready": ready,
+        # The "Policy" menu entry: only with the switch CUSTOM_POLICY on.
+        # Read here, for a signed-in page, where the settings are loaded.
+        "policy_menu": custom_policy_on(get_settings()),
     }
 
 

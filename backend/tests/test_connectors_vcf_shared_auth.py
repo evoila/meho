@@ -24,6 +24,7 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -43,6 +44,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     load_credentials_from_vault,
     vcf_session_login,
 )
+from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import AuthModel
 
 # ---------------------------------------------------------------------------
@@ -883,3 +885,126 @@ async def test_simulated_consumer_relogin_second_401_surfaces_runtime_error(
     msg = str(exc_info.value)
     assert "vrli-a" in msg
     assert "401" in msg
+
+
+# ---------------------------------------------------------------------------
+# A login is not a change: it follows a redirect on the same origin
+# ---------------------------------------------------------------------------
+
+#: A made-up value in the login path, the ``Location`` path and its query.
+_LOGIN_MARKER = "mrk-shared-login-5d2"
+
+
+class _SessionConnector(HttpConnector):
+    """A connector that logs in with ``vcf_session_login`` on its pooled client."""
+
+    connector_kind = "rest"
+    product = "acme-shared-login"
+    version = "1.0"
+    impl_id = "acme-shared-login"
+
+    def __init__(self, login_path: str) -> None:
+        super().__init__()
+        self._login_path = login_path
+
+    async def auth_headers(self, target: object, operator: Operator) -> dict[str, str]:
+        token = await vcf_session_login(
+            await self._http_client(target),  # type: ignore[arg-type]
+            self._login_path,
+            username="admin",
+            password="p",
+            target_name="acme-a",
+            token_extractor=lambda r: r.json().get("sessionId"),
+        )
+        return {"X-Session": token}
+
+    async def fingerprint(self, target: object) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def probe(self, target: object) -> Any:  # pragma: no cover - unused
+        raise NotImplementedError
+
+    async def execute(self, *args: object, **kwargs: object) -> Any:  # pragma: no cover
+        raise NotImplementedError
+
+
+_LOGIN_TARGET = _StubTarget(name="acme-a", host="acme-a.test.invalid", port=443, secret_ref=None)
+_LOGIN_ORIGIN = "https://acme-a.test.invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["/api/session/", "/api/v2/session"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_shared_session_login_follows_a_same_origin_redirect(
+    status: int, location: str
+) -> None:
+    """The login succeeds after a same-origin redirect and the operation is sent once.
+
+    A 307 or 308 sends the login body again to the new path; a 301, 302 or
+    303 sends a GET there.
+    """
+    connector = _SessionConnector("/api/session")
+    again = "POST" if status in (307, 308) else "GET"
+    with respx.mock(base_url=_LOGIN_ORIGIN, assert_all_called=False) as mock:
+        login = mock.post("/api/session").respond(status, headers={"Location": location})
+        login_again = mock.route(method=again, path=location).respond(
+            200, json={"sessionId": "tok-1"}
+        )
+        operation = mock.put("/api/items/7").respond(200, json={"ok": True})
+        await connector._post_json(
+            _LOGIN_TARGET,  # type: ignore[arg-type]
+            "/api/items/7",
+            operator=_make_operator(),
+            verb="PUT",
+            json={"n": 1},
+        )
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert login_again.call_count == 1
+    if again == "POST":
+        assert login_again.calls.last.request.content == login.calls.last.request.content
+    assert operation.call_count == 1
+    assert operation.calls.last.request.headers["X-Session"] == "tok-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location_origin",
+    ["https://other.test.invalid", "http://acme-a.test.invalid"],
+    ids=["other-host", "other-scheme"],
+)
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_shared_session_login_redirect_to_another_origin_ends_the_call(
+    status: int, location_origin: str
+) -> None:
+    """The other origin gets no request, the operation is not sent, the error names no address."""
+    from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
+
+    connector = _SessionConnector(f"/api/{_LOGIN_MARKER}/session")
+    location = f"{location_origin}/{_LOGIN_MARKER}/x?q={_LOGIN_MARKER}-query"
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post(f"{_LOGIN_ORIGIN}/api/{_LOGIN_MARKER}/session").respond(
+            status, headers={"Location": location}
+        )
+        elsewhere = mock.route(url__startswith=location_origin + "/").respond(200, json={})
+        operation = mock.put(f"{_LOGIN_ORIGIN}/api/items/7").respond(200, json={})
+        with pytest.raises(SessionLoginRedirectError) as caught:
+            await connector._post_json(
+                _LOGIN_TARGET,  # type: ignore[arg-type]
+                "/api/items/7",
+                operator=_make_operator(),
+                verb="PUT",
+                json={"n": 1},
+            )
+    await connector.aclose()
+
+    message = str(caught.value)
+    assert message == (
+        f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+        "follow it and did not send the operation."
+    )
+    assert _LOGIN_MARKER not in message
+    assert login.call_count == 1
+    assert elsewhere.call_count == 0
+    assert operation.call_count == 0

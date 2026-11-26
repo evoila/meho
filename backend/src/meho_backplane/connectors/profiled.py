@@ -106,6 +106,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -135,7 +136,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector"]
+__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector", "SessionLoginRedirectError"]
 
 _log = structlog.get_logger(__name__)
 
@@ -537,6 +538,12 @@ class ProfiledRestConnector(HttpConnector):
             auth_error = session_establish_auth_error(exc, message=message, target=target)
             if auth_error is not None:
                 raise auth_error from exc
+            if 300 <= exc.response.status_code < 400:
+                # The login got a redirect that MEHO did not follow (another
+                # origin, or no ``Location``). The error
+                # holds no login path (it can come from the credential), no
+                # ``Location`` and no body, with the switch off and on.
+                raise SessionLoginRedirectError(exc.response.status_code) from exc
             raise
         return resp.json(), established_path
 

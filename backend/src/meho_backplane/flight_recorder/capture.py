@@ -55,8 +55,10 @@ operator-only degrade).
 
 from __future__ import annotations
 
+import contextlib
 import time
 import uuid
+from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,15 +66,21 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.broadcast.events import classify_op, is_secret_param_name
 from meho_backplane.flight_recorder._capture_util import (
+    FilledPath,
     approx_bytes,
     approx_span_bytes,
     as_mapping,
+    body_values,
     cap_body,
     coerce_uuid,
     elapsed_ms,
+    encoded_safe_url,
     header_value,
+    mask_path_values,
     now_utc,
+    path_values,
     request_id,
     response_content,
     safe_url,
@@ -81,9 +89,11 @@ from meho_backplane.flight_recorder._capture_util import (
 from meho_backplane.flight_recorder.config import should_capture
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
 from meho_backplane.redaction.flight_recorder import redact_span
+from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 
 __all__ = [
     "CaptureHandle",
+    "FilledPath",
     "SpanStart",
     "begin_dispatch_capture",
     "end_dispatch_capture",
@@ -142,6 +152,12 @@ class _OpContext:
     # The class stored on the row of an ingested op (a connector's safety
     # floor sets it). A stored ``credential_read`` records no body.
     stored_op_class: str | None = None
+    # The texts of the call's parameter values. For an operation that sends a
+    # secret, a path segment that holds one of them is masked on the span.
+    path_values: frozenset[str] = frozenset()
+    # The path template of an ingested op (``/keys/{name}``). It says which
+    # path segments hold a parameter, so the other segments stay readable.
+    path_template: str | None = None
 
 
 @dataclass(slots=True)
@@ -219,6 +235,16 @@ _op_context_var: ContextVar[_OpContext | None] = ContextVar(
     "flight_recorder_op_context", default=None
 )
 
+#: The body of the operation request the HTTP seam is sending now
+#: (:func:`request_body_values`). Read only to build a trace address.
+_request_body_var: ContextVar[Any] = ContextVar("flight_recorder_request_body", default=None)
+
+#: The path template of the operation request the HTTP seam is sending now,
+#: when a typed handler filled its path from one (:class:`FilledPath`).
+_request_template_var: ContextVar[str | None] = ContextVar(
+    "flight_recorder_request_template", default=None
+)
+
 _INACTIVE_HANDLE: Final[CaptureHandle] = CaptureHandle(
     owns=False, scope=None, op_token=None, cap_token=None
 )
@@ -237,12 +263,17 @@ async def begin_dispatch_capture(
     descriptor: Any,
     connector_id: str,
     owner_sub: str | None = None,
+    params: Any = None,
 ) -> CaptureHandle:
     """Open (or join) the capture scope for one dispatch. Never raises (F7).
 
     *owner_sub* is the login stored as the caller of the trace. It is the
     requester when a call runs after a person approved it; else ``None``,
     and the caller is ``operator.sub``.
+
+    *params* are the call's parameters. For an operation that sends a
+    secret, a span address masks each path segment that holds one of their
+    values.
 
     * **Root dispatch** (no active scope): consults :func:`should_capture`
       (F1 precedence + kill switch, fail-open) and, when enabled, binds a fresh
@@ -259,7 +290,7 @@ async def begin_dispatch_capture(
         existing = _active_capture_var.get()
         if existing is not None:
             # Nested composite child: join the parent trace, no new machinery.
-            op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
+            op_token = _op_context_var.set(_op_context_from(descriptor, connector_id, params))
             _record_composite_step(existing, descriptor, connector_id)
             return CaptureHandle(owns=False, scope=existing, op_token=op_token, cap_token=None)
 
@@ -278,7 +309,7 @@ async def begin_dispatch_capture(
             operator_sub=owner_sub or getattr(operator, "sub", None),
         )
         cap_token = _active_capture_var.set(scope)
-        op_token = _op_context_var.set(_op_context_from(descriptor, connector_id))
+        op_token = _op_context_var.set(_op_context_from(descriptor, connector_id, params))
         return CaptureHandle(owns=True, scope=scope, op_token=op_token, cap_token=cap_token)
     except Exception:
         _log.warning("flight_recorder_begin_capture_failed", exc_info=True)
@@ -408,7 +439,7 @@ def record_vendor_call_error(start: SpanStart | None, *, method: str, exc: BaseE
         return
     try:
         try:
-            url = safe_url(exc.request.url)  # type: ignore[attr-defined]
+            url = _span_url(exc.request.url)  # type: ignore[attr-defined]
         except Exception:
             url = "?"
         op = _op_context_var.get()
@@ -470,7 +501,58 @@ def _redact_vendor_call(
         body_paths=op.body_paths if op else (),
         delete_shaped_patterns=op.delete_shaped_patterns if op else None,
     )
-    return redaction, safe_url(request_url), req_truncated or resp_truncated
+    return redaction, _span_url(request_url), req_truncated or resp_truncated
+
+
+@contextlib.contextmanager
+def request_body_values(body: Any, path: Any = None) -> Iterator[None]:
+    """Name the body and the path of the operation request sent inside, for the trace address.
+
+    The HTTP seam wraps one request in it: the first send, each followed
+    redirect and a network error. When a typed handler filled *path* from a
+    template (:class:`FilledPath`), the trace masks the segments the handler
+    filled, wherever in the body the same value stands. Without a template,
+    a value that the body carries was put into the body, not into the path,
+    so the trace does not mask a path segment because of it (a value under a
+    secret key still counts).
+    """
+    template = path.template if isinstance(path, FilledPath) else None
+    token = _request_body_var.set(body)
+    template_token = _request_template_var.set(template)
+    try:
+        yield
+    finally:
+        _request_template_var.reset(template_token)
+        _request_body_var.reset(token)
+
+
+def _span_url(url: Any) -> str:
+    """The address put on a vendor-call span: scheme, host, port and path.
+
+    For an operation that sends a secret, each path segment that holds a
+    value of the call's parameters is replaced by a fixed mark
+    (:func:`mask_path_values`); the path is then kept percent-encoded, as it
+    was sent. The test is the one the error results use
+    (``operations._vendor_text.sends_secret``). The path template says which
+    segments hold a value: the one of an ingested operation, or the one a
+    typed handler filled its path from (:class:`FilledPath`). Without a
+    template, a value that the request body carries is not a path value, so
+    a fixed segment with the same text stays.
+    """
+    op = _op_context_var.get()
+    if op is not None and _op_sends_secret(op):
+        template = op.path_template or _request_template_var.get()
+        values = op.path_values
+        if template is None:
+            values = values - body_values(_request_body_var.get(), is_secret_param_name)
+        return mask_path_values(encoded_safe_url(url), values, template)
+    return safe_url(url)
+
+
+def _op_sends_secret(op: _OpContext) -> bool:
+    if secret_tag_tokens(op.tags):
+        return True
+    return op.op_id is not None and classify_op(op.op_id) == "credential_write"
 
 
 def _vendor_attributes(redaction: Any, method: str, url: str, truncated: bool) -> dict[str, Any]:
@@ -573,7 +655,7 @@ def _record_composite_step(scope: _CaptureScope, descriptor: Any, connector_id: 
         _log.warning("flight_recorder_composite_span_failed", exc_info=True)
 
 
-def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
+def _op_context_from(descriptor: Any, connector_id: str, params: Any = None) -> _OpContext:
     """Build the per-dispatch op context for redaction."""
     tags_raw = getattr(descriptor, "tags", None) or ()
     tags = tuple(str(tag) for tag in tags_raw)
@@ -597,4 +679,14 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
         body_paths=(),
         delete_shaped_patterns=delete_shaped,
         stored_op_class=getattr(descriptor, "op_class", None),
+        path_values=path_values(params),
+        path_template=_ingested_path(descriptor),
     )
+
+
+def _ingested_path(descriptor: Any) -> str | None:
+    """The path template of an ingested op; ``None`` for a typed op."""
+    path = getattr(descriptor, "path", None)
+    if getattr(descriptor, "source_kind", None) != "ingested" or not isinstance(path, str):
+        return None
+    return path

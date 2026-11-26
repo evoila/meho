@@ -1691,6 +1691,23 @@ class Settings(BaseModel):
         still no second ``approval.pending`` event. When off, the retry
         writes no audit row and the answer's ``audit_id`` is the first
         call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
+    redirect_on_change_result:
+        Off by default. It decides only the answer of a change (PUT, POST,
+        PATCH, DELETE) that ends on a redirect MEHO does not follow. When on,
+        the ``error`` text says what the HTTP code means (307 / 308: the
+        target did not run the call; 303: the target says the change ran;
+        301 / 302: MEHO could not find out), and an operation that may change
+        the target also gets ``execution_outcome``, ``retry`` and
+        ``remediation``. When off, the answer has the keys and the ``error``
+        text of the generic ``connector_error`` answer for that status.
+        Which requests follow which redirect is the same in both modes: the
+        operation's own change request follows only a 307 or 308 to the same
+        path (at most two sends); every other request, a read or a login,
+        follows a redirect on the same origin. A login that ends on a
+        redirect MEHO did not follow gives the ``SessionLoginRedirectError``
+        text in both modes. The block check before a followed redirect, the
+        trace and the values the answer hides are the same in both modes.
+        Env ``REDIRECT_ON_CHANGE_RESULT``.
     runner_checks_enabled:
         Off by default. When on, a check bound to a runner counts like a
         central check: the result a runner posts for its own check sets the
@@ -2709,6 +2726,7 @@ class Settings(BaseModel):
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_retry_own_audit_row: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    redirect_on_change_result: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3970,6 +3988,9 @@ def get_settings() -> Settings:
         ),
         approval_retry_own_audit_row=parse_bool_env(
             os.environ.get("APPROVAL_RETRY_OWN_AUDIT_ROW"),
+        ),
+        redirect_on_change_result=parse_bool_env(
+            os.environ.get("REDIRECT_ON_CHANGE_RESULT"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

@@ -81,11 +81,13 @@ unpinned target's key is unchanged in its pin slot from the #1781 shape.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import functools
 import hashlib
 import os
 import ssl
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, cast
 
 import anyio
@@ -697,13 +699,15 @@ async def _stream_capped_json_response(
             if total > _MAX_RESPONSE_BYTES:
                 raise _body_over_cap_error("decoded bytes")
             chunks.append(chunk)
-        return httpx.Response(
+        rebuilt = httpx.Response(
             status_code=resp.status_code,
             headers=_rebuilt_headers(resp, codings, total),
             content=b"".join(chunks),
             request=resp.request,
             extensions=resp.extensions,
         )
+        rebuilt.history = resp.history
+        return rebuilt
 
 
 async def _read_capped_json_response(
@@ -799,6 +803,146 @@ def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> 
     )
 
 
+# A change (any method that is not a read) follows at most one redirect, and
+# only a 307 / 308 to the same path (see :func:`_change_may_be_sent_again`).
+_MAX_CHANGE_REDIRECTS = 1
+
+
+#: Set while :meth:`HttpConnector._request_json`,
+#: :meth:`HttpConnector._post_json` or :meth:`HttpConnector._send_traced`
+#: sends the operation's own request. Only then does the change rule of the
+#: client apply (at most two sends, only a 307 or 308 to the same path), and
+#: only then does the client put each followed redirect into the trace. Every
+#: other request (a login, for example) follows a redirect on the same
+#: origin with the rule of a read and stays out of the trace.
+_operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_operation_request", default=False
+)
+
+
+def _failed_method(exc: httpx.TransportError, sent_method: str) -> str:
+    """The method of the request that failed: after a redirect it can differ from the sent one."""
+    try:
+        return exc.request.method
+    except RuntimeError:
+        return sent_method
+
+
+def _encoded_path(url: httpx.URL) -> str:
+    """The path of *url* as it is sent: still percent-encoded, without the query.
+
+    :attr:`httpx.URL.path` decodes ``%2F``, so ``/a%2Fb`` and ``/a/b`` would
+    look equal although they name different resources.
+    """
+    return url.raw_path.split(b"?", 1)[0].decode("ascii")
+
+
+def _folded_path(url: httpx.URL) -> str:
+    """The encoded path of *url* without one trailing slash, in lower case."""
+    return _encoded_path(url).removesuffix("/").lower()
+
+
+#: Set while a request is a login that the code names as a login: inside
+#: :func:`login_request`, and while the core asks a connector for its auth
+#: headers (:meth:`HttpConnector.auth_headers`). A login follows a redirect on
+#: the same origin with the rule of a read. Every other request that is not a
+#: read gets the change rule.
+_login_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_login_request", default=False
+)
+
+
+@contextlib.contextmanager
+def login_request() -> Iterator[None]:
+    """Name the requests sent inside as a login."""
+    token = _login_request.set(True)
+    try:
+        yield
+    finally:
+        _login_request.reset(token)
+
+
+#: Set while MEHO sends an operation again after "the login ended": the
+#: change was already sent once, so it follows no redirect
+#: (:func:`change_sent_once_before`).
+_change_sent_before: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "meho_change_sent_before", default=False
+)
+
+
+@contextlib.contextmanager
+def change_sent_once_before() -> Iterator[None]:
+    """Mark the calls inside as a repeat of a change that was already sent once.
+
+    A change is sent at most twice. The dispatcher sends an operation again
+    after "the login ended" only when its first send was one request. Inside
+    this block the operation's own change request follows no redirect, so
+    the repeat is the second and last send. The fresh login inside the block
+    and every read follow a redirect on the same origin.
+    """
+    token = _change_sent_before.set(True)
+    try:
+        yield
+    finally:
+        _change_sent_before.reset(token)
+
+
+@contextlib.contextmanager
+def last_send_of_a_change() -> Iterator[None]:
+    """Mark the change request sent inside as the second and last send.
+
+    For a typed connector that sends a change once more itself, for example
+    after a token refresh on a 401. The request inside follows no redirect,
+    so the change reaches the target at most twice. Renew the token before
+    this block, so a login follows a redirect on the same origin.
+    """
+    repeat = _change_sent_before.set(True)
+    own = _operation_request.set(True)
+    try:
+        yield
+    finally:
+        _operation_request.reset(own)
+        _change_sent_before.reset(repeat)
+
+
+def _sent_address(url: httpx.URL) -> tuple[str, str, int | None, str, str]:
+    """The address a request goes to: scheme, host, port, encoded path and query.
+
+    The fragment and the login part (user name and password) are left out:
+    HTTP sends neither as part of the address, so two URLs that differ only
+    there reach the same resource.
+    """
+    return (
+        url.scheme,
+        url.host,
+        _effective_port(url),
+        _encoded_path(url),
+        url.query.decode("ascii"),
+    )
+
+
+def _change_may_be_sent_again(
+    status_code: int,
+    sent: httpx.URL,
+    location: httpx.URL,
+    already_sent: set[tuple[str, str, int | None, str, str]],
+) -> bool:
+    """Whether a change may be sent once more to *location* after a redirect.
+
+    Only a 307 or 308 (the target says: send the same request there), only to
+    the path that was sent (apart from one trailing slash or letter case) with
+    the same query, and never to an address that was already sent to. The
+    compare uses the sent, still encoded URL, never a path template: a
+    template would match a redirect to another object's id.
+    """
+    return (
+        status_code in (307, 308)
+        and _folded_path(sent) == _folded_path(location)
+        and sent.query == location.query
+        and _sent_address(location) not in already_sent
+    )
+
+
 class _SameOriginRedirectClient(httpx.AsyncClient):
     """An ``AsyncClient`` that follows redirects **only within one origin**.
 
@@ -817,10 +961,16 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
     same-origin canonicalisation (the vendor trailing-slash ``301`` that
     vcsim's ``/rest`` mount and some appliances emit) is still followed, so
-    no vendor flow regresses. Any cross-origin ``Location`` terminates the
-    loop and the ``3xx`` response is returned to the caller unfollowed — the
-    request is **never** replayed off-origin, so no header or body crosses
-    the origin boundary.
+    no vendor flow regresses.
+
+    There are two redirect rules. The operation's own change request (a
+    method that is not a read, sent by ``_request_json``, ``_post_json`` or
+    ``_send_traced``) follows at most one redirect: a 307 or 308 to the same
+    path with the same query. Every other request, a read or a login,
+    follows redirects on the same origin up to the hop budget. Any cross-origin
+    ``Location`` terminates the loop and the ``3xx`` response is returned to
+    the caller unfollowed — the request is **never** replayed off-origin, so
+    no header or body crosses the origin boundary.
     """
 
     async def send(
@@ -855,6 +1005,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             _log_redirect_not_followed(request, UNPARSEABLE_ADDRESS)
             raise
 
+    @staticmethod
+    def _hop_span_start() -> flight_recorder_capture.SpanStart | None:
+        """A trace start for a redirect hop, only inside a traced helper."""
+        return flight_recorder_capture.span_start() if _operation_request.get() else None
+
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
     ) -> httpx.Response:
@@ -862,8 +1017,26 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # following; this class owns the redirect decision so the
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
+        # The change rule holds only for the operation's own request. A login
+        # is not the change: it follows a redirect on the same origin, as a
+        # read does.
+        is_change = request.method.upper() not in _IDEMPOTENT_METHODS and not (
+            _login_request.get() and not _operation_request.get()
+        )
+        if is_change:
+            # The repeated operation request follows no redirect.
+            max_hops = 0 if _change_sent_before.get() else _MAX_CHANGE_REDIRECTS
+        else:
+            max_hops = _MAX_SAME_ORIGIN_REDIRECTS
+        sent_urls = {_sent_address(request.url)}
+        # Each answer that MEHO followed. The last answer carries them in
+        # ``history`` (as httpx does), so a caller can tell that the request
+        # it sees was not the first one sent.
+        history: list[httpx.Response] = []
+        hop_start = self._hop_span_start()
         response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
-        for _ in range(_MAX_SAME_ORIGIN_REDIRECTS):
+        while True:
+            response.history = list(history)
             if not response.has_redirect_location:
                 return response
             # ``next_request`` is httpx's own correctly-built follow-up
@@ -881,19 +1054,68 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                     host_for_log(location_header) if location_header is not None else None,
                 )
                 return response
+            if is_change and (
+                len(history) >= max_hops
+                or not _change_may_be_sent_again(
+                    response.status_code, request.url, next_request.url, sent_urls
+                )
+            ):
+                # A change is sent at most twice, and only to the same path.
+                # Any other redirect ends here; the dispatcher words the
+                # result by what the status code means.
+                logger.warning(
+                    "connector_redirect_not_followed_on_change",
+                    method=request.method,
+                    status_code=response.status_code,
+                    # Host names only, as for a redirect to another origin.
+                    from_url=host_for_log(request.url),
+                    location=host_for_log(next_request.url),
+                )
+                return response
+            if len(history) >= max_hops:
+                # Exhausted the same-origin hop budget — surface httpx's own
+                # error so the caller sees a redirect loop rather than a
+                # silent 3xx. Close the final 3xx first so its connection is
+                # released back to the pool rather than held checked-out
+                # until GC (a looping target would otherwise slowly starve
+                # the pooled client).
+                await response.aclose()
+                raise httpx.TooManyRedirects(
+                    f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
+                    request=request,
+                )
+            # One trace entry per request that was really sent, with its own
+            # method: the helper that sent the request records the last one.
+            # The body of a followed redirect is not recorded: it skips the
+            # connector's own masking (``trace_response_body``), so it could
+            # hold a secret in a field the shared redaction does not know.
+            flight_recorder_capture.record_vendor_call(
+                hop_start,
+                method=request.method,
+                request_headers=request.headers,
+                response=response,
+                response_body=b"",
+            )
             await response.aclose()
+            history.append(response)
+            # The send below runs the client's request hook (``_note_request_sent``),
+            # so a followed redirect passes the same block check as the first send.
             request = next_request
+            sent_urls.add(_sent_address(request.url))
+            hop_start = self._hop_span_start()
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
-        # Exhausted the same-origin hop budget — surface httpx's own error
-        # so the caller sees a redirect loop rather than a silent 3xx. Close
-        # the final 3xx first so its connection is released back to the pool
-        # rather than held checked-out until GC (a looping target would
-        # otherwise slowly starve the pooled client).
-        await response.aclose()
-        raise httpx.TooManyRedirects(
-            f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
-            request=request,
-        )
+
+
+def _as_login(method: Callable[..., Awaitable[dict[str, str]]]) -> Any:
+    """Wrap a connector's ``auth_headers`` so each request it sends is a login."""
+
+    @functools.wraps(method)
+    async def auth_headers(self: Any, *args: Any, **kwargs: Any) -> dict[str, str]:
+        with login_request():
+            return await method(self, *args, **kwargs)
+
+    auth_headers._names_login = True  # type: ignore[attr-defined]
+    return auth_headers
 
 
 class HttpConnector(Connector):
@@ -909,6 +1131,12 @@ class HttpConnector(Connector):
     #: never redirects (Azure) sets a class that follows none, so a redirect
     #: on the same host can never carry a token to another path.
     _client_class: type[httpx.AsyncClient] | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        own = cls.__dict__.get("auth_headers")
+        if own is not None and not getattr(own, "_names_login", False):
+            cls.auth_headers = _as_login(own)  # type: ignore[method-assign]
 
     def __init__(self) -> None:
         # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
@@ -1033,6 +1261,11 @@ class HttpConnector(Connector):
         -- e.g. a login as a different principal than the pooled session --
         builds it identically via :meth:`_ephemeral_http_client`. Callers own
         the SSRF pre-check.
+
+        The client follows a redirect only on the same origin. The
+        operation's own change request follows only a 307 or 308 to the same
+        path; every other request, a read or a login, follows the same-origin
+        redirects of :class:`_SameOriginRedirectClient`.
         """
         verify_tls = bool(getattr(target, "verify_tls", True))
         ca_pin = getattr(target, "tls_ca_pin", None)
@@ -1281,29 +1514,37 @@ class HttpConnector(Connector):
         # captured too. A transport fault (timeout, refused connection) has no
         # response, so it records an error span and re-raises (#3408). Each
         # retry attempt is its own vendor call and gets its own span.
-        _fr_start = flight_recorder_capture.span_start()
-        try:
-            resp = await _read_capped_json_response(
-                client,
-                method,
-                path,
-                params=params,
-                json=json,
-                headers=headers,
-                extensions=self._request_extensions(target),
+        with flight_recorder_capture.request_body_values(json, path):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await _read_capped_json_response(
+                    client,
+                    method,
+                    path,
+                    params=params,
+                    json=json,
+                    headers=headers,
+                    extensions=self._request_extensions(target),
+                )
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, method), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            # After a followed redirect the last request can have another method
+            # (an OPTIONS answered with a 303 is followed by a GET).
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if resp.request.method == method else None,
+                request_content_type="application/json" if json is not None else None,
+                response_body=self._trace_response_body(_fr_start, resp),
             )
-        except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(_fr_start, method=method, exc=exc)
-            raise
-        flight_recorder_capture.record_vendor_call(
-            _fr_start,
-            method=method,
-            request_headers=headers,
-            response=resp,
-            request_body=json,
-            request_content_type="application/json" if json is not None else None,
-            response_body=self._trace_response_body(_fr_start, resp),
-        )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
 
@@ -1394,33 +1635,80 @@ class HttpConnector(Connector):
         # The request body is whichever of ``json`` / ``data`` was sent, with
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
-        _fr_start = flight_recorder_capture.span_start()
-        try:
-            resp = await _read_capped_json_response(
-                client,
-                verb,
-                path,
-                params=params,
-                json=json,
-                data=data,
-                headers=headers,
-                extensions=self._request_extensions(target),
-                timeout=timeout,
+        with flight_recorder_capture.request_body_values(json if json is not None else data, path):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await _read_capped_json_response(
+                    client,
+                    verb,
+                    path,
+                    params=params,
+                    json=json,
+                    data=data,
+                    headers=headers,
+                    extensions=self._request_extensions(target),
+                    timeout=timeout,
+                )
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, verb), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if json is not None else data,
+                request_content_type=_post_body_content_type(json, data),
+                response_body=self._trace_response_body(_fr_start, resp),
             )
-        except httpx.TransportError as exc:
-            flight_recorder_capture.record_vendor_call_error(_fr_start, method=verb, exc=exc)
-            raise
-        flight_recorder_capture.record_vendor_call(
-            _fr_start,
-            method=verb,
-            request_headers=headers,
-            response=resp,
-            request_body=json if json is not None else data,
-            request_content_type=_post_body_content_type(json, data),
-            response_body=self._trace_response_body(_fr_start, resp),
-        )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
+
+    async def _send_traced(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Send one operation request through *client* and put it into the trace.
+
+        For a typed connector that sends its own request instead of using
+        :meth:`_post_json`. The trace gets one entry for each request that
+        was sent, with its own method: each followed redirect and the last
+        answer. Call it only for the operation's own request, never for a
+        login, so login traffic stays out of the trace. The answer is
+        returned as it is; the caller checks its status.
+        """
+        with flight_recorder_capture.request_body_values(json, path):
+            _fr_start = flight_recorder_capture.span_start()
+            trace_hops = _operation_request.set(True)
+            try:
+                resp = await client.request(method, path, json=json, headers=headers)
+            except httpx.TransportError as exc:
+                flight_recorder_capture.record_vendor_call_error(
+                    _fr_start, method=_failed_method(exc, method), exc=exc
+                )
+                raise
+            finally:
+                _operation_request.reset(trace_hops)
+            flight_recorder_capture.record_vendor_call(
+                _fr_start,
+                method=resp.request.method,
+                request_headers=headers,
+                response=resp,
+                request_body=json if resp.request.method == method else None,
+                request_content_type="application/json" if json is not None else None,
+                response_body=self._trace_response_body(_fr_start, resp),
+            )
+        return resp
 
     async def aclose(self) -> None:
         """Close all pooled clients. Called by lifespan or per-target cleanup."""

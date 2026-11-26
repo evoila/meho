@@ -33337,7 +33337,7 @@
           "step_of"
         ],
         "title": "CarryOverOperation",
-        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once (empty when none does)."
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once. It is empty when none does, or when the\nsetting makes only the direct call wait, not the step."
       },
       "CarryOverSetting": {
         "properties": {

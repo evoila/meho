@@ -4585,7 +4585,8 @@ type CarryOverDryRunScope string
 // CarryOverOperation One operation a saved setting matches.
 //
 // “step_of“ lists every multi-step operation that runs it as a step,
-// at every level, each once (empty when none does).
+// at every level, each once. It is empty when none does, or when the
+// setting makes only the direct call wait, not the step.
 type CarryOverOperation struct {
 	ConnectorId string   `json:"connector_id"`
 	OpId        string   `json:"op_id"`

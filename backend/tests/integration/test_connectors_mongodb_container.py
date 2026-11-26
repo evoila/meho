@@ -44,7 +44,7 @@ from meho_backplane.settings import get_settings
 
 from .._container_ready import ping_mongodb, wait_until_ready
 from .._vault_fakes import install_fake_client
-from ._image_tags import major_of_image
+from ._image_tags import ImageRun, image_param, major_of_image
 
 
 def _docker_socket_present() -> bool:
@@ -93,14 +93,15 @@ def _operator() -> Operator:
 
 
 #: The MongoDB images the module runs against. The connector's range is
-#: ``>=7,<9``; CI covers 7 and 8, each from
-#: its own ``MEHO_TEST_MONGODB_<major>_IMAGE``. ``MEHO_TEST_MONGODB_IMAGE`` runs one image.
+#: ``>=7,<9``; CI covers 7 and 8, each from its own
+#: ``MEHO_TEST_MONGODB_<major>_IMAGE``. ``MEHO_TEST_MONGODB_IMAGE`` runs one
+#: image by hand. Each run has a fixed test id, whatever the variable holds.
 _MONGO_IMAGES = (
-    [os.environ["MEHO_TEST_MONGODB_IMAGE"]]
+    [image_param("mongo", os.environ["MEHO_TEST_MONGODB_IMAGE"])]
     if os.environ.get("MEHO_TEST_MONGODB_IMAGE")
     else [
-        os.environ.get("MEHO_TEST_MONGODB_7_IMAGE", "mongo:7"),
-        os.environ.get("MEHO_TEST_MONGODB_8_IMAGE", "mongo:8"),
+        image_param("mongo-7", os.environ.get("MEHO_TEST_MONGODB_7_IMAGE", "mongo:7")),
+        image_param("mongo-8", os.environ.get("MEHO_TEST_MONGODB_8_IMAGE", "mongo:8")),
     ]
 )
 
@@ -120,14 +121,15 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.mongodb import MongoDbContainer
 
-    image: str = request.param
+    run: ImageRun = request.param
+    image = run.image
     mongo = MongoDbContainer(image)
     try:
         mongo.start()
     except _DockerAPIError as exc:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            pytest.skip(f"Docker Hub pull rate-limited for {image!r}; set MEHO_TEST_MONGODB_IMAGE")
+            pytest.skip(f"image pull rate-limited for {run.label}; set MEHO_TEST_MONGODB_IMAGE")
         raise
     try:
         coords = _Container(
@@ -141,7 +143,7 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
             lambda: ping_mongodb(
                 coords.host, coords.port, username=coords.user, password=coords.password
             ),
-            what=f"mongodb ({image})",
+            what=f"mongodb ({run.label})",
             timeout=60,
         )
         _seed(coords)

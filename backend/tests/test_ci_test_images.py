@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -330,6 +333,58 @@ def test_core_images_follow_the_chart_tag(variable: str, subchart: str) -> None:
     )
     block = image_block(_jobs("ci.yml")["python-integration-shard"])
     assert block[variable].endswith(f"/{subchart}/{subchart}:{values['image']['tag']}")
+
+
+_SAMPLE_PROXY = "hidden-proxy.invalid:5443/mirror-path"
+_VERSION_MODULES = (
+    "tests/integration/test_connectors_mongodb_container.py",
+    "tests/integration/test_connectors_postgres_container.py",
+)
+
+
+def _collected_ids(env: dict[str, str]) -> list[str]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *_VERSION_MODULES,
+        ],
+        cwd=_TESTS.parent,
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return [line for line in result.stdout.splitlines() if "::" in line]
+
+
+def test_the_version_runs_have_public_test_ids() -> None:
+    """The test ids go into the test report that CI uploads, so they hold no proxy name."""
+    images = {
+        "MEHO_TEST_MONGODB_7_IMAGE": "library/mongo:7",
+        "MEHO_TEST_MONGODB_8_IMAGE": "library/mongo:8",
+        "MEHO_TEST_POSTGRES_16_IMAGE": "library/postgres:16-alpine",
+        "MEHO_TEST_POSTGRES_17_IMAGE": "library/postgres:17-alpine",
+        "MEHO_TEST_POSTGRES_18_IMAGE": "library/postgres:18-alpine",
+    }
+    ids = _collected_ids({name: f"{_SAMPLE_PROXY}/{image}" for name, image in images.items()})
+    params = {line.rsplit("[", 1)[-1].rstrip("]") for line in ids}
+    assert params == {"mongo-7", "mongo-8", "postgres-16", "postgres-17", "postgres-18"}
+    one = _collected_ids(
+        {
+            "MEHO_TEST_MONGODB_IMAGE": f"{_SAMPLE_PROXY}/library/mongo:8",
+            "MEHO_TEST_POSTGRES_IMAGE": f"{_SAMPLE_PROXY}/library/postgres:17",
+        }
+    )
+    for line in ids + one:
+        for part in ("hidden-proxy", "invalid", "5443", "mirror-path", "library"):
+            assert part not in line, line
 
 
 # ---------------------------------------------------------------------------

@@ -57,7 +57,7 @@ from meho_backplane.connectors.postgres.session import (
 from meho_backplane.settings import get_settings
 
 from .._vault_fakes import install_fake_client
-from ._image_tags import major_of_image
+from ._image_tags import ImageRun, image_param, major_of_image
 
 
 def _docker_socket_present() -> bool:
@@ -110,15 +110,22 @@ _READER_PASSWORD = "reader-test-password"
 
 
 #: The PostgreSQL images the module runs against. The connector's range is
-#: ``>=15,<19``; CI covers 16, 17 and 18, each
-#: from its own ``MEHO_TEST_POSTGRES_<major>_IMAGE``. ``MEHO_TEST_POSTGRES_IMAGE`` runs one image.
+#: ``>=15,<19``; CI covers 16, 17 and 18, each from its own
+#: ``MEHO_TEST_POSTGRES_<major>_IMAGE``. ``MEHO_TEST_POSTGRES_IMAGE`` runs one
+#: image by hand. Each run has a fixed test id, whatever the variable holds.
 _PG_IMAGES = (
-    [os.environ["MEHO_TEST_POSTGRES_IMAGE"]]
+    [image_param("postgres", os.environ["MEHO_TEST_POSTGRES_IMAGE"])]
     if os.environ.get("MEHO_TEST_POSTGRES_IMAGE")
     else [
-        os.environ.get("MEHO_TEST_POSTGRES_16_IMAGE", "postgres:16-alpine"),
-        os.environ.get("MEHO_TEST_POSTGRES_17_IMAGE", "postgres:17-alpine"),
-        os.environ.get("MEHO_TEST_POSTGRES_18_IMAGE", "postgres:18-alpine"),
+        image_param(
+            "postgres-16", os.environ.get("MEHO_TEST_POSTGRES_16_IMAGE", "postgres:16-alpine")
+        ),
+        image_param(
+            "postgres-17", os.environ.get("MEHO_TEST_POSTGRES_17_IMAGE", "postgres:17-alpine")
+        ),
+        image_param(
+            "postgres-18", os.environ.get("MEHO_TEST_POSTGRES_18_IMAGE", "postgres:18-alpine")
+        ),
     ]
 )
 
@@ -139,14 +146,15 @@ def pg_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
-    image: str = request.param
+    run: ImageRun = request.param
+    image = run.image
     pg = PostgresContainer(image)
     try:
         pg.start()
     except _DockerAPIError as exc:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            pytest.skip(f"Docker Hub pull rate-limited for {image!r}; set MEHO_TEST_POSTGRES_IMAGE")
+            pytest.skip(f"image pull rate-limited for {run.label}; set MEHO_TEST_POSTGRES_IMAGE")
         raise
     try:
         coords = _Container(

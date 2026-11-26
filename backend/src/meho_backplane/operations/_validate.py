@@ -1139,25 +1139,38 @@ async def _revoked_agent_denial(operator: Operator) -> str | None:
     """Why an agent login that MEHO revoked may not call, or ``None``.
 
     Read from the agent's row (``DELETE /api/v1/agent-principals/{name}/revoke``),
-    so a token that has not ended yet is refused too. A login with no row
-    is left to the other checks.
+    so a token that has not ended yet is refused too. Both logins are
+    checked: the caller, when it is an agent login, and the acting agent of
+    a hosted agent run (:func:`resolve_actor_sub`). A login with no row is
+    left to the other checks.
     """
     from meho_backplane.db.models import AgentPrincipal
 
-    if operator.principal_kind is not PrincipalKind.AGENT or not operator.client_id:
+    client_ids = []
+    if operator.principal_kind is PrincipalKind.AGENT and operator.client_id:
+        client_ids.append(operator.client_id)
+    actor_sub = resolve_actor_sub()
+    if actor_sub is not None:
+        client_ids.append(actor_sub)
+    if not client_ids:
         return None
     async with get_sessionmaker()() as session:
         revoked = (
-            await session.execute(
-                select(AgentPrincipal.revoked).where(
-                    AgentPrincipal.tenant_id == operator.tenant_id,
-                    AgentPrincipal.keycloak_client_id == operator.client_id,
+            (
+                await session.execute(
+                    select(AgentPrincipal.keycloak_client_id).where(
+                        AgentPrincipal.tenant_id == operator.tenant_id,
+                        AgentPrincipal.keycloak_client_id.in_(client_ids),
+                        AgentPrincipal.revoked.is_(True),
+                    )
                 )
             )
-        ).scalar_one_or_none()
-    if not revoked:
+            .scalars()
+            .first()
+        )
+    if revoked is None:
         return None
-    return f"policy_denied: the agent login {operator.client_id!r} is revoked in MEHO"
+    return f"policy_denied: the agent login {revoked!r} is revoked in MEHO"
 
 
 async def _profile_denial(

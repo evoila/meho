@@ -56,6 +56,7 @@ from __future__ import annotations
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Final, cast
 
@@ -350,6 +351,48 @@ async def _refuse(
     return error
 
 
+async def _refuse_other_caller(
+    operator: Operator, request_id: uuid.UUID, error: ApprovalError, *, code: str
+) -> ApprovalError:
+    """Write the row of a re-run refused to a caller who did not make the request.
+
+    The row names the caller and the request id, and no other field of the
+    request: the caller may not read the request.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditLog
+
+    async with get_sessionmaker()() as session:
+        session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                occurred_at=_now(),
+                operator_sub=operator.sub,
+                tenant_id=operator.tenant_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                method="APPROVAL",
+                path=RERUN_AUDIT_PATH,
+                status_code=_FORBIDDEN_STATUS_CODE,
+                request_id=None,
+                duration_ms=Decimal("0"),
+                payload={
+                    "approval_request_id": str(request_id),
+                    "principal_sub": operator.sub,
+                    "result_status": "refused",
+                    "refusal": code,
+                },
+            )
+        )
+        await session.commit()
+    _log().info(
+        "approval_rerun_refused",
+        approval_request_id=str(request_id),
+        refusal=code,
+        operator_sub=operator.sub,
+    )
+    return error
+
+
 async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | None:
     """Take the re-run claim and write its audit row in one transaction.
 
@@ -536,6 +579,35 @@ async def _check_rerun(
     return effective, target, reveal_secret
 
 
+async def _check_caller(
+    operator: Operator, request: ApprovalRequest, *, role_too_low: bool
+) -> None:
+    """Refuse a caller who did not make the request, or whose role is too low.
+
+    Each refusal writes its ``approval.rerun`` row.
+    """
+    if operator.sub != request.principal_sub:
+        if role_too_low:
+            raise await _refuse_other_caller(
+                operator, request.id, RerunRoleTooLowError(request.id), code="insufficient_role"
+            )
+        raise await _refuse_other_caller(
+            operator,
+            request.id,
+            RerunForbiddenError(request_id=request.id, principal_sub=operator.sub),
+            code="not_request_owner",
+        )
+    if role_too_low:
+        raise await _refuse(
+            operator,
+            request,
+            RerunRoleTooLowError(request.id),
+            code="insufficient_role",
+            status=_FORBIDDEN_STATUS_CODE,
+            reason=f"a re-run needs the operator role; your role is {operator.tenant_role.value}",
+        )
+
+
 async def rerun_failed_request(
     *,
     operator: Operator,
@@ -573,19 +645,7 @@ async def rerun_failed_request(
         if role_too_low:
             raise RerunRoleTooLowError(request_id) from None
         raise
-    if operator.sub != request.principal_sub:
-        if role_too_low:
-            raise RerunRoleTooLowError(request_id)
-        raise RerunForbiddenError(request_id=request_id, principal_sub=operator.sub)
-    if role_too_low:
-        raise await _refuse(
-            operator,
-            request,
-            RerunRoleTooLowError(request.id),
-            code="insufficient_role",
-            status=_FORBIDDEN_STATUS_CODE,
-            reason=f"a re-run needs the operator role; your role is {operator.tenant_role.value}",
-        )
+    await _check_caller(operator, request, role_too_low=role_too_low)
 
     effective_params, target, reveal_secret = await _check_rerun(operator, request, params)
 

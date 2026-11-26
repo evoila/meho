@@ -674,7 +674,7 @@ def test_the_menu_entry_shows_only_for_a_tenant_admin() -> None:
 
 def test_the_menu_entry_follows_the_role_after_a_tenant_switch() -> None:
     _tenants()
-    both = {"meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Admins"]}
+    both = {"meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Operators"]}
     client, mock, _csrf = _client(extra_claims=both)
     try:
         in_a = client.get("/ui/account")
@@ -686,7 +686,8 @@ def test_the_menu_entry_follows_the_role_after_a_tenant_switch() -> None:
         in_b = client.get("/ui/account")
     finally:
         mock.stop()
-    assert _PAGE in in_a.text and _PAGE in in_b.text
+    assert _PAGE in in_a.text
+    assert _PAGE not in in_b.text
 
 
 def test_the_hint_of_a_block_in_every_tenant_names_who_removes_it() -> None:
@@ -788,6 +789,31 @@ def test_an_own_login_unblock_answers_by_role_on_the_console_and_on_rest(
     assert all(path != _UNBLOCK for _method, path in _routes_of("principal.unblock"))
 
 
+def test_only_a_platform_admin_removes_a_tenant_admins_block_in_every_tenant() -> None:
+    # The block is on another login, so it is not an own-login case. A tenant
+    # admin of the tenant cannot remove a block in every tenant, on the console
+    # or on REST. A platform admin can.
+    _tenants()
+    _seed_blocks((_BLOCKED, "*", "blocked everywhere"))
+    client, mock, csrf = _client()
+    headers = {"Authorization": f"Bearer {client.token}"}
+    try:
+        console = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+        rest = client.request("DELETE", f"/api/v1/principals/blocked/{_BLOCKED}", headers=headers)
+    finally:
+        mock.stop()
+    assert console.status_code == 404
+    assert rest.status_code == 404
+    assert _block_rows() == [(_BLOCKED, "*", "blocked everywhere")]
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        allowed = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+    finally:
+        mock.stop()
+    assert allowed.status_code == 303
+    assert _block_rows() == []
+
+
 _ROOT = Path(__file__).resolve().parents[2]
 _RULE_SENTENCES = (
     "The console never removes a block on the admin's own login.",
@@ -797,8 +823,10 @@ _RULE_SENTENCES = (
     "It removes only the block of that tenant.",
     "A block in every tenant stays until another platform admin removes it.",
     "A tenant admin cannot remove a block on their own login.",
-    "Another tenant admin of that tenant, or a platform admin, removes it, "
+    "Another tenant admin of that tenant removes a block of that tenant, "
+    "and a platform admin removes any block, "
     "on this page or with meho principal unblock.",
+    "Only a platform admin removes a block in every tenant.",
 )
 
 

@@ -59,9 +59,7 @@ A platform admin's way back:
   `meho principal unblock <sub> --reason <text>`, run in the tenant of that
   block, with a fresh sign-in. It removes only the block of that tenant. A
   block in every tenant stays until another platform admin removes it. A
-  tenant admin cannot remove a block on their own login. Another tenant
-  admin of that tenant, or a platform admin, removes it, on this page or
-  with `meho principal unblock`.
+  tenant admin cannot remove a block on their own login. Another tenant admin of that tenant removes a block of that tenant, and a platform admin removes any block, on this page or with `meho principal unblock`. Only a platform admin removes a block in every tenant.
 
 To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
@@ -226,8 +224,7 @@ own login with `meho principal unblock <sub> --reason <text>`, run in the
 tenant of that block, with a fresh sign-in. It removes only the block of
 that tenant. A block in every tenant stays until another platform admin
 removes it. A tenant admin cannot remove a block on their own login.
-Another tenant admin of that tenant, or a platform admin, removes it, on
-this page or with `meho principal unblock`. The own-login hint of the page
+Another tenant admin of that tenant removes a block of that tenant, and a platform admin removes any block, on this page or with `meho principal unblock`. Only a platform admin removes a block in every tenant. The own-login hint of the page
 says the rule for the role of the viewer. When MEHO cannot read the blocks, the page and
 both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)

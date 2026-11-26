@@ -4324,7 +4324,7 @@ meho principal block <sub> --reason <text> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
-- `--reason` — why the person is blocked (required)
+- `--reason` — why the person is blocked: 1 to 500 characters, at least one that is not a blank (required)
 
 ### `meho principal blocked`
 
@@ -4347,7 +4347,7 @@ meho principal unblock <sub> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
-- `--reason` — why the block is removed (required on your own login; kept in the audit log)
+- `--reason` — why the block is removed: 1 to 500 characters, at least one that is not a blank (required on your own login; kept in the audit log)
 
 ## `meho promote`
 

@@ -1012,8 +1012,25 @@ async def test_own_unblock_with_a_login_token_asks_for_a_fresh_sign_in(
     assert row.operator_sub == _PA
 
 
+_OWN_REASON_TEXT = (
+    "unblock_reason_required: Removing a block on your own login needs a reason: "
+    "1 to 500 characters, with at least one character that is not a blank. "
+    "Add --reason <text>."
+)
+_OTHER_REASON_TEXT = (
+    "unblock_reason_required: A reason has 1 to 500 characters, with at least one "
+    "character that is not a blank. Leave out --reason, or fix the text."
+)
+_BLANK_REASONS = [" ", "     ", "\t", "\n", " \t\r\n "]
+_BLANK_IDS = ["space", "spaces", "tab", "line-break", "mixed"]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [None, "", "x" * 501], ids=["none", "empty", "too-long"])
+@pytest.mark.parametrize(
+    "reason",
+    [None, "", "x" * 501, *_BLANK_REASONS],
+    ids=["none", "empty", "too-long", *_BLANK_IDS],
+)
 async def test_own_unblock_needs_a_reason(
     _client: tuple[httpx.AsyncClient, Any], reason: str | None
 ) -> None:
@@ -1024,10 +1041,59 @@ async def test_own_unblock_needs_a_reason(
     refused = await _unblock(ac, _pa_token(key), _PA, reason=reason)
 
     assert refused.status_code == 422, refused.text
-    assert refused.json()["detail"].startswith("unblock_reason_required: ")
+    assert refused.json()["detail"] == _OWN_REASON_TEXT
     assert len(await _rows(_PA)) == 1
     (row,) = await _unblock_rows()
     assert row.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["", "x" * 501, *_BLANK_REASONS],
+    ids=["empty", "too-long", *_BLANK_IDS],
+)
+async def test_unblock_of_another_login_refuses_a_reason_without_text(
+    _client: tuple[httpx.AsyncClient, Any], reason: str
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key))).status_code == 201
+
+    refused = await _unblock(ac, _admin(key), _BLOCKED, reason=reason)
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == _OTHER_REASON_TEXT
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", _BLANK_REASONS, ids=_BLANK_IDS)
+async def test_block_with_a_reason_of_only_blanks_writes_no_block(
+    _client: tuple[httpx.AsyncClient, Any], reason: str
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+
+    refused = await _block(ac, _admin(key), reason=reason)
+
+    assert refused.status_code == 422, refused.text
+    assert await _rows(_BLOCKED) == []
+
+
+@pytest.mark.asyncio
+async def test_a_reason_with_blanks_around_a_word_is_stored_as_sent(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    reason = "  planned  maintenance \n"
+
+    assert (await _block(ac, _admin(key), reason=reason)).status_code == 201
+    assert [row.reason for row in await _rows(_BLOCKED)] == [reason]
+
+    removed = await _unblock(ac, _admin(key), _BLOCKED, reason=reason)
+    assert removed.status_code == 200, removed.text
 
 
 @pytest.mark.asyncio

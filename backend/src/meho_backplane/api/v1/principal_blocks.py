@@ -45,7 +45,7 @@ from typing import Annotated, Any, Final
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi import status as http_status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.approval_sign_in import (
     check_fresh_approval_sign_in,
@@ -64,6 +64,7 @@ from meho_backplane.auth.principal_block import (
     block_principal,
     is_principal_blocked,
     list_blocked,
+    reason_is_valid,
     unblock_principal,
 )
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
@@ -78,9 +79,15 @@ _SUB_MAX_LENGTH: Final[int] = 255
 _PEOPLE_ONLY: Final[str] = (
     "only a person can block or unblock a login. Use the CLI (meho principal) or the REST API."
 )
-_REASON_REQUIRED: Final[str] = (
-    "unblock_reason_required: removing a block on your own login needs a reason of "
-    f"1 to {REASON_MAX_LENGTH} characters. Add --reason <text>."
+_REASON_RULE: Final[str] = (
+    f"1 to {REASON_MAX_LENGTH} characters, with at least one character that is not a blank"
+)
+_REASON_REQUIRED_OWN: Final[str] = (
+    f"unblock_reason_required: Removing a block on your own login needs a reason: {_REASON_RULE}. "
+    "Add --reason <text>."
+)
+_REASON_REQUIRED_OTHER: Final[str] = (
+    f"unblock_reason_required: A reason has {_REASON_RULE}. Leave out --reason, or fix the text."
 )
 _UNBLOCK_FRESH_SIGN_IN: Final[str] = (
     "sign in again: removing a block on your own login needs a fresh approval sign-in. "
@@ -150,6 +157,13 @@ class BlockCreate(BaseModel):
 
     sub: str = Field(min_length=1, max_length=_SUB_MAX_LENGTH)
     reason: str = Field(min_length=1, max_length=REASON_MAX_LENGTH)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_has_text(cls, value: str) -> str:
+        if not reason_is_valid(value):
+            raise ValueError(f"a reason needs {_REASON_RULE}")
+        return value
 
 
 class UnblockBody(BaseModel):
@@ -239,11 +253,10 @@ async def unblock_principal_route(
     """Unblock a login. On their own login an admin removes this tenant's block only."""
     own_login = sub == operator.sub
     reason = body.reason if body is not None else None
-    if (own_login and reason is None) or (
-        reason is not None and not 1 <= len(reason) <= REASON_MAX_LENGTH
-    ):
+    if (reason is None and own_login) or (reason is not None and not reason_is_valid(reason)):
         raise HTTPException(
-            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=_REASON_REQUIRED
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_REASON_REQUIRED_OWN if own_login else _REASON_REQUIRED_OTHER,
         )
     sign_in = await _own_login_sign_in(operator) if own_login else None
     # A caller who is blocked in this tenant may remove only their own

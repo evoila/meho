@@ -34,9 +34,11 @@ A platform admin's way back:
 - A platform admin whom a tenant admin blocked removes that block on their
   own login, in the tenant of the block:
   `meho principal unblock <sub> --reason "<why>"`.
-- This call needs a reason of 1 to 500 characters and a fresh approval
+- This call needs a reason of 1 to 500 characters, with at least one
+  character that is not a blank (`reason_is_valid` in
+  `auth/principal_block.py`), and a fresh approval
   sign-in: the same check as an approve (`check_fresh_approval_sign_in` in
-  `auth/approval_sign_in.py`). Without a reason MEHO answers 422
+  `auth/approval_sign_in.py`). Without a valid reason MEHO answers 422
   `unblock_reason_required`; without a fresh sign-in, 401
   `fresh_sign_in_required`. The block stays in both cases.
 - The audit row `principal.unblock` holds the reason and the sign-in
@@ -176,17 +178,28 @@ REST routes (`/api/v1/principals/blocked`):
 
 - `GET`: the list. A platform admin sees every block, a tenant admin sees
   the blocks of their tenant.
-- `POST` with `{"sub", "reason"}`: block. A second block in the same
-  scope updates the reason.
+- `POST` with `{"sub", "reason"}`: block. The reason has 1 to 500
+  characters, with at least one that is not a blank, else 422. A second
+  block in the same scope updates the reason.
 - `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
   every block of the login, but on their own login only the block of the
   current tenant. A tenant admin removes the block of their tenant. 404
   when there is none. On the caller's own login the call needs the body
-  `{"reason": "..."}` (1 to 500 characters, else 422
-  `unblock_reason_required`) and a token of a fresh approval sign-in (else
+  `{"reason": "..."}` (1 to 500 characters, at least one that is not a
+  blank, else 422 `unblock_reason_required`) and a token of a fresh
+  approval sign-in (else
   401 `fresh_sign_in_required` with the `WWW-Authenticate` challenge).
   Both are checked before any block is read. On another person's login
-  the reason is optional and goes into the audit row. This route uses its own sign-in check
+  the reason is optional and goes into the audit row; a reason that is
+  sent must follow the same rule. The code `unblock_reason_required` has two
+  texts. On the caller's own login: "Removing a block on your own login
+  needs a reason: 1 to 500 characters, with at least one character that is
+  not a blank. Add --reason <text>." On another person's login: "A reason
+  has 1 to 500 characters, with at least one character that is not a
+  blank. Leave out --reason, or fix the text." The CLI prints the sentence
+  as the server sends it. A proxy in front of MEHO must pass the body of a
+  DELETE call: `meho principal unblock` sends the reason in it.
+  This route uses its own sign-in check
   (`verify_jwt_platform_admin_way_back` in `auth/jwt.py`,
   `verify_jwt_and_bind_platform_admin_way_back` in `middleware.py`): a
   platform admin passes a block of the current tenant and reaches the
@@ -197,7 +210,8 @@ CLI: `meho principal block <sub> --reason <text>`,
 `meho principal unblock <sub> [--reason <text>]`, `meho principal blocked`.
 On a 401 with the challenge, `unblock` opens the browser approval sign-in
 (the same way as `meho approvals approve`) and sends the call again with
-that token; the token stays in memory for this one run.
+that token; the token stays in memory for this one run. This holds also
+when the challenge comes in the answer after the stored login was renewed.
 
 Console: the page `/ui/blocked-people` lists the blocks the admin may see
 (login id, tenant, reason, who blocked, when), blocks a login with a

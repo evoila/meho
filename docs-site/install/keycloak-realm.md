@@ -1195,6 +1195,7 @@ Who blocks whom:
   their own login: `meho principal unblock <sub> --reason "<why>"`. MEHO
   first asks for a fresh sign-in in the browser. The audit log keeps the
   reason and the sign-in.
+  A proxy in front of MEHO must pass the body of a DELETE call: `meho principal unblock` sends the reason in it.
 - The way back uses the approval sign-in client of the login server
   (`meho-cli-approve` in MEHO's own setup). An install without that
   client has no way back; another platform admin or a tenant admin of

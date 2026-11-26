@@ -1172,8 +1172,8 @@ that client.
 enough on its own. MEHO checks sign-in tokens itself, so a token that
 was already issued keeps working until it ends. Block the person in MEHO
 too: `meho principal block <sub> --reason "<why>"`. MEHO then refuses
-every new request of that person within 5 seconds, on every MEHO
-process. MEHO checks the block again at fixed points while a call runs.
+every new request of that person within a few seconds on every MEHO
+process (the refresh time of the block list, `BLOCK_CACHE_SECONDS`). MEHO checks the block again at fixed points while a call runs.
 A call that reaches such a point ends with the block refusal, and the
 answer says whether a part of it may have run. A request that is
 already on its way to a system runs to its end. To be sure, also end
@@ -1184,8 +1184,7 @@ person (the console's live stream and `GET /api/v1/feed`) ends within
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.
 
-**To stop an agent at once:** a revoked agent's token keeps working until
-it ends. Block the agent in MEHO by the name the agent list shows:
+To stop an agent at once, block it in MEHO by the name the agent list shows.
 `meho principal block agent:<name> --reason "<why>"`. MEHO then refuses
 every token of that agent, the one in use and every new one. MEHO refuses
 a block of an agent name it does not know. `meho principal unblock

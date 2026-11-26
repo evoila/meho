@@ -3,28 +3,43 @@
 ## Overview
 
 An admin can block a person or an agent in MEHO. MEHO then refuses every
-request of that login within 5 seconds, on every MEHO process.
+request of that login within a few seconds on every MEHO process: the
+refresh time of the block list, `BLOCK_CACHE_SECONDS` in
+`auth/principal_block.py`.
 
-What a block names:
+What a block names (`auth/principal_block_agents.py`):
 
-- A login id (the token's `sub`), of a person or of a machine login.
-- The name MEHO shows for an agent: `agent:<name>`, the
-  `keycloak_client_id` of the agent list (REST and console). The block
-  holds for every token of that agent, the one in use and every new one.
-  The token check compares the token's client id too (`login_name` in
-  `auth/principal_block.py`). The list that each process keeps also holds
-  every login id that MEHO saw with that client id
-  (`machine_login.client_id`), so a check that knows only the login id
-  refuses the agent too: an approved call it asked for, a running call,
-  a step of a multi-step operation.
-- An agent name must name an agent registered in the admin's reach (the
-  own tenant, or every tenant for a platform admin), also a revoked one.
-  Else MEHO answers 422 `unknown_login` with a plain sentence and stores
-  no block. The short name of an agent (`probe-bot` instead of
-  `agent:probe-bot`) gets the same answer, and the sentence names the
-  login name to use.
+- A text that starts with `agent:` names an agent: the
+  `keycloak_client_id` of the agent list (REST and console). It must name
+  an agent registered in the admin's reach (the own tenant, or every
+  tenant for a platform admin), also a revoked one. Else MEHO answers 422
+  `unknown_login` with a plain sentence and stores no block. The block
+  stops every token of that agent, the one in use and every new one: the
+  token check compares the token's client id when it starts with `agent:`
+  (`login_name` in `auth/principal_block.py`).
+- Every other text is a login id (the token's `sub`). MEHO stores its
+  block and never compares the text with agent names, in any tenant. The
+  block stops only the login with that id. A token's client id that does
+  not start with `agent:` is never compared with the block list.
+- The 201 answer says in one sentence that the block is stored and holds
+  from the next request of the login (`message`).
 - The block answer and the list name the agent (`agent`) for a block of
   an agent name, and for a block of a login id that MEHO saw as an agent.
+
+A check that knows only a login id finds a block of an agent name too: the
+resume of an approved call the agent asked for, a step of an approved run,
+and a send of a running call. The list that each process keeps holds:
+
+- the login id behind the agent: at block time MEHO asks Keycloak for the
+  service-account user of the agent's client (by `keycloak_internal_id`)
+  and stores its id with the block (`principal_block.login_sub`);
+- every login id that MEHO saw with that agent name
+  (`machine_login.client_id`).
+
+When Keycloak cannot be read at block time, the block by name is stored
+all the same. Then a resume, a step of an approved run, or a send, for a
+login that may be an agent and whose agent name MEHO does not know, is
+refused with `principal_blocked` while such a block is in scope.
 
 MEHO checks sign-in tokens itself, with no question to the login server
 for each request. A person who is disabled in the login server keeps
@@ -91,10 +106,18 @@ The text names no admin and no reason.
   time.
 - Column `machine_login.client_id` (migration `0189`): the client id that
   MEHO saw with a machine login id. `note_machine_login`
-  (`auth/machine_logins.py`) writes it on each REST and MCP call of the
-  login, and on the start of a hosted agent run.
+  (`auth/machine_logins.py`) writes it on each REST and MCP call that
+  passes the token check, and on the start of a hosted agent run. A token
+  that the token check refuses by its agent name writes it too, so a
+  later check by the login id alone finds the block.
+- Column `principal_block.login_sub` (migration `0189`): for a block of
+  an agent name, the login id behind the agent that Keycloak answered at
+  block time; `NULL` when Keycloak could not be read.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,
   and `block_principal`, `unblock_principal`, `list_blocked`.
+- `meho_backplane/auth/principal_block_agents.py`: what a block text
+  names, the lookup of the login id behind an agent in Keycloak, and the
+  agents the console offers to pick.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
@@ -108,10 +131,11 @@ The text names no admin and no reason.
 
 ## Control flow
 
-The reader keeps the whole list in memory for 5 seconds per process
-(`BLOCK_CACHE_SECONDS`). A block or unblock clears the cache of the
-process that made it. Every other process sees the change when its cache
-is 5 seconds old. A process that cannot read the table refuses the
+The reader keeps the whole list in memory per process for the refresh
+time of the block list (`BLOCK_CACHE_SECONDS`). A block or unblock clears
+the cache of the process that made it. Every other process sees the
+change within a few seconds, when its cache is older than
+`BLOCK_CACHE_SECONDS`. A process that cannot read the table refuses the
 request (503 `principal_block_check_unavailable`); it never answers "not
 blocked" for an unknown state.
 
@@ -170,7 +194,8 @@ who asked is blocked between two steps, the next step is refused. This
 holds for a step through `dispatch()`, a governed direct step, and a
 request sent straight to the target.
 
-A new request of a blocked person is refused within 5 seconds. An open
+A new request of a blocked person is refused within a few seconds (the
+refresh time of the block list, `BLOCK_CACHE_SECONDS`). An open
 live stream of the person ends within a few seconds too. The console's
 live stream (`/ui/broadcast/stream`) and `GET /api/v1/feed` each read the
 block list in their liveness check (`StreamLiveness.still_valid`), at every

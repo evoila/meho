@@ -367,6 +367,21 @@ generic `connector_error` envelope then sets `extras.http_status` and
 as the httpx path. First user: `k8s.apply`'s `ApplyRejectedError`, raised
 when the Kubernetes API server rejects a server-side apply.
 
+**A redirect answer (3xx): host names only.** A 3xx answer that MEHO
+does not follow reaches `result_connector_error` as an
+`httpx.HTTPStatusError`. The address of the request and the `Location`
+address can both be the vendor's choice (after a followed redirect on the
+same origin), so `extras.exception_message` holds only the status code and
+the host names, for example `Redirect response 302 from vc.example.com to
+other.example.com, not followed.` A 3xx without a `Location` header says
+`with no Location header.` `extras.redirect_host` holds the host name of the
+`Location` address (`null` without the header), or the fixed mark
+`<unparseable-location>`. `extras.http_status` and
+`extras.upstream_message` stay as for every other status. When httpx cannot
+read the `Location` address, the HTTP client raises the httpx error class
+with one fixed text, `MEHO could not read the address in the Location
+header`. Tests: `tests/test_connectors_http_redirect_answer.py`.
+
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream
 response (`result_connector_error` for an `httpx.HTTPStatusError`, the

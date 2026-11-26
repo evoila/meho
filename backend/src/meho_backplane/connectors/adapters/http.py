@@ -103,7 +103,12 @@ from meho_backplane.connectors._shared.cache_key import (
     target_cache_key,
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
-from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
+from meho_backplane.connectors._shared.log_host import (
+    UNPARSEABLE_ADDRESS,
+    UNREADABLE_LOCATION_ERRORS,
+    host_for_log,
+    unreadable_location_error,
+)
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -788,7 +793,20 @@ def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     )
 
 
-def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> None:
+def _refusal_reason(request: httpx.URL, location: httpx.URL | None) -> str:
+    """Return one fixed word for why MEHO does not follow a redirect to *location*."""
+    if location is None:
+        return "unreadable address"
+    if request.host != location.host:
+        return "other host"
+    if request.scheme != location.scheme:
+        return "other scheme"
+    return "other port"
+
+
+def _log_redirect_not_followed(
+    request: httpx.Request, location: str | None, *, reason: str
+) -> None:
     """Warn that MEHO does not follow a redirect; *location* is a host name or a fixed mark."""
     logger.warning(
         "connector_redirect_not_followed_cross_origin",
@@ -796,6 +814,7 @@ def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> 
         # Vendor-supplied addresses are logged as host name only.
         from_url=host_for_log(request.url),
         location=location,
+        reason=reason,
     )
 
 
@@ -849,11 +868,15 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # httpx builds the next request inside ``send`` and raises (closing the
         # answer) when it cannot read the Location address. Log the fixed mark
         # for that address, then raise the same error to the caller.
+        # httpx's error text can quote a part of the address, so MEHO raises
+        # the same error class with one fixed text. It is raised outside the
+        # ``except`` so it does not carry httpx's error as its context.
         try:
             return super()._build_redirect_request(request, response)
-        except (httpx.RemoteProtocolError, httpx.InvalidURL, UnicodeError):
-            _log_redirect_not_followed(request, UNPARSEABLE_ADDRESS)
-            raise
+        except UNREADABLE_LOCATION_ERRORS as exc:
+            _log_redirect_not_followed(request, UNPARSEABLE_ADDRESS, reason="unreadable address")
+            error = unreadable_location_error(exc, request)
+        raise error
 
     async def _send_same_origin(
         self, request: httpx.Request, stream: bool, auth: Any
@@ -862,6 +885,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # following; this class owns the redirect decision so the
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
+        first_request = request
         response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
         for _ in range(_MAX_SAME_ORIGIN_REDIRECTS):
             if not response.has_redirect_location:
@@ -879,11 +903,14 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
                 _log_redirect_not_followed(
                     request,
                     host_for_log(location_header) if location_header is not None else None,
+                    reason=_refusal_reason(
+                        request.url, next_request.url if next_request is not None else None
+                    ),
                 )
                 return response
             await response.aclose()
             request = next_request
-            response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
+            response = await self._send_followed_hop(first_request, request, stream, auth)
         # Exhausted the same-origin hop budget — surface httpx's own error
         # so the caller sees a redirect loop rather than a silent 3xx. Close
         # the final 3xx first so its connection is released back to the pool
@@ -892,8 +919,25 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         await response.aclose()
         raise httpx.TooManyRedirects(
             f"exceeded the same-origin redirect budget ({_MAX_SAME_ORIGIN_REDIRECTS})",
-            request=request,
+            request=first_request,
         )
+
+    async def _send_followed_hop(
+        self, first_request: httpx.Request, request: httpx.Request, stream: bool, auth: Any
+    ) -> httpx.Response:
+        """Send one followed same-origin hop; name *first_request* for the trace and errors.
+
+        The address of a followed hop is the vendor's choice. So an error of
+        the hop carries the request MEHO sent, and the answer carries its
+        address for the trace.
+        """
+        try:
+            response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
+        except httpx.TransportError as exc:
+            exc.request = first_request
+            raise
+        response.extensions[flight_recorder_capture.FIRST_REQUEST_URL_EXTENSION] = first_request.url
+        return response
 
 
 class HttpConnector(Connector):

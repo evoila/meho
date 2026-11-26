@@ -2255,8 +2255,11 @@ def test_valid_non_ascii_or_ipv6_host_is_logged(location: str, expected: str) ->
     ],
 )
 async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) -> None:
-    """A Location httpx cannot read is logged as one fixed mark; httpx's own error is raised."""
-    from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS
+    """A Location httpx cannot read is logged as one fixed mark; the error has one fixed text."""
+    from meho_backplane.connectors._shared.log_host import (
+        UNPARSEABLE_ADDRESS,
+        UNREADABLE_LOCATION_MESSAGE,
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": location})
@@ -2273,13 +2276,14 @@ async def test_unreadable_redirect_address_logs_one_fixed_mark(location: str) ->
         with capture_logs() as captured, pytest.raises(Exception) as error:
             await client.get("/guestFile")
 
-    assert type(error.value) is type(plain_error.value)
-    assert str(error.value) == str(plain_error.value)
+    assert isinstance(plain_error.value, type(error.value))
+    assert str(error.value) == UNREADABLE_LOCATION_MESSAGE
     warning = next(
         e for e in captured if e["event"] == "connector_redirect_not_followed_cross_origin"
     )
     assert warning["from_url"] == "vc.example.com"
     assert warning["location"] == UNPARSEABLE_ADDRESS
+    assert warning["reason"] == "unreadable address"
     rendered = repr(captured)
     for mark in ("PATHMARK", "QUERYMARK"):
         assert mark not in rendered

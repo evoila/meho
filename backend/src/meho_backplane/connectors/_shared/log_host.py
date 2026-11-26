@@ -6,10 +6,22 @@ import re
 
 import httpx
 
-__all__ = ["UNPARSEABLE_ADDRESS", "host_for_log"]
+__all__ = [
+    "UNPARSEABLE_ADDRESS",
+    "UNREADABLE_LOCATION_ERRORS",
+    "UNREADABLE_LOCATION_MESSAGE",
+    "host_for_log",
+    "unreadable_location_error",
+]
 
 #: The one fixed mark a log line holds when there is no host name to show.
 UNPARSEABLE_ADDRESS = "<unparseable-location>"
+
+#: The fixed text of the error when httpx cannot read a ``Location`` address.
+UNREADABLE_LOCATION_MESSAGE = "MEHO could not read the address in the Location header"
+
+#: What httpx raises while it builds the request for a ``Location`` address.
+UNREADABLE_LOCATION_ERRORS = (httpx.RemoteProtocolError, httpx.InvalidURL, UnicodeError)
 
 # ASCII letters, digits, "_", ".", "-" and the ":" of an IPv6 address. The
 # check reads ``URL.raw_host``, the ASCII (IDNA) form of the host, so a valid
@@ -36,3 +48,17 @@ def host_for_log(address: str | httpx.URL) -> str:
     if not _HOST_NAME.fullmatch(url.raw_host):
         return UNPARSEABLE_ADDRESS
     return host
+
+
+def unreadable_location_error(exc: Exception, request: httpx.Request) -> Exception:
+    """Return an error of the class of ``exc`` with one fixed text.
+
+    ``exc`` is one of :data:`UNREADABLE_LOCATION_ERRORS`. The text httpx
+    gives it can quote a part of the ``Location`` address (for example the
+    port text), so the caller raises this error instead.
+    """
+    if isinstance(exc, httpx.RemoteProtocolError):
+        return httpx.RemoteProtocolError(UNREADABLE_LOCATION_MESSAGE, request=request)
+    if isinstance(exc, httpx.InvalidURL):
+        return httpx.InvalidURL(UNREADABLE_LOCATION_MESSAGE)
+    return UnicodeError(UNREADABLE_LOCATION_MESSAGE)

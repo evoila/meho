@@ -39,7 +39,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeGuard
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -47,6 +47,7 @@ import httpx
 
 from meho_backplane.auth.tenant_admins import LOGIN_REALM_APPROVER
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.log_host import host_for_log
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -1624,6 +1625,27 @@ def result_composite_terminal_error(
     )
 
 
+def _is_redirect_status(exc: BaseException) -> TypeGuard[httpx.HTTPStatusError]:
+    return isinstance(exc, httpx.HTTPStatusError) and 300 <= exc.response.status_code < 400
+
+
+def _redirect_status_message(exc: BaseException) -> str | None:
+    """Return the text for a 3xx answer with host names only, or ``None``.
+
+    httpx's own text quotes the whole request address and the whole
+    ``Location`` header. Both can be the vendor's choice (a followed
+    redirect), so the text holds only the status code and the host names.
+    """
+    if not _is_redirect_status(exc):
+        return None
+    response = exc.response
+    text = f"Redirect response {response.status_code} from {host_for_log(exc.request.url)}"
+    location = response.headers.get("Location")
+    if location is None:
+        return f"{text}, with no Location header."
+    return f"{text} to {host_for_log(location)}, not followed."
+
+
 def result_connector_error(
     op_id: str,
     exc: BaseException,
@@ -1662,12 +1684,15 @@ def result_connector_error(
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
     """
-    msg = _sanitize_free_text(str(exc))
+    msg = _sanitize_free_text(_redirect_status_message(exc) or str(exc))
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    if _is_redirect_status(exc):
+        location = exc.response.headers.get("Location")
+        extras["redirect_host"] = host_for_log(location) if location is not None else None
     if isinstance(exc, ConnectorOwnMessage) and not isinstance(
         exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
     ):

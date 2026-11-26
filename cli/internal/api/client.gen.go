@@ -4581,10 +4581,10 @@ type CarryOverDryRun struct {
 // CarryOverDryRunScope defines model for CarryOverDryRun.Scope.
 type CarryOverDryRunScope string
 
-// CarryOverOperation One operation a saved setting makes wait today.
+// CarryOverOperation One operation a saved setting matches.
 //
-// “step_of“ lists the multi-step operations that use it as a step
-// (empty when none does).
+// “step_of“ lists every multi-step operation that runs it as a step,
+// at every level, each once (empty when none does).
 type CarryOverOperation struct {
 	ConnectorId string   `json:"connector_id"`
 	OpId        string   `json:"op_id"`
@@ -4597,7 +4597,7 @@ type CarryOverOperation struct {
 // “policy_file“ (an entry with “always_wait: true“). “ref“ names
 // the place: “<scope>:override“ or “<scope>:classifications[<index>]“.
 // “match“ is what the setting matches (“connector“, “group“,
-// “op“). “warnings“ say what changes with the carry-over.
+// “op“). “warnings“ say what changes if MEHO reads it as “destructive“.
 type CarryOverSetting struct {
 	Match      map[string]string      `json:"match"`
 	Operations []CarryOverOperation   `json:"operations"`

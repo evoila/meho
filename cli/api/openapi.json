@@ -2456,7 +2456,7 @@
           "policy"
         ],
         "summary": "Carry Over",
-        "description": "Every saved \"always wait\" of *scope*, and what reading it as ``destructive`` will mean.\n\nWho may read it is the rule of the export. Writes nothing and reads no\nswitch: the answer is the same with ``CUSTOM_POLICY`` on or off.",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
         "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
         "parameters": [
           {
@@ -33332,7 +33332,7 @@
           "step_of"
         ],
         "title": "CarryOverOperation",
-        "description": "One operation a saved setting makes wait today.\n\n``step_of`` lists the multi-step operations that use it as a step\n(empty when none does)."
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once (empty when none does)."
       },
       "CarryOverSetting": {
         "properties": {
@@ -33388,7 +33388,7 @@
           "warnings"
         ],
         "title": "CarryOverSetting",
-        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes with the carry-over."
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``."
       },
       "CatalogListResponse": {
         "properties": {

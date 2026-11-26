@@ -23,14 +23,15 @@ func newCarryOverCmd() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "carry-over --dry-run",
-		Short: "List every saved \"always wait\" and what reading it as destructive will mean",
+		Short: "List every saved \"always wait\" and what changes if MEHO reads it as destructive",
 		Long: "carry-over --dry-run calls GET /api/v1/policy/carry-over/dry-run. " +
 			"It lists every saved \"always wait\" setting: an override with " +
 			"approval on, or a policy file entry with always_wait: true. For each " +
-			"one it shows where it comes from, the operations it makes wait, and " +
-			"what changes when MEHO reads it as destructive: a step of a " +
-			"multi-step operation is refused, sandbox mode, and the preview a " +
-			"call needs first. It only reads. Nothing is changed.",
+			"one it shows where it comes from, the operations it matches, and " +
+			"what changes for each setting if MEHO reads it as destructive: a " +
+			"step of a multi-step operation is refused, sandbox mode, and the " +
+			"preview a call needs first. It only reads and reads no switch. " +
+			"Nothing is changed.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,

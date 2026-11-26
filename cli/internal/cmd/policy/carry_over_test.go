@@ -17,7 +17,7 @@ const carryOverAnswer = `{"scope":"tenant","sandbox_mode":true,"message":"Dry ru
   "warnings":["step warning","sandbox warning","preview warning"]},
  {"source":"policy_file","scope":"tenant","ref":"tenant:classifications[2]",
   "match":{"op":"nothing.*"},"operations":[],
-  "warnings":["Today this entry makes no operation wait.","preview warning"]}]}`
+  "warnings":["no-match warning","preview warning"]}]}`
 
 func TestCarryOverDryRunListsEachSetting(t *testing.T) {
 	var got seen
@@ -39,7 +39,7 @@ func TestCarryOverDryRunListsEachSetting(t *testing.T) {
 		"  warning: sandbox warning\n" +
 		"  warning: preview warning\n" +
 		"policy_file tenant:classifications[2] (tenant): op=nothing.*\n" +
-		"  warning: Today this entry makes no operation wait.\n" +
+		"  warning: no-match warning\n" +
 		"  warning: preview warning\n" +
 		"Dry run: nothing was changed.\n"
 	if stdout != want {

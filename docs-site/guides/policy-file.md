@@ -475,12 +475,12 @@ Not checked: idempotency_key, connector_resolution
 
 "Always wait" makes an operation wait for approval on every call. It is
 saved in two places: an admin's override with approval on, or a policy
-file entry with `always_wait: true`. With the `CUSTOM_POLICY` setting on,
-MEHO will read each saved one as a raise to `destructive`.
+file entry with `always_wait: true`.
 
-The dry run lists every saved "always wait" and what that will mean for
-it. It only reads: it changes no setting and no answer, with the setting
-on or off.
+The dry run lists every saved "always wait" and what changes for each
+setting if MEHO reads it as `destructive`. It only reads: it changes no
+setting and no answer, and it reads no setting switch. It writes only its
+audit row.
 
 ```bash
 meho policy carry-over --dry-run                   # your tenant's settings
@@ -491,16 +491,22 @@ For each setting it shows:
 
 - where it comes from: `override` or `policy_file`, the scope, and the
   place (for example `tenant:classifications[2]`);
-- the operations it makes wait today;
-- a warning when an operation is a step of a multi-step operation. A
-  `destructive` step is refused, not held for approval, so such a run
+- the operations it matches. A policy file entry is matched against the
+  operations a call of the tenant can use, and against every step of a
+  multi-step operation, also a step with no stored row. A policy file
+  entry makes an operation wait only with `POLICY_CLASSIFICATION` on;
+  the dry run lists its matches with every switch;
+- a warning when an operation is a step of a multi-step operation, with
+  every multi-step operation that runs it, at every level. As
+  `destructive`, a step is refused, not held for approval, so such a run
   stops at that step;
-- a warning when the install is in sandbox mode. There a delete grant can
-  cover a `destructive` operation for a service login;
-- that a `destructive` call needs a matching preview first. A call
+- a warning when the install is in sandbox mode. As `destructive`, a
+  delete grant can cover the operation there for a service login;
+- that, as `destructive`, a call needs a matching preview first. A call
   without one is refused.
 
-Who may run it: the same people who may export the policy.
+Who may run it: the same callers who may export the policy, except an
+agent login, which gets 403. There is no MCP tool for it.
 
 ## What an import does
 
@@ -538,7 +544,7 @@ Who may run it: the same people who may export the policy.
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
 | `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
-| `GET /api/v1/policy/carry-over/dry-run` | every saved "always wait" and what reading it as `destructive` will mean; writes nothing |
+| `GET /api/v1/policy/carry-over/dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row |
 
 Send the file as the request body with `Content-Type: application/yaml`.
 Every file route takes `?scope=tenant` (the default) or `?scope=install`.

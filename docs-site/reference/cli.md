@@ -4225,7 +4225,7 @@ meho policy
 
 ### `meho policy carry-over`
 
-List every saved "always wait" and what reading it as destructive will mean
+List every saved "always wait" and what changes if MEHO reads it as destructive
 
 ```
 meho policy carry-over --dry-run [flags]

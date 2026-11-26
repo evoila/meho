@@ -20,8 +20,8 @@ person's approval, as it does today. The value is typed in the console and
 goes only to ``vault.kv.put``: it is never logged, never put in an error text
 and never sent back to the page.
 
-Who may submit: the ``operator`` role, the same floor as the Vault page. A
-person below it sees the card without a form, and a POST answers 403.
+Who may use it: the ``operator`` role, the same floor as the Vault page and
+the target page itself. A person below it gets 403 on the card and on the POST.
 See ``docs/codebase/ui.md``, section "Credential card on the target page".
 """
 
@@ -38,11 +38,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.targets.resolver import resolve_target
-from meho_backplane.ui.auth.middleware import (
-    UISessionContext,
-    require_ui_operator,
-    require_ui_session,
-)
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.approvals.render import parked_request_chain, set_csrf_cookie
 from meho_backplane.ui.routes.connectors.credential_plan import (
@@ -68,7 +64,6 @@ _GUIDE_URL: Final[str] = (
     "https://evoila.github.io/meho/guides/targets-and-secrets/#store-the-credential-through-meho"
 )
 
-_require_session_dep = Depends(require_ui_session)
 _require_operator_dep = Depends(require_ui_operator)
 _get_raw_session_dep = Depends(get_raw_session)
 
@@ -93,9 +88,8 @@ async def _render_card(
 ) -> HTMLResponse:
     """Render the card. It never gets a submitted value: the form comes back blank."""
     plan: CredentialPlan = await plan_credential_card(operator, target)
-    can_write = operator.tenant_role in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN)
-    stored = StoredStatus(state="skipped")
-    if plan.state == "form" and can_write:
+    stored = StoredStatus(state="none")
+    if plan.state == "form":
         connector_id = await _vault_connector_id(operator)
         stored = await read_stored_status(operator, connector_id, plan.mount, plan.path)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
@@ -104,7 +98,6 @@ async def _render_card(
         "card_url": f"{target_page_path(target.name)}/credential",
         "plan": plan,
         "stored": stored,
-        "can_write": can_write,
         "is_tenant_admin": operator.tenant_role == TenantRole.TENANT_ADMIN,
         "result": result,
         "errors": errors or {},
@@ -171,7 +164,7 @@ def build_credential_router() -> APIRouter:
     async def _card_handler(
         request: Request,
         name: str,
-        session_ctx: UISessionContext = _require_session_dep,
+        session_ctx: UISessionContext = _require_operator_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
         """``GET /ui/connectors/{name}/credential``."""

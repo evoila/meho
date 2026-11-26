@@ -76,7 +76,7 @@ class CredentialPlan:
 class StoredStatus:
     """Whether a credential is stored. It never holds a value."""
 
-    #: ``stored``, ``none``, ``error`` or ``skipped`` (the caller may not read).
+    #: ``stored``, ``none`` or ``error``.
     state: str
     version: int | None = None
     changed_at: str | None = None

@@ -483,9 +483,7 @@ def test_post_without_the_csrf_token_is_403(monkeypatch: pytest.MonkeyPatch) -> 
     assert _puts(calls) == []
 
 
-def test_read_only_sees_the_card_without_the_form_and_cannot_post(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_only_gets_403_on_the_card_and_the_post(monkeypatch: pytest.MonkeyPatch) -> None:
     _setup()
     _seed_target(_TENANT_A, "web-1")
     calls = _patch_ops(monkeypatch)
@@ -497,10 +495,7 @@ def test_read_only_sees_the_card_without_the_form_and_cannot_post(
             headers=_csrf_headers(csrf),
             data=_PASSWORD_FORM,
         )
-    assert card.status_code == 200
-    assert f"secret/tenants/{_TENANT_A}/web-1" in card.text
-    assert "<form" not in card.text
-    assert "You need the operator role to store a credential." in card.text
+    assert card.status_code == 403
     assert post.status_code == 403
     assert calls == []
 

@@ -48542,7 +48542,14 @@
           },
           "agent_switches": {
             "additionalProperties": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
             },
             "type": "object",
             "title": "Agent Switches",

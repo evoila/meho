@@ -1177,6 +1177,14 @@ async def _cosine_candidates(
     can surface a user-scoped memory row the caller does not own. The
     Memory eligibility predicate is inlined the same way.
     """
+    probes = get_settings().retrieval_ivfflat_probes
+    if probes > 0:
+        # ``true`` limits the value to this transaction, so it cannot leak
+        # to the next user of the pooled connection.
+        await session.execute(
+            text("SELECT set_config('ivfflat.probes', :probes, true)"),
+            {"probes": str(probes)},
+        )
     result = await session.execute(
         _COSINE_CANDIDATES_SQL,
         {

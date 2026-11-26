@@ -13128,11 +13128,22 @@ type VaultStatus struct {
 
 // VersionResponse “GET /version“ response body.
 type VersionResponse struct {
-	AgentSwitches     *map[string]bool    `json:"agent_switches,omitempty"`
-	BuildDate         string              `json:"build_date"`
-	ChartVersion      *string             `json:"chart_version"`
-	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
-	GitSha            string              `json:"git_sha"`
+	AgentSwitches     *map[string]VersionResponse_AgentSwitches_AdditionalProperties `json:"agent_switches,omitempty"`
+	BuildDate         string                                                         `json:"build_date"`
+	ChartVersion      *string                                                        `json:"chart_version"`
+	ConnectorPackages *[]ConnectorPackage                                            `json:"connector_packages,omitempty"`
+	GitSha            string                                                         `json:"git_sha"`
+}
+
+// VersionResponseAgentSwitches0 defines model for .
+type VersionResponseAgentSwitches0 = bool
+
+// VersionResponseAgentSwitches1 defines model for .
+type VersionResponseAgentSwitches1 = int
+
+// VersionResponse_AgentSwitches_AdditionalProperties defines model for VersionResponse.agent_switches.AdditionalProperties.
+type VersionResponse_AgentSwitches_AdditionalProperties struct {
+	union json.RawMessage
 }
 
 // WithdrawRequestBody POST body for “…/withdraw“ (#4987).
@@ -17929,6 +17940,68 @@ func (t ValidationError_Loc_Item) MarshalJSON() ([]byte, error) {
 }
 
 func (t *ValidationError_Loc_Item) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsVersionResponseAgentSwitches0 returns the union data inside the VersionResponse_AgentSwitches_AdditionalProperties as a VersionResponseAgentSwitches0
+func (t VersionResponse_AgentSwitches_AdditionalProperties) AsVersionResponseAgentSwitches0() (VersionResponseAgentSwitches0, error) {
+	var body VersionResponseAgentSwitches0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromVersionResponseAgentSwitches0 overwrites any union data inside the VersionResponse_AgentSwitches_AdditionalProperties as the provided VersionResponseAgentSwitches0
+func (t *VersionResponse_AgentSwitches_AdditionalProperties) FromVersionResponseAgentSwitches0(v VersionResponseAgentSwitches0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeVersionResponseAgentSwitches0 performs a merge with any union data inside the VersionResponse_AgentSwitches_AdditionalProperties, using the provided VersionResponseAgentSwitches0
+func (t *VersionResponse_AgentSwitches_AdditionalProperties) MergeVersionResponseAgentSwitches0(v VersionResponseAgentSwitches0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsVersionResponseAgentSwitches1 returns the union data inside the VersionResponse_AgentSwitches_AdditionalProperties as a VersionResponseAgentSwitches1
+func (t VersionResponse_AgentSwitches_AdditionalProperties) AsVersionResponseAgentSwitches1() (VersionResponseAgentSwitches1, error) {
+	var body VersionResponseAgentSwitches1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromVersionResponseAgentSwitches1 overwrites any union data inside the VersionResponse_AgentSwitches_AdditionalProperties as the provided VersionResponseAgentSwitches1
+func (t *VersionResponse_AgentSwitches_AdditionalProperties) FromVersionResponseAgentSwitches1(v VersionResponseAgentSwitches1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeVersionResponseAgentSwitches1 performs a merge with any union data inside the VersionResponse_AgentSwitches_AdditionalProperties, using the provided VersionResponseAgentSwitches1
+func (t *VersionResponse_AgentSwitches_AdditionalProperties) MergeVersionResponseAgentSwitches1(v VersionResponseAgentSwitches1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t VersionResponse_AgentSwitches_AdditionalProperties) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *VersionResponse_AgentSwitches_AdditionalProperties) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }

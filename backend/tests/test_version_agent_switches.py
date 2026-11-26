@@ -8,7 +8,7 @@ These tests check:
 * every ``Settings`` field is in exactly one of two groups: agent-facing
   or not agent-facing, so a new setting cannot be left out by mistake;
 * the fields with the ``AGENT_FACING`` mark are exactly the agent-facing
-  group, and each of them is a ``bool``;
+  group, and each of them is a ``bool`` or an ``int``;
 * ``GET /version`` lists each switch by env name, sorted, with the value
   ``get_settings`` read from that env name;
 * the answer holds only these names and ``true`` / ``false``, no secret
@@ -67,6 +67,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "operation_contract_guidance",
         "policy_classification",
         "preview_typed_writes",
+        "retrieval_ivfflat_probes",
         "result_query_small_form",
         "runner_checks_enabled",
         "search_clear_lead",
@@ -328,9 +329,21 @@ def _marked() -> set[str]:
     }
 
 
+#: Agent-facing settings that are whole numbers; 0 means off.
+INT_SETTINGS: frozenset[str] = frozenset({"retrieval_ivfflat_probes"})
+
+
+def _on(name: str) -> str:
+    return "7" if name in INT_SETTINGS else "true"
+
+
+def _off(name: str) -> str:
+    return "0" if name in INT_SETTINGS else "false"
+
+
 def _set_all(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     for name in AGENT_FACING_SETTINGS:
-        monkeypatch.setenv(name.upper(), value)
+        monkeypatch.setenv(name.upper(), _on(name) if value == "true" else _off(name))
     get_settings.cache_clear()
 
 
@@ -347,13 +360,13 @@ def test_marked_settings_are_the_agent_facing_group() -> None:
     assert _marked() == set(AGENT_FACING_SETTINGS), _DECIDE
 
 
-def test_only_bool_settings_are_marked() -> None:
+def test_only_bool_and_int_settings_are_marked() -> None:
     wrong = {
         name: Settings.model_fields[name].annotation
         for name in _marked()
-        if Settings.model_fields[name].annotation is not bool
+        if Settings.model_fields[name].annotation not in (bool, int)
     }
-    assert not wrong, f"only bool settings may be agent-facing: {wrong}"
+    assert not wrong, f"only bool and int settings may be agent-facing: {wrong}"
 
 
 def test_version_lists_each_switch_off_by_default(
@@ -381,16 +394,16 @@ def test_version_reads_each_switch_from_its_env_name(
 ) -> None:
     client, _ = client_with_operator
     _set_all(monkeypatch, "false")
-    monkeypatch.setenv(name.upper(), "true")
+    monkeypatch.setenv(name.upper(), _on(name))
     get_settings.cache_clear()
 
     switches = client.get("/version").json()["agent_switches"]
 
-    assert switches[name.upper()] is True
+    assert switches[name.upper()] == (7 if name in INT_SETTINGS else True)
     assert [key for key, on in switches.items() if on] == [name.upper()]
 
 
-def test_version_answer_holds_only_switch_names_and_bools(
+def test_version_answer_holds_only_switch_names_and_numbers(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -404,7 +417,10 @@ def test_version_answer_holds_only_switch_names_and_bools(
 
     switches = response.json()["agent_switches"]
     assert set(switches) == {name.upper() for name in AGENT_FACING_SETTINGS}
-    assert all(value is True for value in switches.values())
+    assert all(
+        value == 7 if name.lower() in INT_SETTINGS else value is True
+        for name, value in switches.items()
+    )
     text = json.dumps(switches)
     for forbidden in (made_up_secret, "keycloak.test", "vault.test", "meho.test", "corpus.test"):
         assert forbidden not in response.text

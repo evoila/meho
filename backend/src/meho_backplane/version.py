@@ -27,8 +27,8 @@ agent sees, keyed by its env name, with its value (for example
 :class:`~meho_backplane.settings.Settings` carries the
 :data:`~meho_backplane.settings.AGENT_FACING` mark. A benchmark run reads
 this list to record which switches were on. The list holds only names and
-``true`` / ``false``. It does not show settings per tenant or per agent
-definition.
+``true`` / ``false`` or a whole number. It does not show settings per
+tenant or per agent definition.
 
 Reading the values from environment variables (rather than baking them
 into a generated ``_version.py``) keeps the runtime image generic and
@@ -77,10 +77,10 @@ class VersionResponse(BaseModel):
     build_date: str
     chart_version: str | None
     connector_packages: list[ConnectorPackage] = []
-    agent_switches: dict[str, bool] = {}
+    agent_switches: dict[str, bool | int] = {}
 
 
-def agent_switches(settings: Settings) -> dict[str, bool]:
+def agent_switches(settings: Settings) -> dict[str, bool | int]:
     """Return each agent-facing setting of *settings*, keyed by env name, sorted.
 
     A setting is agent-facing when its field carries the

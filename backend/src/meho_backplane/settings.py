@@ -59,8 +59,8 @@ __all__ = [
 #: The mark of a setting that changes what an AI agent sees. Put it on a
 #: ``bool`` field as ``Field(default=False, json_schema_extra=AGENT_FACING)``.
 #: ``GET /version`` lists every marked setting with its value
-#: (:func:`meho_backplane.version.agent_switches`). Only ``bool`` settings
-#: may carry it, so no text, address or secret reaches that answer.
+#: (:func:`meho_backplane.version.agent_switches`). Only ``bool`` and ``int``
+#: settings may carry it, so no text, address or secret reaches that answer.
 AGENT_FACING: Final[JsonDict] = {"agent_facing": True}
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
@@ -1956,6 +1956,10 @@ class Settings(BaseModel):
         default=BAKED_MODEL_CACHE_DIR,
         min_length=1,
     )
+    # #6785 -- how many index groups the meaning half of the search looks
+    # into. 0 sets nothing and keeps the server default (1). Above 0, the
+    # vector query sets ``ivfflat.probes`` for its own transaction.
+    retrieval_ivfflat_probes: int = Field(default=0, ge=0, le=100, json_schema_extra=AGENT_FACING)
     # L8 + L14 (#101) — root the server-side kb bulk-ingest is confined
     # to. The ingest ``directory`` argument is resolved (symlinks
     # followed) and rejected unless it lands within this root, so a
@@ -3482,6 +3486,7 @@ def get_settings() -> Settings:
             "RETRIEVAL_MODEL_CACHE_DIR",
             BAKED_MODEL_CACHE_DIR,
         ),
+        retrieval_ivfflat_probes=int(os.environ.get("RETRIEVAL_IVFFLAT_PROBES", "0")),
         kb_ingest_root=os.environ.get(
             "KB_INGEST_ROOT",
             "/opt/meho/kb-ingest",

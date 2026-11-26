@@ -54,6 +54,7 @@
   "tests/integration/test_reembed_row_lock_pg.py": 15.0,
   "tests/integration/test_retrieval_e2e.py": 5.26,
   "tests/integration/test_retrieve_principal_isolation_e2e.py": 4.35,
+  "tests/integration/test_retrieve_vector_index_pg.py": 5.0,
   "tests/integration/test_runbook_retry_overlap_pg.py": 5.98,
   "tests/integration/test_runner_enroll_revoke_turns_pg.py": 7.66,
   "tests/integration/test_runner_key_login_keycloak.py": 19.7,

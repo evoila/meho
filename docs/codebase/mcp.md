@@ -2359,7 +2359,7 @@ of `call_operation`.
 - No tool is added, removed or renamed.
 - Tests: `tests/test_mcp_strict_output_schemas.py` checks every kind of
   `call_operation` answer against the sent output schema.
-  `tests/test_mcp_strict_tool_schemas.py`. It runs the real handler of
+  `tests/test_mcp_strict_tool_schemas.py` runs the real handler of
   each of the 11 tools with `null` and with the field left out. Only the call
   below the handler (service or database) is a stand-in.
 

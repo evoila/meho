@@ -70,6 +70,7 @@ __all__ = [
     "connector_class_registered",
     "connector_exists",
     "connector_product_known",
+    "connector_triples_visible_to",
     "count_known_ops",
     "descriptor_exists_any_state",
     "enabled_for_tenant_clause",
@@ -715,6 +716,17 @@ async def connector_product_known(*, tenant_id: UUID, product: str) -> bool:
     """
     triples = await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
     return any(row_product == product for row_product, _version, _impl_id in triples)
+
+
+async def connector_triples_visible_to(tenant_id: UUID) -> set[tuple[str, str, str]]:
+    """Return the *(product, version, impl_id)* of every connector the caller can see.
+
+    The same rule as :func:`connector_product_known`: the built-in
+    connector classes, plus the connectors whose rows are built in or
+    belong to the caller's tenant. A connector that another tenant
+    imported is never in the set.
+    """
+    return await _visible_connector_triples(tenant_id) | _builtin_registered_triples()
 
 
 async def connector_exists(

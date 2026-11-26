@@ -54,6 +54,7 @@ from meho_backplane.operations.rights_change_console import (
     runs_at_once_in_console,
 )
 from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
+from meho_backplane.policy.fixed_rules import fixed_rule_for
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -669,12 +670,12 @@ async def _service_grant_verdict(
     target-scoped and the only live candidate for this
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
+
+    When a fixed rule holds (:mod:`meho_backplane.policy.fixed_rules`), no
+    grant and no run approval is looked up (:func:`_fixed_rule_blocks_grants`).
     """
     from meho_backplane.operations.grant_cover_check import grant_cover_refusal
-    from meho_backplane.operations.service_grants import (
-        consult_and_record_grant,
-        descriptor_credential_reason,
-    )
+    from meho_backplane.operations.service_grants import descriptor_credential_reason
 
     refused = await grant_cover_refusal(operator, descriptor, target, connector_id, params)
     if refused is not None:
@@ -683,6 +684,80 @@ async def _service_grant_verdict(
         ):
             refused = f"{refused}; {CREDENTIAL_WAIT_NOTE}"
         return None, f"{gate_reason}; {refused}" if gate_reason else refused
+
+    if not _fixed_rule_blocks_grants(operator, descriptor):
+        cleared = await _grant_or_run_approval(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            target_id_str=target_id_str,
+            preview_hash=preview_hash,
+            params=params,
+            decide_only=decide_only,
+        )
+        if cleared is not None:
+            return cleared
+
+    notes: list[str] = []
+    if has_caller_address(descriptor.parameter_schema):
+        notes.append(
+            "the operation connects to an address the caller gives, so no "
+            "standing grant covers it; a person approves each call"
+        )
+    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and descriptor_credential_reason(descriptor):
+        notes.append(CREDENTIAL_WAIT_NOTE)
+    if notes:
+        note = "; ".join(notes)
+        return None, f"{gate_reason}; {note}" if gate_reason else note
+
+    hint = await _null_target_park_hint(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+    )
+    if hint is not None:
+        gate_reason = f"{gate_reason}; {hint}" if gate_reason else hint
+    return None, gate_reason
+
+
+def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor) -> bool:
+    """True when a fixed rule holds, so no standing grant and no run approval is looked up.
+
+    The gate asks :func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`
+    before it reads a grant. In sandbox mode the grant lookup decides, so
+    a delete grant may still cover a delete (``docs/decisions/sandbox-mode.md``).
+    """
+    if sandbox_mode_active():
+        return False
+    rule = fixed_rule_for(descriptor, operator)
+    if rule is None:
+        return False
+    _log.info(
+        "policy_gate_fixed_rule_no_grant",
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        op_id=descriptor.op_id,
+        fixed_rule=rule,
+    )
+    return True
+
+
+async def _grant_or_run_approval(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    target_id_str: str | None,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+    decide_only: bool,
+) -> tuple[PermissionVerdict, str] | None:
+    """A live standing grant (#3151) or run approval (#4126) that clears the call, or ``None``."""
+    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
+    from meho_backplane.operations.service_grants import consult_and_record_grant
 
     grant_id = await consult_and_record_grant(
         operator=operator,
@@ -715,8 +790,6 @@ async def _service_grant_verdict(
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     # #4126: a person approved the operation list of this run once.
-    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
-
     run_approval_id = await consult_and_record_run_approval(
         operator=operator,
         descriptor=descriptor,
@@ -726,28 +799,7 @@ async def _service_grant_verdict(
     )
     if run_approval_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-approved by run approval {run_approval_id}"
-
-    notes: list[str] = []
-    if has_caller_address(descriptor.parameter_schema):
-        notes.append(
-            "the operation connects to an address the caller gives, so no "
-            "standing grant covers it; a person approves each call"
-        )
-    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and descriptor_credential_reason(descriptor):
-        notes.append(CREDENTIAL_WAIT_NOTE)
-    if notes:
-        note = "; ".join(notes)
-        return None, f"{gate_reason}; {note}" if gate_reason else note
-
-    hint = await _null_target_park_hint(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        connector_id=connector_id,
-    )
-    if hint is not None:
-        gate_reason = f"{gate_reason}; {hint}" if gate_reason else hint
-    return None, gate_reason
+    return None
 
 
 def waits_only_for_token_call(operator: Operator, descriptor: EndpointDescriptor) -> bool:

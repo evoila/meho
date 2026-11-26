@@ -110,6 +110,11 @@ from typing import Any, Final, Literal, NotRequired, TypedDict
 
 from cryptography.fernet import Fernet
 
+from meho_backplane.policy.switches import (
+    approver_routing_on,
+    classification_on,
+    engine_shadow_on,
+)
 from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import Settings
 
@@ -535,14 +540,22 @@ def _vault_tenant_scope_block(settings: Settings) -> dict[str, Any]:
 #: is on and the classification is off
 #: (:func:`meho_backplane.policy.routing.category_routing_warnings`).
 CATEGORY_WITHOUT_CLASSIFICATION: Final[str] = (
-    "POLICY_APPROVER_ROUTING is on and POLICY_CLASSIFICATION is off, so no change has "
-    "a category and a routing entry that matches on `category` fits nothing. Turn on "
-    "POLICY_CLASSIFICATION, or match on connector or risk."
+    "Approver routing is on and classification is off, so no change has a category "
+    "and a routing entry that matches on `category` fits nothing. Turn on "
+    "classification, or match on connector or risk. The POLICY_CLASSIFICATION setting "
+    "turns on classification only. The CUSTOM_POLICY setting turns on all three policy "
+    "parts: classification, the policy evaluator and approver routing."
 )
 
 
 def _policy_block(settings: Settings) -> dict[str, Any]:
     """The policy switches, so ``/ready`` shows which are on.
+
+    ``custom_policy`` is the ``CUSTOM_POLICY`` switch, the one switch of
+    the custom policy model. Off by default. With it on, the three parts
+    below count as on (:mod:`meho_backplane.policy.switches`), so each of
+    the three fields says whether its part is on, by its own switch or by
+    ``CUSTOM_POLICY``.
 
     ``classification`` is the ``POLICY_CLASSIFICATION`` switch: category,
     labels and "always wait" on connectors, operation groups and
@@ -567,16 +580,15 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     ``classification`` is off: then no change has a category, so a routing
     entry that matches on ``category`` fits nothing. Empty otherwise.
     """
-    notes = (
-        [CATEGORY_WITHOUT_CLASSIFICATION]
-        if settings.policy_approver_routing and not settings.policy_classification
-        else []
-    )
+    classification = classification_on(settings)
+    approver_routing = approver_routing_on(settings)
+    notes = [CATEGORY_WITHOUT_CLASSIFICATION] if approver_routing and not classification else []
     return {
         "configured": True,
-        "classification": settings.policy_classification,
-        "engine_shadow": settings.policy_engine_shadow,
-        "approver_routing": settings.policy_approver_routing,
+        "custom_policy": settings.custom_policy,
+        "classification": classification,
+        "engine_shadow": engine_shadow_on(settings),
+        "approver_routing": approver_routing,
         "notes": notes,
         "missing_env": [],
     }
@@ -635,7 +647,8 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
           "mcp":            {"configured": true,   "protocol_version": "...",
                              "short_tool_texts": <bool>,
                              "profile_connector_lists": <bool>, "missing_env": []},
-          "policy":         {"configured": true, "classification": <bool>,
+          "policy":         {"configured": true, "custom_policy": <bool>,
+                             "classification": <bool>,
                              "engine_shadow": <bool>, "approver_routing": <bool>,
                              "notes": [<text>], "missing_env": []}
         }

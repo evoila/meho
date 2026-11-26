@@ -68,7 +68,8 @@ def requester_record(operator: Operator) -> dict[str, Any] | None:
     An approvals surface rebuilds the agent from it to check the steps again
     (:func:`approved_step_refusal`) and to check the agent's rights for the
     call (:mod:`~meho_backplane.operations.approved_run_rights`). The card
-    keeps it under an internal key that no caller reads.
+    keeps it under an internal key. The REST and MCP approval tools leave it
+    out.
     """
     if not agent_acts(operator):
         return None

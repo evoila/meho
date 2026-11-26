@@ -1113,12 +1113,18 @@ model, or resume endpoint):
    or per-tenant override may surface the credential on the feed. See
    `docs/codebase/broadcast.md`.
 
-The `_approved=True` re-dispatch does not ask for the approval again.
+**An approved request is checked again when it runs.** The
+`_approved=True` re-dispatch does not ask for the approval again.
 This matters for humans too: with humans routed to `NEEDS_APPROVAL`, the
 full gate on resume would make the call wait again instead of running it.
 The run still checks what can change while the call waits
 (`operations/approved_run_rights.py`): the grants of an agent that asked,
-a revoked agent login, a blocked login, and the risk level.
+a revoked agent login (also the acting agent of a hosted agent run), a
+blocked login, and the risk level. An approved step of a multi-step
+operation gets the same checks before it clears. On the first run, MEHO
+uses the role it checked when the login asked, because it has no newer
+token of that login. A role lowered while the request waits counts at a
+re-run. To stop a login at once, block it.
 
 ## The approval groups and how a person approves (#3325)
 
@@ -2555,7 +2561,10 @@ first re-run is attempt 2. The run's own row also carries
 `approval_rerun_attempt` next to `approval_request_id`. A refused re-run
 writes an `approval.rerun` row with `result_status` `refused`, the reason
 code in `refusal`, and `status_code` `403`, `409` or `422`. A refusal of
-the rights check also carries the full text in `reason`.
+the rights check also carries the full text in `reason`. A re-run refused
+to a caller who did not make the request (`insufficient_role` or
+`not_request_owner`) writes a row with the caller as `operator_sub` and
+the request id, and no other field of the request.
 
 **Response.** `RerunResponseBody`: `approval_request_id`, `attempt`,
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.

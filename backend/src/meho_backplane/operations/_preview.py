@@ -603,9 +603,10 @@ SWITCHED_OBJECT_FIELDS: Final[dict[str, tuple[str, str]]] = {
 AGENT_REQUESTER_RECORD_KEY: Final[str] = "agent_requester_record"
 
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
-#: checks and never returns to a caller: where a change of rights was asked
+#: checks: where a change of rights was asked
 #: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`),
-#: and the record of the agent that asked.
+#: and the record of the agent that asked. The REST and MCP approval tools
+#: leave them out.
 INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
     {"asked_in_web_console", AGENT_REQUESTER_RECORD_KEY}
 )

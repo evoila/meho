@@ -340,7 +340,8 @@ claim for audit parent-linkage (#3446), is never matched against this table).
 
      To rebuild the agent there, the park stores a requester record on
      the approval card whenever an agent asks (sub, kind, client id,
-     role, actor), under an internal key that no caller reads. While the
+     role, actor), under an internal key. The REST and MCP approval
+     tools leave it out. While the
      switch is not `off`, the card also shows it as
      `permission_preflight.requester`. An agent's request whose card has
      no readable record of the agent is refused when a person runs it
@@ -450,8 +451,9 @@ again. On the first run (an approvals surface, or the agent's own wait in
 - the grants of an agent that asked, and of the acting agent of a hosted
   agent run: a `deny` grant, or no grant with the switch `on`, refuses the
   run (`policy_gate` with `decide_only=True`, so no grant use is recorded);
-- a revoked agent login (`DELETE /api/v1/agent-principals/{name}/revoke`):
-  a new call with a token that has not ended yet is refused too;
+- a revoked agent login (`DELETE /api/v1/agent-principals/{name}/revoke`),
+  as the caller or as the acting agent of a hosted agent run: a new call
+  with a token that has not ended yet is refused too;
 - a blocked login;
 - the risk level, for every requester: MEHO compares the level stamped on
   the card (`proposed_effect.safety_level`) with the operation's level
@@ -473,9 +475,14 @@ own wait, a hosted agent run, the requester's re-run). When a person runs
 the call from an approvals surface, MEHO checks the agent that asked,
 rebuilt from the requester record on the approval card (see "A resumed
 call is checked again" above). The approved step of a multi-step
-operation is checked for the agent that asked in the same way, before it
-clears. A refused request stays approved and can run again later: the
-request ends as a failed run with the reason.
+operation is checked in the same way before it clears: its risk level
+now (after the override rows and the classification) against the level
+on its card, for every requester, and the grants of the agent that asked.
+A refused request stays approved and can run again later: the request
+ends as a failed run with the reason. A step cannot run again on its
+own, so the answer to a refused step says to start a new run of the
+operation. An agent's card with no readable record of the agent cannot
+run: the answer says that the agent must ask again with a new request.
 
 `policy_gate` (`_validate.py`) opens its own DB session
 (`get_sessionmaker()`) and calls

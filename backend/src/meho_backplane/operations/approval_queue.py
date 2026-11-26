@@ -3859,8 +3859,9 @@ def _with_requester_record(
     A re-park on behalf of an earlier requester keeps that requester's
     record. A record the operation's own preflight stored stays.
 
-    The record is kept under an internal key that no caller reads
+    The record is kept under an internal key
     (:data:`~meho_backplane.operations._preview.AGENT_REQUESTER_RECORD_KEY`).
+    The REST and MCP approval tools leave it out.
     While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
     under ``permission_preflight["requester"]``.
     """

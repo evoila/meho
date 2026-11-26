@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 
 from meho_backplane.checks.schemas import SensorRead
@@ -52,7 +53,9 @@ async def set_sensor_status(
 
     Returns ``None`` when the Sensor does not exist in the tenant (the
     boundary answers 404). When the Sensor already has *status*, nothing is
-    written and ``before`` and ``after`` are empty.
+    written and ``before`` and ``after`` are empty. When the ``unknown``
+    reading after a resume fails, the failure is logged with the Sensor id
+    and the saved resume is still returned.
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -83,7 +86,14 @@ async def set_sensor_status(
             SensorRead.model_validate(row, from_attributes=True), before, after
         )
     if status is SensorStatus.ACTIVE and has_runner and get_settings().runner_checks_enabled:
-        await _mark_if_runner_stale(tenant_id, sensor_id, now)
+        try:
+            await _mark_if_runner_stale(tenant_id, sensor_id, now)
+        except Exception:
+            # The resume is saved: answer with it. The next result or sweep
+            # of the runner sets the state again.
+            structlog.get_logger(__name__).warning(
+                "sensor_resume_stale_mark_failed", sensor_id=str(sensor_id), exc_info=True
+            )
     return result
 
 
@@ -118,6 +128,7 @@ async def _mark_if_runner_stale(tenant_id: uuid.UUID, sensor_id: uuid.UUID, now:
             select(Sensor)
             .where(
                 Sensor.id == sensor_id,
+                Sensor.tenant_id == tenant_id,
                 Sensor.status == SensorStatus.ACTIVE.value,
             )
             .with_for_update()

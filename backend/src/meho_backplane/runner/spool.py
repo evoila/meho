@@ -21,8 +21,10 @@ Design:
   half-written batch a later drain would choke on.
 * **Set-aside folder** — a batch that MEHO refuses every time is moved to the
   ``set-aside`` folder inside the spool folder, together with the status and
-  the code MEHO answered with (no free text). Nothing reads that folder
-  again by itself. It keeps at most ``max_files`` batches: before one more
+  the code MEHO answered with (no free text), and a mark that says whether
+  MEHO has saved the notice of that batch. The runner reads the folder only
+  to send the notices that MEHO has not saved, and the count; it never sends
+  a set-aside batch again. It keeps at most ``max_files`` batches: before one more
   is set aside past the limit, the oldest set-aside batch is removed and a
   warning names its file, its status and its code.
 * **Bounded** — before each write, oldest files are dropped until adding
@@ -45,7 +47,7 @@ from typing import cast
 
 import structlog
 
-from meho_backplane.runner.wire import RunnerResult, RunnerResultBatch
+from meho_backplane.runner.wire import RunnerResult, RunnerResultBatch, SetAsideNotice
 
 __all__ = ["ExecutedCommandStore", "ResultSpool"]
 
@@ -62,6 +64,9 @@ def _log() -> structlog.typing.FilteringBoundLogger:
 
 _TMP_SUFFIX = ".tmp"
 _SET_ASIDE_DIR = "set-aside"
+#: The mark in a set-aside file: true once MEHO saved its notice, or once the
+#: runner dropped it.
+_NOTICE_DONE = "notice_done"
 
 
 def _batch_files(folder: Path) -> list[Path]:
@@ -134,6 +139,7 @@ class ResultSpool:
             "status": status,
             "code": code,
             "set_aside_at": datetime.now(UTC).isoformat(),
+            _NOTICE_DONE: False,
             "batch": json.loads(batch.model_dump_json()),
         }
         tmp.write_text(json.dumps(record), encoding="utf-8")
@@ -146,6 +152,58 @@ class ResultSpool:
             status=status,
             code=code,
         )
+
+    @staticmethod
+    def notices_of(
+        batch: RunnerResultBatch, *, status: int, code: str | None
+    ) -> list[SetAsideNotice]:
+        """The notices for the results of a set-aside *batch*."""
+        return [
+            SetAsideNotice(
+                check_ref=result.check_ref,
+                result_uid=result.result_uid,
+                status=status,
+                code=code,
+                produced_at=result.produced_at,
+            )
+            for result in batch.results
+        ]
+
+    def waiting_notices(self) -> list[tuple[str, list[SetAsideNotice]]]:
+        """The notices of each set-aside file whose notice MEHO has not saved, oldest-first.
+
+        A file that cannot be read is left out; the count still names it.
+        """
+        target_dir = self._dir / _SET_ASIDE_DIR
+        if not target_dir.exists():
+            return []
+        out: list[tuple[str, list[SetAsideNotice]]] = []
+        for path in _batch_files(target_dir):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if record.get(_NOTICE_DONE) is True:
+                    continue
+                batch = RunnerResultBatch.model_validate(record["batch"])
+                notices = self.notices_of(batch, status=record["status"], code=record.get("code"))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+            out.append((path.name, notices))
+        return out
+
+    def mark_notices_done(self, names: list[str]) -> None:
+        """Mark the set-aside files *names*: their notices are not sent again."""
+        target_dir = self._dir / _SET_ASIDE_DIR
+        for name in names:
+            path = target_dir / name
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                record[_NOTICE_DONE] = True
+            except (OSError, ValueError, TypeError):
+                # Removed by the folder limit, or unreadable: nothing to mark.
+                continue
+            tmp = target_dir / (name + _TMP_SUFFIX)
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            os.replace(tmp, path)
 
     def _enforce_set_aside_cap(self, target_dir: Path) -> None:
         """Remove the oldest set-aside batches until one more stays within ``max_files``."""

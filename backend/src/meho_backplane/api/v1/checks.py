@@ -279,7 +279,14 @@ async def post_results(
                 screened=screened,
                 received_at=received_at,
             )
-            if batch.set_aside:
+            if (
+                batch.set_aside
+                or batch.set_aside_skipped
+                or batch.set_aside_total is not None
+                or batch.set_aside_last_at is not None
+            ):
+                # Also a post that only carries the runner's count: the
+                # runner sends its count once after each start.
                 await _record_set_aside(operator.tenant_id, batch)
             if screened.refused and len(screened.refused) == len(results):
                 raise HTTPException(

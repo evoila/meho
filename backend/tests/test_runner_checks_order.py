@@ -85,6 +85,14 @@ from .test_runner_checks_count import (
 _OP_GENERIC = "check.generic"
 
 
+def _state(**fields: Any) -> RunnerState:
+    """A runner state that already sent the set-aside count of its start.
+
+    So each post that these tests see is a result batch.
+    """
+    return RunnerState(summary_sent=True, **fields)
+
+
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
@@ -359,7 +367,7 @@ async def test_a_recovery_waits_behind_a_saved_critical_reading_that_could_not_b
         token="tok",
         transport=httpx.MockTransport(central),
     )
-    state = RunnerState(assignment=assignment, assignment_version="v1")
+    state = _state(assignment=assignment, assignment_version="v1")
     async with runner:
         await run_one_tick(client=runner, spool=spool, state=state, runner_id="runner-a")
         assert received == []
@@ -484,7 +492,7 @@ async def test_a_runner_tick_reads_the_due_times_the_api_sends(
         token="tok",
         transport=httpx.MockTransport(central),
     )
-    state = RunnerState(assignment=assignment, assignment_version=assignment.assignment_version)
+    state = _state(assignment=assignment, assignment_version=assignment.assignment_version)
     async with runner:
         await run_one_tick(
             client=runner,

@@ -36,6 +36,14 @@ from meho_backplane.runner.wire import RunnerAssignment, RunnerPrincipal, Runner
 _Handler = Callable[[httpx.Request], httpx.Response]
 
 
+def _state(**fields: Any) -> RunnerState:
+    """A runner state that already sent the set-aside count of its start.
+
+    So each post that these tests see is a result batch.
+    """
+    return RunnerState(summary_sent=True, **fields)
+
+
 @asynccontextmanager
 async def _loopback_listener() -> AsyncIterator[int]:
     server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
@@ -87,7 +95,7 @@ async def test_tick_fetch_execute_report(tmp_path: Path, monkeypatch: pytest.Mon
             posted.append(request.content.decode())
             return httpx.Response(202)
 
-        state = RunnerState()
+        state = _state()
         await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
 
     assert state.assignment_version == "v1"
@@ -114,7 +122,7 @@ async def test_fetch_failure_reuses_cached_assignment(
             return httpx.Response(202)
 
         # Prime the cache as if a prior tick had fetched this assignment.
-        state = RunnerState(
+        state = _state(
             assignment=_assignment(port, version="cached-v"),
             assignment_version="cached-v",
         )
@@ -136,9 +144,7 @@ async def test_wire_version_refusal_runs_nothing_and_logs_both_versions(tmp_path
         return httpx.Response(409, json={"detail": refusal})
 
     # A cached assignment from before central changed version must not run.
-    state = RunnerState(
-        assignment=_assignment(9, version="cached-v"), assignment_version="cached-v"
-    )
+    state = _state(assignment=_assignment(9, version="cached-v"), assignment_version="cached-v")
     with capture_logs() as logs:
         await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
 
@@ -166,9 +172,7 @@ async def test_wire_version_refusal_while_draining_spool_keeps_results_and_runs_
 
     spool = ResultSpool(tmp_path, max_files=100)
     spool.write_batch(wire.RunnerResultBatch(runner_id="r1", results=[]))
-    state = RunnerState(
-        assignment=_assignment(9, version="cached-v"), assignment_version="cached-v"
-    )
+    state = _state(assignment=_assignment(9, version="cached-v"), assignment_version="cached-v")
     with capture_logs() as logs:
         await _run_tick(handler, spool, state)
 
@@ -193,7 +197,7 @@ async def test_wire_version_refusal_on_result_post_spools_and_drops_cache(
     calls: list[str] = []
     refusal = wire.wire_version_mismatch_message(wire.SCHEMA_VERSION, "2")
     spool = ResultSpool(tmp_path, max_files=100)
-    state = RunnerState()
+    state = _state()
 
     async with _loopback_listener() as port:
         assignment_json = _assignment(port, version="v1").model_dump(mode="json")
@@ -285,7 +289,7 @@ async def test_a_scheduled_item_runs_only_when_it_is_due(
         posted.append(request.content.decode())
         return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
 
-    state = RunnerState(assignment=assignment, assignment_version="v1")
+    state = _state(assignment=assignment, assignment_version="v1")
     spool = ResultSpool(tmp_path, max_files=100)
     await _run_tick(handler, spool, state)
     await _run_tick(handler, spool, state)
@@ -315,7 +319,7 @@ async def test_results_central_refused_are_logged(
             },
         )
 
-    state = RunnerState(assignment=assignment, assignment_version="v1")
+    state = _state(assignment=assignment, assignment_version="v1")
     with capture_logs() as logs:
         await _run_tick(handler, ResultSpool(tmp_path, max_files=100), state)
 
@@ -348,9 +352,9 @@ async def test_a_counted_check_waits_for_its_due_time_on_the_first_tick_and_afte
         return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
 
     spool = ResultSpool(tmp_path, max_files=100)
-    await _run_tick(handler, spool, RunnerState(assignment=assignment, assignment_version="v1"))
+    await _run_tick(handler, spool, _state(assignment=assignment, assignment_version="v1"))
     # A restart: a new process has no record of its last runs.
-    await _run_tick(handler, spool, RunnerState(assignment=assignment, assignment_version="v1"))
+    await _run_tick(handler, spool, _state(assignment=assignment, assignment_version="v1"))
 
     assert _posted_refs(posted) == [["overdue"], ["overdue"]]
 
@@ -369,7 +373,7 @@ async def test_run_now_and_a_waiting_state_change_bring_a_counted_check_forward(
         posted.append(request.content.decode())
         return httpx.Response(200, json={"accepted": 1, "duplicates": 0})
 
-    state = RunnerState(
+    state = _state(
         assignment=RunnerAssignment(
             assignment_version="v2",
             items=[
@@ -410,7 +414,7 @@ async def test_the_retry_file_holds_no_secret_value_of_a_counted_check(
             return httpx.Response(304)
         return httpx.Response(503)
 
-    state = RunnerState(
+    state = _state(
         assignment=RunnerAssignment(assignment_version="v1", items=[item]),
         assignment_version="v1",
     )

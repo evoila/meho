@@ -15,7 +15,9 @@ eager-init races) does not apply to the runner's tiny startup.
 Each tick, in order:
 
 1. drain the on-disk retry spool oldest-first, then tell MEHO about results
-   of set-aside batches, also while other batches still wait in the spool,
+   of set-aside batches, also while other batches still wait in the spool.
+   After a start, the runner also tells MEHO how many batches its set-aside
+   folder holds, once, also when it has no notice to send,
 2. fetch the assignment (echoing the cached digest as ``known_version``;
    a ``304`` or a fetch failure keeps the cached assignment so the runner
    keeps executing while the uplink is down),
@@ -71,12 +73,32 @@ from meho_backplane.runner.wire import (
 )
 from meho_backplane.scheduler.cron import next_fire_after
 
-__all__ = ["SET_ASIDE_AFTER_TRIES", "run_one_tick", "run_runner"]
+__all__ = [
+    "NOTICE_DROP_AFTER_TRIES",
+    "SET_ASIDE_AFTER_TRIES",
+    "SET_ASIDE_MIN_SPAN",
+    "run_one_tick",
+    "run_runner",
+]
 
 #: How often MEHO may refuse the same saved batch with an answer that a retry
 #: does not change before the runner sets the batch aside: 3. A single refusal
 #: can come from a deploy that is in progress; three in a row are not.
 SET_ASIDE_AFTER_TRIES = 3
+
+#: The shortest time from the first to the last of those refusals: 5 minutes.
+#: A deploy can answer a client error (for example a 404) for a few quick
+#: ticks. Refusals that come faster keep the batch in its place, so good
+#: results are not set aside for a short outage.
+SET_ASIDE_MIN_SPAN = timedelta(minutes=5)
+
+#: How often MEHO may answer a notice post with a client error that a retry
+#: does not change, in a row, before the runner drops those notices: 3.
+NOTICE_DROP_AFTER_TRIES = 3
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _log() -> structlog.typing.FilteringBoundLogger:
@@ -94,6 +116,14 @@ def _log() -> structlog.typing.FilteringBoundLogger:
 
 
 @dataclass
+class _Refusals:
+    """How often MEHO refused one saved batch, and when the first refusal came."""
+
+    tries: int
+    first_at: datetime
+
+
+@dataclass
 class RunnerState:
     """Mutable per-process tick state.
 
@@ -106,9 +136,17 @@ class RunnerState:
     last_run: dict[str, datetime] = field(default_factory=dict)
     #: Failed sends of each saved batch (by file name) that MEHO refused with
     #: an answer a retry does not change.
-    refusals: dict[str, int] = field(default_factory=dict)
+    refusals: dict[str, _Refusals] = field(default_factory=dict)
     #: Results of set-aside batches that MEHO has not been told about yet.
     notices: list[SetAsideNotice] = field(default_factory=list)
+    #: The set-aside file of the notices, in the order of ``notices``: the file
+    #: name and how many of its notices still wait.
+    notice_files: list[tuple[str, int]] = field(default_factory=list)
+    #: Notice posts in a row that MEHO answered with a client error that a
+    #: retry does not change.
+    notice_refusals: int = 0
+    #: True once MEHO has the set-aside count of this start.
+    summary_sent: bool = False
 
 
 def _is_due(item: RunnerWorkItem, last_run: datetime | None, now: datetime) -> bool:
@@ -154,6 +192,8 @@ async def run_one_tick(
     """
     _log().info("runner_tick_start", cached_version=state.assignment_version)
     try:
+        if not state.notices:
+            _load_waiting_notices(spool, state)
         spool_empty = await _drain_spool(client, spool, state)
         # Not tied to an empty spool: when MEHO refuses each new batch (a wrong
         # clock), batches keep waiting and the checks must still say why.
@@ -232,7 +272,7 @@ async def _execute_and_report(
         _log().warning("runner_results_post_failed", results=len(results), error=str(exc))
         path = spool.write_batch(batch)
         if exc.is_permanent:
-            state.refusals[path.name] = 1
+            state.refusals[path.name] = _Refusals(tries=1, first_at=_now())
         if isinstance(exc, RunnerWireVersionMismatchError):
             raise
 
@@ -254,8 +294,9 @@ async def _drain_spool(client: RunnerClient, spool: ResultSpool, state: RunnerSt
     that can pass (no connection, a time-out, a 5xx answer, a rate limit, a
     login to renew) leaves the batch in its place and stops the drain, so
     results reach MEHO in order. A batch that MEHO refuses with another client
-    error :data:`SET_ASIDE_AFTER_TRIES` times is set aside, and the drain goes
-    on with the next one. A wire version refusal propagates to the tick after
+    error :data:`SET_ASIDE_AFTER_TRIES` times, over at least
+    :data:`SET_ASIDE_MIN_SPAN`, is set aside, and the drain goes on with the
+    next one. A wire version refusal propagates to the tick after
     leaving the file in place, so the tick ends without running cached work.
     """
     for path, batch in spool.load_oldest_first():
@@ -264,18 +305,23 @@ async def _drain_spool(client: RunnerClient, spool: ResultSpool, state: RunnerSt
         except RunnerWireVersionMismatchError:
             raise
         except RunnerClientError as exc:
-            if exc.is_permanent:
-                tries = state.refusals.get(path.name, 0) + 1
-                state.refusals[path.name] = tries
-                if tries >= SET_ASIDE_AFTER_TRIES:
-                    _set_aside(spool, state, path, batch, exc)
-                    continue
+            if exc.is_permanent and _refused_enough(state, path.name):
+                _set_aside(spool, state, path, batch, exc)
+                continue
             # Still down, or a refusal that may pass: leave this and the rest.
             _log().warning("runner_spool_drain_failed", path=str(path), error=str(exc))
             return False
         state.refusals.pop(path.name, None)
         spool.remove(path)
     return True
+
+
+def _refused_enough(state: RunnerState, name: str) -> bool:
+    """Count one more refusal of the saved batch *name*; True when it is to be set aside."""
+    now = _now()
+    refusals = state.refusals.setdefault(name, _Refusals(tries=0, first_at=now))
+    refusals.tries += 1
+    return refusals.tries >= SET_ASIDE_AFTER_TRIES and now - refusals.first_at >= SET_ASIDE_MIN_SPAN
 
 
 def _set_aside(
@@ -289,16 +335,44 @@ def _set_aside(
     status = exc.status_code or 0
     spool.set_aside(path, batch, status=status, code=exc.code)
     state.refusals.pop(path.name, None)
-    state.notices.extend(
-        SetAsideNotice(
-            check_ref=result.check_ref,
-            result_uid=result.result_uid,
-            status=status,
-            code=exc.code,
-            produced_at=result.produced_at,
-        )
-        for result in batch.results
-    )
+    _queue_notices(spool, state, path.name, spool.notices_of(batch, status=status, code=exc.code))
+
+
+def _queue_notices(
+    spool: ResultSpool, state: RunnerState, name: str, notices: list[SetAsideNotice]
+) -> None:
+    """Queue the notices of the set-aside file *name*; a file without one is done at once."""
+    if not notices:
+        spool.mark_notices_done([name])
+        return
+    state.notices.extend(notices)
+    state.notice_files.append((name, len(notices)))
+
+
+def _load_waiting_notices(spool: ResultSpool, state: RunnerState) -> None:
+    """Queue the notices of the set-aside files that MEHO has not saved yet.
+
+    Runs at the start of a tick while no notice waits, so a runner that
+    restarted still tells MEHO about batches it set aside before.
+    """
+    for name, notices in spool.waiting_notices():
+        _queue_notices(spool, state, name, notices)
+
+
+def _notices_done(spool: ResultSpool, state: RunnerState, count: int) -> None:
+    """Take the first *count* notices off the queue; mark each file whose notices are all done."""
+    del state.notices[:count]
+    done: list[str] = []
+    while count > 0 and state.notice_files:
+        name, waiting = state.notice_files[0]
+        if waiting > count:
+            state.notice_files[0] = (name, waiting - count)
+            break
+        count -= waiting
+        done.append(name)
+        state.notice_files.pop(0)
+    if done:
+        spool.mark_notices_done(done)
 
 
 async def _send_notices(
@@ -314,8 +388,16 @@ async def _send_notices(
     most ``wire.SET_ASIDE_NOTICES_MAX`` notices; the rest go out on the next
     tick. The notices stay queued when the send fails (also when MEHO answers
     503 because it could not save them), and the next tick sends them again.
+    After :data:`NOTICE_DROP_AFTER_TRIES` client errors in a row that a retry
+    does not change, the runner drops the notices of that post with one
+    warning. A notice that MEHO saved, or that the runner dropped, is marked
+    in its set-aside file and is not sent again after a restart.
+
+    The first post after a start goes out also without a notice. It carries
+    the count of set-aside batches, so MEHO has the right count also after a
+    restart or after an operator emptied the folder.
     """
-    if not state.notices:
+    if not state.notices and state.summary_sent:
         return
     sending = state.notices[: wire.SET_ASIDE_NOTICES_MAX]
     total, last_at = spool.set_aside_summary()
@@ -332,8 +414,21 @@ async def _send_notices(
         raise
     except RunnerClientError as exc:
         _log().warning("runner_set_aside_notice_failed", error=str(exc))
+        state.notice_refusals = state.notice_refusals + 1 if exc.is_permanent else 0
+        if state.notice_refusals >= NOTICE_DROP_AFTER_TRIES:
+            _log().warning(
+                "runner_set_aside_notices_dropped",
+                status=exc.status_code,
+                code=exc.code,
+                dropped=len(sending),
+            )
+            state.notice_refusals = 0
+            state.summary_sent = True
+            _notices_done(spool, state, len(sending))
         return
-    del state.notices[: len(sending)]
+    state.notice_refusals = 0
+    state.summary_sent = True
+    _notices_done(spool, state, len(sending))
 
 
 async def _run_loop(settings: RunnerSettings) -> None:

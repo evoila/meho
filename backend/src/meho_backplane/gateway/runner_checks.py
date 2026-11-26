@@ -16,8 +16,10 @@ Steps for one result batch (see :func:`screen_batch` and
    and names it in the answer. When every result of a batch is refused, the
    answer is a 422, so the runner knows the batch was refused. The counter
    ``runner_check_results_total`` rises for a refused result once the rest
-   of the batch has been stored. A refused result is counted once in each
-   MEHO process, however often its batch is sent.
+   of the batch has been stored. MEHO counts a refused result once, whatever
+   MEHO process takes its batch and however often the batch is sent: the
+   mark that it was counted is a row in ``runner_refused_results``, kept as
+   long as the stored runner results.
 2. Cap the size of each answer and of the whole batch. An answer over the cap
    is stored without its payload and the Sensor reads ``unknown`` with the
    reason ``answer too large``.
@@ -61,12 +63,13 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
@@ -88,6 +91,7 @@ from meho_backplane.checks.repository import accelerate_sensor_next_fire, record
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     RunnerAssignmentRow,
+    RunnerRefusedResult,
     Sensor,
     SensorCadenceKind,
     SensorStatus,
@@ -133,21 +137,38 @@ _ANSWER_TOO_LARGE = "answer too large"
 
 _FUTURE_TIME = "future_time"
 
-#: How many refused results this process remembers, so that one refused
-#: result is counted once in this MEHO process however often its batch is sent.
-_REFUSED_SEEN_MAX = 10_000
-_refused_seen: OrderedDict[tuple[uuid.UUID, str, str], None] = OrderedDict()
 
+async def _count_refused_once(
+    tenant_id: uuid.UUID, runner_name: str, refused: list[RefusedResult]
+) -> None:
+    """Raise the counter once for each refused result that no MEHO process counted yet.
 
-def _count_refused_once(tenant_id: uuid.UUID, runner_name: str, result_uid: str) -> None:
-    """Raise the counter for a refused result the first time it is seen."""
-    key = (tenant_id, runner_name, result_uid)
-    if key in _refused_seen:
+    One transaction adds a row to ``runner_refused_results`` for each result
+    that has none. Only the rows this call added are counted, after the
+    commit. Two processes that take the same batch at the same time add the
+    row once: the second waits for the first and then adds nothing.
+    """
+    uids = sorted({entry.result_uid for entry in refused})
+    if not uids:
         return
-    _refused_seen[key] = None
-    while len(_refused_seen) > _REFUSED_SEEN_MAX:
-        _refused_seen.popitem(last=False)
-    _count(_FUTURE_TIME)
+    now = datetime.now(UTC)
+    rows = [
+        {"tenant_id": tenant_id, "runner_name": runner_name, "result_uid": u, "refused_at": now}
+        for u in uids
+    ]
+    async with get_sessionmaker()() as session:
+        conn = await session.connection()
+        insert = pg_insert if conn.dialect.name == "postgresql" else sqlite_insert
+        stmt = (
+            insert(RunnerRefusedResult)
+            .on_conflict_do_nothing()
+            .returning(RunnerRefusedResult.result_uid)
+        )
+        # A list of rows runs as an insert of many rows, in pages.
+        added = len((await session.execute(stmt, rows)).scalars().all())
+        await session.commit()
+    for _ in range(added):
+        _count(_FUTURE_TIME)
 
 
 #: How far a result's runner time may be ahead of MEHO's clock: 30 seconds.
@@ -562,8 +583,7 @@ async def ingest_and_count(
             _count(label)
         if counted is not None:
             await after_commit(tenant_id, [counted])
-    for refused in screened.refused:
-        _count_refused_once(tenant_id, runner_name, refused.result_uid)
+    await _count_refused_once(tenant_id, runner_name, screened.refused)
     return accepted, len(screened.results) - accepted
 
 
@@ -734,7 +754,9 @@ def _first_notices(
 ) -> list[SetAsideNotice]:
     """The first :data:`SET_ASIDE_NOTICES_MAX` notices of one post; the rest is skipped.
 
-    *skipped* counts the notices the post's model already cut off.
+    *skipped* counts the entries the post's model already skipped: those after
+    the first 1,000, and those that are not a valid notice. One log line names
+    the runner and the number.
     """
     skipped += max(0, len(notices) - SET_ASIDE_NOTICES_MAX)
     if skipped > 0:
@@ -779,8 +801,9 @@ async def record_set_aside(
     MEHO refuse the post. A check that already has a newer counted result of
     the runner, or already shows this refusal, is not written again. A notice
     without a runner time never replaces a counted result. Only the first
-    :data:`SET_ASIDE_NOTICES_MAX` notices of one post are read; *skipped* says
-    how many more the post held, for the log line. The count and
+    :data:`SET_ASIDE_NOTICES_MAX` entries of one post are read, and of those
+    only the valid notices; *skipped* says how many entries the post's model
+    skipped, for the log line. The count and
     the time of the newest set-aside batch are stored on the runner's assignment
     row, the count only from 0 to 2147483647 and the time only with a time zone.
 

@@ -6090,6 +6090,37 @@ class RunnerCheckResult(Base):
     )
 
 
+class RunnerRefusedResult(Base):
+    """A runner result that MEHO refused and counted once.
+
+    MEHO refuses a result whose runner time is too far ahead of its clock
+    and does not store it. This row says that the counter
+    ``runner_check_results_total{outcome="future_time"}`` already rose for
+    it, so every MEHO process on the database counts the result once,
+    however often its batch is sent. The clean-up job of the runner results
+    removes rows older than ``RUNNER_CHECK_RESULTS_RETENTION_DAYS``.
+    """
+
+    __tablename__ = "runner_refused_results"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
+    runner_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    result_uid: Mapped[str] = mapped_column(Text, primary_key=True)
+    refused_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "runner_refused_results_refused_at_idx",
+            "refused_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # G11.2-T3 — per-(principal, op, target) permission model
 # ---------------------------------------------------------------------------

@@ -93,7 +93,9 @@ SET_ASIDE_AFTER_TRIES = 3
 SET_ASIDE_MIN_SPAN = timedelta(minutes=5)
 
 #: How often MEHO may answer a notice post with a client error that a retry
-#: does not change, in a row, before the runner drops those notices: 3.
+#: does not change, in a row, before the runner drops those notices: 3. Those
+#: refusals must also span at least :data:`SET_ASIDE_MIN_SPAN`, like the
+#: refusals of a batch, so a short deploy drops nothing.
 NOTICE_DROP_AFTER_TRIES = 3
 
 
@@ -143,8 +145,8 @@ class RunnerState:
     #: name and how many of its notices still wait.
     notice_files: list[tuple[str, int]] = field(default_factory=list)
     #: Notice posts in a row that MEHO answered with a client error that a
-    #: retry does not change.
-    notice_refusals: int = 0
+    #: retry does not change, and when the first of them came.
+    notice_refusals: _Refusals | None = None
     #: True once MEHO has the set-aside count of this start.
     summary_sent: bool = False
 
@@ -375,6 +377,27 @@ def _notices_done(spool: ResultSpool, state: RunnerState, count: int) -> None:
         spool.mark_notices_done(done)
 
 
+def _notice_refused_enough(state: RunnerState, *, permanent: bool) -> bool:
+    """Count one more failed notice post; True when its notices are to be dropped.
+
+    A failure that can pass starts the count again. A client error that a
+    retry does not change counts; the notices are dropped after
+    :data:`NOTICE_DROP_AFTER_TRIES` of them that span at least
+    :data:`SET_ASIDE_MIN_SPAN`.
+    """
+    if not permanent:
+        state.notice_refusals = None
+        return False
+    now = _now()
+    if state.notice_refusals is None:
+        state.notice_refusals = _Refusals(tries=0, first_at=now)
+    refusals = state.notice_refusals
+    refusals.tries += 1
+    return (
+        refusals.tries >= NOTICE_DROP_AFTER_TRIES and now - refusals.first_at >= SET_ASIDE_MIN_SPAN
+    )
+
+
 async def _send_notices(
     client: RunnerClient, spool: ResultSpool, state: RunnerState, runner_id: str
 ) -> None:
@@ -389,13 +412,17 @@ async def _send_notices(
     tick. The notices stay queued when the send fails (also when MEHO answers
     503 because it could not save them), and the next tick sends them again.
     After :data:`NOTICE_DROP_AFTER_TRIES` client errors in a row that a retry
-    does not change, the runner drops the notices of that post with one
-    warning. A notice that MEHO saved, or that the runner dropped, is marked
-    in its set-aside file and is not sent again after a restart.
+    does not change, and only when they span at least
+    :data:`SET_ASIDE_MIN_SPAN`, the runner drops the notices of that post with
+    one warning. A refusal that comes sooner keeps the notices. A notice that
+    MEHO saved, or that the runner dropped, is marked in its set-aside file
+    and is not sent again after a restart.
 
-    The first post after a start goes out also without a notice. It carries
-    the count of set-aside batches, so MEHO has the right count also after a
-    restart or after an operator emptied the folder.
+    After a start, the runner sends the count of set-aside batches and the
+    time of the newest one in its first notice post, also when it has no
+    notice to send. That post goes out in the first tick, after any saved
+    batches of the spool. So MEHO has the right count also after a restart or
+    after an operator emptied the folder.
     """
     if not state.notices and state.summary_sent:
         return
@@ -414,19 +441,18 @@ async def _send_notices(
         raise
     except RunnerClientError as exc:
         _log().warning("runner_set_aside_notice_failed", error=str(exc))
-        state.notice_refusals = state.notice_refusals + 1 if exc.is_permanent else 0
-        if state.notice_refusals >= NOTICE_DROP_AFTER_TRIES:
+        if _notice_refused_enough(state, permanent=exc.is_permanent):
             _log().warning(
                 "runner_set_aside_notices_dropped",
                 status=exc.status_code,
                 code=exc.code,
                 dropped=len(sending),
             )
-            state.notice_refusals = 0
+            state.notice_refusals = None
             state.summary_sent = True
             _notices_done(spool, state, len(sending))
         return
-    state.notice_refusals = 0
+    state.notice_refusals = None
     state.summary_sent = True
     _notices_done(spool, state, len(sending))
 

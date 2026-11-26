@@ -8,8 +8,8 @@
   sent again. The first post after a start carries the count of the folder,
   also without a notice.
 * After three answers in a row with a client error that a retry does not
-  change, the runner drops the notices of that post with one warning. Other
-  failures keep them.
+  change, over at least ``SET_ASIDE_MIN_SPAN``, the runner drops the notices
+  of that post with one warning. Other failures keep them.
 * A batch is set aside only when its three refusals span at least
   ``SET_ASIDE_MIN_SPAN``.
 
@@ -199,15 +199,16 @@ async def test_a_runner_that_starts_with_an_empty_folder_sets_the_stored_count_t
 
 
 async def test_a_notice_refused_three_times_with_a_400_is_dropped_with_one_warning(
-    tmp_path: Path,
+    tmp_path: Path, clock: _Clock
 ) -> None:
     spool = ResultSpool(tmp_path, max_files=10)
     name = _set_aside_on_disk(spool, "bad")
     central = _RefusesResults(notice_answers=[400] * 10)
     state = RunnerState()
+    half = int(SET_ASIDE_MIN_SPAN.total_seconds()) // 2
 
     with capture_logs() as logs:
-        await _ticks(central, spool, state, NOTICE_DROP_AFTER_TRIES)
+        await _refusal_ticks(central, spool, state, clock, [half] * (NOTICE_DROP_AFTER_TRIES - 1))
 
     assert state.notices == []
     drops = [e for e in logs if e["event"] == "runner_set_aside_notices_dropped"]

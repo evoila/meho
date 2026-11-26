@@ -191,7 +191,13 @@ class ResultSpool:
         return out
 
     def mark_notices_done(self, names: list[str]) -> None:
-        """Mark the set-aside files *names*: their notices are not sent again."""
+        """Mark the set-aside files *names*: their notices are not sent again.
+
+        A mark that cannot be written (a full disk, a folder that cannot be
+        written) is logged once for its file, and the runner goes on with its
+        tick. The notice of that file may then go out again on a later tick;
+        MEHO saves a notice it already has only once.
+        """
         target_dir = self._dir / _SET_ASIDE_DIR
         for name in names:
             path = target_dir / name
@@ -202,8 +208,13 @@ class ResultSpool:
                 # Removed by the folder limit, or unreadable: nothing to mark.
                 continue
             tmp = target_dir / (name + _TMP_SUFFIX)
-            tmp.write_text(json.dumps(record), encoding="utf-8")
-            os.replace(tmp, path)
+            try:
+                tmp.write_text(json.dumps(record), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError as exc:
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
+                _log().warning("runner_set_aside_mark_failed", path=name, error=str(exc))
 
     def _enforce_set_aside_cap(self, target_dir: Path) -> None:
         """Remove the oldest set-aside batches until one more stays within ``max_files``."""

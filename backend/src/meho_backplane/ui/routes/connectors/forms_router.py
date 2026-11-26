@@ -16,6 +16,8 @@ Route inventory (all gated server-side to a tenant admin who is a person, via
 
 * ``GET   /ui/connectors/create``        -- HTMX-loaded create modal.
 * ``POST  /ui/connectors/create``        -- create submit handler.
+* ``GET   /ui/connectors/target-fields`` -- the extra settings and the default
+  port the connector of a product declares (HTMX, on a product change).
 * ``GET   /ui/connectors/{name}/edit``   -- HTMX-loaded edit modal.
 * ``PATCH /ui/connectors/{name}``        -- edit submit handler.
 * ``GET   /ui/connectors/{name}/delete`` -- HTMX-loaded delete-confirm
@@ -48,7 +50,14 @@ from meho_backplane.ui.routes.connectors.forms import (
     submit_delete,
     submit_edit,
 )
+from meho_backplane.ui.routes.connectors.forms_declared import (
+    declared_view,
+    extra_values_from,
+    load_declared,
+    port_after_product_change,
+)
 from meho_backplane.ui.routes.connectors.operator import resolve_human_admin_or_403
+from meho_backplane.ui.templating import get_templates
 
 __all__ = ["build_forms_router"]
 
@@ -70,6 +79,7 @@ _SECRET_REF_MAX = 1024
 _ALIASES_MAX = 2048
 _NOTES_MAX = 8192
 _PORT_MAX = 16
+_IMPL_MAX = 200
 
 
 async def _create_modal_handler(
@@ -80,6 +90,44 @@ async def _create_modal_handler(
     """``GET /ui/connectors/create`` -- HTMX-loaded create modal fragment."""
     del operator  # gate only; render needs no operator-specific context.
     return await render_create_modal(request, session_ctx)
+
+
+async def _posted_extras(request: Request) -> dict[str, str]:
+    """The ``extra__<key>`` values of the posted form (the last one of a key wins)."""
+    form = await request.form()
+    return extra_values_from({k: str(form.getlist(k)[-1]) for k in form})
+
+
+async def _target_fields_handler(
+    request: Request,
+    product: str = Query(default="", max_length=_PRODUCT_MAX),
+    preferred_impl_id: str | None = Query(default=None, max_length=_IMPL_MAX),
+    port: str | None = Query(default=None, max_length=_PORT_MAX),
+    declared_port: str | None = Query(default=None, max_length=_PORT_MAX),
+    session_ctx: UISessionContext = _require_session_dep,
+    operator: Operator = _require_admin_dep,
+) -> HTMLResponse:
+    """``GET /ui/connectors/target-fields`` -- what the product's connector declares.
+
+    Answers the fragment inside ``#target-declared-fields``: the summary, the
+    choice of connector class, and the extra settings. It also swaps the port
+    input out of band: an empty port, or a port that was only the earlier
+    declared one, becomes the new declared port. A product that declares
+    nothing gets an empty fragment.
+    """
+    del session_ctx  # gate only.
+    declared = await load_declared(operator, product, preferred_impl_id)
+    context: dict[str, object] = {"declared": None}
+    new_default = None
+    if declared is not None:
+        values = extra_values_from(dict(request.query_params))
+        context["declared"] = declared_view(declared, values=values)
+        new_default = declared.chosen.default_port
+    if declared is not None or declared_port:
+        context["oob_port"] = port_after_product_change(port, declared_port, new_default)
+    return get_templates().TemplateResponse(
+        request, "connectors/_target_fields_fragment.html", context
+    )
 
 
 async def _create_submit_handler(
@@ -100,6 +148,7 @@ async def _create_submit_handler(
     aliases: str | None = Form(default=None, max_length=_ALIASES_MAX),
     notes: str | None = Form(default=None, max_length=_NOTES_MAX),
     managed_realm: str | None = Form(default=None, max_length=_NAME_MAX),
+    preferred_impl_id: str | None = Form(default=None, max_length=_IMPL_MAX),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
     db_session: AsyncSession = _get_session_dep,
@@ -126,6 +175,8 @@ async def _create_submit_handler(
         aliases_raw=aliases,
         notes=notes,
         managed_realm=managed_realm,
+        preferred_impl_id=preferred_impl_id,
+        extra_values=await _posted_extras(request),
     )
 
 
@@ -137,8 +188,7 @@ async def _edit_modal_handler(
     db_session: AsyncSession = _get_session_dep,
 ) -> HTMLResponse:
     """``GET /ui/connectors/{name}/edit`` -- pre-populated edit modal fragment."""
-    del operator  # gate only.
-    return await render_edit_modal(request, session_ctx, db_session, target_name=name)
+    return await render_edit_modal(request, session_ctx, operator, db_session, target_name=name)
 
 
 async def _delete_modal_handler(
@@ -202,6 +252,7 @@ async def _edit_submit_handler(
     aliases: str | None = Form(default=None, max_length=_ALIASES_MAX),
     notes: str | None = Form(default=None, max_length=_NOTES_MAX),
     managed_realm: str | None = Form(default=None, max_length=_NAME_MAX),
+    preferred_impl_id: str | None = Form(default=None, max_length=_IMPL_MAX),
     session_ctx: UISessionContext = _require_session_dep,
     operator: Operator = _require_admin_dep,
     db_session: AsyncSession = _get_session_dep,
@@ -222,6 +273,8 @@ async def _edit_submit_handler(
         aliases_raw=aliases,
         notes=notes,
         managed_realm=managed_realm,
+        preferred_impl_id=preferred_impl_id,
+        extra_values=await _posted_extras(request),
     )
 
 
@@ -249,6 +302,13 @@ def build_forms_router() -> APIRouter:
         _create_submit_handler,
         methods=["POST"],
         name="ui_connectors_create_submit",
+        response_class=HTMLResponse,
+    )
+    router.add_api_route(
+        "/ui/connectors/target-fields",
+        _target_fields_handler,
+        methods=["GET"],
+        name="ui_connectors_target_fields",
         response_class=HTMLResponse,
     )
     router.add_api_route(

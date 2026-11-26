@@ -2992,6 +2992,28 @@ Client-side validation (HTML5 `required` / `minlength` / numeric
 `min`/`max` with DaisyUI `input-error` styling) gives immediate
 feedback; the server-side Pydantic pass is authoritative.
 
+**What the connector declares (Task #6939).** When the person picks a
+product, the form loads `GET /ui/connectors/target-fields?product=...`
+into `#target-declared-fields` (tenant admin + person, like the other
+form routes). The fragment shows the connector's one-line `summary`, one
+input for each `target_fields` entry (label, help text, a "required"
+mark; a text, number, choice or boolean input by `kind`), and fills the
+port from `default_port`. The port is filled only when it is empty or was
+only the earlier declared port, so a port the person typed stays. Posted
+values arrive as `extra__<key>`. `forms_declared.py` reads the
+declarations (through the same class lookup as
+`GET /api/v1/connectors/target-form`), checks them (a missing required
+value, a number that is not whole, a choice not in the list give a 422
+under that field, typed values kept) and merges them into `extras`
+through `create_target` / `update_target`. On edit, the stored `extras`
+fill the fields, and `extras` keys the connector does not declare stay.
+When the classes of a product declare different settings or ports, the
+form adds a "Connector" select and stores the choice as
+`preferred_impl_id`; the settings shown are those of the chosen class. A
+product that declares nothing shows the form as before. The Keycloak
+realm keeps its own input; a declared `managed_realm` field is not shown
+for Keycloak.
+
 **Product dropdown source.** The create dropdown is rendered from
 `registered_product_tokens()` — the canonical set `create_target`
 validates `product` against — rather than from the raw

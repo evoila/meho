@@ -79,6 +79,11 @@
     <select
       name="product"
       required
+      hx-get="/ui/connectors/target-fields"
+      hx-trigger="change"
+      hx-target="#target-declared-fields"
+      hx-swap="innerHTML"
+      hx-include="[name='port'],[name='declared_port']"
       class="select select-bordered select-sm w-full {{ error_class('product', 'select-error') }}"
       aria-label="Connector product"
     >
@@ -113,6 +118,13 @@
   </label>
 </div>
 
+{#- What the connector declares: summary, extra settings, class choice.
+    Filled by HTMX when the product changes; rendered here when the product is
+    known (edit form, or a form shown again with errors). -#}
+<div id="target-declared-fields" class="space-y-3">
+  {% if declared %}{% include "connectors/_target_declared_fields.html" %}{% endif %}
+</div>
+
 <div class="grid gap-3 md:grid-cols-2">
   <label class="flex flex-col gap-1">
     <span class="text-sm font-medium">Host</span>
@@ -130,20 +142,10 @@
     {{ error_for('host') }}
   </label>
 
-  <label class="flex flex-col gap-1">
-    <span class="text-sm font-medium">Port <span class="text-subtle">(optional)</span></span>
-    <input
-      type="number"
-      name="port"
-      min="1"
-      max="65535"
-      value="{{ field_value('port') }}"
-      class="input input-bordered input-sm w-full {{ error_class('port', 'input-error') }}"
-      aria-label="Port"
-      placeholder="1-65535"
-    />
-    {{ error_for('port') }}
-  </label>
+  {%- set port_value = field_value('port') -%}
+  {%- set port_oob = false -%}
+  {%- set port_error = errors['port'] if errors and 'port' in errors else '' -%}
+  {% include "connectors/_target_port_field.html" %}
 </div>
 
 <div class="grid gap-3 md:grid-cols-2">

@@ -1,0 +1,14 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The answer of ``GET /ui/connectors/target-fields``: the declared part of the
+  target form, plus the out-of-band port input. An empty answer when the
+  product declares nothing.
+-#}
+{% if declared %}{% include "connectors/_target_declared_fields.html" %}{% endif %}
+{% if oob_port is defined %}
+  {% set port_value = oob_port %}
+  {% set port_oob = true %}
+  {% include "connectors/_target_port_field.html" %}
+{% endif %}

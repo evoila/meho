@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block_run import (
+    mark_request_sent,
     mark_step_refused,
     run_login,
     step_refused_in_run,
@@ -81,6 +82,7 @@ __all__ = [
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
     "block_principal",
+    "check_before_send",
     "checking_logins_for_steps",
     "first_blocked_step_login",
     "is_principal_blocked",
@@ -311,6 +313,25 @@ async def raise_if_send_refused() -> None:
     if refusal is not None:
         _log.info("principal_block_send_refused", operator_sub=login[0])
         raise refusal
+
+
+async def check_before_send(_request: object = None) -> None:
+    """The check right before a request goes out of a client, then a note that it is sent.
+
+    It is the request hook of every client of the core
+    (``event_hooks={"request": [check_before_send]}`` on an ``httpx`` client),
+    and the kit offers it to connector packages for the clients they build
+    themselves. A client that is not ``httpx`` calls it right before each
+    call that sends something. The input is the ``httpx`` request. It is not
+    used.
+
+    Raises :class:`PrincipalBlockedStepError` as :func:`raise_if_send_refused`
+    does. Otherwise the running operation notes that it sends a request, so a
+    later refusal says that a part of the operation may have run. Outside a
+    running call it does nothing.
+    """
+    await raise_if_send_refused()
+    mark_request_sent()
 
 
 def _scope_of(operator: Operator) -> str:

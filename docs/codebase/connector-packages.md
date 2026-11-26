@@ -800,6 +800,20 @@ start (see "The kit range at start").
 - The **second** number goes up when names are only added, or a name is
   marked as old.
 
+The kit also has `check_before_send` and `PrincipalBlockedStepError` (kit
+1.6). `check_before_send` is the check of the caller's block that the core's
+own clients run before each request (`auth/principal_block.py`); it also
+notes that the call sends a request. The rule for a package: every client it
+builds itself carries the check. An `httpx` client gets it as a request hook
+(`event_hooks={"request": [kit.check_before_send]}`, which also covers
+redirect hops and retries). Every other client calls
+`await kit.check_before_send()` right before each call that sends. A blocking
+library that runs in a thread is checked in the event loop, right before the
+thread starts. A client from the core needs nothing. The template's
+`tests/test_httpx_clients_have_the_check.py` fails when a package builds an
+`httpx.AsyncClient` without the hook; clients that are not `httpx` need a test
+that runs them.
+
 For three classes, the kit also promises some of their insides:
 `HttpConnector` (`__init__`, `auth_headers`, `aclose`,
 `trace_response_body`, `_get_json`, `_post_json`), `PreviewContext`

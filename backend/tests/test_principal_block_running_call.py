@@ -36,12 +36,13 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     PrincipalBlockedStepError,
     block_principal,
+    check_before_send,
     raise_if_send_refused,
     reset_block_cache,
 )
 from meho_backplane.auth.principal_block_run import tracking_run
 from meho_backplane.connectors.adapters import ssh as ssh_module
-from meho_backplane.connectors.adapters.http import HttpConnector, _note_request_sent
+from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.kubernetes._wire_span import instrument_api_client
 from meho_backplane.connectors.linux import _sudo as linux_sudo
 from meho_backplane.connectors.registry import clear_registry
@@ -488,7 +489,7 @@ async def test_http_request_hook_stops_the_request_of_a_blocked_login(
     async with httpx.AsyncClient(
         base_url="https://target.test",
         transport=httpx.MockTransport(_handler),
-        event_hooks={"request": [_note_request_sent]},
+        event_hooks={"request": [check_before_send]},
     ) as client:
         operator = _operator()
         with tracking_run(is_step=False, login=(operator.sub, operator.tenant_id)):
@@ -523,7 +524,7 @@ class _SlowCredentialConnector(HttpConnector):
         return httpx.AsyncClient(
             base_url="https://target.test",
             transport=httpx.MockTransport(_handler),
-            event_hooks={"request": [_note_request_sent]},
+            event_hooks={"request": [check_before_send]},
         )
 
     async def fingerprint(self, target: Any, operator: Any = None) -> Any:  # type: ignore[override]

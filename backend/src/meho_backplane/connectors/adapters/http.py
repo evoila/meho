@@ -95,8 +95,7 @@ from httpx._decoders import SUPPORTED_DECODERS
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.principal_block import raise_if_send_refused
-from meho_backplane.auth.principal_block_run import mark_request_sent
+from meho_backplane.auth.principal_block import check_before_send
 from meho_backplane.connectors._shared.cache_key import (
     DEFAULT_PORTS,
     effective_scheme,
@@ -470,18 +469,6 @@ class _WireCappedStream(httpx.AsyncByteStream):
         await self._inner.aclose()
 
 
-async def _note_request_sent(_request: httpx.Request) -> None:
-    """Request hook of every connector client: the check right before a request goes out.
-
-    It runs after the credentials are ready, and again for each request a
-    redirect sends. When the login of the running call is blocked, the
-    request is not sent (:func:`raise_if_send_refused`). Otherwise the
-    running operation notes that it sends a request.
-    """
-    await raise_if_send_refused()
-    mark_request_sent()
-
-
 #: Upper time limit, in seconds, that a stop waits for the close of an answer.
 _STOP_CLOSE_LIMIT_S = 5.0
 
@@ -668,8 +655,7 @@ async def _stream_capped_json_response(
     """
     # The check right before the request goes out, also for a client that has
     # no request hook (a connector that builds its own client).
-    await raise_if_send_refused()
-    mark_request_sent()
+    await check_before_send()
     async with client.stream(
         method,
         path,
@@ -1108,7 +1094,7 @@ class HttpConnector(Connector):
             transport=transport,
             # A refusal by the block list after this request says that a
             # part of the operation may have run.
-            event_hooks={"request": [_note_request_sent]},
+            event_hooks={"request": [check_before_send]},
         )
 
     async def _ephemeral_http_client(self, target: Target) -> httpx.AsyncClient:

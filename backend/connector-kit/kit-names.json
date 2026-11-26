@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.5",
+  "kit_version": "1.6",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -135,6 +135,9 @@
         }
       }
     },
+    "PrincipalBlockedStepError": {
+      "kind": "class"
+    },
     "ProbeResult": {
       "kind": "class"
     },
@@ -179,6 +182,13 @@
     },
     "VaultCredentialsReadError": {
       "kind": "class"
+    },
+    "check_before_send": {
+      "inputs": [
+        "_request: object = None"
+      ],
+      "kind": "function",
+      "returns": "None"
     },
     "compute_audit_digest_hash": {
       "inputs": [

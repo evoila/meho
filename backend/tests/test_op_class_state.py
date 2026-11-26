@@ -11,6 +11,7 @@ helper does not name, or when the helper does not put a mark back.
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -39,8 +40,10 @@ def test_the_helper_names_every_mark_of_the_module() -> None:
 
 def test_every_mark_is_back_after_a_reset_inside_the_helper() -> None:
     stand_in_id = "example.stand_in.op"
+    names = sorted(_module_marks())
+    own_copy = {name: copy.copy(getattr(op_classes, name)) for name in names}
     added: dict[str, Any] = {}
-    for name in sorted(_module_marks()):
+    for name in names:
         mark = getattr(op_classes, name)
         if isinstance(mark, list):
             mark.append(_stand_in)
@@ -59,9 +62,12 @@ def test_every_mark_is_back_after_a_reset_inside_the_helper() -> None:
         )
         assert missing == []
     finally:
-        for name, value in added.items():
+        # Put the real marks back here too, so a failing helper does not
+        # leave the marks empty for the next tests in this process.
+        for name, values in own_copy.items():
             mark = getattr(op_classes, name)
-            if isinstance(mark, dict):
-                mark.pop(value, None)
-            elif value in mark:
-                mark.remove(value)
+            mark.clear()
+            if isinstance(mark, list):
+                mark.extend(values)
+            else:
+                mark.update(values)

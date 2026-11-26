@@ -29,7 +29,7 @@ drives the op through the real **approve → resume** flow:
    ``POST /api/v1/approvals/{id}/decide`` (the self-approval guard
    rejects the requester — real four-eyes);
 3. the ``/decide`` route re-hydrates the stored target and re-dispatches
-   with ``_approved=True`` (the committed approval is the authorization);
+   with ``_approved=True`` (the approval is not asked for again);
 4. assert ``dispatch_status == "ok"`` **and** the secret-free audit row
    of the executed (post-approval) op.
 

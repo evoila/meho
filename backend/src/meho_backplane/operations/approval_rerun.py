@@ -21,6 +21,11 @@ The rules, checked in this order:
    settings changed since the request was made, or the preview hash of a
    ``destructive`` request differs. The operation, connector and target
    always come from the request, so the caller cannot change them.
+   The caller's rights are checked as for a new call of the same caller
+   made now (:mod:`~meho_backplane.operations.approved_run_rights`). A new
+   call that would be refused refuses the re-run
+   (:class:`RerunRightsRefusedError`). A new call that would wait for an
+   approval this one does not cover needs a new approval.
 4. One run at a time. The claim is one conditional ``UPDATE`` that clears
    ``resume_result`` and adds one to ``rerun_count``, only while the stored
    result is a failure that is not ``uncertain`` and ``rerun_count`` is
@@ -49,7 +54,9 @@ match ``params_hash``.
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Final, cast
 
@@ -57,7 +64,8 @@ import structlog
 from sqlalchemy import func, null, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY, resolve_actor_sub
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditEventClass
 from meho_backplane.operations._audit import work_ref_var
@@ -65,6 +73,7 @@ from meho_backplane.operations._validate import params_hash_matches
 from meho_backplane.operations.approval_object_check import object_changed_since_request
 from meho_backplane.operations.approval_queue import (
     ApprovalError,
+    ApprovalNotFoundError,
     ApprovalResultState,
     _deadline_has_passed,
     _dispatch_resume_with_bound_context,
@@ -81,6 +90,11 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.approval_resume_checks import preview_changed_since_request
 from meho_backplane.operations.approval_state_pin import state_changed_since_request
 from meho_backplane.operations.approved_reveal import is_secret_reveal
+from meho_backplane.operations.approved_run_rights import (
+    approved_run_refusal,
+    bind_approved_run,
+)
+from meho_backplane.operations.approved_step_check import approved_step_refusal
 from meho_backplane.operations.grant_approval import grant_changed_since_request
 from meho_backplane.operations.uncertain_outcome import (
     LOGIN_ENDED_ADVICE,
@@ -88,6 +102,7 @@ from meho_backplane.operations.uncertain_outcome import (
     connection_lost_after_send,
     with_uncertain_outcome,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "RERUN_AUDIT_PATH",
@@ -97,6 +112,8 @@ __all__ = [
     "RerunOutcome",
     "RerunParamsRequiredError",
     "RerunRefusal",
+    "RerunRightsRefusedError",
+    "RerunRoleTooLowError",
     "rerun_failed_request",
 ]
 
@@ -104,6 +121,7 @@ __all__ = [
 RERUN_AUDIT_PATH: Final = "approval.rerun"
 
 _ACCEPTED_STATUS_CODE: Final = 202
+_FORBIDDEN_STATUS_CODE: Final = 403
 _CONFLICT_STATUS_CODE: Final = 409
 _PARAMS_REQUIRED_STATUS_CODE: Final = 422
 
@@ -124,6 +142,7 @@ class RerunRefusal(StrEnum):
     PREVIEW_CHANGED = "preview_changed"
     OBJECT_CHANGED = "object_changed"
     MULTI_STEP_RUN = "multi_step_run"
+    RISK_RAISED = "risk_raised"
 
 
 _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
@@ -142,6 +161,9 @@ _REFUSAL_MESSAGES: Final[dict[RerunRefusal, str]] = {
     RerunRefusal.MULTI_STEP_RUN: (
         "it is a step of a multi-step operation, and MEHO does not run such a request "
         "again, so that no step is sent twice; start a new run of the operation"
+    ),
+    RerunRefusal.RISK_RAISED: (
+        "the risk level of the operation went up, and the approval does not cover it"
     ),
 }
 
@@ -181,6 +203,32 @@ class RerunNeedsNewApprovalError(ApprovalError):
         )
         self.request_id = request_id
         self.reason = reason
+
+
+class RerunRightsRefusedError(ApprovalError):
+    """A new call of the caller, made now, would be refused, so the re-run is refused.
+
+    The request stays approved: it can run again when the rights allow it.
+    """
+
+    def __init__(self, request_id: uuid.UUID, reason: str) -> None:
+        super().__init__(
+            f"approval request {request_id} did not run: a new call of yours would be "
+            f"refused now ({reason}). The request stays approved. Run it again when your "
+            "rights allow it, or ask again with a new request."
+        )
+        self.request_id = request_id
+        self.reason = reason
+
+
+class RerunRoleTooLowError(ApprovalError):
+    """The caller's role is below ``operator``, the role of a new call."""
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        super().__init__(
+            f"approval request {request_id} did not run: a re-run needs the operator role"
+        )
+        self.request_id = request_id
 
 
 class RerunParamsRequiredError(ApprovalError):
@@ -270,24 +318,78 @@ async def _audit_rerun(
 
 
 async def _refuse(
-    operator: Operator, request: ApprovalRequest, error: ApprovalError, *, code: str, status: int
+    operator: Operator,
+    request: ApprovalRequest,
+    error: ApprovalError,
+    *,
+    code: str,
+    status: int,
+    reason: str | None = None,
 ) -> ApprovalError:
     """Write the audit row of a refused re-run and return *error* to raise."""
     from meho_backplane.db.engine import get_sessionmaker
 
+    extra: dict[str, Any] = {"result_status": "refused", "refusal": code}
+    if reason is not None:
+        extra["reason"] = reason
     async with get_sessionmaker()() as session:
         await _audit_rerun(
             session,
             operator=operator,
             request=request,
             status_code=status,
-            extra={"result_status": "refused", "refusal": code},
+            extra=extra,
         )
         await session.commit()
     _log().info(
         "approval_rerun_refused",
         approval_request_id=str(request.id),
         op_id=request.op_id,
+        refusal=code,
+        operator_sub=operator.sub,
+    )
+    return error
+
+
+async def _refuse_other_caller(
+    operator: Operator, request_id: uuid.UUID, error: ApprovalError, *, code: str
+) -> ApprovalError:
+    """Write the row of a re-run refused to a caller who did not make the request.
+
+    The row names the caller and the request id, and no other field of the
+    request: the caller may not read the request. ``requester_sub`` is
+    ``None``, so every audit view shows the caller only as the person who
+    acted (:func:`~meho_backplane.audit_query.approval_payload.approval_payload_view`).
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import AuditLog
+
+    async with get_sessionmaker()() as session:
+        session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                occurred_at=_now(),
+                operator_sub=operator.sub,
+                tenant_id=operator.tenant_id,
+                event_class=AuditEventClass.POLICY_DECISION,
+                method="APPROVAL",
+                path=RERUN_AUDIT_PATH,
+                status_code=_FORBIDDEN_STATUS_CODE,
+                request_id=None,
+                duration_ms=Decimal("0"),
+                payload={
+                    "approval_request_id": str(request_id),
+                    "principal_sub": operator.sub,
+                    "requester_sub": None,
+                    "result_status": "refused",
+                    "refusal": code,
+                },
+            )
+        )
+        await session.commit()
+    _log().info(
+        "approval_rerun_refused",
+        approval_request_id=str(request_id),
         refusal=code,
         operator_sub=operator.sub,
     )
@@ -341,6 +443,79 @@ async def _claim_rerun(operator: Operator, request: ApprovalRequest) -> int | No
         )
         await session.commit()
     return attempt
+
+
+def _acting_agent(request: ApprovalRequest) -> Any:
+    """Bind the acting agent of a request made inside a hosted agent run.
+
+    The re-run is then checked with the same caller and acting agent as the
+    first run: the stricter of the requester's and the agent's rights.
+    """
+    if request.principal_act is None or resolve_actor_sub() is not None:
+        return nullcontext()
+    return structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: request.principal_act})
+
+
+async def _rights_refusal(
+    operator: Operator, request: ApprovalRequest, target: Any, params: dict[str, Any]
+) -> ApprovalError | None:
+    """Refuse the re-run when a new call of *operator* made now would not run.
+
+    The steps of a multi-step operation are checked too, while
+    ``AGENT_GRANT_REQUIRED`` is ``on``, so a refused step refuses the re-run
+    before MEHO takes it. An operation MEHO does not know is left to the
+    run, which refuses it.
+    """
+    from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
+
+    product, version, impl_id = parse_connector_id(request.connector_id)
+    descriptor = await lookup_descriptor(
+        tenant_id=request.tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=request.op_id,
+    )
+    if descriptor is None:
+        return None
+    with _acting_agent(request), bind_approved_run(request):
+        refusal = await approved_run_refusal(
+            operator=operator,
+            requester_runs=True,
+            descriptor=descriptor,
+            connector_id=request.connector_id,
+            target=target,
+            params=params,
+            preview_hash=request.preview_hash,
+        )
+        step_reason = None
+        if refusal is None and get_settings().agent_grant_required == "on":
+            step_reason = await approved_step_refusal(
+                operator=operator,
+                descriptor=descriptor,
+                connector_id=request.connector_id,
+                target=target,
+            )
+    if refusal is not None and refusal.new_approval:
+        return await _refuse(
+            operator,
+            request,
+            RerunNeedsNewApprovalError(request.id, RerunRefusal.RISK_RAISED),
+            code=RerunRefusal.RISK_RAISED.value,
+            status=_CONFLICT_STATUS_CODE,
+            reason=refusal.reason,
+        )
+    reason = refusal.reason if refusal is not None else step_reason
+    if reason is None:
+        return None
+    return await _refuse(
+        operator,
+        request,
+        RerunRightsRefusedError(request.id, reason),
+        code="rights_refused",
+        status=_FORBIDDEN_STATUS_CODE,
+        reason=reason,
+    )
 
 
 async def _check_rerun(
@@ -401,7 +576,39 @@ async def _check_rerun(
             code=reason.value,
             status=_CONFLICT_STATUS_CODE,
         )
+    rights = await _rights_refusal(operator, request, target, effective)
+    if rights is not None:
+        raise rights
     return effective, target, reveal_secret
+
+
+async def _check_caller(
+    operator: Operator, request: ApprovalRequest, *, role_too_low: bool
+) -> None:
+    """Refuse a caller who did not make the request, or whose role is too low.
+
+    Each refusal writes its ``approval.rerun`` row.
+    """
+    if operator.sub != request.principal_sub:
+        if role_too_low:
+            raise await _refuse_other_caller(
+                operator, request.id, RerunRoleTooLowError(request.id), code="insufficient_role"
+            )
+        raise await _refuse_other_caller(
+            operator,
+            request.id,
+            RerunForbiddenError(request_id=request.id, principal_sub=operator.sub),
+            code="not_request_owner",
+        )
+    if role_too_low:
+        raise await _refuse(
+            operator,
+            request,
+            RerunRoleTooLowError(request.id),
+            code="insufficient_role",
+            status=_FORBIDDEN_STATUS_CODE,
+            reason=f"a re-run needs the operator role; your role is {operator.tenant_role.value}",
+        )
 
 
 async def rerun_failed_request(
@@ -414,8 +621,9 @@ async def rerun_failed_request(
 
     *params* are the original params. They are optional when MEHO stored
     them on the request, and required for a credential write. The run uses
-    the caller's identity, like the agent's own resume after approval, with
-    the approval as the authorization (``dispatch(..., _approved=True)``).
+    the caller's identity, like the agent's own resume after approval
+    (``dispatch(..., _approved=True)``). The approval is not asked for
+    again, but the caller's rights are checked as for a new call made now.
 
     Raises:
         ApprovalNotFoundError: No request with this id in the caller's tenant.
@@ -424,13 +632,23 @@ async def rerun_failed_request(
             is running.
         RerunParamsRequiredError: No stored params and none were sent.
         RerunNeedsNewApprovalError: Something changed since the approval.
+        RerunRightsRefusedError: A new call of the caller would be refused now.
+        RerunRoleTooLowError: The caller's role is below ``operator``.
     """
     from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.mcp.registry import role_at_least
 
-    async with get_sessionmaker()() as session:
-        request = await get_request(session, tenant_id=operator.tenant_id, request_id=request_id)
-    if operator.sub != request.principal_sub:
-        raise RerunForbiddenError(request_id=request_id, principal_sub=operator.sub)
+    role_too_low = not role_at_least(operator.tenant_role, TenantRole.OPERATOR)
+    try:
+        async with get_sessionmaker()() as session:
+            request = await get_request(
+                session, tenant_id=operator.tenant_id, request_id=request_id
+            )
+    except ApprovalNotFoundError:
+        if role_too_low:
+            raise RerunRoleTooLowError(request_id) from None
+        raise
+    await _check_caller(operator, request, role_too_low=role_too_low)
 
     effective_params, target, reveal_secret = await _check_rerun(operator, request, params)
 
@@ -451,14 +669,15 @@ async def rerun_failed_request(
         operator_sub=operator.sub,
     )
     try:
-        result = await _dispatch_resume_with_bound_context(
-            operator=operator,
-            request=request,
-            resolved_target=target,
-            effective_params=effective_params,
-            rerun_attempt=attempt,
-            reveal_secret=reveal_secret,
-        )
+        with _acting_agent(request):
+            result = await _dispatch_resume_with_bound_context(
+                operator=operator,
+                request=request,
+                resolved_target=target,
+                effective_params=effective_params,
+                rerun_attempt=attempt,
+                reveal_secret=reveal_secret,
+            )
     except Exception as exc:
         # Store a result, so the request does not stay "started" for good. A
         # timeout or a lost connection may have reached the target: that is

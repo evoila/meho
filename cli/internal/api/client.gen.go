@@ -10168,6 +10168,17 @@ type RunCompletedResponse struct {
 	State       *string            `json:"state,omitempty"`
 }
 
+// RunNowModel Whether the caller can run the test read now, with no wait.
+//
+// “code“ and “reason“ are “None“ when “can_run“ is true. Otherwise
+// “code“ is one of “not_enabled“, “waits_for_approval“ and
+// “not_allowed“, and “reason“ is the one fixed sentence of that code.
+type RunNowModel struct {
+	CanRun bool    `json:"can_run"`
+	Code   *string `json:"code"`
+	Reason *string `json:"reason"`
+}
+
 // RunSummary List-view projection returned by “meho_runbook_list_runs“.
 //
 // Run-level state plus the current step's *state* -- no step
@@ -12163,12 +12174,10 @@ type TargetFieldModel_Default struct {
 
 // TargetFormClass What one connector class declares. “None“ means "not declared".
 //
-// “test_operation“ is also “None“ while the stored row of the test read
-// has a risk level other than “safe“ or is turned off, or while an
-// override of the install or of the caller's tenant raises its risk level
-// or makes it wait for approval. Otherwise it names the test read the
-// connector declares; whether the caller may run it is decided when it is
-// called.
+// “test_operation“ names the test read the class declares.
+// “test_operation_run“ is “None“ when the class declares none. Otherwise
+// it says whether the caller can run that read now, with the code and the
+// fixed sentence of the reason when not.
 type TargetFormClass struct {
 	CredentialWays        *[]CredentialWayModel `json:"credential_ways"`
 	DefaultPort           *int                  `json:"default_port"`
@@ -12176,7 +12185,14 @@ type TargetFormClass struct {
 	SupportedVersionRange *string               `json:"supported_version_range"`
 	TargetFields          *[]TargetFieldModel   `json:"target_fields"`
 	TestOperation         *string               `json:"test_operation"`
-	Version               string                `json:"version"`
+
+	// TestOperationRun Whether the caller can run the test read now, with no wait.
+	//
+	// ``code`` and ``reason`` are ``None`` when ``can_run`` is true. Otherwise
+	// ``code`` is one of ``not_enabled``, ``waits_for_approval`` and
+	// ``not_allowed``, and ``reason`` is the one fixed sentence of that code.
+	TestOperationRun RunNowModel `json:"test_operation_run"`
+	Version          string      `json:"version"`
 }
 
 // TargetFormResponse The declarations of every connector class of one product.

@@ -63,8 +63,9 @@ map.
    risk level `safe`. Its built-in row must still exist after the retire
    step of the same start. With the test-only registrar snapshot
    (`test_amortize_typed_op_registrars`), a missing row is allowed. While
-   the registrars run, `operation_catalog_write`
-   collects the risk level each one gives (`collect_code_safety_levels`). A
+   the registrars run, each registration notes the risk level its code gives
+   on the start's own database session (`note_code_safety_level`), and
+   `operation_catalog_write` reads them back (`code_safety_levels`). A
    call with no input (`{}`) must pass the same parameter check a real call
    runs: the schema as calls see it (with its `oneOf` and `anyOf` rules),
    checked by `validate_params`, then the op's own params check. So a read
@@ -89,13 +90,40 @@ see that connector (`connector_triples_visible_to` in
 `operations/_lookup.py`): the import is built in, or it belongs to the
 caller's tenant. A connector that another tenant imported answers 404.
 
-The route answers `test_operation: null` for a class while the stored row
-of its test read has a risk level other than `safe` or is turned off, or
-while an override of the install or of the caller's tenant raises its risk
-level or makes it wait for approval (`ready_test_operations`). Then the
-console offers no test read for that class. Otherwise the route names the
-test read the connector declares; whether the caller may run it is decided
-when it is called. The answer holds what the classes declare: names,
+The route names the test read each class declares in `test_operation`. For a
+class with a test read it also answers `test_operation_run`: whether the
+caller can run that read now, with no wait. MEHO decides this with the same
+steps a real call of the read takes for the same caller
+(`operations/run_now_check.py`, `run_now`):
+
+1. The call's own row lookup (`lookup_descriptor`). It knows the tenant's own
+   on/off setting of a built-in operation, the tenant's own rows of the
+   connector, and the final risk level and approval flag (stored values,
+   overrides of the install and of the caller's tenant, the classification
+   rules when that switch is on, and the floors).
+2. The call's own policy gate (`governance_and_gate`, asked with
+   `decide_only`: it writes no audit row, no approval request and no grant
+   use).
+
+The route keeps no copy of this rule. `stored_state_problems` is used only by
+the start check, for its warning lines.
+
+`test_operation_run` is `null` when the class declares no test read.
+Otherwise it has `can_run`, `code` and `reason`. When the caller can run the
+read, `code` and `reason` are `null`. When not, `code` is one of these, and
+`reason` is the one fixed sentence of the code:
+
+| `code` | Meaning |
+|---|---|
+| `not_enabled` | The read is turned off for the caller's tenant, or the tenant's own rows of the connector do not have it. A call is refused. |
+| `waits_for_approval` | A call of the read waits for a person to approve it: its risk level is above `safe`, or it needs approval. |
+| `not_allowed` | The caller may not run the read, for example an agent login with no grant for it while the agent grant setting is on. |
+
+The answer shows no stored value: no risk level text from a row, no override
+reason, no tenant id and no reason string from the gate. The console button
+shows the fixed sentence.
+
+The answer holds what the classes declare: names,
 labels, help texts, kinds, choices and the declared defaults of target
 settings. A credential field has no default and no example value. The
 route never reads the secret store and never returns a value of any
@@ -108,6 +136,8 @@ ingest router, so `target-form` is not read as a connector id.
   (`connectors_for_tenant` for the route).
 - `operations/_validate.py` and `operations/switch_params.py` for the
   parameter check of the test read.
+- `operations/_lookup.py` and `operations/_request_preview.py` for the row
+  lookup and the policy gate that `run_now` asks.
 - The `endpoint_descriptor` rows written by the typed-operation registrars.
 - `cli/api/openapi.json` and the generated CLI client change with the route.
 
@@ -138,5 +168,6 @@ read that needs the login, so it proves the login works.
 ## References
 
 - `backend/tests/test_connector_target_form.py`
+- `backend/tests/test_connector_target_form_run_now.py` (each case also makes the real call)
 - `docs/codebase/targets.md`
 - `docs/codebase/api-shape-conventions.md`

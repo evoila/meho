@@ -14,12 +14,22 @@ the secret store and never returns a value of any secret.
 
 Errors: 404 with a plain message when no connector serves the product.
 
-The route answers ``test_operation: null`` for a class while the stored row
-of its test read has a risk level other than ``safe`` or is turned off, or
-while an override of the install or of the caller's tenant raises its risk
-level or makes it wait for approval. Then the console offers no test read for
-that class. Otherwise the route names the test read the connector declares;
-whether the caller may run it is decided when it is called.
+``test_operation`` names the test read the class declares (``null`` when it
+declares none). For a class with a test read, ``test_operation_run`` also
+says whether the caller can run that read now, with no wait. MEHO decides it
+with the steps a real call of the read takes for the same caller
+(:func:`~meho_backplane.operations.run_now_check.run_now`): the call's own row
+lookup and the call's own policy. When the caller cannot, the answer holds a
+fixed ``code`` and one fixed sentence, so the console button can show them:
+
+* ``not_enabled``: the read is turned off for the caller's tenant, or the
+  tenant's own rows of the connector do not have it. A call is refused.
+* ``waits_for_approval``: a call of the read waits for a person to approve it.
+* ``not_allowed``: the caller may not run the read, for example an agent login
+  with no grant for it while the agent grant setting is on.
+
+The answer holds no stored value: no risk level text from a row, no override
+reason and no tenant id.
 
 The caller sees the connector classes installed with MEHO, and a class made
 by an import only when the caller may see that connector: the import is
@@ -43,7 +53,7 @@ from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.connectors.registry import connectors_for_tenant
 from meho_backplane.connectors.target_form import CredentialWay, TargetField
 from meho_backplane.operations._lookup import connector_triples_visible_to
-from meho_backplane.operations.connector_declaration_check import ready_test_operations
+from meho_backplane.operations.run_now_check import RunNow, run_now
 
 __all__ = ["TargetFormClass", "TargetFormResponse", "router"]
 
@@ -84,15 +94,26 @@ class CredentialWayModel(BaseModel):
     fields: list[CredentialFieldModel]
 
 
+class RunNowModel(BaseModel):
+    """Whether the caller can run the test read now, with no wait.
+
+    ``code`` and ``reason`` are ``None`` when ``can_run`` is true. Otherwise
+    ``code`` is one of ``not_enabled``, ``waits_for_approval`` and
+    ``not_allowed``, and ``reason`` is the one fixed sentence of that code.
+    """
+
+    can_run: bool
+    code: str | None
+    reason: str | None
+
+
 class TargetFormClass(BaseModel):
     """What one connector class declares. ``None`` means "not declared".
 
-    ``test_operation`` is also ``None`` while the stored row of the test read
-    has a risk level other than ``safe`` or is turned off, or while an
-    override of the install or of the caller's tenant raises its risk level
-    or makes it wait for approval. Otherwise it names the test read the
-    connector declares; whether the caller may run it is decided when it is
-    called.
+    ``test_operation`` names the test read the class declares.
+    ``test_operation_run`` is ``None`` when the class declares none. Otherwise
+    it says whether the caller can run that read now, with the code and the
+    fixed sentence of the reason when not.
     """
 
     impl_id: str
@@ -102,6 +123,7 @@ class TargetFormClass(BaseModel):
     target_fields: list[TargetFieldModel] | None
     credential_ways: list[CredentialWayModel] | None
     test_operation: str | None
+    test_operation_run: RunNowModel | None
 
 
 class TargetFormResponse(BaseModel):
@@ -141,7 +163,7 @@ def _way(way: CredentialWay) -> CredentialWayModel:
     )
 
 
-def _describe(cls: type[Connector], *, test_ready: bool) -> TargetFormClass:
+def _describe(cls: type[Connector], *, test_run: RunNow | None) -> TargetFormClass:
     return TargetFormClass(
         impl_id=cls.impl_id,
         version=cls.version,
@@ -153,7 +175,12 @@ def _describe(cls: type[Connector], *, test_ready: bool) -> TargetFormClass:
         credential_ways=(
             None if cls.credential_ways is None else [_way(w) for w in cls.credential_ways]
         ),
-        test_operation=cls.test_operation if test_ready else None,
+        test_operation=cls.test_operation,
+        test_operation_run=(
+            None
+            if test_run is None
+            else RunNowModel(can_run=test_run.can_run, code=test_run.code, reason=test_run.sentence)
+        ),
     )
 
 
@@ -183,6 +210,19 @@ async def _classes_for(operator: Operator, wanted: str) -> list[type[Connector]]
     return sorted(kept, key=lambda cls: (cls.product, cls.version, cls.impl_id, cls.__name__))
 
 
+async def _test_run(operator: Operator, cls: type[Connector]) -> RunNow | None:
+    """Can *operator* run the test read of *cls* now? ``None`` when it declares none."""
+    if cls.test_operation is None:
+        return None
+    return await run_now(
+        operator,
+        product=cls.product,
+        version=cls.version,
+        impl_id=cls.impl_id,
+        op_id=cls.test_operation,
+    )
+
+
 @router.get(
     "/target-form",
     response_model=TargetFormResponse,
@@ -199,8 +239,7 @@ async def get_target_form(
             http_status.HTTP_404_NOT_FOUND,
             f"No connector serves the product {product!r}.",
         )
-    ready = await ready_test_operations(operator.tenant_id, classes)
     return TargetFormResponse(
         product=classes[0].product,
-        classes=[_describe(c, test_ready=c in ready) for c in classes],
+        classes=[_describe(c, test_run=await _test_run(operator, c)) for c in classes],
     )

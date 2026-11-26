@@ -132,8 +132,8 @@ def _only_fake(monkeypatch: pytest.MonkeyPatch, cls: type[Connector]) -> None:
     monkeypatch.setattr(typed_register, "_TYPED_OP_REGISTRARS", [formfake_registrar])
 
 
-def _route_test_operation(cls: type[Connector]) -> Any:
-    """``test_operation`` of *cls* in the answer of the target form route."""
+def _route_test_run(cls: type[Connector]) -> Any:
+    """What the target form route says about running the test read of *cls*."""
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[verify_jwt_and_bind] = lambda: Operator(
@@ -142,7 +142,8 @@ def _route_test_operation(cls: type[Connector]) -> Any:
     resp = TestClient(app).get("/api/v1/connectors/target-form", params={"product": _PRODUCT})
     assert resp.status_code == 200, resp.text
     (answer,) = resp.json()["classes"]
-    return answer["test_operation"]
+    assert answer["test_operation"] == "formfake.ping"
+    return answer["test_operation_run"]
 
 
 # ---------------------------------------------------------------------------
@@ -252,14 +253,16 @@ async def test_a_pod_list_test_read_stops_the_start_and_names_the_connector(
 
 
 @pytest.mark.asyncio
-async def test_a_safe_enabled_test_read_is_in_the_route(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_safe_enabled_test_read_can_run_in_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _OPS["formfake.ping"] = ("safe", {"type": "object"})
     cls = _make(test_operation="formfake.ping")
     _only_fake(monkeypatch, cls)
     with capture_logs() as logs:
         await _start()
     assert not [e for e in logs if e["event"] == "connector_test_operation_not_ready"]
-    assert _route_test_operation(cls) == "formfake.ping"
+    assert _route_test_run(cls) == {"can_run": True, "code": None, "reason": None}
 
 
 async def _start_twice_with(monkeypatch: pytest.MonkeyPatch, change: Any) -> tuple[Any, list[Any]]:
@@ -289,7 +292,7 @@ def _row_update(**values: Any) -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("level", ["caution", "dangerous", "destructive"])
-async def test_a_stored_risk_level_warns_starts_and_hides_the_test_read(
+async def test_a_stored_risk_level_warns_starts_and_the_test_read_waits(
     monkeypatch: pytest.MonkeyPatch, level: str
 ) -> None:
     change = _row_update(safety_level=level, requires_approval=level == "destructive")
@@ -298,20 +301,20 @@ async def test_a_stored_risk_level_warns_starts_and_hides_the_test_read(
         ("FakeConnector", "formfake.ping", f"stored risk level {level!r}")
     ]
     assert warnings[0]["log_level"] == "warning"
-    assert _route_test_operation(cls) is None
+    assert _route_test_run(cls)["code"] == "waits_for_approval"
 
 
 @pytest.mark.asyncio
-async def test_a_turned_off_row_warns_starts_and_hides_the_test_read(
+async def test_a_turned_off_row_warns_starts_and_the_test_read_is_not_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cls, warnings = await _start_twice_with(monkeypatch, _row_update(is_enabled=False))
     assert [w["stored_value"] for w in warnings] == ["the row is turned off"]
-    assert _route_test_operation(cls) is None
+    assert _route_test_run(cls)["code"] == "not_enabled"
 
 
 @pytest.mark.asyncio
-async def test_an_override_warns_starts_and_hides_the_test_read(
+async def test_an_override_warns_starts_and_the_test_read_waits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def add_override(session: Any) -> None:
@@ -331,7 +334,7 @@ async def test_an_override_warns_starts_and_hides_the_test_read(
     assert [w["stored_value"] for w in warnings] == [
         "an override (install) sets risk level 'caution'"
     ]
-    assert _route_test_operation(cls) is None
+    assert _route_test_run(cls)["code"] == "waits_for_approval"
 
 
 def _retire_the_test_read(monkeypatch: pytest.MonkeyPatch) -> type[Connector]:

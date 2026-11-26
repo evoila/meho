@@ -18,19 +18,17 @@ its operation rows. For each registered connector class:
 These are facts of the code. A broken one stops the start with a message that
 names the connector class. A value that lives only in the database (a stored
 risk level on the row, the row's turned-off mark, an override) never stops the
-start: MEHO logs one warning line per value and starts. While such a value
-holds, the target form route answers ``test_operation: null`` for that class
-(:func:`ready_test_operations`). The core only reads the declarations; it never
-changes how a connector logs in.
+start: MEHO logs one warning line per value and starts. Whether the caller can
+run the test read now is not decided here: the target form route asks the
+call's own lookup and policy
+(:func:`~meho_backplane.operations.run_now_check.run_now`). The core only reads
+the declarations; it never changes how a connector logs in.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Iterable, Mapping
 from typing import Any
-from uuid import UUID
 
 import structlog
 from sqlalchemy import select
@@ -42,7 +40,6 @@ from meho_backplane.connectors.target_form import (
     ConnectorDeclarationError,
     check_connector_declaration,
 )
-from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -50,15 +47,13 @@ from meho_backplane.operations._validate import (
     params_errors,
     validate_params,
 )
-from meho_backplane.operations.op_policy import OpKey, load_overrides
 from meho_backplane.operations.switch_params import checked_parameter_schema
 
 __all__ = [
     "CodeLevels",
     "assert_connector_declarations_valid",
-    "collect_code_safety_levels",
+    "code_safety_levels",
     "note_code_safety_level",
-    "ready_test_operations",
     "registered_connector_classes",
     "stored_state_problems",
 ]
@@ -67,29 +62,33 @@ __all__ = [
 #: in this start, with the risk level the registrar's own code gives it.
 CodeLevels = Mapping[tuple[str, str, str, str], str]
 
-_CODE_LEVELS: ContextVar[dict[tuple[str, str, str, str], str] | None] = ContextVar(
-    "meho_connector_code_safety_levels", default=None
-)
+#: The key under which the registrars' code levels live in ``session.info`` of
+#: the start-up registration transaction.
+_CODE_LEVELS_KEY = "meho_connector_code_safety_levels"
 
 
-@contextmanager
-def collect_code_safety_levels() -> Iterator[dict[tuple[str, str, str, str], str]]:
-    """Collect the code's risk level of every operation registered while the block runs."""
-    levels: dict[tuple[str, str, str, str], str] = {}
-    token = _CODE_LEVELS.set(levels)
-    try:
-        yield levels
-    finally:
-        _CODE_LEVELS.reset(token)
+def code_safety_levels(session: AsyncSession) -> dict[tuple[str, str, str, str], str]:
+    """The code's risk level of every operation registered through *session* so far."""
+    levels: dict[tuple[str, str, str, str], str] = session.info.setdefault(_CODE_LEVELS_KEY, {})
+    return levels
 
 
 def note_code_safety_level(
-    *, product: str, version: str, impl_id: str, op_id: str, safety_level: str
+    session: AsyncSession,
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+    safety_level: str,
 ) -> None:
-    """Remember the risk level the registrar's code gives *op_id*, while a start collects."""
-    levels = _CODE_LEVELS.get()
-    if levels is not None:
-        levels[(product, version, impl_id, op_id)] = safety_level
+    """Remember the risk level the registrar's code gives *op_id*, on *session*.
+
+    Every registration path ends in the one helper that calls this, so the
+    start-up transaction (which owns *session*) sees each operation any
+    registrar wrote.
+    """
+    code_safety_levels(session)[(product, version, impl_id, op_id)] = safety_level
 
 
 def registered_connector_classes() -> list[type[Connector]]:
@@ -228,7 +227,7 @@ async def assert_connector_declarations_valid(
     """Raise :class:`ConnectorDeclarationError` for the first broken declaration.
 
     *code_levels* holds the operations the registrars wrote in this start,
-    with the risk level of their code (:func:`collect_code_safety_levels`).
+    with the risk level of their code (:func:`code_safety_levels`).
 
     ``allow_missing_rows`` is for the test-only registrar snapshot
     (``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS``): a snapshot replay runs no
@@ -243,33 +242,3 @@ async def assert_connector_declarations_valid(
         await _check_test_operation(
             session, cls, code_levels=code_levels, allow_missing_rows=allow_missing_rows
         )
-
-
-async def ready_test_operations(
-    tenant_id: UUID, classes: Iterable[type[Connector]]
-) -> set[type[Connector]]:
-    """Read each test read's stored row (risk level, turned-off mark) and overrides.
-
-    The overrides read are those of the install and of *tenant_id*. A class is
-    in the set when the stored row has risk level ``safe`` and is not turned
-    off, and no override raises its risk level or makes it wait for approval.
-    A class with no row, or with a problem from :func:`stored_state_problems`,
-    is not in the set.
-    """
-    wanted = [cls for cls in classes if cls.test_operation is not None]
-    if not wanted:
-        return set()
-    ready: set[type[Connector]] = set()
-    async with get_sessionmaker()() as session:
-        for cls in wanted:
-            op_id = str(cls.test_operation)
-            row = await _test_row(session, cls, op_id)
-            if row is None:
-                continue
-            key = OpKey(cls.product, cls.version, cls.impl_id, op_id)
-            overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(
-                key, []
-            )
-            if not stored_state_problems(row, overrides):
-                ready.add(cls)
-    return ready

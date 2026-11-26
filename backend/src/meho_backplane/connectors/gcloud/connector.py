@@ -99,6 +99,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.log_host import host_for_log
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud.backup_bucket import BackupBucketOps
@@ -590,7 +591,7 @@ class GcloudConnector(
         resp = await client.get(abs_url, params=params, headers=headers)
 
         if resp.status_code == 401:
-            _log.info("gcloud_401_token_refresh", target=target.name, url=abs_url)
+            _log.info("gcloud_401_token_refresh", target=target.name, url=host_for_log(abs_url))
             new_token = await self.refresh_token(target)
             headers = {"Authorization": f"Bearer {new_token}"}
             resp = await client.get(abs_url, params=params, headers=headers)
@@ -783,7 +784,9 @@ class GcloudConnector(
         resp = await client.post(abs_url, json=json_body or {}, headers=headers)
 
         if resp.status_code == 401:
-            _log.info("gcloud_401_token_refresh_post", target=target.name, url=abs_url)
+            _log.info(
+                "gcloud_401_token_refresh_post", target=target.name, url=host_for_log(abs_url)
+            )
             new_token = await self.refresh_token(target)
             headers = {"Authorization": f"Bearer {new_token}"}
             resp = await client.post(abs_url, json=json_body or {}, headers=headers)

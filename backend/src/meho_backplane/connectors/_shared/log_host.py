@@ -6,7 +6,7 @@ import re
 
 import httpx
 
-__all__ = ["UNPARSEABLE_ADDRESS", "host_for_log"]
+__all__ = ["UNPARSEABLE_ADDRESS", "host_for_log", "origin_for_log", "spec_source_for_log"]
 
 #: The one fixed mark a log line holds when there is no host name to show.
 UNPARSEABLE_ADDRESS = "<unparseable-location>"
@@ -36,3 +36,34 @@ def host_for_log(address: str | httpx.URL) -> str:
     if not _HOST_NAME.fullmatch(url.raw_host):
         return UNPARSEABLE_ADDRESS
     return host
+
+
+def origin_for_log(address: str | httpx.URL) -> str:
+    """Return only ``scheme://host`` of ``address``, or one fixed mark.
+
+    Use it for an address of MEHO's own settings or requests, where the
+    scheme helps the reader. The result never holds the path, the query, the
+    fragment, the port or the user part. A value that has no scheme or no valid
+    host name gives :data:`UNPARSEABLE_ADDRESS`.
+    """
+    try:
+        url = address if isinstance(address, httpx.URL) else httpx.URL(address)
+    except (httpx.InvalidURL, UnicodeError):
+        return UNPARSEABLE_ADDRESS
+    host = host_for_log(url)
+    if host == UNPARSEABLE_ADDRESS or not url.scheme:
+        return UNPARSEABLE_ADDRESS
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{url.scheme}://{host}"
+
+
+def spec_source_for_log(uri: str) -> str:
+    """Return ``scheme://host`` for a spec at a web address, else ``file``.
+
+    A local or packaged spec has no address worth logging, and its path is not
+    written.
+    """
+    if uri.lower().startswith(("http://", "https://")):
+        return origin_for_log(uri)
+    return "file"

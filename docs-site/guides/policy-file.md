@@ -504,6 +504,9 @@ For each setting it shows:
   the dry run lists its matches with every switch;
 - a warning when the setting makes a step of a multi-step operation
   wait, with every multi-step operation that runs it, at every level. A
+  setting of the install counts when it makes the step wait for at least
+  one run, also the run of a tenant whose own row of the step is in
+  another group. A
   policy file entry that makes only the direct call wait gives no such
   warning. As
   `destructive`, a step is refused, not held for approval, so such a run

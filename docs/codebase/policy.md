@@ -551,4 +551,6 @@ the refusal sentences),
 "always wait" carry-over: the list, steps at every level, the operations
 of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
 (who may run it, every table the same, an override keeps waiting),
+`backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
+warning exactly when the step check makes the step wait, in both scopes),
 `cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

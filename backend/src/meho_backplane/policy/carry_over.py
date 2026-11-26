@@ -29,8 +29,9 @@ Per setting it says:
   and against every declared step with the group the step gate finds
   for it, also a step with no row a call can use. An entry names the
   multi-step operations of an operation only when it makes the step
-  wait, not only the direct call. As ``destructive``, a step of a
-  multi-step operation is refused, not held for approval;
+  wait for at least one run of the scope, not only the direct call. As
+  ``destructive``, a step of a multi-step operation is refused, not held
+  for approval;
 * whether the install is in sandbox mode. There a delete grant of a
   service login can cover some ``destructive`` operations;
 * that, as ``destructive``, a call needs a matching preview first.
@@ -334,6 +335,36 @@ async def _stored_entries(
         ) from exc
 
 
+async def _step_coordinates(
+    session: AsyncSession, scope: Scope, tenant_id: UUID, key: _StepKey, row: EndpointDescriptor
+) -> list[OpCoordinates]:
+    """A declared step once per group the step gate can find for it.
+
+    The step gate takes the group of the tenant's own row of the step
+    first, then the one of the built-in row, and none without a row
+    (:func:`~meho_backplane.policy.store._stored_group_key`). A tenant's
+    settings count for the runs of that tenant. The install's settings
+    count for every run: the one of a tenant without its own row (the
+    built-in group) and the one of each tenant with its own row.
+    """
+    runs: list[UUID | None] = [tenant_id]
+    if scope == "install":
+        own = (
+            select(EndpointDescriptor.tenant_id)
+            .distinct()
+            .where(
+                EndpointDescriptor.tenant_id.is_not(None),
+                EndpointDescriptor.product == row.product,
+                EndpointDescriptor.version == row.version,
+                EndpointDescriptor.impl_id == row.impl_id,
+                EndpointDescriptor.op_id == row.op_id,
+            )
+        )
+        runs = [None, *(await session.execute(own)).scalars()]
+    groups = {await _stored_group_key(session, run, row) for run in runs}
+    return [OpCoordinates(key[0], group, key[1]) for group in sorted(groups, key=lambda g: g or "")]
+
+
 async def _file_settings(
     session: AsyncSession,
     scope: Scope,
@@ -348,19 +379,19 @@ async def _file_settings(
     if not waits:
         return []
     stored = await _operations(session, scope, tenant_id)
-    # A declared step, with the group the step gate finds for it: the
-    # tenant's row first, then the built-in row, none without a row.
-    step_tenant = tenant_id if scope == "tenant" else None
     as_steps = {
-        key: OpCoordinates(key[0], await _stored_group_key(session, step_tenant, row), key[1])
+        key: await _step_coordinates(session, scope, tenant_id, key, row)
         for key, row in sorted(step_rows.items())
     }
-    # The entries that make each step wait: only they name its multi-step operations.
+    # The entries that make a step wait for at least one run: only they
+    # name its multi-step operations.
     step_waits = {
-        key: {e.ref for e in _waiting_entries(entries, coords)} for key, coords in as_steps.items()
+        key: {e.ref for coords in runs for e in _waiting_entries(entries, coords)}
+        for key, runs in as_steps.items()
     }
     candidates = sorted(
-        {*stored, *as_steps.values()}, key=lambda c: (c.connector_id, c.op_id, c.group_key or "")
+        {*stored, *(coords for runs in as_steps.values() for coords in runs)},
+        key=lambda c: (c.connector_id, c.op_id, c.group_key or ""),
     )
     reached: dict[str, list[CarryOverOperation]] = {e.ref: [] for e in waits}
     listed: dict[str, set[_StepKey]] = {e.ref: set() for e in waits}

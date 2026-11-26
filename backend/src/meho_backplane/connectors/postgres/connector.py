@@ -61,6 +61,7 @@ from meho_backplane.connectors.postgres import queries
 from meho_backplane.connectors.postgres.ops import PG_OPS, PG_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.postgres.query_guard import (
     assert_no_admin_functions,
+    assert_no_secret_catalogs,
     assert_not_superuser,
 )
 from meho_backplane.connectors.postgres.session import (
@@ -231,8 +232,9 @@ class PostgresConnector(Connector):
         """``postgres.query`` -- a guarded free-form read-only SELECT.
 
         Before a connection is opened, the statement must pass the
-        first-keyword allowlist (:func:`assert_read_only_sql`) and the admin
-        function deny list (:func:`assert_no_admin_functions`). After the
+        first-keyword allowlist (:func:`assert_read_only_sql`), the admin
+        function deny list (:func:`assert_no_admin_functions`) and the
+        catalog deny list (:func:`assert_no_secret_catalogs`). After the
         connection is open, the login role must not be a superuser
         (:func:`assert_not_superuser`, unless the target allows it). Then the
         statement runs on the server-enforced read-only session with its
@@ -241,6 +243,7 @@ class PostgresConnector(Connector):
         sql = params["sql"]
         assert_read_only_sql(sql)
         assert_no_admin_functions(sql)
+        assert_no_secret_catalogs(sql)
         max_rows = int(params.get("max_rows") or _DEFAULT_MAX_ROWS)
         async with self._connection(target, operator, database=params.get("database")) as conn:
             await assert_not_superuser(conn, target)

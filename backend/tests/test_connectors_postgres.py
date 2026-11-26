@@ -63,6 +63,8 @@ from meho_backplane.connectors.postgres.session import (
     DEFAULT_TRUST_USER,
     connect_read_only,
     first_significant_keyword,
+    first_significant_keywords,
+    nested_block_comment_in,
 )
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
@@ -423,6 +425,8 @@ def test_read_only_gate_rejects_non_read_first_keyword(sql: str) -> None:
         ("  select now()", "SELECT"),
         ("/* audit */ (SELECT 1)", "SELECT"),
         ("-- lead comment\nSHOW all", "SHOW"),
+        ("-- lead comment\r\nSELECT 1", "SELECT"),
+        ("\f\v SELECT 1", "SELECT"),
         ("WITH x AS (SELECT 1) SELECT * FROM x", "WITH"),
         ("EXPLAIN SELECT 1", "EXPLAIN"),
         ("TABLE pg_class", "TABLE"),
@@ -446,6 +450,96 @@ async def test_run_query_rejects_write_without_opening_connection(
     with pytest.raises(PostgresReadOnlyError):
         await connector.run_query(_make_operator(), _PgTarget(), {"sql": "DELETE FROM t"})
     mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("sql", "server_keyword"),
+    [
+        ("-- c\rSHOW server_version /*\nSELECT */", "SHOW"),
+        ("-- c\rDELETE FROM t\nSELECT 1", "DELETE"),
+        ("-- c\rSELECT 1 AS\nDELETE", "SELECT"),
+    ],
+    ids=[
+        "show-after-a-carriage-return",
+        "write-after-a-carriage-return",
+        "write-after-a-line-feed",
+    ],
+)
+def test_a_carriage_return_ends_a_line_comment_and_both_readings_are_checked(
+    sql: str, server_keyword: str
+) -> None:
+    """PostgreSQL ends a line comment at a carriage return; the gate reads it the same way.
+
+    The gate also checks the reading that ends a line comment only at a line
+    feed, so a statement that either reading refuses is refused.
+    """
+    assert first_significant_keyword(sql) == server_keyword
+    if server_keyword == "SHOW":
+        assert first_significant_keywords(sql) == {"SHOW", "SELECT"}
+        assert_read_only_sql(sql)
+        return
+    with pytest.raises(PostgresReadOnlyError, match="DELETE"):
+        assert_read_only_sql(sql)
+
+
+@pytest.mark.parametrize("sql", ["\u00a0DELETE FROM t", "\u2003SELECT 1"])
+def test_unicode_white_space_does_not_count_as_sql_white_space(sql: str) -> None:
+    """The PostgreSQL scanner reads only ASCII white space; other space is refused."""
+    with pytest.raises(PostgresReadOnlyError):
+        assert_read_only_sql(sql)
+
+
+def _nested_comment_statements(word: str) -> list[str]:
+    """Statements in which a block comment holds the start of another one."""
+    return [
+        f"/* a /* b */ {word} */ SELECT 1",
+        f"/* a /* b */ SELECT */ {word} 1",
+        f"/* a /* b /* c */ */ VALUES */ {word} 1",
+        f"/* a /*/ {word} 1",
+        f"{word} 1 /* a /* b */ */",
+        f"{word} 1 /* unclosed /* nested",
+    ]
+
+
+_NESTED_COMMENT_CASES = [
+    pytest.param(sql, id=f"{word}-{i}")
+    for word in [*sorted(ALLOWED_FIRST_KEYWORDS), "DELETE", "INSERT"]
+    for i, sql in enumerate(_nested_comment_statements(word))
+]
+
+
+@pytest.mark.parametrize("sql", _NESTED_COMMENT_CASES)
+def test_read_only_gate_refuses_a_block_comment_inside_a_block_comment(sql: str) -> None:
+    """A block comment that holds the start of another one is refused for each first word."""
+    assert nested_block_comment_in(sql)
+    with pytest.raises(PostgresReadOnlyError, match="block comment holds the start"):
+        assert_read_only_sql(sql)
+
+
+@pytest.mark.parametrize("sql", _NESTED_COMMENT_CASES)
+@pytest.mark.asyncio
+async def test_run_query_refuses_nested_block_comments_before_a_connection_opens(
+    monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    mock = _patch_connection(monkeypatch, _FakeConn())
+    with pytest.raises(PostgresReadOnlyError, match="block comment holds the start"):
+        await PostgresConnector().run_query(_make_operator(), _PgTarget(), {"sql": sql})
+    mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "/* a */ /* b */ SELECT 1",
+        "/**/ SELECT 1",
+        "SELECT 1 /* unclosed",
+        "SELECT '*/' AS t",
+        "-- /* line comment\nSELECT 1",
+    ],
+)
+def test_comments_that_do_not_nest_pass_the_gate(sql: str) -> None:
+    assert not nested_block_comment_in(sql)
+    assert_read_only_sql(sql)
 
 
 # ---------------------------------------------------------------------------

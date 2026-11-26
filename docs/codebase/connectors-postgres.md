@@ -16,8 +16,8 @@ sibling (#2237) reuses for a different wire driver.
 The connector is **read-only, doubly enforced**: every session is opened with
 `default_transaction_read_only=on` and a `statement_timeout` (server-enforced),
 and the free-form `postgres.query` op additionally runs its statement through a
-first-keyword allowlist and a deny list of server admin functions before it
-reaches the wire, and refuses to run as a superuser role unless the target
+first-keyword allowlist, a deny list of server admin functions and a deny list
+of catalogs that can hold a secret before it reaches the wire, and refuses to run as a superuser role unless the target
 allows it. Auth is **optional** — a trust-auth instance (no `secret_ref`)
 connects with no password.
 
@@ -38,11 +38,12 @@ Source: `backend/src/meho_backplane/connectors/postgres/`.
   (`session.py`) — the wire-session factory (server-enforced read-only +
   statement timeout + the optional-auth branch) and the pure first-keyword
   gate + its violation type.
-- **`assert_no_admin_functions` / `assert_not_superuser` /
-  `PostgresSuperuserError`** (`query_guard.py`) — the two extra guards of
-  `postgres.query`: the deny list of server admin functions
-  (`DENIED_FUNCTIONS` + `DENIED_FUNCTION_PREFIXES`) and the superuser refusal
-  with its target flag `extras["allow_superuser_query"]`.
+- **`assert_no_admin_functions` / `assert_no_secret_catalogs` /
+  `assert_not_superuser` / `PostgresSuperuserError`** (`query_guard.py`) —
+  the three extra guards of `postgres.query`: the deny list of server admin
+  functions (`DENIED_FUNCTIONS` + `DENIED_FUNCTION_PREFIXES`), the deny list
+  of catalogs that can hold a secret (`DENIED_RELATIONS`), and the superuser
+  refusal with its target flag `extras["allow_superuser_query"]`.
 - **`queries.py`** — the SQL text, row-shaping, and the `_jsonable` normaliser
   that coerces asyncpg's rich types (`datetime`, `Decimal`, `UUID`, `inet`,
   `bytes`) to JSON-serialisable primitives.
@@ -78,9 +79,9 @@ Ops:
 | `postgres.tables` | `pg_stat_user_tables` + size helpers | vacuum/analyze stats + total/table/index bytes |
 | `postgres.indexes` | `pg_stat_user_indexes` + `pg_relation_size` | scan counters + index size |
 | `postgres.activity` | `pg_stat_activity` | sessions; **query text omitted** (may hold literal secrets) |
-| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides |
+| `postgres.settings` | `pg_settings` | curated set by default; `names` filter overrides; **a connection text is shown whole or as one fixed mark, never in part**: a value of `primary_conninfo` is shown whole only when it holds no at sign, percent sign, backslash or quote, none of the secret key words (`password`, `sslpassword`, `oauth_client_secret`, `scram_client_key`, `scram_server_key`) in any case, and no colon after the start word `postgresql://` or `postgres://`; else the mark that names the setting stands in place of the whole value; the call is not refused because of it |
 | `postgres.replication` | `pg_stat_replication` + `pg_stat_wal_receiver` + `pg_is_in_recovery()` / `pg_last_xact_replay_timestamp()` | physical streaming replication health + standby lag; symmetric (standbys on the primary, `wal_receiver` on the standby); LSNs cast to canonical `X/Y` text, `*_lag` as float seconds; **`conninfo` omitted** (holds the primary DSN) |
-| `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions denied + no superuser role + server read-only; row-capped |
+| `postgres.query` | any read-only statement | first-keyword allowlisted + admin functions and secret catalogs denied + no superuser role + server read-only; row-capped |
 
 Schemas/tables/indexes/query accept an optional `database` param (catalog stats
 are per-database); tables/indexes accept an optional `schema` filter.
@@ -97,7 +98,14 @@ are per-database); tables/indexes accept an optional `schema` filter.
    `postgres.query`) parses the first significant keyword (skipping leading
    comments and wrapping parens) and rejects anything not in
    `{SELECT, SHOW, EXPLAIN, WITH, TABLE, VALUES}` **before a connection is
-   opened**. `WITH`/`EXPLAIN` are admitted at the keyword level; a
+   opened**. It first refuses a statement in which a block comment holds the
+   start of another block comment (`assert_no_nested_block_comment`).
+   PostgreSQL nests block comments, so with that refusal the first keyword
+   the gate reads is the one the server reads. White space and the end of a
+   `--` line comment (a line feed or a carriage return) follow the PostgreSQL
+   SQL scanner. The gate also checks a second reading that ends a line
+   comment only at a line feed, and refuses the statement when either reading
+   starts with a word that is not on the list. `WITH`/`EXPLAIN` are admitted at the keyword level; a
    data-modifying CTE or `EXPLAIN ANALYZE <write>` that slips past is still
    caught by the server-side backstop.
 
@@ -117,7 +125,7 @@ cannot raise it.
 
 A read-only transaction stops writes to tables, but PostgreSQL still allows
 some server admin functions inside it, and what they do depends on the login
-role's rights. So the free-form op adds two checks:
+role's rights. So the free-form op adds three checks:
 
 1. **Admin function deny list** — `assert_no_admin_functions` runs after the
    first-keyword gate and before a connection is opened. It lower-cases every
@@ -128,12 +136,16 @@ role's rights. So the free-form op adds two checks:
    `pg_switch_wal`, recovery control such as `pg_promote`, replication slot
    and origin functions, statistics resets, `pg_notify`, and the built-ins
    that run a SQL string given as an argument: `ts_stat`, `ts_rewrite`,
-   `connectby`) or starts with a prefix in `DENIED_FUNCTION_PREFIXES`
+   `connectby`, the `xml2` extension function `xpath_table`, and the
+   extension functions that read stored rows:
+   `get_raw_page`, `pg_get_wal_block_info`) or starts with a prefix in `DENIED_FUNCTION_PREFIXES`
    (`pg_ls_`, `pg_logical_slot_`, `pg_stat_reset`, `pg_sleep`, `dblink`,
-   `postgres_fdw_`, `query_to_xml`, `cursor_to_xml`, `crosstab`). The names
+   `postgres_fdw_`, `query_to_xml`, `cursor_to_xml`, `crosstab`, and the
+   table-dumping families `table_to_xml`, `schema_to_xml`,
+   `database_to_xml`). The names
    are pinned to the PostgreSQL 16 pages "System Administration Functions",
    "XML Functions" (mapping tables to XML), "Text Search Functions" and the
-   `tablefunc` extension. The SQL-running functions are on the list because
+   `tablefunc` and `xml2` extensions. The SQL-running functions are on the list because
    a statement could build a denied name from string pieces (`'pg_' ||
    'terminate_backend(...)'`), which the word scan cannot see, and hand it
    to such a function; the server would join and run it. The scan does not
@@ -141,9 +153,68 @@ role's rights. So the free-form op adds two checks:
    hide a later call; a false hit (a column named `pg_sleep`) only gives a
    clear refusal. Unicode-escaped identifiers (`U&"..."`) are refused as a
    whole. The prefixes cover no catalog view or role name
-   (`pg_file_settings`, `pg_replication_origin_status`, `pg_read_all_data`,
-   `table_to_xml` stay allowed).
-2. **No superuser role** — `assert_not_superuser` runs on the open connection
+   (`pg_replication_origin_status`, `pg_read_all_data` stay allowed). The table-dumping functions are on the list because they
+   read every row of a table or schema chosen by a value, and the statement
+   can build that value from pieces, so a denied catalog name (next check)
+   would not show in the text. For the same reason the list holds
+   `get_raw_page` (the `pageinspect` extension: the stored page of a table
+   named by a text value) and `pg_get_wal_block_info` (the `pg_walinspect`
+   extension: the stored row data of the WAL records). The other functions
+   of these extensions read a page that `get_raw_page` returns, or show WAL
+   records without their row data. `xpath_table` (the `xml2` extension) is
+   on the list because it builds a SQL text from its text arguments (table
+   name, key, column and condition) and runs it. The other `xml2` functions
+   read a document text, not SQL.
+2. **Catalog deny list** — `assert_no_secret_catalogs` runs right after the
+   function check, also before a connection is opened, with the same word
+   scan and the same refusal of Unicode-escaped identifiers. It refuses a
+   statement that names a catalog in `DENIED_RELATIONS`:
+   - `pg_authid`, `pg_shadow` — the password hash of every role;
+   - `pg_subscription` — the connection string of a logical replication
+     subscription, often with a password;
+   - `pg_user_mapping`, `pg_user_mappings`, and the information schema views
+     `user_mapping_options` and `_pg_user_mappings` — the options of a
+     foreign server login (`postgres_fdw`), with its password;
+   - `pg_foreign_server`, and the information schema views
+     `foreign_server_options` and `_pg_foreign_servers` — the options of a
+     foreign server, where some foreign data wrappers keep a login or a key;
+   - `pg_hba_file_rules` (view and function) — the lines of `pg_hba.conf`,
+     where the options of an ldap line hold the bind password;
+   - `pg_stat_activity`, `pg_stat_get_activity`,
+     `pg_stat_get_backend_activity` — the SQL text of other sessions, which
+     can hold a password;
+   - `pg_stat_statements`, `pg_stat_statements_info` — the extension that
+     keeps the SQL text of past statements (its info view goes with it).
+   - `pg_settings`, `pg_file_settings`, `pg_show_all_settings`,
+     `pg_show_all_file_settings`, `current_setting` — MEHO refuses these
+     reads of server settings and points to `postgres.settings`.
+   - `pg_statistic`, `pg_stats`, `pg_stats_ext`, `pg_stats_ext_exprs`,
+     `pg_statistic_ext_data` — MEHO refuses these reads of column
+     statistics, which hold sampled column values.
+
+   The check also refuses `SHOW ALL` and a `SHOW` of a setting in
+   `CONNECTION_TEXT_SETTINGS` (`primary_conninfo`), in any case, in double
+   quotes or after a comment, under both readings of the first keyword. The
+   refusal for settings names
+   `postgres.settings`. For every caller, it shows the value of such a
+   setting whole or as one fixed mark that names the setting, never in part,
+   and it does not refuse the call because of it. The value is shown whole
+   only when it holds no at sign, percent sign, backslash or quote, no word
+   of `CONNECTION_TEXT_SECRET_KEYWORDS` in any case (also inside a longer
+   word), and no colon after the start word `postgresql://` or
+   `postgres://`. The refusal for
+   sessions names `postgres.activity`, which reads the same
+   view without the `query` column. Views that show no secret value stay
+   allowed: `pg_roles` and `pg_user` (the password is shown as stars),
+   `pg_stat_ssl`, `pg_stat_subscription` (no connection string), and
+   `pg_stat_wal_receiver` (its connection string hides the password). The
+   names are pinned to the PostgreSQL 16 pages "System Catalogs", "System
+   Views", "The Cumulative Statistics System", the information schema and
+   `pg_stat_statements`. The check holds for every login and every target,
+   also a target that allows a superuser. A sensor of `postgres.query` whose
+   statement names one of these catalogs reads `unknown` at each run, with
+   the refusal as the cause.
+3. **No superuser role** — `assert_not_superuser` runs on the open connection
    before the statement. It reads `pg_roles.rolsuper` for `current_user` and
    lets the query run only on a clear `false`; a `true`, a missing row or an
    odd value refuses with `PostgresSuperuserError`. A target that sets
@@ -151,6 +222,12 @@ role's rights. So the free-form op adds two checks:
    (an operator's explicit choice for a lab or dev instance). The curated
    ops are not affected: their SQL is fixed catalog reads, so they still run
    as any role, including the trust-auth default `postgres`.
+
+   A superuser login that a target allows can still read every other table
+   and catalog. A login that is not a superuser, with
+   read rights only on the tables the operator wants to show (and
+   `pg_monitor` or `pg_read_all_stats` only when needed), is the right
+   choice for `postgres.query`.
 
 Both errors are `ValueError` subclasses, so the dispatcher renders the
 message under `connector_error` and the caller sees which name or role was

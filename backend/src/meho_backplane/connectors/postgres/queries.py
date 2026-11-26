@@ -26,7 +26,13 @@ from typing import Any
 
 import asyncpg
 
+from meho_backplane.connectors.postgres.query_guard import (
+    CONNECTION_TEXT_SECRET_KEYWORDS,
+    CONNECTION_TEXT_SETTINGS,
+)
+
 __all__ = [
+    "CONNECTION_TEXT_MARK",
     "CURATED_SETTINGS",
     "fetch_activity",
     "fetch_databases",
@@ -311,11 +317,72 @@ async def fetch_activity(conn: asyncpg.Connection) -> dict[str, Any]:
     return {"sessions": _rows(records)}
 
 
+#: The value columns of a ``pg_settings`` row.
+_SETTING_VALUE_COLUMNS: tuple[str, ...] = ("setting", "boot_val", "reset_val")
+
+#: The two start words of the address form of a connection text, compared in
+#: any case.
+_ADDRESS_PREFIXES: tuple[str, ...] = ("postgresql://", "postgres://")
+
+#: Characters that make MEHO show a connection text as the mark: an at sign,
+#: a percent sign, a backslash and both quotes.
+_MARK_CHARACTERS = frozenset("@%\\'\"")
+
+#: The one fixed mark that stands in place of a whole connection text.
+#: ``{setting}`` is the name of the setting.
+CONNECTION_TEXT_MARK = (
+    "[hidden: the value of the setting '{setting}' holds a secret; read it on the server]"
+)
+
+
+def _connection_text_needs_mark(text: str) -> bool:
+    """Whether MEHO shows a connection text as the mark, not whole.
+
+    This is no parse. It looks only at a few characters and words: an at
+    sign, a percent sign, a backslash or a quote; one of
+    :data:`CONNECTION_TEXT_SECRET_KEYWORDS` anywhere in the text, in any case;
+    or a start word of the address form followed by a colon.
+    """
+    if _MARK_CHARACTERS.intersection(text):
+        return True
+    lowered = text.lower()
+    if any(word in lowered for word in CONNECTION_TEXT_SECRET_KEYWORDS):
+        return True
+    for prefix in _ADDRESS_PREFIXES:
+        if lowered.startswith(prefix):
+            return ":" in text[len(prefix) :]
+    return False
+
+
+def _hide_connection_text(row: dict[str, Any]) -> dict[str, Any]:
+    """Show a setting in :data:`CONNECTION_TEXT_SETTINGS` whole or as the mark.
+
+    An empty value and a null value stay as they are.
+    """
+    setting = str(row.get("name", "")).lower()
+    if setting not in CONNECTION_TEXT_SETTINGS:
+        return row
+    for column in _SETTING_VALUE_COLUMNS:
+        value = row.get(column)
+        if isinstance(value, str) and value and _connection_text_needs_mark(value):
+            row[column] = CONNECTION_TEXT_MARK.format(setting=setting)
+    return row
+
+
 async def fetch_settings(conn: asyncpg.Connection, names: list[str] | None) -> dict[str, Any]:
-    """Return curated (or caller-named) runtime settings from ``pg_settings``."""
+    """Return curated (or caller-named) runtime settings from ``pg_settings``.
+
+    The value of a setting in
+    :data:`~meho_backplane.connectors.postgres.query_guard.CONNECTION_TEXT_SETTINGS`
+    is shown whole, or as one fixed mark (:data:`CONNECTION_TEXT_MARK`) that
+    names the setting, for every caller. No part of it is shown. It is shown
+    whole only when it holds no at sign, percent sign, backslash or quote,
+    none of the secret key words in any case, and no colon after a start word
+    of the address form. The call is not refused because of such a value.
+    """
     wanted = list(names) if names else list(CURATED_SETTINGS)
     records = await conn.fetch(_SETTINGS_SQL, wanted)
-    return {"settings": _rows(records)}
+    return {"settings": [_hide_connection_text(row) for row in _rows(records)]}
 
 
 async def run_select(conn: asyncpg.Connection, sql: str, max_rows: int) -> dict[str, Any]:

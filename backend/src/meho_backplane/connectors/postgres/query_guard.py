@@ -9,7 +9,7 @@ allows inside a read-only transaction: ending other sessions, reloading the
 server config, reading files on the server, controlling backups and
 replication, or opening a connection to another server. The login role's
 rights decide what such a call can do, and a superuser role can do all of
-it. So ``postgres.query`` adds two checks:
+it. So ``postgres.query`` adds three checks:
 
 * :func:`assert_no_admin_functions` refuses, before a connection is opened,
   any statement that names one of the functions in :data:`DENIED_FUNCTIONS`
@@ -25,7 +25,34 @@ it. So ``postgres.query`` adds two checks:
   ``tablefunc`` functions ``crosstab`` and ``connectby``). Without them a
   statement could build a denied name from pieces (``'pg_' ||
   'terminate_backend(...)'``) and hand it to the server as a string, which
-  the word scan cannot see.
+  the word scan cannot see. For the same reason it holds the functions that
+  read every row of a table or schema chosen by a value (``table_to_xml``,
+  ``schema_to_xml``, ``database_to_xml`` and their variants): the value can
+  be built from pieces too. It also holds the two extension functions that
+  read the stored rows of a table without naming the table in the statement:
+  ``get_raw_page`` (``pageinspect``) takes the table name as a text value and
+  returns its stored page, and ``pg_get_wal_block_info`` (``pg_walinspect``)
+  returns the stored row data of the WAL records. The other functions of
+  these extensions read a page that ``get_raw_page`` returns, or show WAL
+  records without their row data. The ``xml2`` extension function
+  ``xpath_table`` is on the list too: it builds a SQL text from its text
+  arguments (table name, key, column and condition) and runs it. The other
+  ``xml2`` functions read a document text, not SQL.
+
+* :func:`assert_no_secret_catalogs` refuses, before a connection is opened,
+  any statement that names one of the server catalogs, views or functions
+  in :data:`DENIED_RELATIONS`. Each of them can show a stored password
+  (also a login or key in the options of a foreign server, or the bind
+  password of an ldap line in ``pg_hba.conf``), a connection string with a
+  password, the SQL text of other sessions, a
+  server setting or sampled column values. It uses the same word scan and
+  the same refusal of Unicode-escaped identifiers. It also refuses
+  ``SHOW ALL`` and a ``SHOW`` of a setting in
+  :data:`CONNECTION_TEXT_SETTINGS`. The check holds for every login, also
+  on a target that allows a superuser. Settings are read with the curated
+  ``postgres.settings``. It shows a connection text whole or as one fixed
+  mark that names the setting, never in part, and it does not refuse the
+  call because of such a value.
 
 * :func:`assert_not_superuser` refuses to run the statement when the login
   role is a superuser, unless the target sets
@@ -41,7 +68,25 @@ XML") and "Text Search Functions and Operators"
 (https://www.postgresql.org/docs/16/functions-textsearch.html); plus the
 ``dblink`` and ``postgres_fdw`` extension functions that open remote
 connections and the ``tablefunc`` extension functions that run SQL text
-(https://www.postgresql.org/docs/16/tablefunc.html).
+(https://www.postgresql.org/docs/16/tablefunc.html), the ``pageinspect``
+extension (https://www.postgresql.org/docs/16/pageinspect.html) and the
+``pg_walinspect`` extension
+(https://www.postgresql.org/docs/16/pgwalinspect.html), and the ``xml2``
+extension (https://www.postgresql.org/docs/16/xml2.html). Catalog names are
+pinned to the PostgreSQL 16 pages "System Catalogs"
+(https://www.postgresql.org/docs/16/catalogs.html), "System Views"
+(https://www.postgresql.org/docs/16/views.html), "The Cumulative Statistics
+System" (https://www.postgresql.org/docs/16/monitoring-stats.html), the
+information schema view ``user_mapping_options``
+(https://www.postgresql.org/docs/16/infoschema-user-mapping-options.html),
+the information schema view ``foreign_server_options``
+(https://www.postgresql.org/docs/16/infoschema-foreign-server-options.html),
+the view ``pg_hba_file_rules``
+(https://www.postgresql.org/docs/16/view-pg-hba-file-rules.html),
+the ``pg_stat_statements`` extension
+(https://www.postgresql.org/docs/16/pgstatstatements.html), the ``SHOW``
+command (https://www.postgresql.org/docs/16/sql-show.html) and the setting
+functions of "System Administration Functions".
 """
 
 from __future__ import annotations
@@ -52,16 +97,25 @@ from typing import Any
 
 import asyncpg
 
-from meho_backplane.connectors.postgres.session import PostgresReadOnlyError
+from meho_backplane.connectors.postgres.session import (
+    PostgresReadOnlyError,
+    assert_no_nested_block_comment,
+    first_significant_keywords,
+)
 
 __all__ = [
     "ALLOW_SUPERUSER_QUERY_EXTRA",
+    "CONNECTION_TEXT_SECRET_KEYWORDS",
+    "CONNECTION_TEXT_SETTINGS",
     "DENIED_FUNCTIONS",
     "DENIED_FUNCTION_PREFIXES",
+    "DENIED_RELATIONS",
     "PostgresSuperuserError",
     "assert_no_admin_functions",
+    "assert_no_secret_catalogs",
     "assert_not_superuser",
     "denied_function_in",
+    "denied_relation_in",
 ]
 
 #: The target ``extras`` key that lets ``postgres.query`` run as a superuser.
@@ -123,6 +177,16 @@ DENIED_FUNCTIONS: frozenset[str] = frozenset(
         "ts_stat",
         "ts_rewrite",
         "connectby",
+        # Extension functions that read the stored rows of a table by a name
+        # in a text value, which a statement can build from pieces.
+        # pageinspect: the stored page of a table named by a text value.
+        "get_raw_page",
+        # pg_walinspect: the stored row data of the WAL records
+        # (block_data, block_fpi_data), for any table.
+        "pg_get_wal_block_info",
+        # xml2: builds a SQL text from its text arguments (table name, key,
+        # column and condition) and runs it.
+        "xpath_table",
     }
 )
 
@@ -138,7 +202,101 @@ DENIED_FUNCTION_PREFIXES: tuple[str, ...] = (
     "query_to_xml",  # query_to_xml, query_to_xmlschema, ..._and_xmlschema: run SQL text
     "cursor_to_xml",  # cursor_to_xml, cursor_to_xmlschema: read a cursor
     "crosstab",  # tablefunc crosstab, crosstab2..4, crosstab_N: run SQL text
+    # Read every row of a table or schema chosen by a value, which a
+    # statement can build from pieces: table_to_xml, table_to_xmlschema,
+    # table_to_xml_and_xmlschema, and the schema_* and database_* variants.
+    "table_to_xml",
+    "schema_to_xml",
+    "database_to_xml",
 )
+
+#: Server catalogs, views and functions (lower case, no schema) that
+#: ``postgres.query`` refuses. Each can show a stored password, a connection
+#: string with a password, the SQL text of other sessions, a server setting
+#: or sampled column values. ``pg_roles``, ``pg_user``,
+#: ``pg_stat_ssl``, ``pg_stat_subscription`` and ``pg_stat_wal_receiver``
+#: (its connection string hides the password) stay allowed.
+DENIED_RELATIONS: frozenset[str] = frozenset(
+    {
+        # The password hash (SCRAM verifier or MD5) of every role.
+        "pg_authid",
+        "pg_shadow",
+        # The connection string of a logical replication subscription.
+        "pg_subscription",
+        # The options of a foreign server login, with its password.
+        "pg_user_mapping",
+        "pg_user_mappings",
+        "_pg_user_mappings",
+        "user_mapping_options",
+        # The options of a foreign server. Some foreign data wrappers keep a
+        # login or a key there.
+        "pg_foreign_server",
+        "_pg_foreign_servers",
+        "foreign_server_options",
+        # The lines of pg_hba.conf (view and function): the options of an
+        # ldap line hold the bind password.
+        "pg_hba_file_rules",
+        # The SQL text of other sessions.
+        "pg_stat_activity",
+        "pg_stat_get_activity",
+        "pg_stat_get_backend_activity",
+        # The pg_stat_statements extension: the SQL text of past statements.
+        # Its info view is refused with it, so the extension is refused as
+        # one unit.
+        "pg_stat_statements",
+        "pg_stat_statements_info",
+        # Server settings. A setting can hold a connection string with a
+        # password; postgres.settings shows that value whole or as one mark.
+        "pg_settings",
+        "pg_file_settings",
+        "pg_show_all_settings",
+        "pg_show_all_file_settings",
+        "current_setting",
+        # Column statistics: sampled values of table columns.
+        "pg_statistic",
+        "pg_stats",
+        "pg_stats_ext",
+        "pg_stats_ext_exprs",
+        "pg_statistic_ext_data",
+    }
+)
+
+#: Settings (lower case) whose value is a connection text. ``postgres.query``
+#: refuses a ``SHOW`` of them. ``postgres.settings`` shows their value whole
+#: or as one fixed mark that names the setting, never in part (see
+#: :data:`CONNECTION_TEXT_SECRET_KEYWORDS`). It does not refuse the call
+#: because of such a value.
+CONNECTION_TEXT_SETTINGS: frozenset[str] = frozenset({"primary_conninfo"})
+
+#: The key words of a connection text whose value is a secret. Pinned to the
+#: libpq page "Parameter Key Words"
+#: (https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS):
+#: ``password``, ``sslpassword`` (the key of the client certificate),
+#: ``oauth_client_secret``, and the two SCRAM keys of PostgreSQL 18,
+#: ``scram_client_key`` and ``scram_server_key``.
+CONNECTION_TEXT_SECRET_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "password",
+        "sslpassword",
+        "oauth_client_secret",
+        "scram_client_key",
+        "scram_server_key",
+    }
+)
+
+_SETTINGS_OP = "postgres.settings"
+
+#: The curated operation to use instead, for a denied catalog that has one.
+_CURATED_INSTEAD: dict[str, str] = {
+    "pg_stat_activity": "postgres.activity",
+    "pg_stat_get_activity": "postgres.activity",
+    "pg_stat_get_backend_activity": "postgres.activity",
+    "pg_settings": _SETTINGS_OP,
+    "pg_file_settings": _SETTINGS_OP,
+    "pg_show_all_settings": _SETTINGS_OP,
+    "pg_show_all_file_settings": _SETTINGS_OP,
+    "current_setting": _SETTINGS_OP,
+}
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _UNICODE_ESCAPED_IDENTIFIER_RE = re.compile(r"[Uu]&\"")
@@ -168,24 +326,84 @@ def denied_function_in(sql: str) -> str | None:
     return None
 
 
-def assert_no_admin_functions(sql: str) -> None:
-    """Raise :class:`PostgresReadOnlyError` when *sql* names a denied function.
+def denied_relation_in(sql: str) -> str | None:
+    """Return the first denied catalog name found in *sql*, else ``None``.
 
-    Runs before a connection is opened, after the first-keyword gate.
+    The same raw word scan as :func:`denied_function_in`, compared with
+    :data:`DENIED_RELATIONS`.
     """
+    for match in _IDENTIFIER_RE.finditer(sql):
+        word = match.group(0).lower()
+        if word in DENIED_RELATIONS:
+            return word
+    return None
+
+
+def _refuse_unicode_escapes(sql: str) -> None:
     if _UNICODE_ESCAPED_IDENTIFIER_RE.search(sql):
         raise PostgresReadOnlyError(
             'postgres.query does not accept Unicode-escaped identifiers (U&"..."); '
             "write the identifier in plain form."
         )
+
+
+def assert_no_admin_functions(sql: str) -> None:
+    """Raise :class:`PostgresReadOnlyError` when *sql* names a denied function.
+
+    Runs before a connection is opened, after the first-keyword gate.
+    """
+    _refuse_unicode_escapes(sql)
     name = denied_function_in(sql)
     if name is not None:
         raise PostgresReadOnlyError(
             f"postgres.query refuses the statement: it names {name!r}, a server "
-            "admin, file, backup, replication, wait, remote-connection or "
-            "SQL-running function. Only plain reads of tables and catalogs are "
-            "accepted."
+            "admin, file, backup, replication, wait, remote-connection, "
+            "SQL-running or table-dumping function. Only plain reads of tables "
+            "and catalogs are accepted."
         )
+
+
+def _refuse_show_of_secret_settings(sql: str) -> None:
+    """Refuse ``SHOW ALL`` and a ``SHOW`` of a connection-text setting.
+
+    Every identifier-like word of a ``SHOW`` statement is checked, so a
+    comment, double quotes or upper case do not hide ``all`` or a name. A
+    statement with nested block comments is refused first, so the first
+    keyword is the one the server reads. The check runs when either reading
+    of :func:`first_significant_keywords` starts with ``SHOW``.
+    """
+    assert_no_nested_block_comment(sql)
+    if "SHOW" not in first_significant_keywords(sql):
+        return
+    for match in _IDENTIFIER_RE.finditer(sql):
+        word = match.group(0).lower()
+        if word == "all" or word in CONNECTION_TEXT_SETTINGS:
+            raise PostgresReadOnlyError(
+                "postgres.query refuses SHOW ALL and a SHOW of a setting that "
+                f"holds a connection text. Use {_SETTINGS_OP} instead."
+            )
+
+
+def assert_no_secret_catalogs(sql: str) -> None:
+    """Raise :class:`PostgresReadOnlyError` when *sql* names a denied catalog.
+
+    Also refuses ``SHOW ALL`` and a ``SHOW`` of a setting in
+    :data:`CONNECTION_TEXT_SETTINGS`. Runs before a connection is opened, for
+    every login and every target.
+    """
+    _refuse_unicode_escapes(sql)
+    _refuse_show_of_secret_settings(sql)
+    name = denied_relation_in(sql)
+    if name is None:
+        return
+    instead = _CURATED_INSTEAD.get(name)
+    hint = f" Use {instead} instead." if instead else ""
+    raise PostgresReadOnlyError(
+        f"postgres.query refuses the statement: it names {name!r}, a server "
+        "catalog, view or function that can show a stored password, a "
+        "connection string, the SQL text of other sessions, a server setting "
+        f"or sampled column values.{hint}"
+    )
 
 
 _IS_SUPERUSER_SQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user"

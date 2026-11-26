@@ -1416,7 +1416,8 @@ uiConsole:
 # must wait for approval. While this block is off, the pod gets no
 # APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
 # instead of letting it wait for approval. `GET /ready` shows the state under
-# `features.approval_custody`.
+# `features.approval_custody`. With `metricsAuth` on (the default), `/ready`
+# shows it only to a caller that sends the metrics token (see `metricsAuth`).
 #
 # With a built-in core part on, it is on by default (#4047): the install
 # makes the key in `<release>-core-approval-handoff`. Without one, create a

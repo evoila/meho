@@ -1282,6 +1282,15 @@ review payload also carries `classified_safety_level` /
 
 **Edit rules** (`apply_policy_edit`, called by `ReviewService.edit_op`):
 
+A reason never holds a secret. Before anything else, `apply_policy_edit` and
+`remove_override` check the reason with `reason_refusal`
+(`operations/change_reason.py`, which uses `contains_secret` from the
+settings schema). A reason that looks like a secret raises
+`OpPolicyEditError` with code `reason_looks_like_secret`: REST answers 400,
+MCP answers invalid params, and the console shows the refusal. MEHO writes
+nothing, and no audit row, answer or log line holds the reason. The check
+is in the service, so every way in gets it.
+
 | Edit | Who | Scope | Result |
 |---|---|---|---|
 | raise the risk level (any of the four levels) | tenant admin | own tenant | override; `destructive` also requires approval |

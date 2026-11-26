@@ -47,6 +47,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations.change_reason import REASON_HOLDS_SECRET
 from meho_backplane.operations.ingest import (
     BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
@@ -64,6 +65,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._secret_reason import assert_no_trace, made_up_key
 
 _TYPED = {"product": "typedpets", "version": "1.x", "impl_id": "typedpets"}
 _TYPED_CONNECTOR = "typedpets-1.x"
@@ -1198,3 +1200,99 @@ async def test_mcp_edit_tool_refuses_to_loosen(embedding: AsyncMock) -> None:
     result = await ca_mod._edit_op_handler(admin, {**base, "safety_level": "dangerous"})
     assert result["ok"] is True
     assert await _effective(uuid.uuid4()) == ("dangerous", True)
+
+
+# ---------------------------------------------------------------------------
+# A reason that looks like a secret is refused on every way in
+# ---------------------------------------------------------------------------
+
+
+async def _everything_stored() -> list[Any]:
+    """The audit rows and the override rows, as text to search."""
+    async with get_sessionmaker()() as session:
+        audit = (await session.execute(select(AuditLog))).scalars().all()
+        overrides = (await session.execute(select(OperationPolicyOverride))).scalars().all()
+    return [[r.payload, r.path] for r in audit] + [vars(o) for o in overrides]
+
+
+@pytest.mark.asyncio
+async def test_the_service_refuses_an_edit_whose_reason_looks_like_a_secret(
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    key = made_up_key()
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding, requires_approval=True)
+    admin = _operator(tenant_id, platform_admin=True)
+    with caplog.at_level("DEBUG"), pytest.raises(OpPolicyEditError) as caught:
+        await _turn_off(admin, reason=f"ticket {key}", person_present=True)
+    assert caught.value.code == "reason_looks_like_secret"
+    assert str(caught.value) == REASON_HOLDS_SECRET
+    assert await _effective(tenant_id) == ("caution", True)
+    assert_no_trace(key, str(caught.value), await _everything_stored(), caplog.text)
+
+    # A plain reason is stored in the audit row.
+    await _turn_off(admin, reason="ticket CHG-1234", person_present=True)
+    assert await _effective(tenant_id) == ("caution", False)
+    assert (await _last_edit_audit())["reason"] == "ticket CHG-1234"
+
+
+@pytest.mark.asyncio
+async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(embedding: AsyncMock) -> None:
+    key = made_up_key()
+    await _register_typed(embedding, requires_approval=True)
+    fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}
+    response, report = _patch(fresh, {"requires_approval": False, "reason": key})
+    assert response.status_code == 400, response.text
+    assert REASON_HOLDS_SECRET in response.json()["detail"]
+    assert report.json() == {"overrides": []}
+    assert_no_trace(key, response.text, await _everything_stored())
+
+    plain, report = _patch(fresh, {"requires_approval": False, "reason": "ticket CHG-1234"})
+    assert plain.status_code == 200, plain.text
+    assert report.json()["overrides"][0]["reason"] == "ticket CHG-1234"
+    assert (await _last_edit_audit())["reason"] == "ticket CHG-1234"
+
+
+@pytest.mark.asyncio
+async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
+    embedding: AsyncMock,
+) -> None:
+    key = made_up_key()
+    tenant_id = uuid.uuid4()
+    await _register_typed(embedding)
+    await ReviewService(_operator(tenant_id)).edit_op(
+        _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
+    )
+    fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}
+    refused = _delete_override(fresh, override_tenant_id=tenant_id, reason=key)
+    assert refused.status_code == 400, refused.text
+    assert REASON_HOLDS_SECRET in refused.json()["detail"]
+    assert await _effective(tenant_id) == ("caution", True)
+    assert_no_trace(key, refused.text, await _everything_stored())
+
+    removed = _delete_override(fresh, override_tenant_id=tenant_id, reason="ticket CHG-1234")
+    assert removed.status_code == 204, removed.text
+    assert (await _last_edit_audit())["reason"] == "ticket CHG-1234"
+
+
+@pytest.mark.asyncio
+async def test_mcp_edit_tool_refuses_a_reason_that_looks_like_a_secret(
+    embedding: AsyncMock,
+) -> None:
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    key = made_up_key()
+    await _register_typed(embedding, requires_approval=True)
+    admin = _operator(uuid.uuid4(), platform_admin=True, auth_time=int(time.time()))
+    args = {
+        "connector_id": _TYPED_CONNECTOR,
+        "op_id": "typedpets.pet.update",
+        "tenant_id": None,
+        "requires_approval": False,
+        "reason": key,
+    }
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await ca_mod._edit_op_handler(admin, args)
+    assert REASON_HOLDS_SECRET in str(caught.value)
+    assert await _effective(uuid.uuid4()) == ("caution", True)
+    assert_no_trace(key, str(caught.value), await _everything_stored())

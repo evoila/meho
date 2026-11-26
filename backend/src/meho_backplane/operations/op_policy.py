@@ -93,6 +93,7 @@ from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
+from meho_backplane.operations.change_reason import reason_refusal
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.switch_params import (
@@ -182,6 +183,7 @@ PolicyEditErrorCode = Literal[
     "approval_off_rights_change",
     "approval_off_needs_platform_admin",
     "approval_off_needs_reason",
+    "reason_looks_like_secret",
     "approval_off_needs_fresh_sign_in",
     "approval_required_for_install",
 ]
@@ -858,6 +860,8 @@ async def apply_policy_edit(
     operation run one at a time (:func:`_lock_operation`), so the checks
     see the edit before them.
     """
+    if (refusal := reason_refusal(reason)) is not None:
+        raise OpPolicyEditError("reason_looks_like_secret", refusal)
     key = OpKey.of(row)
     await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
@@ -955,6 +959,8 @@ async def remove_override(
     operation run one at a time (:func:`_lock_operation`), also across
     scopes, so two removals cannot both pass on each other's row.
     """
+    if (refusal := reason_refusal(reason)) is not None:
+        raise OpPolicyEditError("reason_looks_like_secret", refusal)
     await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
     mine, others = _split(overrides, scope_tenant_id)

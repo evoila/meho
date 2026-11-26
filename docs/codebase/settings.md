@@ -168,6 +168,12 @@ Tenant rows and conventions change no approval or gate.
   other parts of the file. The other direction needs no reason, and the page
   asks for no fresh sign-in. A tenant admin makes these changes in their own
   tenant, a platform admin in any tenant, both with a reason.
+- A reason never holds a secret. `apply_import` checks the reason first, with
+  the shared check `operations/change_reason.py` (`reason_refusal`, which
+  uses `contains_secret`), before it reads the file. A reason that looks like
+  a secret is refused with 403 and a plain sentence that never repeats it.
+  MEHO writes nothing: no change, no revision, and no reason in the audit
+  row. Every caller of `apply_import` gets this, not only the console page.
 
 - The apply locks the rows of the tenants in the file before it reads
   their policies, and holds the lock until its commit. A second import of

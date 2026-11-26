@@ -756,7 +756,12 @@ text with no documents, and text that is not valid YAML. A
 example `2026-11-26` or `2024` without quotes) is refused, and the refusal
 says to put the name in quotes. A list object is
 refused too: a document whose `kind` is `List`, or whose `kind` ends in
-`List` and that has an `items` field.
+`List` and that has a top-level `items` field, when its `apiVersion` is
+`v1`, or its group has no dot, or its group ends in `.k8s.io` (for
+example `apps/v1` or `rbac.authorization.k8s.io/v1`). A custom resource
+of another group, for example `apiVersion: example.com/v1` with `kind:
+ShoppingList` and an `items` field, is a normal object: it passes the
+check and waits for approval like any other manifest.
 
 The refusal names the document by its number, counted from 1 (the first
 document is document 1; an empty document between two `---` lines counts

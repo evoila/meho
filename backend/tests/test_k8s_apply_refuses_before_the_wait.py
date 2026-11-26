@@ -151,6 +151,10 @@ _REFUSED: dict[str, tuple[str, str]] = {
         "apiVersion: v1\nkind: NamespaceList\nmetadata: {name: web}\nitems: []\n",
         "document 1 (apiVersion v1, kind NamespaceList) is a list object",
     ),
+    "deployment-list-with-items": (
+        "apiVersion: apps/v1\nkind: DeploymentList\nmetadata: {name: web}\nitems: []\n",
+        "document 1 (apiVersion apps/v1, kind DeploymentList) is a list object",
+    ),
 }
 
 
@@ -440,6 +444,27 @@ async def test_a_kind_ending_in_list_without_items_waits_once(cluster: AsyncMock
     result = await _call({"manifest": manifest})
     assert result.status == "awaiting_approval", result
     assert await _count(ApprovalRequest) == 1
+
+
+async def test_a_custom_resource_ending_in_list_with_items_waits_once(
+    cluster: AsyncMock,
+) -> None:
+    params = {
+        "manifest": (
+            "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\nitems: [milk]\n"
+        )
+    }
+    result = await _call(params)
+    preview = await preview_dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP,
+        target=_TARGET,
+        params=params,
+    )
+    assert result.status == "awaiting_approval", result
+    assert await _count(ApprovalRequest) == 1
+    assert preview["status"] == "ok", preview
 
 
 async def test_three_documents_wait_once_and_apply_in_order(

@@ -1640,6 +1640,21 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      - name: Read the CI repository secrets
+        # Only in a merge-queue run. The job then runs on the self-hosted
+        # pool, which reaches the image proxy, so it takes the same Python
+        # image, by the same digest, through the proxy. On a pull request the
+        # job runs on a GitHub-hosted runner and pulls IMAGE from Docker Hub
+        # (backend/tests/ci_test_image_exceptions.json).
+        if: github.event_name == 'merge_group'
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PYTHON_IMAGE: PROXY/library/python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+          IMAGES
+
       - name: Docker Hub login (for the image pull)
         # Same login as the other jobs of this workflow (see the one in
         # python-tests for the reasons): the job pulls one image, and a
@@ -1720,7 +1735,7 @@ jobs:
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
           # The container's error output goes to a file that is never
           # printed: the job log is public.
-          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}" sh -euc '
             work="$(mktemp -d)"
             tar -x -C "${work}"
             cd "${work}/backend"
@@ -2868,12 +2883,15 @@ jobs:
         # 600 MB, and anonymous pulls would use up the shared pull limit. So
         # without the proxy (only in another repository) it is empty, and
         # the live Keycloak test skips (tests/integration/
-        # test_auth_keycloak_client_credentials.py). The k3s image uses the
-        # tag of the fixture's own default, so the proxy serves the exact
-        # tag the tests ask for. Every other image a test pulls or builds
-        # from is named here too (docs/codebase/devops.md, "Test images come
-        # through the image proxy"); backend/tests/test_ci_test_images.py
-        # pins it.
+        # test_auth_keycloak_client_credentials.py). The two core images
+        # (MEHO_TEST_CORE_KEYCLOAK_IMAGE, MEHO_TEST_CORE_OPENBAO_IMAGE) name
+        # the digest that the chart pins, because a tag can move. With an
+        # empty core variable the core tests use the chart's own image. The
+        # k3s image uses the tag of the fixture's own default, so the proxy
+        # serves the exact tag the tests ask for. Every other image a test
+        # pulls or builds from is named here too (docs/codebase/devops.md,
+        # "Test images come through the image proxy");
+        # backend/tests/test_ci_test_images.py pins it.
         env:
           CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
           SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
@@ -2887,8 +2905,8 @@ jobs:
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           MEHO_TEST_K3S_IMAGE: PROXY/rancher/k3s:v1.32.5-k3s1
           MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
-          MEHO_TEST_CORE_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.8.1
-          MEHO_TEST_CORE_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          MEHO_TEST_CORE_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
+          MEHO_TEST_CORE_OPENBAO_IMAGE: PROXY/openbao/openbao@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
           MEHO_TEST_DEBIAN_BOOKWORM_IMAGE: PROXY/library/debian:bookworm-slim
           MEHO_TEST_DEBIAN_TRIXIE_IMAGE: PROXY/library/debian:trixie-slim
           MEHO_TEST_MONGODB_7_IMAGE: PROXY/library/mongo:7
@@ -3103,6 +3121,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # Same as the step of the same name in python-unit-shard: it checks
+        # the repository secrets, hides their parts and sets the test images
+        # of the timing test files (with tests/integration/conftest.py).
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
+          MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          IMAGES
 
       - name: Docker Hub login (for testcontainers pulls)
         if: env.DOCKERHUB_USERNAME != ''

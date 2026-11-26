@@ -264,6 +264,8 @@ def test_ci_reads_the_secrets_in_each_job_that_uses_them() -> None:
         "python-coverage",
         "python-integration-shard",
         "python-migration-tests",
+        "python-timing-tests",
+        "redaction-compare",
     }
     text = json.dumps(_ci_jobs())
     for job_id, job in _ci_jobs().items():
@@ -344,7 +346,10 @@ def test_ci_test_images_fall_back_to_docker_hub_in_another_repository(
     assert masks == []
     for key, image in exported.items():
         if key in {"MEHO_TEST_KEYCLOAK_IMAGE", "MEHO_TEST_CORE_KEYCLOAK_IMAGE"}:
-            # No public fallback: an empty image makes the Keycloak test skip.
+            # No Docker Hub fallback for the large Keycloak image. An empty
+            # MEHO_TEST_KEYCLOAK_IMAGE makes the live Keycloak test skip. An
+            # empty MEHO_TEST_CORE_KEYCLOAK_IMAGE makes the core Keycloak
+            # tests use the chart's image, by the chart's digest.
             assert image == ""
         else:
             assert image.split("/", 1)[0] == "docker.io", (key, image)

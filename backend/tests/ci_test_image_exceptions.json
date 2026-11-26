@@ -3,18 +3,30 @@
   "variables_not_set": [
     {
       "variable": "MEHO_TEST_POSTGRES_IMAGE",
+      "jobs": ["python-integration-shard"],
       "reason": "It runs one PostgreSQL image by hand. CI sets one variable for each major version (MEHO_TEST_POSTGRES_16_IMAGE and so on)."
     },
     {
       "variable": "MEHO_TEST_MONGODB_IMAGE",
+      "jobs": ["python-integration-shard"],
       "reason": "It runs one MongoDB image by hand. CI sets one variable for each major version (MEHO_TEST_MONGODB_7_IMAGE and so on)."
+    },
+    {
+      "variable": "MEHO_TEST_KEYCLOAK_IMAGE",
+      "jobs": ["python-unit-shard", "python-coverage"],
+      "reason": "The acceptance tests import build_integration_app from tests/integration/conftest.py, which also holds the live Keycloak fixture. No test of these jobs uses that fixture, so they never start Keycloak."
     }
   ],
   "workflow_jobs": [
     {
       "workflow": "ci.yml",
       "job": "redaction-compare",
-      "reason": "On pull requests it runs on a GitHub-hosted runner, which cannot reach the image proxy. It runs one pinned Python image by digest with docker run."
+      "reason": "Only the pull request runs: they run on a GitHub-hosted runner, which cannot reach the image proxy, and pull one pinned Python image by digest from Docker Hub. A merge-queue run takes the same image through the proxy."
+    },
+    {
+      "workflow": "ci.yml",
+      "job": "python-outside-backend",
+      "reason": "GitHub-hosted runner, so no image proxy. It runs on pull requests only, and tests/test_db_engine.py starts the chart's PostgreSQL image. The merge queue runs the same tests in the unit shards, through the proxy."
     },
     {
       "workflow": "chart.yml",

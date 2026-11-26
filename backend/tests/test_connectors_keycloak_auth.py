@@ -431,8 +431,12 @@ async def test_fingerprint_surfaces_realm_metadata_and_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name() -> None:
-    """The answered name differs from the managed realm: the extras say so."""
+@pytest.mark.parametrize("switch_on", [False, True])
+async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name(
+    switch_on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extras name a different realm only when the switch is on."""
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true" if switch_on else "false")
     connector = _make_connector()
 
     async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
@@ -445,7 +449,10 @@ async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name() 
 
     assert fp.extras["realm"] == "Example"
     assert fp.extras["managed_realm"] == "example"
-    assert "not the managed realm" in fp.extras["realm_name_differs"]
+    if switch_on:
+        assert "not the managed realm" in fp.extras["realm_name_differs"]
+    else:
+        assert "realm_name_differs" not in fp.extras
 
     await connector.aclose()
 

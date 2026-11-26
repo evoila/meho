@@ -115,7 +115,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.answer_realm import name_the_realm
+from meho_backplane.connectors.keycloak.answer_realm import answer_realm_on, name_the_realm
 from meho_backplane.connectors.keycloak.managed_realm_check import ManagedRealmChecks
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
@@ -1660,7 +1660,9 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
     ``GET /admin/realms/{realm}`` body and records the resolved
     admin-realm / managed-realm pair so an operator reading the
     fingerprint can see which realm was probed and where the admin client
-    authenticated. Tolerates a non-dict body defensively.
+    authenticated. When the ``KEYCLOAK_ANSWER_REALM`` switch is on and the
+    answered name differs from the managed realm, it adds
+    ``realm_name_differs``. Tolerates a non-dict body defensively.
     """
     repr_dict = realm_repr if isinstance(realm_repr, dict) else {}
     extras: dict[str, Any] = {
@@ -1671,7 +1673,7 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
         **_realm_names(realms),
     }
     answered = repr_dict.get("realm")
-    if answered != realms.managed_realm:
+    if answer_realm_on() and answered != realms.managed_realm:
         extras["realm_name_differs"] = (
             "Keycloak answered with a realm name that is not the managed realm. "
             "MEHO refuses operations on this target until the names match."

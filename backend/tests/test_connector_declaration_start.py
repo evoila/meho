@@ -10,7 +10,8 @@ with the test-only registrar snapshot turned off, unless it says otherwise.
 * A fact of the code stops the start, with a message that names the class: a
   broken declaration, a ``test_operation`` that no registrar of the connector
   writes, a ``test_operation`` whose code gives it a risk level other than
-  ``safe``, and a ``test_operation`` that needs input.
+  ``safe``, a ``test_operation`` whose row the start retired, and a
+  ``test_operation`` that needs input.
 * A value that lives only in the database never stops the start: a stored
   risk level on the row, the row's turned-off mark, or an override. MEHO logs
   one warning line, starts, and the target form route answers
@@ -43,7 +44,7 @@ from meho_backplane.connectors.target_form import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.middleware import verify_jwt_and_bind
-from meho_backplane.operations import typed_register
+from meho_backplane.operations import dead_handler_sweep, typed_register
 from meho_backplane.operations.connector_declaration_check import (
     assert_connector_declarations_valid,
 )
@@ -333,6 +334,29 @@ async def test_an_override_warns_starts_and_hides_the_test_read(
     assert _route_test_operation(cls) is None
 
 
+def _retire_the_test_read(monkeypatch: pytest.MonkeyPatch) -> type[Connector]:
+    """A registrar writes the test read, and the retire step of the start removes it."""
+    _OPS["formfake.ping"] = ("safe", {"type": "object"})
+    retired = dead_handler_sweep.RetiredOp(_PRODUCT, _VERSION, _IMPL_ID, "formfake.ping")
+    monkeypatch.setattr(
+        dead_handler_sweep, "RETIRED_OPS", dead_handler_sweep.RETIRED_OPS | {retired}
+    )
+    cls = _make(test_operation="formfake.ping")
+    _only_fake(monkeypatch, cls)
+    return cls
+
+
+@pytest.mark.asyncio
+async def test_the_start_stops_for_a_test_read_whose_row_was_retired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _retire_the_test_read(monkeypatch)
+    with pytest.raises(
+        ConnectorDeclarationError, match=r"FakeConnector.*'formfake.ping' has no built-in"
+    ):
+        await _start()
+
+
 # ---------------------------------------------------------------------------
 # The test-only registrar snapshot
 # ---------------------------------------------------------------------------
@@ -348,3 +372,15 @@ async def test_a_missing_code_level_is_allowed_only_for_the_snapshot(
         await assert_connector_declarations_valid(session, code_levels={}, allow_missing_rows=True)
         with pytest.raises(ConnectorDeclarationError, match="no registrar"):
             await assert_connector_declarations_valid(session, code_levels={})
+
+
+@pytest.mark.asyncio
+async def test_a_retired_test_read_row_is_allowed_with_the_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the test-only snapshot on, the same start finishes."""
+    _retire_the_test_read(monkeypatch)
+    monkeypatch.setenv("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS", "true")
+    monkeypatch.setattr(typed_register, "_TYPED_OP_SNAPSHOT", None)
+    get_settings.cache_clear()
+    await _start()

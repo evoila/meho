@@ -10,7 +10,8 @@ its operation rows. For each registered connector class:
   :func:`~meho_backplane.connectors.target_form.check_connector_declaration`;
 * a declared ``test_operation`` must be written by a registrar of the same
   connector in this start, with risk level ``safe`` in the registrar's own
-  code, and a call with no input must pass the same parameter check a real
+  code; its built-in row must still exist after the start retired old
+  operations; and a call with no input must pass the same parameter check a real
   call runs (the schema with its ``oneOf`` / ``anyOf`` rules, and the op's
   own params check).
 
@@ -197,7 +198,12 @@ async def _check_test_operation(
     _check_code_level(cls, op_id, code_levels, allow_missing_rows=allow_missing_rows)
     row = await _test_row(session, cls, op_id)
     if row is None:
-        return
+        if allow_missing_rows:
+            return
+        raise ConnectorDeclarationError(
+            f"Connector {cls.__name__}: test_operation {op_id!r} has no built-in operation "
+            "row after the start wrote and retired its operations."
+        )
     problems = _empty_call_problems(op_id, row.parameter_schema, row.source_kind)
     if problems:
         raise ConnectorDeclarationError(
@@ -226,9 +232,9 @@ async def assert_connector_declarations_valid(
 
     ``allow_missing_rows`` is for the test-only registrar snapshot
     (``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS``): a snapshot replay runs no
-    registrar, so *code_levels* is empty. A test read with no code level is
-    then not an error. A row that exists is still checked. Production never
-    sets it.
+    registrar, so *code_levels* is empty. A test read with no code level or
+    with no row is then not an error. A row that exists is still checked.
+    Production never sets it.
     """
     classes = registered_connector_classes()
     for cls in classes:

@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.5**.
+The kit version this page describes: **1.6**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -87,6 +87,9 @@ part that starts with an underscore is private by its name too.
 | Connector | `Connector` | The base class of every connector. |
 | Connector | `HttpConnector` | The base class for an HTTP API. It brings MEHO's checks for TLS (secure, encrypted connections), addresses, redirects and answer size. |
 | Connector | `Target` | The target fields a connector may read. |
+| Connector | `TargetField` | One extra setting of a target, for `target_fields`. Needs kit 1.6 or higher. |
+| Connector | `CredentialWay` | One way to log in, with the fields of its secret, for `credential_ways`. Needs kit 1.6 or higher. |
+| Connector | `CredentialField` | One field of the secret of a `CredentialWay`. Needs kit 1.6 or higher. |
 | Answers | `FingerprintResult` | The answer of `fingerprint`: the detected product and version. |
 | Answers | `ProbeResult` | The answer of `probe`: can MEHO reach the target. |
 | Answers | `OperationResult` | The answer of `execute`. |
@@ -113,7 +116,7 @@ part that starts with an underscore is private by its name too.
 | Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
-Inside three classes, the kit also promises some parts:
+Inside six classes, the kit also promises some parts:
 
 - `HttpConnector`: `__init__`, `auth_headers`, `aclose`,
   `trace_response_body`, `_get_json` and `_post_json`. The last two
@@ -123,6 +126,11 @@ Inside three classes, the kit also promises some parts:
   and `connector_id`.
 - `Target`: `name`, `host`, `extras`, `auth_model`, `verify_tls` and
   `secret_ref`. Any other field of a target is private.
+- `TargetField`: `key`, `label`, `help`, `required`, `kind`, `choices`
+  and `default`.
+- `CredentialWay`: `key`, `label` and `fields`.
+- `CredentialField`: `name`, `label`, `help`, `required`, `hidden` and
+  `multiline`.
 
 For every other class, the kit promises only the name.
 
@@ -158,6 +166,20 @@ operations you register, not `execute`.
   list them in `product_aliases`, for example `("vcenter", "vsphere")`.
   With the switch `CONNECTOR_LIST_PRODUCT_ALIASES` on, a `product` filter
   of `meho_connector_list` also finds your connector by these names.
+- **What a target needs.** A connector can declare four optional
+  attributes: `default_port`, `target_fields` (the extra settings of a
+  target), `credential_ways` (the ways to log in and the fields of the
+  secret) and `test_operation` (one safe read that needs no input). MEHO
+  checks them at start. The console reads them from
+  `GET /api/v1/connectors/target-form?product=<product>`. A connector that
+  declares nothing passes the start check, and the route shows the four as
+  `null`. The test read is an operation that a registrar of the
+  connector itself writes at start (a typed or multi-step operation). A
+  read from an imported API spec cannot be declared: a class that declares
+  one stops the start with a message that names the class. Build the
+  entries with
+  `kit.TargetField`, `kit.CredentialWay` and `kit.CredentialField`
+  (kit 1.6 or higher).
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 

@@ -32,6 +32,11 @@ from meho_backplane.db.models import Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import create_session, reset_fernet_cache_for_testing
+from meho_backplane.ui.csrf import (
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    mint_csrf_token,
+)
 from meho_backplane.ui.error_pages import (
     is_web_path,
     web_http_exception_handler,
@@ -457,21 +462,102 @@ def test_the_reason_is_escaped_on_the_page() -> None:
 
 
 def test_the_real_cancel_route_keeps_its_json_with_the_handler_installed() -> None:
-    """The production route, not a stand-in, with the production handler.
+    """The production cancel route, reached for real, must answer JSON.
 
-    The run console's Stop button POSTs here and reads the JSON ``detail``
-    to say who may stop another person's run. The earlier test for this
-    used a stand-in GET route, so it could not have caught a regression
-    in how the real route's 403 is answered.
+    The previous version of this test posted to a path that does not
+    exist and sent no CSRF token, so the CSRF middleware answered a JSON
+    403 and both assertions passed without the route ever running. It
+    proved nothing. This one posts to the registered path
+    ``/ui/agents/{name}/run/{handle}/cancel`` with a valid token, so a
+    regression in how that route's refusal is rendered would fail here.
     """
     client = _signed_in_client()
+    session_id = client.cookies.get(SESSION_COOKIE_NAME)
+    assert session_id is not None
+    token = mint_csrf_token(session_id)
+    client.cookies.set(CSRF_COOKIE_NAME, token)
+
     with client:
         response = client.post(
-            "/ui/agents/runs/does-not-exist/cancel",
-            headers={**_BROWSER, "HX-Request": "true"},
+            f"/ui/agents/some-agent/run/{uuid.uuid4()}/cancel",
+            headers={**_BROWSER, "HX-Request": "true", CSRF_HEADER_NAME: token},
         )
 
-    # Whatever the route decides, it must not become an HTML page: an
-    # htmx caller parses this body.
+    # The route decides the status; what matters is that an htmx caller
+    # still gets a body it can parse, not the branded page.
     assert response.status_code != 302, "the session did not take"
+    # Non-vacuous: a wrong path or a missing CSRF token both answer 403
+    # from middleware before the route runs, which is how the previous
+    # version of this test passed without proving anything.
+    assert response.status_code != 403, (
+        "still answered before the route ran -- check the path and the CSRF token"
+    )
     assert not response.headers.get("content-type", "").startswith("text/html")
+    assert "data-error-page" not in response.text
+
+
+def test_a_structured_refusal_shows_its_message() -> None:
+    """A dict ``detail`` with a ``message`` is composed for a reader.
+
+    The citations 403 names the capability the identity is missing. That
+    is the whole value of the page over a bare "Not allowed".
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/corpus/cited")
+    async def cited() -> None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_entitled",
+                "message": "the identity is missing the meho-docs:runbooks capability.",
+            },
+        )
+
+    with TestClient(app) as client:
+        response = client.get("/ui/corpus/cited", headers=_NAVIGATION)
+
+    assert response.status_code == 403
+    assert "missing the meho-docs:runbooks capability" in response.text
+
+
+def test_the_page_never_quotes_the_address_back() -> None:
+    """A message built from a path segment is dropped, however long.
+
+    Several routes interpolate a segment -- ``f"target {name!r} not
+    found"`` -- so showing the detail would put whatever was typed onto
+    the page. An overlong name is the case that makes it obvious.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/connectors/{name}")
+    async def detail_route(name: str) -> None:
+        raise HTTPException(status_code=404, detail=f"target {name!r} not found")
+
+    overlong = "a" * 400
+    with TestClient(app) as client:
+        response = client.get(f"/ui/connectors/{overlong}", headers=_NAVIGATION)
+
+    assert response.status_code == 404
+    assert 'data-error-page="404"' in response.text
+    assert overlong not in response.text
+    assert "a" * 50 not in response.text
+    assert 'data-field="error-reason"' not in response.text
+
+
+def test_a_reason_is_capped() -> None:
+    """An unbounded string does not reach the page at full length."""
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/verbose")
+    async def verbose() -> None:
+        raise HTTPException(status_code=403, detail={"message": "why " * 400})
+
+    with TestClient(app) as client:
+        response = client.get("/ui/verbose", headers=_NAVIGATION)
+
+    assert response.status_code == 403
+    assert ("why " * 400) not in response.text

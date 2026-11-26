@@ -126,27 +126,74 @@ def is_web_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in WEB_PREFIXES)
 
 
-def _reason(exc: Exception, code: int) -> str | None:
+#: Longest reason rendered on the page. A route composing something far
+#: larger is not writing for a reader, and an unbounded string on an
+#: error page is how an address ends up quoted back at full length.
+_REASON_MAX: Final[int] = 200
+
+
+def _echoes_the_address(text: str, request: Request) -> bool:
+    """True when *text* quotes a caller-supplied part of the address back.
+
+    Several routes build a message by interpolating a path parameter --
+    ``f"target {name!r} not found"`` -- which puts whatever was in the
+    address onto the page. The page is meant to explain the refusal, not
+    to repeat what was typed.
+
+    The test is against the matched **path parameters**, not against the
+    path as a whole. A message may legitimately contain a word that also
+    appears as a fixed segment -- "keycloak authoring requires
+    tenant_admin" on ``/ui/keycloak/...`` -- and rejecting those would
+    throw away the explanations this page exists to carry. Only the
+    variable parts of the route are caller-supplied.
+    """
+    params = request.scope.get("path_params") or {}
+    lowered = text.casefold()
+    return any(
+        len(value) > 2 and value.casefold() in lowered
+        for value in (str(v) for v in params.values())
+    )
+
+
+def _reason(exc: Exception, code: int, request: Request) -> str | None:
     """The route's own explanation, when it added one worth showing.
 
-    A 403 is rarely just "no". The routes say which role is required
-    -- ``keycloak authoring requires tenant_admin`` -- or which account
-    to use, and a generic page throws that away. The ``detail``
-    is server-authored at every one of these sites, and Jinja escapes it
-    on the way out, so it is shown as given.
+    A 403 is rarely just "no". The routes say which role is required --
+    ``Your role cannot decide approval requests`` -- or which account to
+    use, and a generic page throws that away.
+
+    Two shapes carry one, and they are trusted differently.
+
+    A ``dict`` detail with a ``message`` is a structured refusal the
+    route composed *for a reader*: the citations 403 names the capability
+    the identity is missing. That message is used as given.
+
+    A plain string is a diagnostic that happens to be shown, and several
+    are built by interpolating a path segment. Those are dropped rather
+    than quoting the address back onto the page.
 
     Starlette fills ``detail`` with the status phrase when the raiser
-    passed none, so "Forbidden" and "Not Found" are dropped: repeating
-    the status as a reason tells the reader nothing.
+    passed none, so "Forbidden" and "Not Found" are dropped too:
+    repeating the status as a reason tells the reader nothing.
+
+    Jinja escapes whatever survives, so nothing here can carry markup
+    onto the page.
     """
     if not isinstance(exc, StarletteHTTPException):
         return None
     detail = exc.detail
-    if not isinstance(detail, str) or not detail.strip():
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        text = message.strip() if isinstance(message, str) else ""
+    elif isinstance(detail, str):
+        text = detail.strip()
+        if text and _echoes_the_address(text, request):
+            return None
+    else:
         return None
-    if detail.strip().casefold() == HTTPStatus(code).phrase.casefold():
+    if not text or text.casefold() == HTTPStatus(code).phrase.casefold():
         return None
-    return detail.strip()
+    return text[:_REASON_MAX]
 
 
 def _render(request: Request, code: int, reason: str | None = None) -> Response:
@@ -225,7 +272,7 @@ async def web_http_exception_handler(request: Request, exc: Exception) -> Respon
         and is_web_path(request.url.path)
         and _wants_a_page(request)
     ):
-        return _render(request, exc.status_code, _reason(exc, exc.status_code))
+        return _render(request, exc.status_code, _reason(exc, exc.status_code, request))
     return await ui_session_expired_exception_handler(request, exc)
 
 

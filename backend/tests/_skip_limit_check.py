@@ -108,8 +108,10 @@ def load_limits(path: Path, lane: str, backend_dir: Path = BACKEND_DIR) -> dict[
 def count_skips(junit_xml: Path) -> Counter[str]:
     """Return the number of skipped tests per test file in one JUnit file.
 
-    Needs the xunit1 family (``-o junit_family=xunit1``), which writes the
-    test file name on every test case. Raises ``CheckError`` when the file
+    Every test file of the JUnit file is in the result, also with 0 skips,
+    so the check knows which files ran in this shard. Needs the xunit1
+    family (``-o junit_family=xunit1``), which writes the test file name on
+    every test case. Raises ``CheckError`` when the file
     is missing, empty, broken or holds no test case.
     """
     try:
@@ -126,9 +128,7 @@ def count_skips(junit_xml: Path) -> Counter[str]:
                 f"{junit_xml}: test case {case.get('name')!r} has no 'file' attribute; "
                 "run pytest with -o junit_family=xunit1"
             )
-        skipped = len(case.findall("skipped"))
-        if skipped:
-            skips[name] += skipped
+        skips[name] += len(case.findall("skipped"))
     if cases == 0:
         raise CheckError(f"{junit_xml}: the JUnit file holds no test case")
     return skips
@@ -171,9 +171,11 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"::notice title=Skip limit::{notice}")
     for error in result.errors:
         print(f"::error title=Too many skipped tests::{error}")
-    print(f"{sum(skips.values())} skipped tests in {len(skips)} test files ({args.lane} lane)")
+    with_skips = sum(1 for count in skips.values() if count)
+    print(f"{sum(skips.values())} skipped tests in {with_skips} test files ({args.lane} lane)")
     for name in sorted(skips):
-        print(f"  {name}: {skips[name]} skipped, allowed {limits.get(name, 0)}")
+        if skips[name] or name in limits:
+            print(f"  {name}: {skips[name]} skipped, allowed {limits.get(name, 0)}")
     return 0 if result.ok else 1
 
 

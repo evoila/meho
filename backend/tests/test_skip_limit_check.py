@@ -84,6 +84,16 @@ def test_count_below_the_number_passes_with_a_notice(
     assert "::error" not in out
 
 
+def test_listed_file_that_ran_with_no_skip_gives_a_notice(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    junit = _junit(tmp_path, [(_FILE_A, "pass"), (_FILE_A, "pass")])
+    assert _run(junit, _limits(tmp_path, {_FILE_A: 2})) == 0
+    out = capfd.readouterr().out
+    assert f"{_FILE_A} skipped 0 tests, the number is 2" in out
+    assert f"lower the number for {_FILE_A} in this pull request" in out
+
+
 def test_file_with_a_number_that_did_not_run_gives_no_notice(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:

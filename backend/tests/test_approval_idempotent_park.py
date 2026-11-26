@@ -37,6 +37,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from cryptography.fernet import Fernet
 from httpx import ASGITransport
 from sqlalchemy import func, select
 
@@ -73,6 +74,9 @@ from meho_backplane.operations.approved_reveal import fetch_approved_reveal
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth import SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.session_store import create_session, reset_fernet_cache_for_testing
+from meho_backplane.ui.templating import reset_templating_for_testing
 from tests.test_destructive_preview_binding import (
     _CONNECTOR_ID,
     _OP_ID,
@@ -1242,6 +1246,82 @@ async def test_a_call_that_gets_the_waiting_request_writes_its_own_audit_row(
     assert reuse_row.parent_audit_id == request_row.id
     assert reuse_row.status_code == 202
     assert await _approval_row_count() == 1
+
+
+@pytest.fixture
+def console_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
+    get_settings.cache_clear()
+    reset_fernet_cache_for_testing()
+    reset_templating_for_testing()
+    yield
+    get_settings.cache_clear()
+    reset_fernet_cache_for_testing()
+    reset_templating_for_testing()
+
+
+async def _drawer_html(audit_id: str) -> str:
+    """The console drawer ``/ui/audit/show/{id}`` of one audit row, as an operator."""
+    key = make_rsa_keypair("kid-drawer")
+    async with get_sessionmaker()() as s, s.begin():
+        web_session = await create_session(
+            s,
+            operator_sub="op-viewer",
+            tenant_id=_TENANT,
+            access_token=mint_token(
+                key,
+                sub="op-viewer",
+                tenant_role=TenantRole.OPERATOR.value,
+                tenant_id=str(_TENANT),
+            ),
+            refresh_token="refresh-token",
+            lifetime=timedelta(hours=1),
+        )
+    with respx.mock(assert_all_called=False) as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+            cookies={SESSION_COOKIE_NAME: str(web_session.id)},
+        ) as ac:
+            response = await ac.get(f"/ui/audit/show/{audit_id}", follow_redirects=False)
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("same_call_reuse_on", "console_env")
+@pytest.mark.parametrize(("first_key", "second_key"), [(None, None), ("first-key", "second-key")])
+async def test_the_drawer_of_a_same_call_row_says_it_got_the_waiting_request(
+    embedding: list[float], first_key: str | None, second_key: str | None
+) -> None:
+    """The drawer of a same-call row says the call got the waiting request, not "ran"."""
+    _register_recording_connector()
+    register_preview_builder(_OP_ID, _blast_radius_builder)
+    await _seed_target(name="gh-prod")
+    await _insert_destructive_descriptor(embedding=embedding)
+    requester = _operator(sub="op-requester")
+    args = {"connector_id": _CONNECTOR_ID, "op_id": _OP_ID, "target": "gh-prod", "params": _PARAMS}
+    preview = await preview_operation(requester, args)
+    bound = {**args, "preview_hash": preview["preview_hash"]}
+
+    first = await call_operation(requester, {**bound, "idempotency_key": first_key})
+    second = await call_operation(requester, {**bound, "idempotency_key": second_key})
+
+    assert second["extras"]["approval_request_id"] == first["extras"]["approval_request_id"]
+    rows = await _approval_audit_rows()
+    assert [row.path for row in rows] == ["approval.request", "approval.reuse"]
+    assert "request_state" not in rows[1].payload
+    body = await _drawer_html(second["audit_id"])
+    assert "Awaiting approval" in body
+    assert "badge-warning" in body
+    assert (
+        "asked again for Destroy a VM. on gh-prod. At that time the same call was waiting for "
+        "approval, and this call got that request."
+    ) in body
+    assert " ran " not in body
 
 
 @pytest.mark.asyncio

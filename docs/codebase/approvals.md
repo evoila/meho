@@ -2987,7 +2987,11 @@ second `approval.request` row:
 
   The row of a call that gets the waiting request of the same call
   (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
-  `request_state` and its status code is 202.
+  `request_state` and its status code is 202. It reads `pending`, and the
+  console shows "Awaiting approval". Its "what happened" line in the drawer
+  (`_build_what_happened`) is: "<who> asked again for <operation> on
+  <target>. At that time the same call was waiting for approval, and this
+  call got that request." It does not say "ran".
 - `payload.params_hash` is the hash of this call's params
   (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the

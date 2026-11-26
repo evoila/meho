@@ -481,15 +481,20 @@ def _request_state_of(row: AuditLog) -> str | None:
     return state if isinstance(state, str) else None
 
 
+def is_reuse_row(row: AuditLog) -> bool:
+    """``True`` for an ``approval.reuse`` row, with or without ``request_state``."""
+    return row.method == _REUSE_METHOD and row.path == _REUSE_PATH
+
+
 def reuse_state(row: AuditLog) -> ReuseState | None:
     """How a retry row (``approval.reuse``) reads, or ``None`` for any other row.
 
     ``None`` also for a reuse row with no known ``request_state`` (the row of a
     call that got the waiting request of the same call): it reads by its status
-    code, as before. The console drawer uses this too, so the list and the
-    drawer follow one table.
+    code. The console drawer uses this too, so the list and the drawer follow
+    one table.
     """
-    if row.method != _REUSE_METHOD or row.path != _REUSE_PATH:
+    if not is_reuse_row(row):
         return None
     state = _request_state_of(row)
     return REUSE_STATES.get(state) if state is not None else None

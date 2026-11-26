@@ -59,7 +59,12 @@ from urllib.parse import quote
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.audit_query.query import ReuseState, is_withdraw_row, reuse_state
+from meho_backplane.audit_query.query import (
+    ReuseState,
+    is_reuse_row,
+    is_withdraw_row,
+    reuse_state,
+)
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS
 from meho_backplane.db.models import (
     AuditLog,
@@ -587,11 +592,16 @@ def _build_what_happened(
     status: StatusRef,
     withdrawn: bool = False,
     reuse: ReuseState | None = None,
+    same_call: bool = False,
 ) -> str:
     """Compose the plain-language "what happened" line (op + target + outcome).
 
     A withdrawn request (#5717) did not run, so it never says "ran". Nor does a
     retry row: it says the state the request had at the time of the retry.
+    Nor does the row of a call that got the waiting request of the same call
+    (*same_call*: an ``approval.reuse`` row with no ``request_state``): it says
+    "<who> asked again for <operation> on <target>. At that time the same call
+    was waiting for approval, and this call got that request."
     """
     op_label = operation.summary or operation.op_id
     if target.name:
@@ -609,6 +619,11 @@ def _build_what_happened(
         return (
             f"{principal.display} asked again for {op_label}{target_clause} with the same key. "
             f"At that time the request {reuse.words}."
+        )
+    if same_call:
+        return (
+            f"{principal.display} asked again for {op_label}{target_clause}. "
+            "At that time the same call was waiting for approval, and this call got that request."
         )
     return f"{principal.display} ran {op_label}{target_clause} → {status.label}"
 
@@ -692,6 +707,7 @@ async def resolve_audit_references(
             status=status,
             withdrawn=withdrawn,
             reuse=reuse,
+            same_call=reuse is None and is_reuse_row(row),
         ),
         audit_href=f"/ui/audit?audit_id={row.id}",
     )

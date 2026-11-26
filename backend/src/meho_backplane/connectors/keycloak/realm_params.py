@@ -42,6 +42,7 @@ from meho_backplane.operations._validate import (
     params_problem,
     register_params_check,
 )
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.required_extras import check_realm_name, realm_name_problem
 
 if TYPE_CHECKING:
@@ -225,7 +226,9 @@ async def read_realm_held(
     the realm that was read (:func:`answer_names_managed_realm`). A call
     that fails, or answers with another realm, keeps its status only, so
     the stored trace and the agent copy hold only bodies that passed the
-    check.
+    check. A try before an answer that passed (Keycloak answered only on a
+    retry) keeps its headers and body; with ``KEYCLOAK_TRACE_RETRY_STATUS_ONLY``
+    on, it keeps its status only.
     The caller decides what a wrong answer means.
     """
     with flight_recorder_capture.held() as spans:
@@ -235,7 +238,10 @@ async def read_realm_held(
             spans.release_status()
             raise
         if answer_names_managed_realm(answer, target, expected):
-            spans.release()
+            spans.release(
+                earlier_status_only=spans.recording
+                and get_settings().keycloak_trace_retry_status_only
+            )
         else:
             spans.release_status()
     return answer

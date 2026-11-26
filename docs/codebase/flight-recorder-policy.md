@@ -93,12 +93,16 @@ uses it (`docs/codebase/connectors-keycloak.md`).
 
 A call whose answer the connector must check first runs inside
 `with capture.held() as spans:`. Its spans stay out of the trace until the
-connector calls `spans.release()` after the check passed: the last span (the
-answer that was checked) goes in whole, and an earlier try keeps only its
-status. When the call fails, or its answer fails the check, the connector
-calls `spans.release_status()`: each span keeps its method, address, status
-and time, with no header and no body. Spans that are not released are
-dropped. The Keycloak reads of a realm's settings use it.
+connector calls `spans.release()` after the check passed: every span goes in
+whole, as without the block. With `spans.release(earlier_status_only=True)`
+an earlier try (a failed try before a retry) keeps only its status; the
+Keycloak realm reads ask for this only while the off-by-default switch
+`KEYCLOAK_TRACE_RETRY_STATUS_ONLY` is on. When the call fails, or its answer
+fails the check, the connector calls `spans.release_status()`: each span
+keeps only its method, address, status, time and request id (and the error
+class of a request that got no answer), with no header, no body and no other
+text of the answer. Spans that are not released are dropped. The Keycloak
+reads of a realm's settings use it.
 
 ## Audit
 

@@ -349,17 +349,20 @@ def paused() -> Iterator[None]:
         _active_capture_var.reset(token)
 
 
-#: The span attributes that hold what the vendor or MEHO sent: left out of a span
-#: whose answer did not pass its check (:meth:`HeldSpans.release_status`).
-_UNCHECKED_KEYS: Final = frozenset(
-    {"request_headers", "response_headers", "request_body", "response_body"}
-)
+#: The span attributes a span keeps when its answer did not pass its check
+#: (:meth:`HeldSpans.release_status`): which call it was and how it ended. No
+#: header, no body and no other text of the answer.
+_STATUS_KEYS: Final = ("connector_id", "op_id", "method", "url", "request_id", "phase")
 
 
 def _status_only(span: SpanInput) -> SpanInput:
-    """*span* without its headers and bodies: the call, its status and its time stay."""
-    attributes = {k: v for k, v in span.attributes.items() if k not in _UNCHECKED_KEYS}
-    if "body_recorded" in attributes:
+    """*span* with only the call, its status and its time: no value of the answer."""
+    attributes: dict[str, Any] = {
+        key: span.attributes[key] for key in _STATUS_KEYS if key in span.attributes
+    }
+    if "exception_class" in span.attributes:
+        attributes["exception_class"] = span.attributes["exception_class"]
+    else:
         attributes["body_recorded"] = False
     return replace(span, attributes=attributes)
 
@@ -371,14 +374,20 @@ class HeldSpans:
         self._outer = outer
         self._buffer = buffer
 
-    def release(self) -> None:
+    @property
+    def recording(self) -> bool:
+        """Whether the calls of the block go into a trace at all."""
+        return self._outer is not None and self._buffer is not None
+
+    def release(self, *, earlier_status_only: bool = False) -> None:
         """Add the spans held so far to the trace, after the answer passed its check.
 
-        Only the last span is the answer that was checked; it is added in
-        full. An earlier span (a failed try before a retry) is added with
-        its status only (:meth:`release_status`).
+        Only the last span is the answer that was checked; it is added
+        whole. An earlier span (a failed try before a retry) is added whole
+        too, unless *earlier_status_only* is set: then it keeps its status
+        only (:meth:`release_status`).
         """
-        self._add(full_last=True)
+        self._add(full_last=True, full_earlier=not earlier_status_only)
 
     def release_status(self) -> None:
         """Add the spans held so far with their status only: no header and no body.
@@ -386,15 +395,15 @@ class HeldSpans:
         For a call that failed, or whose answer failed its check: the
         trace shows that the call ran and how it ended.
         """
-        self._add(full_last=False)
+        self._add(full_last=False, full_earlier=False)
 
-    def _add(self, *, full_last: bool) -> None:
+    def _add(self, *, full_last: bool, full_earlier: bool) -> None:
         if self._outer is None or self._buffer is None:
             return
         spans = self._buffer.spans
         for index, span in enumerate(spans):
-            last = index == len(spans) - 1
-            self._outer.add(span if full_last and last else _status_only(span))
+            full = full_last if index == len(spans) - 1 else full_earlier
+            self._outer.add(span if full else _status_only(span))
         for kind, count in self._buffer.overflow.items():
             self._outer.overflow[kind] = self._outer.overflow.get(kind, 0) + count
         if full_last and self._buffer.redaction_uncertain:

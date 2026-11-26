@@ -1692,8 +1692,9 @@ there.
   - the "no admin" note shows for every waiting change of rights with a
     sure count of zero admins, also `policy.apply`, `policy.classify` and
     a change in any other realm;
-  - the one-admin note shows only when the person who asked is the only
-    admin of the tenant and the card's `login_realm` fact is true, by the
+  - the one-admin note shows only when MEHO finds no platform admin in the
+    tenant other than the person who asked, and the card's `login_realm`
+    fact is true, by the
     facts the approve uses: `grant_facts(request)` is not `None` and its
     `login_realm` is true. The connector sets the fact for MEHO's own
     login realm, for `master` and for the target's admin realm, and also
@@ -1702,28 +1703,37 @@ there.
     approve.
 
   `policy.apply`, `policy.classify` (they have no realm) and a change in
-  another realm get no one-admin note. Two or more admins and a count that
-  is not known give no note. When the tenant has at least one admin, a
-  request whose asker is not an admin (an Operator, an agent or a service
-  login) gets no note. A failed read of the note gives
+  another realm get no one-admin note. Another platform admin and a count
+  that is not known give no note. Only platform admins count here, because in
+  these realms only a platform admin approves. So an asker who is a tenant
+  admin, an Operator, an agent or a service login gets the note when the
+  tenant has no platform admin. A failed read of the note gives
   no note; the call still waits for approval. The one-admin note is in
   `extras.approval_note` and at the end of `error`: "A platform admin must
   approve this change. It is in MEHO's own login realm, in `master` or in
   the target's admin realm, or MEHO could not make sure that it is not. You can
   approve it yourself only if you are a platform admin and asked for it
-  in the web console. MEHO found no other admin in this tenant." and a
-  link to the approvals guide. The request is still stored, so an admin
+  in the web console. MEHO found no other platform admin in this tenant." and a
+  link to the approvals guide. For a change that can change the approval
+  sign-in, and for a change that sets the password of the asker's own login,
+  the asker is always refused, so the note leaves out the sentence "You can
+  approve it yourself only if you are a platform admin and asked for it in
+  the web console." (`asker_never_approves` in `grant_approval.py`). The request is still stored, so an admin
   added later can approve it. `meho operation call` prints the note under
   the parked hint. The web console shows it in the waiting answer of the
   Keycloak pages, the operation run window, and the classify page.
-- `/api/v1/health` and `meho_status` report the count in
-  `approvals.rights_change_admins`. `meho doctor` shows the line "second
-  admin". For one admin it warns "This tenant has only one admin. Some
+- `/api/v1/health` and `meho_status` report the number of tenant admins and
+  platform admins together in `approvals.rights_change_admins`.
+  `/api/v1/health` also reports the platform admins on their own in
+  `approvals.rights_change_platform_admins`; `meho_status` leaves that field
+  out. `meho doctor` shows the line "second admin" from the platform admin
+  number. For no platform admin or one it warns "This tenant has no platform
+  admin." or "This tenant has only one platform admin.", followed by "Some
   changes of rights in MEHO's own login realm need a platform admin other
-  than the person who asked." Its fix says "add a second platform admin in
-  Keycloak (in MEHO-Platform-Admins)" with the guide link. Two or more
-  admins give an ok line. When the count is not known or the backplane is
-  older, there is no line.
+  than the person who asked." Its fix says "add a platform admin other than
+  the person who asks (in MEHO-Platform-Admins)" with the guide link. Two or
+  more platform admins give an ok line. When the count is not known or the
+  backplane is older, there is no line.
 - The fix of the `meho doctor` line "approval sign-in" says who runs
   `keycloak.authflow.ensure_approval_flow`: a platform admin in the web
   console runs it at once; asked with a token, it waits and a second
@@ -1732,10 +1742,9 @@ there.
 
   | Admins | Note |
   |---|---|
-  | none | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
-  | one, the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note |
-  | one, another person | no note. In MEHO's own login realm, in `master` and in the target's admin realm, only a platform admin approves; MEHO counts tenant admins and platform admins together, so there is no note also when that other admin is a tenant admin only. |
-  | two or more | no note |
+  | no admin at all | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
+  | no platform admin other than the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note. This holds when the tenant has tenant admins only, too. |
+  | another platform admin | no note |
   | not known | no note |
 
   The "no admin" note shows only for a sure count of zero. Today the read of
@@ -2890,7 +2899,7 @@ for approval.
   secret value. When the request has the note of `rights_change_note` (see
   [the note for a tenant with one admin](#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
   the note follows this text. On an approved request, the note keeps only "MEHO
-  found no other admin in this tenant." and the guide link, also in
+  found no other platform admin in this tenant." and the guide link, also in
   `extras.approval_note`: the part about who must approve is left out. A
   retry of a waiting request keeps the text "requires approval before
   execution" and the full note.

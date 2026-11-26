@@ -1333,7 +1333,7 @@ _FULL_NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
     "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
-    f"web console. MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
+    f"web console. MEHO found no other platform admin in this tenant. See {_GUIDE_LINK}"
 )
 _WAITING_ERROR = f"awaiting_approval: {_OP_ID!r} requires approval before execution. {_FULL_NOTE}"
 
@@ -1346,8 +1346,8 @@ def _only_admin_is_requester(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from meho_backplane.auth import tenant_admins
 
-    async def _read(*_args: object) -> frozenset[str] | None:
-        return frozenset({"op-requester"})
+    async def _read(*_args: object) -> tenant_admins._Admins | None:
+        return tenant_admins._Admins(frozenset({"op-requester"}), frozenset({"op-requester"}))
 
     monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_OP_ID})
     monkeypatch.setattr(grant_approval, "_GRANT_OPS", {_OP_ID: grant_approval._GrantOp((), ())})
@@ -1385,10 +1385,10 @@ async def test_retry_of_an_approved_rights_change_keeps_only_the_true_part_of_th
     assert retry["status"] == "awaiting_approval", retry
     assert retry["extras"]["approval_request_id"] == request_id
     note = retry["extras"]["approval_note"]
-    assert note == f"MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
+    assert note == f"MEHO found no other platform admin in this tenant. See {_GUIDE_LINK}"
     assert retry["error"] == (
         f"awaiting_approval: the approval request {request_id} is already approved. "
-        f"MEHO found no other admin in this tenant. See {_GUIDE_LINK}"
+        f"MEHO found no other platform admin in this tenant. See {_GUIDE_LINK}"
     )
 
 

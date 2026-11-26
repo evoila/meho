@@ -125,6 +125,7 @@ __all__ = [
     "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
     "asked_in_web_console",
+    "asker_never_approves",
     "check_grant_approval",
     "check_rights_change_approval",
     "grant_audit_fields",
@@ -526,6 +527,22 @@ def may_make_alone(operator: Operator, request: ApprovalRequest) -> bool:
     if facts is None or not facts.login_realm:
         return True
     return operator.platform_admin and not approval_sign_in_check(request)
+
+
+def asker_never_approves(request: ApprovalRequest) -> bool:
+    """True when the login that asked for *request* is always refused as its approver.
+
+    That holds for a change that can change the approval sign-in, and for a
+    change that sets the password of the asker's own login.
+    """
+    if approval_sign_in_check(request):
+        return True
+    facts = grant_facts(request)
+    return (
+        facts is not None
+        and _stamp(request).get(FOR_LOGIN) is True
+        and _same_login(facts.user_id, request.principal_sub)
+    )
 
 
 def _refusal(request: ApprovalRequest, operator: Operator, denial: str) -> Exception:

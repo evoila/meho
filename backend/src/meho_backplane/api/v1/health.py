@@ -99,7 +99,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.jwt import verify_jwt_allow_unchosen
 from meho_backplane.auth.operator import Operator, TenantMembership, TenantRole, group_grant
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.auth.tenant_admins import admin_count
+from meho_backplane.auth.tenant_admins import admin_count, platform_admin_count
 from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connector_packages import ConnectorPackage, installed_connector_packages
 from meho_backplane.connectors._shared.credential_backend import (
@@ -350,7 +350,7 @@ class ReadinessStatus(BaseModel):
 
 
 class ApprovalsStatus(BaseModel):
-    """The approval settings in force (#4830).
+    """The approval settings in force.
 
     ``custody`` is the state of the approval key: ``configured``,
     ``missing`` or ``malformed``. ``effective_posture`` says whether a
@@ -360,24 +360,28 @@ class ApprovalsStatus(BaseModel):
     someone else's instruction is allowed. The three values come from
     :func:`meho_backplane.features.build_features_block`; they are state
     words only, never a key value. ``sign_in`` is the state of the
-    approval client's own login flow in Keycloak (#6280,
-    :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
-    is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+    approval client's own login flow in Keycloak
+    (:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+    is the value of ``APPROVAL_SIGN_IN_LEVEL``: ``off``,
     ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
     what MEHO does now with an approval sign-in that lacks the approval
     level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
     only while ``sign_in`` shows for sure that the realm does not give the
     level, and ``required`` when it is ``ok`` or its read failed).
     ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
-    console's approval client (#6282): ``auto`` reads each client's
+    console's approval client: ``auto`` reads each client's
     binding, so the two can differ. ``sign_in_level_warning`` is a short
     sentence whenever the level is not required in practice for either
     client or a read failed, else ``None``.
-    ``rights_change_admins`` is how many admins of the caller's tenant could
-    approve a change of rights (#6641,
-    :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-    count them. With one admin, some changes of rights in MEHO's own login
-    realm cannot be approved.
+    ``rights_change_admins`` is the number of tenant admins and platform
+    admins of the caller's tenant together
+    (:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
+    count them. ``rights_change_platform_admins`` is the number of platform
+    admins among them, or ``None`` when MEHO cannot count them. Only a
+    platform admin approves a change of rights in MEHO's own login realm, and
+    never the person who asked with a token, so with fewer than two some
+    changes cannot be approved. ``GET /api/v1/health`` reports it; the
+    ``meho_status`` tool leaves it out.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -392,6 +396,7 @@ class ApprovalsStatus(BaseModel):
     web_sign_in_level_in_force: str | None = None
     sign_in_level_warning: str | None = None
     rights_change_admins: int | None = None
+    rights_change_platform_admins: int | None = None
 
 
 class FeatureStatus(BaseModel):
@@ -1067,7 +1072,9 @@ def _with_sign_in(
     )
 
 
-async def build_health_response(operator: Operator) -> HealthResponse:
+async def build_health_response(
+    operator: Operator, *, with_platform_admins: bool = False
+) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
     Lifted out of :func:`authenticated_health` so the MCP reference tool
@@ -1084,6 +1091,9 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     refuses lower roles; the ``meho_status`` tool is open to every role,
     so a lower caller gets every other part of the answer and a ``vault``
     block with ``checked=false``.
+
+    *with_platform_admins* adds ``approvals.rights_change_platform_admins``.
+    Only the REST route sets it.
     """
     if not operator.tenant_chosen:
         return await _tenant_not_chosen_response(operator)
@@ -1095,9 +1105,10 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         read_approval_sign_in(), read_web_approval_sign_in()
     )
     approvals = _with_sign_in(approvals, sign_in, web_sign_in)
-    approvals = approvals.model_copy(
-        update={"rights_change_admins": await admin_count(operator.tenant_id)}
-    )
+    admins: dict[str, int | None] = {"rights_change_admins": await admin_count(operator.tenant_id)}
+    if with_platform_admins:
+        admins["rights_change_platform_admins"] = await platform_admin_count(operator.tenant_id)
+    approvals = approvals.model_copy(update=admins)
     return HealthResponse(
         operator=_operator_identity(operator),
         vault=vault_status,
@@ -1232,4 +1243,4 @@ async def authenticated_health(
     A login with several tenants and no chosen tenant (#5239) skips the
     role check and gets only its tenants and roles (no Vault call).
     """
-    return await build_health_response(operator)
+    return await build_health_response(operator, with_platform_admins=True)

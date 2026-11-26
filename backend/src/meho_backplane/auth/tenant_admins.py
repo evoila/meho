@@ -14,6 +14,11 @@ So when the person who asked is the only admin of the tenant, nobody else in
 the tenant can approve it. In every other realm, the person who asked
 approves the change in the web console, so it needs no other admin.
 
+In MEHO's own login realm, in ``master`` and in the target's admin realm,
+only a platform admin approves a change of rights. So the note and the
+doctor line count the platform admins on their own
+(:func:`platform_admin_ids`), next to all admins (:func:`tenant_admin_ids`).
+
 MEHO stores no list of people. :func:`tenant_admin_ids` reads them from
 MEHO's own sign-in realm with the backplane's Keycloak admin client
 (:class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`): the
@@ -43,9 +48,11 @@ The answer is ``None`` ("not known") when MEHO cannot count:
   asked is the only admin shows only for a change in MEHO's own login
   realm, in ``master`` or in the target's admin realm, or where MEHO could
   not make sure that it is not;
-* the doctor line of ``meho doctor`` (``approvals.rights_change_admins`` in
-  ``/api/v1/health``), which warns that some changes of rights in that realm
-  need a platform admin other than the person who asked.
+* the doctor line of ``meho doctor``
+  (``approvals.rights_change_platform_admins`` in ``/api/v1/health``), which
+  warns when the tenant has no platform admin or only one, because some
+  changes of rights in that realm need a platform admin other than the
+  person who asked.
 
 An answer is kept for :data:`_KEEP_S` seconds per tenant (a failed read for
 :data:`_KEEP_FAILED_S` seconds), so the health answer, which is called
@@ -58,6 +65,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import quote
 
@@ -72,28 +80,38 @@ from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "LOGIN_REALM_APPROVER",
+    "LOGIN_REALM_APPROVER_BASE",
     "NO_ADMIN",
     "ONLY_ONE_ADMIN",
     "RIGHTS_CHANGE_GUIDE_URL",
     "admin_count",
     "only_admin_note",
+    "platform_admin_count",
+    "platform_admin_ids",
     "tenant_admin_ids",
 ]
+
+#: The first part of the note, for a change that the person who asked can
+#: never approve (it can change the approval sign-in, or it sets the password
+#: of the asker's own login).
+LOGIN_REALM_APPROVER_BASE: Final[str] = (
+    "A platform admin must approve this change. "
+    "It is in MEHO's own login realm, in `master` or in the target's admin realm, "
+    "or MEHO could not make sure that it is not."
+)
 
 #: Who approves a waiting change of rights in MEHO's own login realm, in
 #: ``master`` or in the target's admin realm, or where MEHO could not make
 #: sure that it is not: the first part of the note. An answer about an approved request
 #: leaves it out.
 LOGIN_REALM_APPROVER: Final[str] = (
-    "A platform admin must approve this change. "
-    "It is in MEHO's own login realm, in `master` or in the target's admin realm, "
-    "or MEHO could not make sure that it is not. "
+    f"{LOGIN_REALM_APPROVER_BASE} "
     "You can approve it yourself only if you are a platform admin and asked for it "
     "in the web console."
 )
 
-#: The sentence a person reads when MEHO found no other admin in the tenant.
-ONLY_ONE_ADMIN: Final[str] = "MEHO found no other admin in this tenant."
+#: The sentence a person reads when MEHO found no other platform admin in the tenant.
+ONLY_ONE_ADMIN: Final[str] = "MEHO found no other platform admin in this tenant."
 
 #: The sentence a person reads when the tenant has no admin who could approve at all.
 NO_ADMIN: Final[str] = "This tenant has no admin."
@@ -122,8 +140,17 @@ _MAX_PAGES: Final[int] = 20
 #: The most groups read in the whole group tree before the count is "not known".
 _MAX_GROUPS: Final[int] = 1000
 
-#: The kept answers: (admin URL, tenant) -> (when read, in monotonic seconds; the ids).
-_kept: dict[tuple[str, uuid.UUID], tuple[float, frozenset[str] | None]] = {}
+
+@dataclass(frozen=True)
+class _Admins:
+    """The admins of one tenant: everyone, and the platform admins among them."""
+
+    everyone: frozenset[str]
+    platform: frozenset[str]
+
+
+#: The kept answers: (admin URL, tenant) -> (when read, in monotonic seconds; the admins).
+_kept: dict[tuple[str, uuid.UUID], tuple[float, _Admins | None]] = {}
 
 
 class _CannotCountError(Exception):
@@ -144,9 +171,14 @@ def _same_tenant(value: str, tenant_id: uuid.UUID) -> bool:
         return False
 
 
+def _gives_platform_admin(attributes: Mapping[str, Any]) -> bool:
+    """Whether a group with these (inherited) attributes makes its members platform admins."""
+    return any(v.lower() == "true" for v in _values(attributes, "platform_admin"))
+
+
 def _gives_admin(attributes: Mapping[str, Any], tenant_id: uuid.UUID) -> bool:
     """Whether a group with these (inherited) attributes makes its members admins of the tenant."""
-    if any(v.lower() == "true" for v in _values(attributes, "platform_admin")):
+    if _gives_platform_admin(attributes):
         return True
     for entry in _values(attributes, "meho_tenant"):
         parts = entry.split(":")
@@ -180,9 +212,12 @@ async def _read_list(kc: KeycloakAdminClient, path: str, **params: str) -> list[
     raise _CannotCountError(f"GET {path} has too many pages")
 
 
-async def _admin_groups(kc: KeycloakAdminClient, tenant_id: uuid.UUID) -> list[str]:
-    """The ids of every group, at any level, that makes its members admins of the tenant."""
-    found: list[str] = []
+async def _admin_groups(kc: KeycloakAdminClient, tenant_id: uuid.UUID) -> list[tuple[str, bool]]:
+    """Every group, at any level, that makes its members admins of the tenant.
+
+    Each row is the group id and whether the group gives platform admin rights.
+    """
+    found: list[tuple[str, bool]] = []
     seen = 0
     todo: list[tuple[str, dict[str, Any]]] = [("/groups", {})]
     while todo:
@@ -196,7 +231,7 @@ async def _admin_groups(kc: KeycloakAdminClient, tenant_id: uuid.UUID) -> list[s
                 raise _CannotCountError("a group has no id")
             attributes = _inherit(group.get("attributes"), parent_attributes)
             if _gives_admin(attributes, tenant_id):
-                found.append(group_id)
+                found.append((group_id, _gives_platform_admin(attributes)))
             if group.get("subGroupCount", 1) != 0:
                 todo.append((f"/groups/{quote(group_id, safe='')}/children", attributes))
     return found
@@ -215,9 +250,10 @@ def _is_service_account(user: Mapping[str, Any], prefix: str) -> bool:
 
 async def _admins(
     kc: KeycloakAdminClient, tenant_id: uuid.UUID, service_account_prefix: str
-) -> frozenset[str]:
+) -> _Admins:
     ids: set[str] = set()
-    for group_id in await _admin_groups(kc, tenant_id):
+    platform: set[str] = set()
+    for group_id, gives_platform in await _admin_groups(kc, tenant_id):
         path = f"/groups/{quote(group_id, safe='')}/members"
         for user in await _read_list(kc, path, briefRepresentation="true"):
             user_id = user.get("id")
@@ -228,10 +264,12 @@ async def _admins(
                 and not _is_service_account(user, service_account_prefix)
             ):
                 ids.add(user_id.casefold())
-    return frozenset(ids)
+                if gives_platform:
+                    platform.add(user_id.casefold())
+    return _Admins(frozenset(ids), frozenset(platform))
 
 
-async def _read(settings: Settings, tenant_id: uuid.UUID) -> frozenset[str] | None:
+async def _read(settings: Settings, tenant_id: uuid.UUID) -> _Admins | None:
     """Read the admins of the tenant; ``None`` when MEHO cannot count them. Never raises."""
     if settings.jwt_platform_admin_role_name:
         return None
@@ -241,19 +279,16 @@ async def _read(settings: Settings, tenant_id: uuid.UUID) -> frozenset[str] | No
         return None
     try:
         async with asyncio.timeout(_READ_TIMEOUT_S), kc:
-            ids = await _admins(kc, tenant_id, settings.jwt_service_account_username_prefix)
+            admins = await _admins(kc, tenant_id, settings.jwt_service_account_username_prefix)
     except Exception as exc:
         structlog.get_logger(__name__).info(
             "tenant_admin_count_unknown", error_class=type(exc).__name__
         )
         return None
-    return ids or None
+    return admins if admins.everyone else None
 
 
-async def tenant_admin_ids(
-    tenant_id: uuid.UUID, settings: Settings | None = None
-) -> frozenset[str] | None:
-    """The Keycloak user ids (lower case) of the tenant's admins, or ``None`` when not known."""
+async def _tenant_admins(tenant_id: uuid.UUID, settings: Settings | None = None) -> _Admins | None:
     settings = settings or get_settings()
     key = (settings.keycloak_admin_url, tenant_id)
     kept = _kept.get(key)
@@ -261,9 +296,28 @@ async def tenant_admin_ids(
         keep = _KEEP_S if kept[1] is not None else _KEEP_FAILED_S
         if time.monotonic() - kept[0] < keep:
             return kept[1]
-    ids = await _read(settings, tenant_id)
-    _kept[key] = (time.monotonic(), ids)
-    return ids
+    admins = await _read(settings, tenant_id)
+    _kept[key] = (time.monotonic(), admins)
+    return admins
+
+
+async def tenant_admin_ids(
+    tenant_id: uuid.UUID, settings: Settings | None = None
+) -> frozenset[str] | None:
+    """The Keycloak user ids (lower case) of the tenant's admins, or ``None`` when not known.
+
+    Tenant admins and platform admins together.
+    """
+    admins = await _tenant_admins(tenant_id, settings)
+    return None if admins is None else admins.everyone
+
+
+async def platform_admin_ids(
+    tenant_id: uuid.UUID, settings: Settings | None = None
+) -> frozenset[str] | None:
+    """The user ids (lower case) of the tenant's platform admins, or ``None`` when not known."""
+    admins = await _tenant_admins(tenant_id, settings)
+    return None if admins is None else admins.platform
 
 
 async def admin_count(tenant_id: uuid.UUID) -> int | None:
@@ -272,8 +326,18 @@ async def admin_count(tenant_id: uuid.UUID) -> int | None:
     return None if ids is None else len(ids)
 
 
+async def platform_admin_count(tenant_id: uuid.UUID) -> int | None:
+    """How many platform admins the tenant has; ``None`` when not known."""
+    ids = await platform_admin_ids(tenant_id)
+    return None if ids is None else len(ids)
+
+
 async def only_admin_note(
-    tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool = True
+    tenant_id: uuid.UUID,
+    requester_sub: str,
+    *,
+    login_realm: bool = True,
+    asker_never_approves: bool = False,
 ) -> str | None:
     """The note for a waiting change of rights no other admin could approve, else ``None``.
 
@@ -285,18 +349,20 @@ async def only_admin_note(
     * No admin at all: :data:`NO_ADMIN`, for every change of rights. It has
       no sentence about who must approve, because one more admin alone
       would not be enough.
-    * The requester is the only admin and *login_realm* is true:
-      :data:`LOGIN_REALM_APPROVER` and :data:`ONLY_ONE_ADMIN`.
-    * ``None`` when another admin is found, when the person who asked is
-      not an admin, when the person who asked is the only admin and
-      *login_realm* is false, and when the count is not known: then MEHO
-      says nothing new.
+    * *login_realm* is true and MEHO finds no platform admin in the tenant
+      other than the requester: :data:`LOGIN_REALM_APPROVER` and
+      :data:`ONLY_ONE_ADMIN`.
+    * With *asker_never_approves* the note leaves out the sentence about
+      approving it yourself: the person who asked is always refused.
+    * ``None`` when another platform admin is found, when *login_realm* is
+      false, and when the count is not known: then MEHO says nothing new.
     """
-    ids = await tenant_admin_ids(tenant_id)
-    if ids is None:
+    admins = await _tenant_admins(tenant_id)
+    if admins is None:
         return None
-    if not ids:
+    if not admins.everyone:
         return f"{NO_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
-    if not login_realm or ids - {requester_sub.casefold()}:
+    if not login_realm or admins.platform - {requester_sub.casefold()}:
         return None
-    return f"{LOGIN_REALM_APPROVER} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"
+    who = LOGIN_REALM_APPROVER_BASE if asker_never_approves else LOGIN_REALM_APPROVER
+    return f"{who} {ONLY_ONE_ADMIN} See {RIGHTS_CHANGE_GUIDE_URL}"

@@ -55,7 +55,7 @@ async def _meho_status_handler(
     operator: Operator,
     _arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return the chassis ``/api/v1/health`` payload wire-identical.
+    """Return the chassis ``/api/v1/health`` payload, without the platform admin count.
 
     The MCP dispatcher already validated ``arguments`` against the
     tool's ``inputSchema`` (``{additionalProperties: false}``) before
@@ -65,7 +65,9 @@ async def _meho_status_handler(
     wraps in the MCP ``content`` array.
     """
     response = await build_health_response(operator)
-    return response.model_dump(mode="json")
+    return response.model_dump(
+        mode="json", exclude={"approvals": {"rights_change_platform_admins"}}
+    )
 
 
 register_mcp_tool(

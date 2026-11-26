@@ -79,7 +79,7 @@ _NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
     "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
-    f"web console. MEHO found no other admin in this tenant. See {_GUIDE}"
+    f"web console. MEHO found no other platform admin in this tenant. See {_GUIDE}"
 )
 _WAITING = f"awaiting_approval: {_ADD!r} requires approval before execution"
 
@@ -160,8 +160,8 @@ def admin_count(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     monkeypatch.setattr(tenant_admins, "_kept", {})
 
     def _set(ids: frozenset[str] | None) -> None:
-        async def _read(*_args: object) -> frozenset[str] | None:
-            return ids
+        async def _read(*_args: object) -> tenant_admins._Admins | None:
+            return None if ids is None else tenant_admins._Admins(ids, ids)
 
         monkeypatch.setattr(tenant_admins, "_read", _read)
 

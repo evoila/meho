@@ -974,7 +974,7 @@ func TestWriteParkedHintShowsTheNote(t *testing.T) {
 	note := "A platform admin must approve this change. " +
 		"It is in MEHO's own login realm, in `master` or in the target's admin realm, or MEHO could not make sure that it is not. " +
 		"You can approve it yourself only if you are a platform admin and asked for it in the web console. " +
-		"MEHO found no other admin in this tenant."
+		"MEHO found no other platform admin in this tenant."
 	var with, without bytes.Buffer
 	WriteParkedHint(&with, json.RawMessage(`{"approval_request_id":"ar-1","approval_note":"`+note+`"}`))
 	WriteParkedHint(&without, json.RawMessage(`{"approval_request_id":"ar-1"}`))

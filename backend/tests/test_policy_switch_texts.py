@@ -3,18 +3,21 @@
 
 """The texts that tell a person or an agent which switch turns a policy part on.
 
-* Each such text names ``CUSTOM_POLICY`` before an old switch
+* The four messages that show while classification is off, and the console
+  text of the classify page that repeats one of them, have an exact text.
+  Each names ``POLICY_CLASSIFICATION`` first, which turns on classification
+  only, and then ``CUSTOM_POLICY``, which turns on all three policy parts.
+  None names ``POLICY_ENGINE_SHADOW`` or ``POLICY_APPROVER_ROUTING``.
+* Each other text names ``CUSTOM_POLICY`` before an old switch
   (``POLICY_CLASSIFICATION``, ``POLICY_ENGINE_SHADOW``,
-  ``POLICY_APPROVER_ROUTING``). No text names only an old switch.
-* Each CLI help text, answer text, the console text and the profile
-  comment also says once that each older switch still turns on its own
-  part alone.
+  ``POLICY_APPROVER_ROUTING``). No such text names only an old switch.
+* The CLI help texts and the profile comment also say once that each older
+  switch still turns on its own part alone.
 
-The texts: the CLI help of ``meho policy explain``,
+The other texts: the CLI help of ``meho policy explain``,
 ``meho connector classify`` and ``meho connector overrides``, the CLI line
-for an evaluator that is off, the console text of the classify page, the
-four answer texts, the comment of the shipped policy profile, and the
-switch table of ``docs/codebase/mcp.md``.
+for an evaluator that is off, the comment of the shipped policy profile,
+and the switch table of ``docs/codebase/mcp.md``.
 """
 
 from __future__ import annotations
@@ -39,6 +42,40 @@ OLD_SWITCHES_ALONE = (
     "Each older switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, "
     "POLICY_APPROVER_ROUTING) still turns on its own part alone."
 )
+
+#: The two sentences each message that shows while classification is off
+#: says once.
+OFF_MESSAGE_SWITCHES = (
+    "The POLICY_CLASSIFICATION setting turns on classification only. The CUSTOM_POLICY "
+    "setting turns on all three policy parts: classification, the policy evaluator and "
+    "approver routing."
+)
+
+#: The exact text of each message that shows while classification is off.
+OFF_MESSAGE_TEXTS: dict[str, str] = {
+    "answer: SWITCH_OFF_REFUSAL": (
+        "Classification is off on this MEHO. An admin can turn it on in one of two ways. "
+        + OFF_MESSAGE_SWITCHES
+    ),
+    "console: classify page": (
+        "Classification is off on this MEHO. An admin can turn it on in one of two ways. "
+        + OFF_MESSAGE_SWITCHES
+    ),
+    "answer: SWITCH_OFF_IMPORT": (
+        "The policy file import is off on this MEHO, because classification is off. An "
+        "admin can turn it on in one of two ways. " + OFF_MESSAGE_SWITCHES
+    ),
+    "answer: FILE_NEEDS_CLASSIFICATION": (
+        "A policy file counts only while classification is on. Classification is off, so "
+        "the file would change no answer. An admin can turn it on in one of two ways. "
+        + OFF_MESSAGE_SWITCHES
+    ),
+    "answer: CATEGORY_WITHOUT_CLASSIFICATION": (
+        "Approver routing is on and classification is off, so no change has a category "
+        "and a routing entry that matches on `category` fits nothing. Turn on "
+        "classification, or match on connector or risk. " + OFF_MESSAGE_SWITCHES
+    ),
+}
 
 _GO_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -94,6 +131,15 @@ def _mcp_switch_table() -> list[str]:
     return rows
 
 
+#: The messages that show while classification is off, as MEHO has them.
+OFF_MESSAGES: dict[str, str] = {
+    "answer: SWITCH_OFF_REFUSAL": SWITCH_OFF_REFUSAL,
+    "console: classify page": _console_text(),
+    "answer: SWITCH_OFF_IMPORT": SWITCH_OFF_IMPORT,
+    "answer: FILE_NEEDS_CLASSIFICATION": FILE_NEEDS_CLASSIFICATION,
+    "answer: CATEGORY_WITHOUT_CLASSIFICATION": CATEGORY_WITHOUT_CLASSIFICATION,
+}
+
 #: Texts that must also carry :data:`OLD_SWITCHES_ALONE`.
 TEXTS_WITH_SENTENCE: dict[str, str] = {
     "cli help: meho policy explain": _flat(
@@ -105,11 +151,6 @@ TEXTS_WITH_SENTENCE: dict[str, str] = {
     "cli help: meho connector overrides": _flat(
         _go_string("cli/internal/cmd/connector/overrides.go", 'Long: "overrides calls')
     ),
-    "console: classify page": _console_text(),
-    "answer: SWITCH_OFF_REFUSAL": SWITCH_OFF_REFUSAL,
-    "answer: SWITCH_OFF_IMPORT": SWITCH_OFF_IMPORT,
-    "answer: CATEGORY_WITHOUT_CLASSIFICATION": _flat(CATEGORY_WITHOUT_CLASSIFICATION),
-    "answer: FILE_NEEDS_CLASSIFICATION": FILE_NEEDS_CLASSIFICATION,
     "profile: separated-duties.yaml": _profile_comment(),
 }
 
@@ -152,9 +193,25 @@ def test_says_each_old_switch_still_works_alone(name: str) -> None:
     assert TEXTS_WITH_SENTENCE[name].count(OLD_SWITCHES_ALONE) == 1, name
 
 
+@pytest.mark.parametrize("name", sorted(OFF_MESSAGES))
+def test_off_message_names_the_part_switch_first(name: str) -> None:
+    text = _flat(OFF_MESSAGES[name])
+    assert text.count(OFF_MESSAGE_SWITCHES) == 1, name
+    assert "still turns on its own part alone" not in text, name
+    assert "POLICY_CLASSIFICATION" in text, name
+    assert text.index("POLICY_CLASSIFICATION") < text.index("CUSTOM_POLICY"), name
+    assert "POLICY_ENGINE_SHADOW" not in text, name
+    assert "POLICY_APPROVER_ROUTING" not in text, name
+
+
+@pytest.mark.parametrize("name", sorted(OFF_MESSAGES))
+def test_off_messages_have_the_exact_text(name: str) -> None:
+    assert OFF_MESSAGES[name] == OFF_MESSAGE_TEXTS[name], name
+
+
 def test_the_texts_were_found() -> None:
     """Each collected text is there, so a moved text cannot pass by being empty."""
-    for name, text in {**TEXTS_WITH_SENTENCE, **TEXTS_WITHOUT_SENTENCE}.items():
+    for name, text in {**OFF_MESSAGES, **TEXTS_WITH_SENTENCE, **TEXTS_WITHOUT_SENTENCE}.items():
         assert text.strip(), name
     assert len(_mcp_switch_table()) == 5
     assert "Policy evaluator: off" in TEXTS_WITHOUT_SENTENCE["cli output: evaluator off"]

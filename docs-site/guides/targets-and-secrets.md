@@ -355,6 +355,8 @@ built-in OpenBao. It is not for Google Secret Manager (see below).
       a write on the exact path. MEHO's own rules on who may approve
       still hold: see
       [Who may approve](approvals-and-break-glass.md#who-may-approve).
+      The write also needs the approval hand-off key. See
+      [The approval hand-off key](../install/index.md#the-approval-hand-off-key).
 
     On the command line, use the approval id from step 3:
 
@@ -721,7 +723,7 @@ Real failure modes, with the errors they actually produce:
 
 | Symptom | What it means | Fix |
 |---|---|---|
-| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. |
+| 422 at registration: *"target destination is not a public address; refusing it as a server-side request forgery risk…"* | The SSRF guard rejects private/internal addresses by default. The number-one surprise on on-prem first installs. | Add your internal ranges or hostnames to the chart's `config.targetSsrfAllowlist` (env `MEHO_TARGET_SSRF_ALLOWLIST`) and upgrade the release. An entry can end in a port (`host.name:8443`); it then admits that host on that port only. On a Linux server (install form 2), run `sudo meho-host target-networks <list>` instead ([The target networks](../install/form-2-linux-server.md#the-target-networks)). |
 | 422 `unknown_product`, listing `valid_products` | The `product` token isn't one a registered connector advertises. Product tokens are exact — `k8s`, not `kubernetes`. | Pick a token from the error's `valid_products` list. |
 | 422 `secret_ref_outside_tenant_scope` | You supplied a Vault ref outside `tenants/<tenant-id>/…`. It would fail with "permission denied" at every dispatch. | Use the `expected_secret_ref` the error names — or omit `secret_ref` and take the server default. |
 | 422 `secret_ref_project_not_allowed` | You supplied a `gsm:` ref in a Google Cloud project that `GSM_PARAM_ALLOWED_PROJECTS` does not list. MEHO would refuse every read of it. | List the project in `GSM_PARAM_ALLOWED_PROJECTS` and upgrade the release — or point `secret_ref` at a secret in a listed project. |

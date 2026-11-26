@@ -24,7 +24,10 @@ import (
 const classifyNote = "A category decides who may approve, so a change of category,\n" +
 	"labels or \"always wait\" is a change of rights: it waits until\n" +
 	"a tenant admin approves it in the web console. It needs\n" +
-	"the POLICY_CLASSIFICATION setting on the backplane.\n"
+	"the CUSTOM_POLICY or POLICY_CLASSIFICATION setting on the\n" +
+	"backplane. Each older switch (POLICY_CLASSIFICATION,\n" +
+	"POLICY_ENGINE_SHADOW, POLICY_APPROVER_ROUTING) still turns on\n" +
+	"its own part alone.\n"
 
 // newClassifyCmd returns the `meho connector classify` command.
 //

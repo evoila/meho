@@ -236,11 +236,17 @@
             "type": "string"
           },
           "delivery": {
-            "enum": [
-              "complete",
-              "partial",
-              "unavailable",
-              null
+            "anyOf": [
+              {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
             "type": [
               "string",

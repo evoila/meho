@@ -3251,12 +3251,15 @@ GitHub Actions does **not** expose the `secrets` context to job-level
 `if:` expressions (only `github`, `needs`, `vars`, and `inputs` are
 available — see the
 [GitHub Actions contexts reference](https://docs.github.com/en/actions/reference/contexts-reference)).
-A clause like `secrets.RDC_KUBECONFIG != ''` therefore collapses to
+A clause like `secrets.<kubeconfig secret> != ''` therefore collapses to
 undefined at evaluation time and the gate silently breaks. The single
 repository-scoped `vars.RKE2_SMOKE_ENABLED` is the documented gate;
 maintainers flip it to `'true'` after the consumer-side auth lands. The "Build kubeconfig" step still inspects
-`env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG` to pick Option A vs Option B
+`env.RKE2_CA_CERT` / `env.<kubeconfig secret>` to pick Option A vs Option B
 at step level (where the env indirection makes `secrets.*` legal).
+
+The exact secret name is set in `.github/workflows/pr-smoke.yml` (the
+`env:` block of the smoke job).
 
 Two auth modes are supported, matching the cross-repo doc's Sections 1A
 and 1B:
@@ -3264,7 +3267,7 @@ and 1B:
 | Mode | Required from consumer | Selected when |
 | --- | --- | --- |
 | Option A (OIDC trust) | `RKE2_CA_CERT` secret + `RKE2_API_SERVER` var + apiserver `--oidc-issuer-url=https://token.actions.githubusercontent.com` (or `AuthenticationConfiguration`) | `RKE2_CA_CERT` is set AND `RKE2_API_SERVER` is set |
-| Option B (kubeconfig) | `RDC_KUBECONFIG` secret (base64-encoded SA kubeconfig) | Only `RDC_KUBECONFIG` is set |
+| Option B (kubeconfig) | the kubeconfig secret of the smoke cluster (base64-encoded SA kubeconfig) | Only the kubeconfig secret is set |
 
 When both are set, Option A wins (the cross-repo doc's preference
 order: short-lived OIDC tokens vs. a long-lived stored kubeconfig).
@@ -3391,7 +3394,7 @@ Script invariants:
 Deferred-AC: every criterion that requires a live run against
 the consumer's cluster (image-push verification, namespace-create-then-teardown
 verifiability) is gated on the consumer-side OIDC trust OR
-`RDC_KUBECONFIG` secret landing. Until then the workflow ships in
+kubeconfig secret of the smoke cluster landing. Until then the workflow ships in
 "skipped at job level" mode and the AC bullets stay open in the
 Task body's tracking checklist. The cross-repo doc's "Status" table
 is the source of truth for when these bullets close.

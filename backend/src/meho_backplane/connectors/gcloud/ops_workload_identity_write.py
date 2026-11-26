@@ -335,6 +335,7 @@ _PROVIDER_CREATE_OP = GcloudOp(
     tags=(*_TAGS, "create", "workload-identity"),
     safety_level="dangerous",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call after the pool exists, to say which outside tokens Google trusts. Upload the "
@@ -412,6 +413,8 @@ _UPDATE_KEYS_OP = GcloudOp(
     tags=(*_TAGS, "update", "workload-identity"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call when the outside issuer signs with a new key, for example after a Kubernetes "
@@ -496,6 +499,7 @@ _SA_BINDING_ADD_OP = GcloudOp(
     tags=(*_TAGS, "service-accounts", "policy"),
     safety_level="dangerous",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call to let one identity use or act as a service account, for example to give "

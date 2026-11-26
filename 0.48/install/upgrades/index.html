@@ -4072,6 +4072,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>On a Linux server (install form 2), you can now name the networks of the systems that MEHO manages, with <code>install.sh --target-networks &lt;list&gt;</code> or <code>sudo meho-host target-networks &lt;list&gt;</code>: IPv4 ranges and addresses, each address with an optional port. MEHO accepts a target on a private address only inside them (the chart value <code>config.targetSsrfAllowlist</code>), and the update keeps the list. Without a list, MEHO refuses every target on a private address, as before.</td>
+<td>On a Linux server, run <code>sudo meho-host target-networks &lt;list&gt;</code> after the update, with the networks of your vCenter, switches and other managed systems, for example <code>10.20.0.0/16,10.30.0.5:443</code>. MEHO restarts for this. See https://evoila.github.io/meho/latest/install/form-2-linux-server/#the-target-networks.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Only a person can remove a <code>deny</code> grant or a <code>needs-approval</code> grant of an agent. A call that removes such a grant with a service, runner or agent login now gets 403 <code>human_principal_required</code>, and the grant stays. This holds for REST, MCP and the console. Over REST and MCP, any login that has the <code>tenant_admin</code> role can remove an <code>auto-execute</code> grant. On the unified console page, only a person can remove any grant.</td>
 <td>If a script removes <code>deny</code> or <code>needs-approval</code> grants, run it with a person's login. Scripts that only remove <code>auto-execute</code> grants need no change.</td>
 </tr>

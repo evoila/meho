@@ -48,7 +48,7 @@ refusal is noted, a connector sends no more requests for that card
 (:func:`refusal_noted`, :class:`CallRefusedError`).
 The check is fail-closed: a check that raises refuses the call, with a
 reason that names only the exception class. An expired login during the
-check is renewed once (:func:`_refresh_rejected_session`).
+check is renewed once (:func:`refresh_rejected_session`).
 """
 
 from __future__ import annotations
@@ -61,7 +61,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from meho_backplane.operations._errors import is_auth_failed_status, result_park_check_refused
+from meho_backplane.operations._errors import (
+    is_auth_failed_status,
+    result_gate_check_refused,
+    result_park_check_refused,
+)
 from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
@@ -74,14 +78,17 @@ __all__ = [
     "ParkCheck",
     "gate_check_refusal",
     "gate_check_registered",
+    "mark_reads_only",
     "note_refusal",
     "park_check_refusal",
     "park_check_registered",
+    "refresh_rejected_session",
     "refusal_noted",
     "refusal_scope",
     "register_gate_check",
     "register_park_check",
     "run_park_check",
+    "sent_reads_only",
     "transport_cause",
 ]
 
@@ -170,11 +177,29 @@ def refusal_noted() -> str | None:
     return noted[0] if noted else None
 
 
+#: Set on a transport error of a request that only read (:func:`mark_reads_only`).
+_READS_ONLY_MARK = "_meho_sent_reads_only"
+
+
+def mark_reads_only(exc: BaseException) -> None:
+    """Mark *exc* as the error of a check read: the call sent only reads, so nothing changed.
+
+    The dispatcher then gives a timeout of a write the text of a failed read
+    (:func:`~meho_backplane.operations.dispatcher.transport_error_result`).
+    """
+    setattr(exc, _READS_ONLY_MARK, True)
+
+
+def sent_reads_only(exc: BaseException) -> bool:
+    """Whether *exc* was marked by :func:`mark_reads_only`."""
+    return getattr(exc, _READS_ONLY_MARK, False) is True
+
+
 class CallRefusedError(RuntimeError):
     """A request was not sent: a read before it already refused the call (:func:`note_refusal`)."""
 
 
-async def _refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
+async def refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
     """Drop the login the vendor rejected; ``True`` when the check can run again.
 
     A check can read the vendor with the connector's cached login. When
@@ -255,7 +280,7 @@ async def _check_with_fresh_login(ctx: PreviewContext, check: ParkCheck) -> str 
     try:
         return await check(ctx)
     except httpx.HTTPStatusError as exc:
-        if not await _refresh_rejected_session(ctx, exc):
+        if not await refresh_rejected_session(ctx, exc):
             raise
     return await check(ctx)
 
@@ -337,7 +362,7 @@ async def gate_check_refusal(
             target=target,
             params=params,
             duration_ms=duration_ms,
-            raise_no_answer=True,
+            gate=True,
         )
     except Exception as exc:
         cause = transport_cause(exc)
@@ -382,9 +407,14 @@ async def _refusal(
     target: Any,
     params: dict[str, Any],
     duration_ms: float,
-    raise_no_answer: bool = False,
+    gate: bool = False,
 ) -> OperationResult | None:
-    """Run *check* for the call; the refusal result, or ``None``."""
+    """Run *check* for the call; the refusal result, or ``None``.
+
+    With *gate* (a check before the policy gate), an error of a request
+    that got no answer is raised, and the refusal is
+    :func:`~meho_backplane.operations._errors.result_gate_check_refused`.
+    """
     if check is None:
         return None
     # Imported lazily: the dispatcher imports this module.
@@ -408,8 +438,10 @@ async def _refusal(
             connector_id=connector_id,
         ),
         check,
-        raise_no_answer=raise_no_answer,
+        raise_no_answer=gate,
     )
     if reason is None:
         return None
+    if gate:
+        return result_gate_check_refused(op_id, reason, duration_ms)
     return result_park_check_refused(op_id, reason, duration_ms)

@@ -114,6 +114,7 @@ __all__ = [
     "result_connector_vault_forbidden",
     "result_connector_vault_write_forbidden",
     "result_denied",
+    "result_gate_check_refused",
     "result_handler_unreachable",
     "result_idempotency_key_conflict",
     "result_invalid_op_schema",
@@ -1208,6 +1209,25 @@ def result_park_check_refused(op_id: str, reason: str, duration_ms: float) -> Op
     )
 
 
+def result_gate_check_refused(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """The op's check before the policy gate refused the call.
+
+    The check (:func:`~meho_backplane.operations._park_check.register_gate_check`)
+    runs for every call of the op, also for one that runs at once. So the
+    text is the check's *reason* only: it says what to check, and nothing
+    about a wait for approval. Preview returns the same text. ``status`` and
+    ``error_code`` are the ones of :func:`result_park_check_refused`.
+    """
+    reason = _sanitize_free_text(reason)
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {reason}",
+        duration_ms=duration_ms,
+        extras={"error_code": "refused_before_approval", "reason": reason},
+    )
+
+
 def result_preview_hash_mismatch(op_id: str, duration_ms: float) -> OperationResult:
     """Destructive-tier park refused: presented preview hash did not match (#3197).
 
@@ -1764,6 +1784,7 @@ def result_connector_timeout(
     duration_ms: float,
     *,
     changes_target: bool = False,
+    nothing_changed: bool = False,
 ) -> OperationResult:
     """Return a structured timeout or other HTTP transport-fault result.
 
@@ -1772,7 +1793,9 @@ def result_connector_timeout(
     a dropped connection after MEHO wrote the request), the result then
     carries ``execution_outcome: uncertain`` and ``retry: False``, the same
     as :func:`result_audit_commit_failed`. A connect timeout, and any fault
-    of a read operation, stay a plain error.
+    of a read operation, stay a plain error. *nothing_changed* is ``True``
+    when the call sent only reads to a target it may change: the text then
+    says that nothing was changed.
 
     ``httpx`` exposes a per-request timeout map through the request extension.
     A non-timeout transport failure has no truthful phase, so it is labelled
@@ -1814,6 +1837,8 @@ def result_connector_timeout(
         extras["retry"] = False
         extras["remediation"] = UNCERTAIN_ADVICE
         error += f". {UNCERTAIN_ADVICE}"
+    elif nothing_changed:
+        error += ". MEHO sent only reads to the target, so nothing was changed"
     return OperationResult(
         status="error",
         op_id=op_id,

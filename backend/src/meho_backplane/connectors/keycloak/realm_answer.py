@@ -33,9 +33,17 @@ call too (:func:`~meho_backplane.connectors.keycloak.realm_params.check_answered
 When the check read gets no answer at all (for example the TLS certificate
 of the server is not trusted), the call stops there with the error it would
 return for it (for example ``connector_tls_verify_failed``,
-:func:`~meho_backplane.operations._park_check.gate_check_refusal`). So no
-call waits for approval, and no preview says it may go on, without a
-passed check.
+:func:`~meho_backplane.operations._park_check.gate_check_refusal`). When it
+gets an HTTP error or an answer that is not JSON, the check before the
+policy gate refuses the call with a text that names the target and what to
+check: the ``managed_realm`` of the target, the address of the Keycloak
+server and the rights of MEHO's admin account in Keycloak. The text names
+the HTTP status and no text of the answer. So no call waits for approval,
+and no preview says it may go on, without a passed check.
+
+When the check read in the handler gets no answer, the error says that MEHO
+sent only that read, so nothing was changed
+(:func:`~meho_backplane.operations._park_check.mark_reads_only`).
 
 ``keycloak.realm.create`` and ``keycloak.realm.delete`` use
 :func:`realm_checked_or_absent` and :data:`ABSENT_OK_OPS`: they also go on
@@ -61,7 +69,12 @@ from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_pa
 from meho_backplane.connectors.keycloak.realm_params import realm_fence_problem
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
-from meho_backplane.operations._park_check import ParkCheck, register_gate_check
+from meho_backplane.operations._park_check import (
+    ParkCheck,
+    mark_reads_only,
+    refresh_rejected_session,
+    register_gate_check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -120,11 +133,37 @@ async def check_realm_answer(
     connector._realm_checks.note_passed(target)
 
 
+def _unreadable_text(target: Any, status: int | None) -> str:
+    """The refusal when the check read got an HTTP error or an answer that is not JSON."""
+    how = f"HTTP {status}" if status is not None else "the answer is not JSON"
+    return (
+        f"target {getattr(target, 'name', None)!r}: MEHO could not read the realm this "
+        f"target manages from Keycloak ({how}). Check the 'managed_realm' of the target, "
+        "the address of the Keycloak server and the rights of MEHO's admin account in "
+        "Keycloak."
+    )
+
+
+async def _gate_read(
+    connector: KeycloakConnector, ctx: PreviewContext, *, allow_absent: bool
+) -> None:
+    """:func:`check_realm_answer`; once more after a fresh login when Keycloak rejected it."""
+    try:
+        await check_realm_answer(connector, ctx.operator, ctx.target, allow_absent=allow_absent)
+        return
+    except httpx.HTTPStatusError as exc:
+        if not await refresh_rejected_session(ctx, exc):
+            raise
+    await check_realm_answer(connector, ctx.operator, ctx.target, allow_absent=allow_absent)
+
+
 def realm_gate_check(op_id: str) -> ParkCheck:
     """The check of *op_id* before the policy gate: the refusal text, or ``None``.
 
-    The text is the one the handler gives. A target or connector that does
-    not resolve is left to the dispatcher, which refuses the call itself.
+    For another realm in the answer, the text is the one the handler gives.
+    For an HTTP error or an answer that is not JSON, it is
+    :func:`_unreadable_text`. A target or connector that does not resolve is
+    left to the dispatcher, which refuses the call itself.
     """
 
     async def check(ctx: PreviewContext) -> str | None:
@@ -138,11 +177,14 @@ def realm_gate_check(op_id: str) -> ParkCheck:
         if problem is not None:
             return problem
         try:
-            await check_realm_answer(
-                connector, ctx.operator, ctx.target, allow_absent=op_id in ABSENT_OK_OPS
-            )
+            await _gate_read(connector, ctx, allow_absent=op_id in ABSENT_OK_OPS)
         except KeycloakRealmAnswerError as exc:
             return str(exc)
+        except httpx.HTTPStatusError as exc:
+            return _unreadable_text(ctx.target, exc.response.status_code)
+        except ValueError:
+            # An answer that is not JSON (a JSONDecodeError): no text of it.
+            return _unreadable_text(ctx.target, None)
         return None
 
     return check
@@ -174,7 +216,12 @@ def _checked[R](
         problem = realm_fence_problem(op_id, params, target) if op_id is not None else None
         if problem is not None:
             raise ValueError(problem)
-        await check_realm_answer(self, operator, target, allow_absent=allow_absent)
+        try:
+            await check_realm_answer(self, operator, target, allow_absent=allow_absent)
+        except httpx.TransportError as exc:
+            # Only the realm read was sent: the error says nothing was changed.
+            mark_reads_only(exc)
+            raise
         return await handler(self, operator, target, params)
 
     _wrapped.realm_answer_checked = True  # type: ignore[attr-defined]

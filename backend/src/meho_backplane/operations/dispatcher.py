@@ -443,6 +443,7 @@ from meho_backplane.operations._park_check import (
     gate_check_refusal,
     park_check_refusal,
     refusal_scope,
+    sent_reads_only,
 )
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
@@ -1964,7 +1965,13 @@ async def _run_branch_with_error_handling(
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             await transport_error_result(
-                op_id, transport_exc, descriptor=descriptor, target=target, duration_ms=duration_ms
+                op_id,
+                transport_exc,
+                descriptor=descriptor,
+                target=target,
+                duration_ms=duration_ms,
+                # A check read of the handler (``_park_check.mark_reads_only``).
+                reads_only=sent_reads_only(transport_exc),
             ),
             audit_id=audit_id,
             operator=operator,
@@ -2353,8 +2360,9 @@ async def transport_error_result(
     other ConnectError (DNS failure, connection refused) is the generic
     ``connector_error``, never mislabelled as a TLS fault. A timeout or any
     other transport fault is ``connector_timeout``. With *reads_only* (the
-    call sent only reads, for example a check before the policy gate), a
-    timeout counts as a failed read, also for a write.
+    call sent only reads, for example a check before the policy gate or the
+    handler's realm check), a timeout counts as a failed read, also for a
+    write, and the text of a write says that nothing was changed.
 
     The connectors' shared ``HttpConnector._retryable`` already retried the
     error on idempotent verbs, so by here the retries are exhausted.
@@ -2375,11 +2383,13 @@ async def transport_error_result(
             else None
         )
         return result_connector_tls_verify_failed(op_id, exc, target, duration_ms, presented)
+    may_change = changes_target(descriptor.safety_level)
     return result_connector_timeout(
         op_id,
         exc,
         duration_ms,
-        changes_target=not reads_only and changes_target(descriptor.safety_level),
+        changes_target=not reads_only and may_change,
+        nothing_changed=reads_only and may_change,
     )
 
 

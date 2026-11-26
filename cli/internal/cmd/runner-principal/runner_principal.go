@@ -235,4 +235,8 @@ func printEntrySummary(w io.Writer, e *api.RunnerPrincipalRead) {
 	fmt.Fprintf(w, "  owner_sub:           %s\n", e.OwnerSub)
 	fmt.Fprintf(w, "  revoked:             %v\n", e.Revoked)
 	fmt.Fprintf(w, "  created_at:          %s\n", e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"))
+	if e.SetAsideCount != nil {
+		fmt.Fprintf(w, "  set_aside_count:     %s\n", setAsideCountText(e.SetAsideCount))
+		fmt.Fprintf(w, "  set_aside_last_at:   %s\n", setAsideTimeText(e.SetAsideLastAt))
+	}
 }

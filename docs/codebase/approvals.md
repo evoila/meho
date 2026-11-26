@@ -4613,7 +4613,9 @@ CLI) the token must prove it:
     (default 300), whatever the window is; else
     `ApprovalSignInTooOldError`, mapped to 401 `fresh_sign_in_required:`
     with `max_age=300`;
-  - the sign-in must not have approved anything else; else
+  - the sign-in must not have approved anything else, and must not have
+    removed the person's own block (`principal.unblock` audit row with the
+    same sign-in key; `auth/sign_in_use.py` reads both kinds of row); else
     `ApprovalSignInReusedError`, mapped to 401
     `fresh_sign_in_already_used:` with `max_age=300`;
   - after it, that sign-in approves nothing more: its audit row carries

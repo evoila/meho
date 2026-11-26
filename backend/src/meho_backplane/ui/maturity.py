@@ -93,6 +93,7 @@ SURFACE_FEATURE: dict[str, str] = {
     "vault": "write_surfaces",
     "approvals": "approvals",
     "grants": "approvals",
+    "blocked-people": "auth_tenancy",
     "audit": "audit",
 }
 

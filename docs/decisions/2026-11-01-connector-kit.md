@@ -162,13 +162,18 @@ How a change to the kit is noticed:
      needs only the second number. A package built against the older kit keeps working with no
      rebuild. "Given only by name" means the input comes after the `*` in the function's inputs:
      the caller must write its name; it can never be given by its place.
-   - Four cases still need the first number, even with a default, because they can break a
+   - This second-number rule is about functions of the kit that a package calls.
+   - Five cases still need the first number, even with a default, because they can break a
      package:
      - a new input that can be given by its place, also when it is added last;
      - a new input with no default;
      - a change of the default or the meaning of an input that exists;
      - a new input given only by name, on a function that already takes any further named inputs
-       (`**`): a name that went into those before now goes to the new input.
+       (`**`): a name that went into those before now goes to the new input;
+     - the kit starts to pass an input to a method that a package supplies, and an existing
+       package's method does not take it.
+   - The kit's version tools follow this rule once they know it. Tools that do not know it yet
+     ask for the first number for every changed input list.
 4. **The pull request** shows the changed list file, so a person sees the kit change before the
    merge. The kit owner must approve it, through the code owners file (decision 3).
 5. **The release.** A small script in `scripts/release/` compares the list file at the last release

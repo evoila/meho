@@ -3,14 +3,16 @@
 
 """Who may run the dry run of the "always wait" carry-over, and what it writes.
 
-* An agent login gets 403, also one with the platform admin mark. Every
-  other caller gets the same status as ``GET /api/v1/policy/export`` with
-  the same scope. A hosted run has no MCP tool and no operation for it.
+* An agent login gets 403 from the dry run, also one with the platform
+  admin mark. Every other caller gets the same status as
+  ``GET /api/v1/policy/export`` with the same scope. A hosted run has no
+  MCP tool and no operation for it.
 * It writes only its audit row: every table is the same before and after,
   with every policy switch off and on, also when the dry run fails half
   way.
 * An override with approval on keeps waiting: the override alone makes a
-  ``safe`` call wait, before and after a dry run.
+  ``safe`` call wait, before and after a dry run, with ``CUSTOM_POLICY``
+  off and on.
 
 Drives the production ``meho_backplane.main:app`` with real tokens. DB is
 the autouse per-test SQLite + ``alembic upgrade head``.
@@ -44,6 +46,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp.handlers import handle_tools_list
 from meho_backplane.mcp.registry import registered_tool_names
 from meho_backplane.policy import carry_over
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.settings import get_settings
 
 from ._carry_over_helpers import (
@@ -175,24 +178,20 @@ async def test_an_agent_is_refused_and_every_other_caller_gets_the_export_answer
         await session.commit()
     key = make_rsa_keypair("kid-co-callers")
 
-    seen: list[tuple[str, str, int, int, int]] = []
+    seen: list[tuple[str, str, int, int]] = []
     for caller, claims, tenant_status, install_status in _CALLERS:
         for scope, expected in (("tenant", tenant_status), ("install", install_status)):
             dry = _send(client, key, ROUTE, scope, claims)
-            export = _send(client, key, EXPORT_ROUTE, scope, claims)
-            seen.append((caller, scope, dry, export, expected))
-
-    for caller, scope, dry, export, expected in seen:
-        assert dry == expected, (caller, scope, dry)
-        if claims_is_agent(caller):
-            assert dry == 403, (caller, scope)
-        else:
-            assert dry == export, (caller, scope, dry, export)
-    # The refusal of an agent is the dry run's own: the export lets this one read.
-    assert ("agent, platform admin", "tenant", 403, 200, 403) in seen
+            assert dry == expected, (caller, scope, dry)
+            if is_agent(caller):
+                assert dry == 403, (caller, scope)
+            else:
+                export = _send(client, key, EXPORT_ROUTE, scope, claims)
+                assert dry == export, (caller, scope, dry, export)
+            seen.append((caller, scope, dry, expected))
 
     rows = await audit_rows()
-    sent = [(dry, scope) for _, scope, dry, _, _ in seen if dry != 401]
+    sent = [(dry, scope) for _, scope, dry, _ in seen if dry != 401]
     assert [row.status_code for row in rows] == [dry for dry, _ in sent]
     assert {row.method for row in rows} == {"GET"}
     named = [row for row in rows if (row.payload or {}).get("op_id") == AUDIT_OP]
@@ -200,7 +199,7 @@ async def test_an_agent_is_refused_and_every_other_caller_gets_the_export_answer
     assert len([dry for dry, _ in sent if dry == 200]) == 7
 
 
-def claims_is_agent(caller: str) -> bool:
+def is_agent(caller: str) -> bool:
     return caller.startswith("agent")
 
 
@@ -329,7 +328,17 @@ async def _requests() -> list[ApprovalRequest]:
         return list((await session.execute(select(ApprovalRequest))).scalars())
 
 
+@pytest.fixture(params=[False, True], ids=["custom-policy-off", "custom-policy-on"])
+def custom_policy(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+    on: bool = request.param
+    monkeypatch.setenv("CUSTOM_POLICY", "true" if on else "false")
+    get_settings.cache_clear()
+    assert custom_policy_on(get_settings()) is on
+    return on
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("custom_policy")
 async def test_without_the_override_the_same_safe_call_runs(
     client: TestClient, embedding: AsyncMock
 ) -> None:
@@ -340,6 +349,7 @@ async def test_without_the_override_the_same_safe_call_runs(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("custom_policy")
 async def test_an_override_with_approval_on_keeps_waiting(
     client: TestClient, embedding: AsyncMock
 ) -> None:

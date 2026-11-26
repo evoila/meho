@@ -317,10 +317,14 @@ def test_the_first_click_on_unblock_only_shows_the_confirm_page() -> None:
     _seed_blocks(("in-a", str(_TENANT_A), "reason a"), ("in-b", str(_TENANT_B), "reason b"))
     client, mock, csrf = _client(platform_admin=True)
     try:
-        first = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
+        first = client.post(
+            _UNBLOCK, data={"sub": "in-a", "csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        )
         rows_after_first = _block_rows()
         audit_after_first = _audit_payloads("principal.unblock")
-        confirmed = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
+        confirmed = client.post(
+            _UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        )
     finally:
         mock.stop()
     assert first.status_code == 200, first.text
@@ -454,7 +458,9 @@ def test_old_forms_after_a_tenant_switch_are_refused_and_change_no_blocks() -> N
     client, mock, csrf = _client(extra_claims=admin_in_both)
     try:
         page = client.get(_PAGE)
-        confirm_page = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
+        confirm_page = client.post(
+            _UNBLOCK, data={"sub": "in-a", "csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        )
         asyncio.run(
             save_session_tenant(
                 client.session_id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
@@ -484,9 +490,22 @@ def test_both_forms_post_with_the_token_in_a_hidden_field_and_work_without_htmx(
     client, mock, csrf = _client()
     try:
         page = client.get(_PAGE)
-        blocked = client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r", "csrf_token": csrf})
-        refused = client.post(_PAGE, data={"sub": _OP_A, "reason": "r", "csrf_token": csrf})
-        unblocked = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
+        blocked = client.post(
+            _PAGE,
+            data={
+                "sub": _BLOCKED,
+                "reason": "r",
+                "csrf_token": csrf,
+                "meho_tenant": str(_TENANT_A),
+            },
+        )
+        refused = client.post(
+            _PAGE,
+            data={"sub": _OP_A, "reason": "r", "csrf_token": csrf, "meho_tenant": str(_TENANT_A)},
+        )
+        unblocked = client.post(
+            _UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        )
     finally:
         mock.stop()
     assert page.text.count('method="post"') == 2
@@ -576,3 +595,80 @@ def test_a_form_without_the_csrf_token_is_refused() -> None:
         mock.stop()
     assert response.status_code == 403
     assert _block_rows() == []
+
+
+def _block_form(csrf: str, **extra: str) -> dict[str, str]:
+    return {"sub": _BLOCKED, "reason": "r", "csrf_token": csrf, **extra}
+
+
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        ({"Sec-Fetch-Site": "cross-site"}, 403),
+        ({"Sec-Fetch-Site": "same-site"}, 403),
+        ({"Sec-Fetch-Site": "same-origin"}, 303),
+        ({"Origin": "https://other.example"}, 403),
+        ({"Origin": "null"}, 403),
+        ({"Origin": "http://testserver"}, 303),
+        ({}, 303),
+    ],
+)
+def test_block_form_from_another_origin_is_refused_and_writes_nothing(
+    headers: dict[str, str], status: int
+) -> None:
+    _tenants()
+    client, mock, csrf = _client()
+    try:
+        response = client.post(
+            _PAGE, data=_block_form(csrf, meho_tenant=str(_TENANT_A)), headers=headers
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == status, response.text
+    if status == 403:
+        assert response.json() == {"detail": "csrf_token_invalid"}
+        assert _block_rows() == []
+    else:
+        assert _block_rows() == [(_BLOCKED, str(_TENANT_A), "r")]
+
+
+def test_unblock_form_from_another_origin_is_refused_and_removes_nothing() -> None:
+    _tenants()
+    _seed_blocks(("in-a", str(_TENANT_A), "reason a"))
+    client, mock, csrf = _client()
+    try:
+        form = {**_confirmed("in-a"), "csrf_token": csrf, "meho_tenant": str(_TENANT_A)}
+        cross = client.post(_UNBLOCK, data=form, headers={"Sec-Fetch-Site": "cross-site"})
+        rows_after = _block_rows()
+        own = client.post(_UNBLOCK, data=form, headers={"Sec-Fetch-Site": "same-origin"})
+    finally:
+        mock.stop()
+    assert cross.status_code == 403
+    assert rows_after == [("in-a", str(_TENANT_A), "reason a")]
+    assert own.status_code == 303
+    assert _block_rows() == []
+
+
+def test_plain_form_without_the_page_tenant_is_refused_with_409() -> None:
+    _tenants()
+    client, mock, csrf = _client()
+    try:
+        without = client.post(_PAGE, data=_block_form(csrf))
+        rows_after = _block_rows()
+        with_tenant = client.post(_PAGE, data=_block_form(csrf, meho_tenant=str(_TENANT_A)))
+    finally:
+        mock.stop()
+    assert without.status_code == 409
+    assert without.json()["detail"] == "The tenant changed. Reload the page."
+    assert rows_after == []
+    assert with_tenant.status_code == 303
+
+
+def test_pages_load_from_a_link_on_another_site() -> None:
+    _tenants()
+    client, mock, _csrf = _client()
+    try:
+        response = client.get(_PAGE, headers={"Sec-Fetch-Site": "cross-site"})
+    finally:
+        mock.stop()
+    assert response.status_code == 200

@@ -541,7 +541,7 @@ def _post_read(
     with_csrf: bool = True,
 ) -> object:
     csrf = _csrf_token(session_id)
-    form = dict(data)
+    form = {"meho_tenant": str(_TENANT_A), **data}
     if with_csrf:
         form["csrf_token"] = csrf
     with respx.mock(assert_all_called=False):
@@ -735,7 +735,7 @@ def test_read_post_unknown_collection_keeps_the_page_404() -> None:
         ):
             response = client.post(
                 "/ui/corpus/chunks/ghost/c-9",
-                data={"read_handle": _HANDLE, "csrf_token": csrf},
+                data={"read_handle": _HANDLE, "csrf_token": csrf, "meho_tenant": str(_TENANT_A)},
             )
 
     assert response.status_code == 404, response.text

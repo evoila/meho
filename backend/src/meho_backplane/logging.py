@@ -20,10 +20,8 @@ timestamp, contextvar-merged ``request_id`` (when in a request
 context), and locals-stripped structured tracebacks. Nothing on the
 backplane emits plain-text log lines any more.
 
-httpx logs one line per request at INFO with the full URL. The URL can be
-a credential (a vCenter download URL, a pre-signed URL, a token in the
-query), so :class:`_HttpxUrlFilter` cuts every URL in that line down to
-its scheme and host before the bridge writes it.
+:class:`_HttpxUrlFilter` cuts every URL in the per-call line of httpx down
+to its scheme and host before the bridge writes it.
 
 MEHO holds the logger of each HTTP client library, and every child
 logger, at the level in :data:`_HTTP_STACK_LOGGERS`.
@@ -32,6 +30,13 @@ logger, at the level in :data:`_HTTP_STACK_LOGGERS`.
 record below the held level, also when a library changes the level of its
 own logger after :func:`configure_logging` ran (the Anthropic SDK does this
 at its first import when ``ANTHROPIC_LOG`` is set).
+
+:func:`configure_logging` also sets a log record factory. For a record of a
+listed logger below its held level, the factory keeps only a fixed text: no
+arguments, no exception and no stack. So every handler in the process gets
+that text, not only MEHO's. Four kinds of record that help an operator get
+their own fixed line instead (:data:`_SAFE_LINES`), and MEHO's handler lets
+that line through.
 
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
@@ -43,7 +48,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TextIO
+from collections.abc import Callable
+from typing import Any, TextIO
 
 import httpx
 import structlog
@@ -88,26 +94,109 @@ def _held_level(name: str) -> int | None:
         name = parent
 
 
+#: Attribute that marks a record made into one of the fixed lines of
+#: :data:`_SAFE_LINES`.
+_SAFE_EVENT_ATTR = "meho_safe_event"
+
+#: Fixed text of every other record below the held level.
+_WITHHELD_TEXT = "HTTP library log text withheld"
+
+#: The kinds of record below the held level that MEHO writes as a fixed line.
+#: The key is the logger name and the library's format text, both exact. The
+#: value is the event name and the fixed text of MEHO's line.
+_SAFE_LINES: dict[tuple[str, str], tuple[str, str]] = {
+    (
+        "urllib3.connection",
+        "Certificate did not match expected hostname: %s. Certificate: %s",
+    ): ("http_tls_name_mismatch", "The server's certificate does not match the host name."),
+    (
+        "urllib3.connectionpool",
+        "Retrying (%r) after connection broken by '%r': %s",
+    ): ("http_retry_after_broken_connection", "A connection broke; the call is retried."),
+    (
+        "botocore.credentials",
+        "Refreshing temporary credentials failed during %s refresh period.",
+    ): ("aws_credential_refresh_failed", "Refreshing AWS credentials failed."),
+    (
+        "botocore.tokens",
+        "Refreshing token failed during the %s refresh period.",
+    ): ("aws_token_refresh_failed", "Refreshing an AWS token failed."),
+    (
+        "botocore.tokens",
+        "SSO token refresh attempt failed",
+    ): ("aws_token_refresh_failed", "Refreshing an AWS token failed."),
+}
+
+
+def _hold_record(record: logging.LogRecord) -> None:
+    """Cut a record of a listed logger below its held level down to fixed text."""
+    if not isinstance(record.name, str):
+        # ``logging.makeLogRecord`` makes an empty record and fills it later.
+        return
+    held = _held_level(record.name)
+    if held is None or record.levelno >= held:
+        return
+    safe = _SAFE_LINES.get((record.name, record.msg)) if isinstance(record.msg, str) else None
+    if safe is not None:
+        record.msg = f"{safe[0]}: {safe[1]}"
+        record.levelno = logging.WARNING
+        record.levelname = logging.getLevelName(logging.WARNING)
+        setattr(record, _SAFE_EVENT_ATTR, safe[0])
+    else:
+        record.msg = _WITHHELD_TEXT
+    record.args = ()
+    record.exc_info = None
+    record.exc_text = None
+    record.stack_info = None
+
+
+_previous_record_factory: Callable[..., logging.LogRecord] | None = None
+
+
+def _hold_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+    """Make the record with the earlier factory, then cut it down if it is held."""
+    assert _previous_record_factory is not None
+    record = _previous_record_factory(*args, **kwargs)
+    _hold_record(record)
+    return record
+
+
+def _install_record_factory() -> None:
+    """Set :func:`_hold_record_factory` once, keeping the factory set before it."""
+    global _previous_record_factory
+    current = logging.getLogRecordFactory()
+    if current is _hold_record_factory:
+        return
+    if _previous_record_factory is None:
+        _previous_record_factory = current
+    logging.setLogRecordFactory(_hold_record_factory)
+
+
 class _HttpStackLevelFilter(logging.Filter):
     """Drop a record of an HTTP library logger below its held level.
 
     Sits on MEHO's handler, so the hold does not depend on the level of the
-    library's own logger, which the library can change at any time.
+    library's own logger, which the library can change at any time. A record
+    that :func:`_hold_record` made into a fixed line of :data:`_SAFE_LINES`
+    passes.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         held = _held_level(record.name)
-        return held is None or record.levelno >= held
+        return (
+            held is None
+            or record.levelno >= held
+            or getattr(record, _SAFE_EVENT_ATTR, None) is not None
+        )
 
 
 class _HttpxUrlFilter(logging.Filter):
     """Keep only the scheme and the host of a URL in an httpx log record.
 
-    httpx logs ``HTTP Request: GET <url> "HTTP/1.1 200 OK"`` at INFO with the
-    full :class:`httpx.URL` as an argument. The path and the query of that
-    URL can be a credential (CWE-532): a vCenter download URL holds the
-    download session, a pre-signed URL holds its signature. The method, the
-    host and the status stay, so the line is still useful for triage.
+    The per-call line has the form ``HTTP Request: GET <url> "HTTP/1.1 200 OK"``.
+    The filter cuts the :class:`httpx.URL` argument down to scheme and host.
+    The method, the host and the status stay, so the line is still useful for
+    triage.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -227,6 +316,12 @@ def _bridge_stdlib_logging(level: int, shared: list[structlog.typing.Processor])
     logging.getLogger("httpx").addFilter(_HTTPX_URL_FILTER)
     for name, held in _HTTP_STACK_LOGGERS.items():
         logging.getLogger(name).setLevel(held)
+    # The loggers of the fixed lines must make their WARNING records, so that
+    # the record factory and the handler filter can judge them.
+    for name, _ in _SAFE_LINES:
+        if (_held_level(name) or logging.NOTSET) > logging.WARNING:
+            logging.getLogger(name).setLevel(logging.WARNING)
+    _install_record_factory()
 
     for name in ("uvicorn", "uvicorn.error"):
         bridged = logging.getLogger(name)

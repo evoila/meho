@@ -864,23 +864,78 @@ class TakeBackTest(DryRunTestCase):
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the override of k8s.annotate (check 9): not as before the run (now: tenant "
-             "dangerous, approval not set; before the run: none)"],
+            ["[left] the override of k8s.annotate (check 9): not as before the run: tenant "
+             "override: added (risk level dangerous, approval not set, category not set, "
+             "labels none, always wait not set)"],
         )  # fmt: skip
 
     def test_an_override_from_before_the_run_is_set_back_not_removed(self) -> None:
         before = {
             "connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
-            "safety_level": "dangerous", "requires_approval": True,
+            "safety_level": "dangerous", "requires_approval": True, "category": "write",
+            "labels": {"team": "web", "area": "apps"}, "always_wait": True,
         }  # fmt: skip
         self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
         self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [before]}}
         result = self.run_script()
         self.assertIn(
             "set the overrides of k8s.scale back to how they were before the run "
-            "(tenant dangerous, approval true)",
+            "(tenant override: risk level dangerous, approval true, category write, "
+            "labels area=apps team=web, always wait true)",
             result.stdout,
         )
+        self.assertEqual(self.left_lines(result), [])
+
+    def lost_setting(self, field: str, value: Any) -> list[str]:
+        """An override from before the run that has lost one stored setting at the end."""
+        before = {
+            "connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
+            "safety_level": "dangerous", "requires_approval": None, "category": "write",
+            "labels": {"team": "web"}, "always_wait": False,
+        }  # fmt: skip
+        self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        after = dict(before, **{field: value})
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
+        result = self.run_script()
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+        return self.left_lines(result)
+
+    def test_an_override_from_before_the_run_that_lost_its_labels_is_named(self) -> None:
+        self.assertEqual(
+            self.lost_setting("labels", {}),
+            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
+             "override: labels is none, before the run team=web"],
+        )  # fmt: skip
+
+    def test_an_override_from_before_the_run_that_lost_its_category_is_named(self) -> None:
+        self.assertEqual(
+            self.lost_setting("category", None),
+            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
+             "override: category is not set, before the run write"],
+        )  # fmt: skip
+
+    def test_an_always_wait_mark_left_changed_is_named(self) -> None:
+        self.assertEqual(
+            self.lost_setting("always_wait", True),
+            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
+             "override: always wait is true, before the run false"],
+        )  # fmt: skip
+
+    def test_check_9_does_not_run_with_an_override_from_before_the_run(self) -> None:
+        before = {
+            "connector_id": "k8s", "op_id": "k8s.annotate", "scope": "install",
+            "safety_level": "caution", "requires_approval": None, "labels": {"team": "web"},
+        }  # fmt: skip
+        self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        result = self.run_script()
+        self.assertIn(
+            "[skip] check 9 (an Admin, a person, web console): not run: an override from "
+            "before the run",
+            result_lines(result.stdout),
+        )
+        self.assertNotIn("[person] Check 9.", result.stdout)
+        self.assertNotIn("(check 9)", result.stdout)
         self.assertEqual(self.left_lines(result), [])
 
     def test_a_tenant_lowering_left_next_to_an_install_override_is_named(self) -> None:
@@ -894,9 +949,9 @@ class TakeBackTest(DryRunTestCase):
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the lowering of k8s.scale (check 1): not as before the run (now: install "
-             "dangerous, approval not set; tenant caution, approval not set; before the run: "
-             "install dangerous, approval not set)"],
+            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
+             "override: added (risk level caution, approval not set, category not set, "
+             "labels none, always wait not set)"],
         )  # fmt: skip
         self.assertIn("1 not taken back", result.stdout)
 
@@ -909,9 +964,11 @@ class TakeBackTest(DryRunTestCase):
         after = dict(before, requires_approval=False)
         self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
         result = self.run_script()
-        left = self.left_lines(result)
-        self.assertEqual(len(left), 1, left)
-        self.assertIn("approval false; before the run: tenant dangerous, approval true", left[0])
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
+             "override: approval is false, before the run true"],
+        )  # fmt: skip
 
     def test_an_override_read_that_fails_at_the_start_skips_the_four_edit_steps(self) -> None:
         self.answers["before-overrides"] = {"code": 500, "body": {"detail": "boom"}}
@@ -971,7 +1028,7 @@ class TakeBackTest(DryRunTestCase):
             "code": 200,
             "body": [
                 {"id": "req-cut", "principal_sub": "service-1", "created_at": "2026-01-01T00:00:01Z",
-                 "work_ref": WORK_REF},
+                 "work_ref": f"{WORK_REF}-c6-root"},
                 {"id": "req-other", "principal_sub": "someone-else", "created_at": "2026-01-01T00:00:01Z"},
                 {"id": "req-before", "principal_sub": "service-1", "created_at": "2025-12-31T23:59:59Z"},
             ],
@@ -1001,6 +1058,49 @@ class TakeBackTest(DryRunTestCase):
         )
         self.assertIn("[note] request req-ticket of PERSON_TOKEN waits", result.stdout)
         self.assertEqual(self.left_lines(result), [])
+
+    def test_a_request_of_another_run_of_the_script_stays(self) -> None:
+        other = "custom-policy-check-0123456789abcdef-c6-rights"
+        self.answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {"id": "req-run", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
+                 "work_ref": other},
+                {"id": "req-prefix", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
+                 "work_ref": WORK_REF + "x-c6-rights"},
+            ],
+        }  # fmt: skip
+        result = self.run_script()
+        self.assertIn(f"[note] request req-run of PERSON_TOKEN waits, but it does not carry "
+                      f"this run's work reference (it has {other}); it stays", result.stdout)  # fmt: skip
+        self.assertIn("[note] request req-prefix of PERSON_TOKEN waits", result.stdout)
+        self.assertNotIn("withdraw-req-run", result.stdout)
+        self.assertEqual(self.left_lines(result), [])
+
+    def test_a_queue_answer_that_is_not_a_list_is_never_read_as_empty(self) -> None:
+        for body in ({"items": []}, "<html>busy</html>", None, [1, 2]):
+            with self.subTest(body=body):
+                self.answers["withdraw-queue"] = {"code": 200, "body": body}
+                result = self.run_script()
+                self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
+                left = self.left_lines(result)
+                self.assertEqual(len(left), 1, left)
+                self.assertTrue(
+                    left[0].startswith(
+                        "[left] the waiting requests of this run: could not read the queue (HTTP 200"
+                    ),
+                    left[0],
+                )
+                self.assertIn("1 not taken back", result.stdout)
+
+    def test_a_queue_that_does_not_answer_200_is_named(self) -> None:
+        self.answers["withdraw-queue"] = {"code": 502, "body": {"detail": "bad gateway"}}
+        result = self.run_script()
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the waiting requests of this run: could not read the queue (HTTP 502)"],
+        )
 
 
 class NoSecretsInTheScriptTest(unittest.TestCase):

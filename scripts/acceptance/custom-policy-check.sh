@@ -72,10 +72,15 @@ What it does:
   (extras.approval_request_reused), the check fails, and the script never
   asks anyone to approve that request and never withdraws it.
 
-  It takes back only what this run made: each request that carries this
-  run's work reference (every call sends it: the Meho-Work-Ref header, and
-  --work-ref for meho), and each person step that was done. A waiting
-  request of its logins without that reference stays, with a [note] line.
+  Each call sends a work reference of its own: the run's reference and the
+  step, for example custom-policy-check-<run>-c6-delete-person (the
+  Meho-Work-Ref header, and --work-ref for meho). So each request of the run
+  has its own work reference, and an approve of one work reference in the
+  web console or on the command line covers one request of the run at most.
+  It takes back only what this run made: each request whose work reference
+  starts with the run's reference, and each person step that was done. A
+  waiting request of its logins without that reference stays, with a [note]
+  line. A queue that cannot be read prints a [left] line.
   A request whose state cannot be read, or that cannot be withdrawn, prints
   a [left] line with its id and its login. So does an override, the agent
   rule or the role whose removal it cannot confirm. When the overrides
@@ -236,10 +241,11 @@ waits_for() { check_skip "$1: not run: waits for the person step $2"; }
 WORK="$(mktemp -d)"
 REQUESTS=()
 
-# The work reference of this run: new for each run. Every call sends it (the
-# Meho-Work-Ref header, and --work-ref for meho), so each request that this
-# run makes carries it, and the clean-up withdraws only those requests. A dry
-# run uses "@work-ref".
+# The work reference of this run: new for each run. Each call sends a
+# reference of its own, the run's reference and the step (step_ref; the
+# Meho-Work-Ref header, and --work-ref for meho). So no two requests of the
+# run share a reference, and the clean-up finds the run's requests by the
+# run's part. A dry run uses "@work-ref".
 if [[ -n "$DRY_DIR" ]]; then
     WORK_REF="@work-ref"
 else
@@ -248,6 +254,9 @@ fi
 RUN_START=""
 RUN_START_EXACT=""
 TAKEN_BACK=""
+
+# step_ref STEP: the work reference of one call: the run's reference and the step.
+step_ref() { printf '%s-%s' "$WORK_REF" "$1"; }
 
 # At every end of the run, also on an error or a stop signal: withdraw the
 # requests of this run that still wait, and remove the private files.
@@ -324,7 +333,7 @@ rest() {
     local out="$WORK/out" data="$WORK/data" args
     rm -f "$out"
     args=(-sS -o "$out" -w '%{http_code}' -X "$method" -H "Content-Type: $ctype"
-        -H "Meho-Work-Ref: $WORK_REF")
+        -H "Meho-Work-Ref: $(step_ref "$step")")
     [[ -n "$REST_HEADER" ]] && args+=(-H "$REST_HEADER")
     if [[ -n "$body" ]]; then
         printf '%s' "$body" >"$data"
@@ -344,10 +353,10 @@ get_open() {
     local out="$WORK/out"
     rm -f "$out"
     if [[ -n "$token_name" && -n "${!token_name:-}" ]]; then
-        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $WORK_REF" \
+        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $(step_ref "$step")" \
             -H @<(auth_header "$token_name") "$BACKPLANE$path" 2>/dev/null)" || REPLY_CODE=000
     else
-        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $WORK_REF" \
+        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $(step_ref "$step")" \
             "$BACKPLANE$path" 2>/dev/null)" || REPLY_CODE=000
     fi
     read_out "$out"
@@ -364,13 +373,14 @@ mcp() {
     rm -f "$headers" "$out"
     printf '%s' "$MCP_INIT" >"$data"
     curl -sS -o /dev/null -D "$headers" -X POST -H 'Content-Type: application/json' \
-        -H "Meho-Work-Ref: $WORK_REF" -H @<(auth_header "$token_name") --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null || true
+        -H "Meho-Work-Ref: $(step_ref "$step-init")" -H @<(auth_header "$token_name") \
+        --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null || true
     session="$(awk 'tolower($1) == "mcp-session-id:" {print $2}' "$headers" 2>/dev/null | tr -d '\r')"
     printf '%s' "$arguments" | jq -c --arg t "$tool" \
         '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$t,arguments:.}}' >"$data"
     REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -X POST \
         -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2025-06-18' \
-        -H "Meho-Work-Ref: $WORK_REF" ${session:+-H "Mcp-Session-Id: $session"} \
+        -H "Meho-Work-Ref: $(step_ref "$step")" ${session:+-H "Mcp-Session-Id: $session"} \
         -H @<(auth_header "$token_name") \
         --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null)" || REPLY_CODE=000
     REPLY_BODY="$(jq -c '.result.structuredContent // (.result.content[0].text | fromjson? ) // .' \
@@ -462,7 +472,7 @@ meho_cli() {
     if [[ -n "$DRY_DIR" ]]; then recorded "$step"; return 0; fi
     local out="$WORK/cli"
     REPLY_CODE=0
-    meho "$@" --work-ref "$WORK_REF" --backplane "$BACKPLANE" >"$out" 2>/dev/null || REPLY_CODE=$?
+    meho "$@" --work-ref "$(step_ref "$step")" --backplane "$BACKPLANE" >"$out" 2>/dev/null || REPLY_CODE=$?
     read_out "$out"
 }
 
@@ -1221,6 +1231,11 @@ check_8() {
 check_9() {
     local since
     overrides_known "check 9 (an Admin, a person, web console)" || return 0
+    # Check 9 removes an override. One from before the run would be lost.
+    if [[ "$(overrides_of "$BEFORE_OVERRIDES" CPC_OP_WRITE)" != none ]]; then
+        check_skip "check 9 (an Admin, a person, web console): not run: an override from before the run"
+        return 0
+    fi
     since="$(now_iso)"
     if ! person p9 "Check 9. As an Admin whose sign-in is older than the fresh sign-in time, in the web console: raise $(op_label CPC_OP_WRITE) to dangerous, then remove that override again."; then
         needs_person "check 9 (an Admin, a person, web console)"
@@ -1406,11 +1421,12 @@ withdraw_one() {
 }
 
 # Withdraw each request of this run that still waits, with the login that
-# made it. Then read the queue: a waiting request with this run's work
-# reference is this run's too (a call that a stop cut off); it is withdrawn
-# as well. A waiting request of one of the script's logins, made since the
-# run started, without this run's work reference is another session's: it
-# stays, with one [note] line.
+# made it. Then read the queue: a waiting request whose work reference starts
+# with this run's reference is this run's too (a call that a stop cut off);
+# it is withdrawn as well. A waiting request of one of the script's logins,
+# made since the run started, without this run's reference is another
+# session's: it stays, with one [note] line. Only an answer HTTP 200 whose
+# body is a list counts as the queue; any other answer prints a [left] line.
 withdraw_requests() {
     TAKEN_BACK=yes
     local entry request token_name _rest done_ids=" "
@@ -1423,27 +1439,34 @@ withdraw_requests() {
     [[ ${#LOGINS[@]} -gt 0 ]] || return 0
     rest withdraw-queue GET "/api/v1/approvals?status=pending&order=newest" CPC_ADMIN_TOKEN
     if [[ "$REPLY_CODE" != 200 ]]; then
-        left "the waiting requests of the script's logins: could not read the queue, HTTP $REPLY_CODE"
+        left "the waiting requests of this run: could not read the queue (HTTP $REPLY_CODE)"
+        return
+    fi
+    if ! jq -e 'type == "array"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
+        left "the waiting requests of this run: could not read the queue (HTTP 200, the answer is not a list)"
         return
     fi
     local queue sub ref since
-    queue="$(jq -r --arg s "$RUN_START_EXACT" --arg w "$WORK_REF" \
-        '.[]? | select((.work_ref // "") == $w or ((.created_at // "") | .[0:19]) >= $s)
+    queue="$(jq -r --arg s "$RUN_START_EXACT" --arg w "$WORK_REF-" \
+        '.[] | select(((.work_ref // "") | startswith($w)) or ((.created_at // "") | .[0:19]) >= $s)
          | [.id, (.principal_sub // ""), (.work_ref // ""), ((.created_at // "") | .[0:19] >= $s | tostring)]
          | map(if . == "" then "-" else . end) | @tsv' \
-        <<<"$REPLY_BODY" 2>/dev/null || true)"
+        <<<"$REPLY_BODY" 2>/dev/null)" || {
+        left "the waiting requests of this run: could not read the queue (HTTP 200, an entry is not a request)"
+        return
+    }
     while IFS=$'\t' read -r request sub ref since; do
         [[ -n "$request" && "$request" != - && "$done_ids" != *" $request "* ]] || continue
         [[ "$sub" == - ]] && sub=""
         [[ "$ref" == - ]] && ref=""
-        if [[ "$ref" != "$WORK_REF" ]]; then
+        if [[ "$ref" != "$WORK_REF-"* ]]; then
             if [[ "$since" == true ]] && token_name="$(token_of_sub "$sub")"; then
                 note "request $request of ${token_name#CPC_} waits, but it does not carry this run's work reference (it has ${ref:-none}); it stays"
             fi
             continue
         fi
         if ! token_name="$(token_of_sub "$sub")"; then
-            left "request $request (work reference of this run, login ${sub:-unknown}): not withdrawn, the login is none of the script's"
+            left "request $request (work reference $ref of this run, login ${sub:-unknown}): not withdrawn, the login is none of the script's"
             continue
         fi
         withdraw_one "$request" "$token_name"
@@ -1491,15 +1514,50 @@ policy_file() {
     return 0
 }
 
-# overrides_of OVERRIDES_JSON OP_VAR: each override of the operation, by
-# scope (install or tenant), risk level and approval setting, sorted; or
-# "none".
+# The stored settings of each override of one operation, in words: a JSON
+# list of {scope, "risk level", approval, category, labels, "always wait"},
+# sorted by scope. The jq input is the answer of the overrides list; $o and
+# $c name the operation and its connector.
+# shellcheck disable=SC2016  # jq text: $o and $c are jq arguments
+OVERRIDE_SETTINGS='[.overrides[]? | select(.op_id == $o and .connector_id == $c)
+  | {scope: "\(.scope // "unknown scope")\(if .tenant_id then " (\(.tenant_id))" else "" end)",
+     "risk level": (.safety_level // "not set"),
+     approval: (if .requires_approval == null then "not set" else (.requires_approval | tostring) end),
+     category: (.category // "not set"),
+     labels: ((.labels // {}) | to_entries | sort_by(.key) | map("\(.key)=\(.value)")
+              | if length == 0 then "none" else join(" ") end),
+     "always wait": (if .always_wait == null then "not set" else (.always_wait | tostring) end)}]
+  | sort_by(.scope)'
+OVERRIDE_FIELDS='["risk level", "approval", "category", "labels", "always wait"]'
+
+# overrides_of OVERRIDES_JSON OP_VAR: each override of the operation with
+# every stored setting, as text; or "none".
 overrides_of() {
-    jq -r --arg o "$(op_part "$2" 2)" --arg c "$(op_part "$2" 1)" \
-        '[.overrides[]? | select(.op_id == $o and .connector_id == $c)
-          | "\(.scope // "unknown scope") \(.safety_level // "no level"), approval \(if .requires_approval == null then "not set" else (.requires_approval | tostring) end)"]
-         | sort | if length == 0 then "none" else join("; ") end' \
+    jq -r --arg o "$(op_part "$2" 2)" --arg c "$(op_part "$2" 1)" --argjson f "$OVERRIDE_FIELDS" \
+        "$OVERRIDE_SETTINGS"' | map(. as $x | "\($x.scope) override: " + ([$f[] | "\(.) \($x[.])"] | join(", ")))
+         | if length == 0 then "none" else join("; ") end' \
         <<<"$1" 2>/dev/null || echo unreadable
+}
+
+# override_changes BEFORE_JSON NOW_JSON OP_VAR: one line for each stored
+# setting of an override of the operation that is not as before the run, and
+# one for an override that was added or removed. No line: as before.
+override_changes() {
+    local before now
+    before="$(jq -c --arg o "$(op_part "$3" 2)" --arg c "$(op_part "$3" 1)" "$OVERRIDE_SETTINGS" <<<"$1" 2>/dev/null)" \
+        || { echo "the overrides before the run could not be read"; return 0; }
+    now="$(jq -c --arg o "$(op_part "$3" 2)" --arg c "$(op_part "$3" 1)" "$OVERRIDE_SETTINGS" <<<"$2" 2>/dev/null)" \
+        || { echo "the overrides could not be read"; return 0; }
+    jq -nr --argjson b "$before" --argjson n "$now" --argjson f "$OVERRIDE_FIELDS" '
+        def text($x): [$f[] | "\(.) \($x[.])"] | join(", ");
+        ([$b[].scope] + [$n[].scope] | unique)[] as $s
+        | ([$b[] | select(.scope == $s)][0]) as $x
+        | ([$n[] | select(.scope == $s)][0]) as $y
+        | if $x == null then "\($s) override: added (\(text($y)))"
+          elif $y == null then "\($s) override: removed (before the run: \(text($x)))"
+          else $f[] as $k | select($x[$k] != $y[$k])
+               | "\($s) override: \($k) is \($y[$k]), before the run \($x[$k])"
+          end' 2>/dev/null || echo "the overrides could not be compared"
 }
 
 take_back_text() { # the person's task for one entry of TAKE_BACK
@@ -1521,7 +1579,7 @@ take_back_text() { # the person's task for one entry of TAKE_BACK
 # when its removal cannot be confirmed. The agent rule and the role are read
 # from the tenant's policy file, never from an explain answer.
 read_back() {
-    local kind label op_var now before
+    local kind label op_var
     IFS='|' read -r kind label op_var <<<"$1"
     case "$kind" in
         override)
@@ -1529,10 +1587,10 @@ read_back() {
                 left "$label: removal not confirmed: the overrides could not be read"
                 return
             fi
-            now="$(overrides_of "$TAKEBACK_OVERRIDES" "$op_var")"
-            before="$(overrides_of "$BEFORE_OVERRIDES" "$op_var")"
-            [[ "$now" == "$before" ]] \
-                || left "$label: not as before the run (now: $now; before the run: $before)" ;;
+            local change
+            while IFS= read -r change; do
+                [[ -n "$change" ]] && left "$label: not as before the run: $change"
+            done < <(override_changes "$BEFORE_OVERRIDES" "$TAKEBACK_OVERRIDES" "$op_var") ;;
         agent_rule|role)
             if [[ -z "$BEFORE_POLICY_READ" || -z "$TAKEBACK_POLICY_READ" ]]; then
                 left "$label: removal not confirmed: the tenant's policy file could not be read"

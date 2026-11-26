@@ -105,8 +105,9 @@ PERSON_SUB = "operator-1"
 SENSOR_ID = "11111111-1111-4111-8111-111111111111"
 SENSOR_DUE = "2026-01-01T00:00:05.123456Z"
 FAR_FUTURE = "2999-01-01T00:00:00Z"
-#: The work reference of a dry run. The stand-in curl puts the reference that
-#: a live run sent in its place.
+#: The run's work reference of a dry run. Each call sends this reference and
+#: its step ("@work-ref-c6-rights"). The stand-in curl puts the run's part of
+#: the reference that a live run sent in its place.
 WORK_REF = "@work-ref"
 #: The tenant's policy file before and after a run.
 POLICY_FILE = "policy: v1\nclassifications: []\n"
@@ -485,7 +486,10 @@ def request_id(match):
 body = re.sub(r"@request-id:([A-Za-z0-9_.-]+)", request_id, body)
 for h in headers:
     if h.lower().startswith("meho-work-ref: "):
-        body = body.replace("@work-ref", h.split(" ", 1)[1])
+        ref = h.split(" ", 1)[1]
+        if step and ref.endswith("-" + step):
+            ref = ref[: -len(step) - 1]
+        body = body.replace("@work-ref", ref)
 if values["-o"]:
     open(values["-o"], "w").write(body)
 else:

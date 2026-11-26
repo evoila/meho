@@ -159,8 +159,9 @@ class FullLiveRunTest(LiveTestCase):
             if entry["prog"] == "meho":
                 self.assertNotIn("approvals", entry["argv"])
 
-    def test_every_call_carries_one_new_work_reference(self) -> None:
-        refs = set()
+    def test_no_two_calls_send_the_same_work_reference(self) -> None:
+        refs: list[str] = []
+        runs = set()
         for entry in self.full_calls:
             argv = entry["argv"]
             if entry["prog"] == "curl":
@@ -169,11 +170,20 @@ class FullLiveRunTest(LiveTestCase):
             else:
                 found = [argv[argv.index("--work-ref") + 1]] if "--work-ref" in argv else []
             self.assertEqual(len(found), 1, entry)
-            refs.add(found[0])
-        self.assertEqual(len(refs), 1, refs)
-        ref = refs.pop()
-        self.assertRegex(ref, r"^custom-policy-check-[0-9a-f]{16}$")
-        self.assertIn(f"[note] this run's work reference: {ref}", self.full_run.stdout)
+            ref = found[0]
+            # The MCP start of a step has a reference of its own too.
+            step = entry["step"] + ("-init" if ref.endswith(entry["step"] + "-init") else "")
+            self.assertTrue(ref.endswith("-" + step), (ref, step))
+            runs.add(ref[: -len(step) - 1])
+            refs.append(ref)
+        duplicates = sorted({r for r in refs if refs.count(r) > 1})
+        self.assertEqual(duplicates, [])
+        self.assertEqual(len(runs), 1, runs)
+        run = runs.pop()
+        self.assertRegex(run, r"^custom-policy-check-[0-9a-f]{16}$")
+        self.assertIn(f"[note] this run's work reference: {run}", self.full_run.stdout)
+        for step in ("c2-call", "c6-delete-person", "c6-delete-agent", "c6-cred-write", "c10-cli"):
+            self.assertIn(f"{run}-{step}", refs, step)
 
     def test_withdraws_each_waiting_request_with_the_login_that_made_it(self) -> None:
         withdrawn = {}
@@ -237,7 +247,7 @@ class NoTerminalTest(LiveTestCase):
                     "id": "req-cut",
                     "principal_sub": "operator-1",
                     "created_at": "2999-01-01T00:00:00Z",
-                    "work_ref": WORK_REF,
+                    "work_ref": f"{WORK_REF}-c6-rights",
                 }
             ],
         }
@@ -256,7 +266,7 @@ class NoTerminalTest(LiveTestCase):
             "body": [
                 {"id": "req-session", "principal_sub": "operator-1", "created_at": FAR_FUTURE},
                 {"id": "req-cut", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
-                 "work_ref": WORK_REF},
+                 "work_ref": f"{WORK_REF}-c6-rights"},
             ],
         }  # fmt: skip
         answers["withdraw-req-cut-status"] = {"code": 200, "body": {"status": "pending"}}

@@ -92,7 +92,14 @@ def test_every_folder_has_one_connector_class() -> None:
 def test_every_class_declares_its_target_form(folder: str, cls: type[Connector]) -> None:
     port, test_read, way_keys = _EXPECTED[folder]
     assert cls.credential_ways is not None, f"{cls.__name__} has no credential_ways"
-    assert cls.target_fields == ()
+    if folder == "postgres":
+        (field,) = cls.target_fields
+        assert field.key == "allow_superuser_query"
+        assert field.kind == "boolean"
+        assert field.required is False
+        assert field.default is False
+    else:
+        assert cls.target_fields == ()
     assert cls.default_port == port
     assert cls.test_operation == test_read
     assert tuple(way.key for way in cls.credential_ways) == way_keys
@@ -186,6 +193,9 @@ async def test_the_start_check_and_the_route_accept_every_declaration(
         assert resp.status_code == 200, (product, resp.text)
         answer: dict[str, Any] = resp.json()["classes"][0]
         assert answer["default_port"] == port
-        assert answer["target_fields"] == []
+        if product == "postgres":
+            assert [f["key"] for f in answer["target_fields"]] == ["allow_superuser_query"]
+        else:
+            assert answer["target_fields"] == []
         assert answer["test_operation"] == test_read
         assert tuple(w["key"] for w in answer["credential_ways"]) == way_keys

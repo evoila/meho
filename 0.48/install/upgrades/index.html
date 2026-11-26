@@ -4012,6 +4012,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The web console has a Settings file page (/ui/settings). A person with tenant_admin or platform_admin uploads a settings file there, reads the preview of every change and every refused part with its reason, and applies it. A person there may also add or change targets, turn on <code>run_approval_target_kinds</code> and turn off <code>announce_gate_enabled</code>. The two policy changes need a reason, which MEHO keeps in the audit row; the other direction needs none. See https://evoila.github.io/meho/latest/guides/settings-file/#apply-a-file-in-the-web-console.</td>
+<td>None.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A call that reads, writes or makes a credential (the classes <code>credential_read</code>, <code>credential_write</code> and <code>credential_mint</code>, for example <code>vault.kv.put</code>, <code>vault.token.create</code> or <code>vault.kv.generate</code>) waits for a person on every call. No standing grant, no agent grant and no run approval covers it, also one made before the upgrade: such a grant stays stored, but each call waits. The call of an agent or a service login of such an operation waits also at level <code>safe</code>, and the approval of a parent multi-step run does not cover such a step. When the code of an operation that writes or makes a credential turns approval on, an install or tenant override that turns approval off leaves it on. Grant create, run approval create and agent grant create (an exact op id with <code>auto-execute</code>) refuse such an operation. A credential read that returns no secret value (<code>vault.kv.list</code>, <code>vault.kv.compare</code>, <code>k8s.secret.compare_to_ref</code>, and <code>vault.kv.read</code> without <code>reveal_secret</code>) still runs at once. Inside a multi-step run, MEHO does not store the result of a step that reads, writes or makes a credential. When a later step of that run waits for a person, the run goes on after the approval as the row <code>composite-resume-steps.md</code> says. A credential write or make that ended well is not sent again. A Vault read that needed no person (<code>vault.kv.read</code>, <code>vault.kv.list</code>, <code>vault.kv.compare</code>) is sent again when it still needs none. A run with any other credential read before the waiting step stops with <code>composite_resume_read_not_sent</code>, and MEHO makes no approval request.</td>
 <td>Find the grants that name such an operation with <code>meho service-principals grants list</code>, <code>meho agent grant list</code> and <code>meho approvals runs list</code>, and remove them or leave them. An automation run that writes or makes credentials waits for a person on each such call: approve each call in the console or the CLI. No schema action.</td>
 </tr>
@@ -4223,7 +4228,7 @@ Rows of the next release are in this table at once.</p>
 <tr>
 <td><strong>v0.49.0</strong></td>
 <td>A settings import with a token (the CLI, a script, an AI tool) that turns on <code>run_approval_target_kinds</code> or turns off <code>announce_gate_enabled</code> now gets 403, and MEHO writes nothing from that file. A preview with a token still works and names these changes. See https://evoila.github.io/meho/latest/guides/settings-file/#approval-policies-change-only-in-the-web-console.</td>
-<td>Until the web console has a settings page, these two changes cannot be made. A stored value stays as it is. Turn the announce gate on only if you want to keep it on: it cannot be turned off again until then.</td>
+<td>Make these two changes on the Settings file page of the web console (/ui/settings). A stored value stays as it is.</td>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>

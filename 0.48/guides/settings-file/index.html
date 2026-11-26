@@ -2605,6 +2605,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#apply-a-file-in-the-web-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Apply a file in the web console
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#what-the-checks-refuse" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3392,6 +3403,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#apply-a-file-in-the-web-console" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Apply a file in the web console
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#what-the-checks-refuse" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3469,9 +3491,11 @@ store.</p>
 <p>The categories and classifications of operations are in a separate file:
 see <a href="../policy-file/">The policy file</a>.</p>
 <div class="admonition note">
-<p class="admonition-title">REST only</p>
-<p>The command line and the web console do not have it yet. Today you
-use the settings file through the REST API, as shown on this page.</p>
+<p class="admonition-title">REST and the web console</p>
+<p>The command line does not have it yet. You export the file and read
+the history through the REST API, as shown on this page. You import a
+file through the REST API or on the <strong>Settings file</strong> page of the web
+console (see <a href="#apply-a-file-in-the-web-console">Apply a file in the web console</a>).</p>
 </div>
 <h2 id="who-may-use-it">Who may use it<a class="headerlink" href="#who-may-use-it" title="Permanent link">&para;</a></h2>
 <p>Every call needs a login. Without a token MEHO answers <code>401</code>.</p>
@@ -3521,14 +3545,14 @@ with a token waits for approval. When you send such a file with a token
   the file that is the same as the stored one is no change.</li>
 <li>Two policies change only in the web console:
   <code>run_approval_target_kinds</code> turned on and <code>announce_gate_enabled</code>
-  turned off. The web console cannot apply a settings file yet, so these
-  two changes cannot be made at all today. See
+  turned off. Apply such a file on the <strong>Settings file</strong> page of the web
+  console. See
   <a href="#approval-policies-change-only-in-the-web-console">Approval policies change only in the web console</a>.
   The other policies and the conventions apply with a token.</li>
 </ul>
-<p>The web console does not have the settings file yet. Until it does, add
-or change each target with <code>meho targets</code> or the target API (with a
-token it waits for approval), then import the file.</p>
+<p>Apply such a file on the <strong>Settings file</strong> page of the web console
+(<code>/ui/settings</code>). See
+<a href="#apply-a-file-in-the-web-console">Apply a file in the web console</a>.</p>
 <p>To call the API from a shell, get a token with the CLI. The value is a
 live login: do not log it or share it.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>meho<span class="w"> </span>login<span class="w"> </span>--print-token<span class="w"> </span>https://meho.example.com<span class="k">)</span>
@@ -3594,22 +3618,18 @@ live login: do not log it or share it.</p>
   target kind, not only one target.</li>
 <li><code>announce_gate_enabled: false</code> turns the announce gate off.</li>
 </ul>
-<p>These two changes apply only for a person in the web console. The web
-console cannot apply a settings file yet, so today these two changes
-cannot be made at all. When you send such a file with a token (the CLI, a
-script or an AI tool), MEHO answers <code>403</code>, names each policy, and saves
+<p>These two changes apply only for a person in the web console: apply the
+file on the <strong>Settings file</strong> page (<code>/ui/settings</code>) and give a reason.
+When you send such a
+file with a token (the CLI, a script or an AI tool), MEHO answers <code>403</code>,
+names each policy, and saves
 nothing from the file, also not its other parts. This includes
 <code>policies: null</code> when the gate is on, because it turns the gate off.</p>
-<div class="admonition warning">
-<p class="admonition-title">Turn the announce gate on only if you want to keep it on</p>
-<p>Turning the gate on applies with a token. Turning it off again
-cannot be done until the web console can apply a settings file.</p>
-</div>
 <ul>
 <li>The preview works with a token. It shows the change in <code>diff</code> and
   names it in <code>warnings</code>.</li>
 <li>The other direction (<code>run_approval_target_kinds: false</code>,
-  <code>announce_gate_enabled: true</code>) applies with a token.</li>
+  <code>announce_gate_enabled: true</code>) applies with a token. It needs no reason.</li>
 <li>A value that is the same as the stored one is no change.</li>
 <li>The other policies apply with a token.</li>
 </ul>
@@ -3707,6 +3727,43 @@ change. It saves nothing.</p>
   entry.</li>
 <li>One audit row covers the whole import.</li>
 </ul>
+<h3 id="apply-a-file-in-the-web-console">Apply a file in the web console<a class="headerlink" href="#apply-a-file-in-the-web-console" title="Permanent link">&para;</a></h3>
+<p>The <strong>Settings file</strong> page of the web console (<code>/ui/settings</code>) runs the
+same preview and import as the REST API. A person in the web console may
+make every change of the file, also the ones that MEHO refuses with a
+token: targets, <code>run_approval_target_kinds: true</code> and
+<code>announce_gate_enabled: false</code>.</p>
+<ol>
+<li>Open <strong>Settings file</strong> in the side menu.</li>
+<li>Choose your <code>meho-settings.yaml</code> and click <strong>Show preview</strong>. MEHO
+   shows every change of the file. When the file has mistakes, MEHO
+   lists each one with its reason and offers no <strong>Apply</strong> button.</li>
+<li>Read the preview. A change that MEHO accepts only from a person in
+   the web console has its own note: the two policies, and each target
+   that the file adds or changes. Warnings show also next to mistakes.</li>
+<li>When the file turns the announce gate off (also with <code>policies: null</code>)
+   or turns <code>run_approval_target_kinds</code> on, fill in the <strong>Reason</strong> field
+   (at most 1024 characters). MEHO keeps the reason in the audit row.
+   Without a reason, or with only blanks, MEHO refuses the file and saves
+   nothing from it. Other changes need no reason.</li>
+<li>Click <strong>Apply</strong>. MEHO checks the file again and saves it. The answer
+   shows what really changed, and the id of the new entry in the
+   history.</li>
+</ol>
+<p>Who may use the page:</p>
+<ul>
+<li>A person with <code>tenant_admin</code>, for a file with only their own tenant.</li>
+<li>A <a href="../several-tenants/#the-platform-admin-role">platform admin</a> who
+  is a person, for any file.</li>
+<li>Everyone else gets <code>403</code>. An agent, a service or a runner login gets
+  <code>human_principal_required</code>, and any other role gets
+  <code>insufficient_role</code>.</li>
+</ul>
+<p>MEHO saves the changes of an apply and its audit row together. When any
+step of the apply fails, MEHO saves nothing, and the page shows an error,
+not the result. The audit log then names only the attempt. When MEHO refuses the file (for example a file
+for another tenant), the page shows the reason, and the audit log keeps
+the refusal.</p>
 <h3 id="what-the-checks-refuse">What the checks refuse<a class="headerlink" href="#what-the-checks-refuse" title="Permanent link">&para;</a></h3>
 <ul>
 <li>A file larger than 4 MiB (<code>413</code>). The file must be YAML in UTF-8.

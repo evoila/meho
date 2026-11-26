@@ -260,11 +260,12 @@ jobs:
       - name: Run the tests
         # The tests run the script in its dry mode against recorded answers,
         # and live against stand-in curl and meho programs. The script needs
-        # jq. The tests skip without it, so install it first.
+        # jq, and the tests skip without it, so the job stops when the
+        # runner has no jq. It installs nothing.
         run: |
           set -euo pipefail
           if ! command -v jq >/dev/null 2>&1; then
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq
+            echo "::error::jq is not on this runner. The tests of the custom policy check script need jq."
+            exit 1
           fi
           python -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py' -v

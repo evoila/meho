@@ -497,8 +497,7 @@ config:
   # with the device-grant flow enabled and an audience mapper that
   # injects `keycloakAudience` into the issued access token's `aud`
   # claim — see `deploy/values-examples/README.md` § meho-cli public
-  # client for the realm-side recipe. G0.9.1-T9 (RDC dogfood Signal
-  # #16, 2026-05-21).
+  # client for the realm-side recipe.
   keycloakCliClientId: ""
   # -- Public OAuth client_id of the fresh browser sign-in of `meho
   # approvals approve` (#5515). Rendered into `KEYCLOAK_CLI_APPROVE_CLIENT_ID`
@@ -579,8 +578,7 @@ config:
   # this value to wherever the content lives. A chassis-only deploy
   # that never ingests carries the default harmlessly.
   kbIngestRoot: "/opt/meho/kb-ingest"
-  # -- Reverse-proxy trust list (Issue #730 / Signal #3, RDC dogfood
-  # 2026-05-20). The backplane Dockerfile invokes uvicorn with
+  # -- Reverse-proxy trust list. The backplane Dockerfile invokes uvicorn with
   # `--proxy-headers`, which honours `X-Forwarded-Proto` /
   # `X-Forwarded-For` from upstream proxies so a TLS-terminating
   # Ingress' `https://` scheme survives FastAPI's trailing-slash 307
@@ -592,13 +590,11 @@ config:
   # (equivalent to the `--forwarded-allow-ips` CLI flag). uvicorn's
   # secure default is `127.0.0.1` only, which fails-closed in a
   # cluster: the Ingress controller's pod IP is never the loopback
-  # and the chain breaks shut. Operators MUST override with the
-  # Ingress controller's pod CIDR (preferred) — e.g. `10.42.0.0/16`
-  # for the RKE2 default pod CIDR, or the specific `nginx-ingress` /
-  # `traefik` namespace pod IPs once they're known. `*` disables the
-  # allow-list entirely and is acceptable only for ephemeral CI
-  # clusters where every connecting peer is the cluster's own proxy
-  # — never for production. See
+  # and the chain breaks shut. Operators MUST override it with the
+  # Ingress controller's own address (a `/32`, or the tightest slice
+  # you have subnetted the controller onto). Never use the whole pod
+  # network, and never `*`: any workload that can reach the backplane
+  # could then forge the client address. See
   # `docs/cross-repo/reverse-proxy-contract.md` for the operator-
   # side trust contract.
   forwardedAllowIps: "127.0.0.1"
@@ -2069,8 +2065,9 @@ networkPolicy:
   # etc.) — disabling without a replacement removes the chart's least-
   # privilege egress story.
   enabled: true
-  # -- Namespace label value selecting the ingress controller. RKE2 ships with
-  # `ingress-nginx`; override per-cluster.
+  # -- Namespace label value selecting the ingress controller. `ingress-nginx`
+  # is only an example. RKE2 and k3s run Traefik in `kube-system`; set the
+  # namespace of your own controller.
   ingressControllerNamespace: ingress-nginx
   # -- Let the backplane reach its own console address (`ingress.host`).
   # The first-start `certificate` check opens a TLS connection to it. A

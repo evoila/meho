@@ -1007,6 +1007,158 @@ provisioned.
 
 No new runtime dependencies were added by Task #1070, #1071, or #1073.
 
+## Compare with main
+
+A pull request that changes how MEHO hides secrets is compared with the
+base branch on a fixed set of made-up inputs. The author sees a fault
+before a reviewer reads the pull request.
+
+- **The inputs.** `backend/tests/redaction_compare/inputs.py` builds about
+  1,500 texts and structures from forms (`password=`, `--password`, a URL
+  with a login, JSON, YAML, XML, a command line, a shell script, a nested
+  result), value styles (plain, quoted, with a space, empty) and
+  containers. A fixed seed makes the same inputs on every run. Each
+  planted part has an id: `s...` is a secret value, `p...` is a plain word
+  that must stay visible.
+- **The steps.** `redact` with the default policy, `scrub_content`,
+  `scrub_broadcast_params`, `redact_error_payload`, the default view of an
+  answer, `hide_command_text` and `hide_shell_script`
+  (`backend/tests/redaction_compare/answers.py`).
+- **The snapshot.** `backend/tests/snapshots/redaction_compare.jsonl` has
+  one line for each input, sorted by id: the input id and one sha256
+  checksum (`sum`) over the full answers of all steps the input runs on.
+  It holds no lists of hidden and shown parts.
+  `backend/tests/test_redaction_compare_snapshot.py` fails on any change of
+  any answer, also when a step only starts or stops hiding a value, and
+  names the inputs that changed, are missing or are new. The same file
+  checks three properties on main: a text with no secret comes back
+  unchanged, hiding twice gives the answer of hiding once, and the time
+  grows in a straight line with the size. Each timed run gets its own copy
+  of the input.
+  The snapshot test file takes about 12 seconds of its own time, and
+  `test_redaction_compare_judge.py` about 3 seconds (measured on 12 cores).
+  Both are under 30 seconds in a unit shard. The first test of any shard
+  also pays a one-time session setup of about 33 seconds (it imports every
+  connector); that time belongs to the shard, not to these files.
+- **Write the snapshot again.** From `backend/`:
+  `uv run python ../scripts/ci/redaction_compare.py --write`. Commit the file.
+- **The records.** `redaction_compare.py --records FILE`, run from a
+  `backend/` folder, writes one record for each input and step: the parts
+  the step hides, the parts it shows, a hash of the whole answer (`sha`),
+  and a hash of the answer without its planted parts (`rest`). For `rest`,
+  each planted part (secret or plain) and each hiding marker becomes one
+  `<hidden>` token. A plain part counts as shown only where it stands
+  outside a hiding marker. So `--[REDACTED:password]` in place of
+  `--password <value>` hides the label `password` too, and the job sees it
+  as a plain part now hidden. `--password [REDACTED:password]` hides only
+  the value. A test checks that each planted part, labels too, stands in
+  its input with the same spelling. The records are never committed.
+- **The CI job** "Secret hiding compared with the base branch" makes a
+  second checkout of the base commit and builds the base records there,
+  with the base's own code and input set. It builds the pull request
+  records with the pull request's own code and input set in a container
+  with no mounted folder: the files go in on stdin and the records come
+  out on stdout. So the pull request's code can write only its own
+  records. Both files stay in the job's temporary folder. Then it runs
+  the rule of `scripts/ci/redaction_compare.py --judge` on the two record
+  files. It fails when a part that the base hides is now shown, when a
+  plain part that the base shows is now hidden, when the answer changed in
+  another way, or when an input of the base is missing from the pull request's
+  records. A secret part that the base showed and the pull request hides
+  passes: that is the purpose of a fix. When a part is hidden or shown,
+  the job still compares `rest`, so another change of the same answer
+  (lost quotes, a dropped field) fails as `text`, next to the part
+  difference. An approved entry for the part does not cover it: the other
+  change needs its own `text` entry.
+- **A wanted difference.** List it in
+  `backend/tests/snapshots/redaction_compare_approved.yaml`: the input id,
+  the step, the part id (or `text`, or `removed` for a dropped input) and
+  a one-line reason. Only the entries that the pull request adds count:
+  the job reads the base branch's approved file with `git show` too (no
+  file counts as empty). A new entry that matches no difference fails the
+  job. An entry that is already in the base's file approves nothing and
+  never fails the job, so it can stay after the merge. To approve the same
+  input, step and part again, add a new entry (for example with a new
+  reason).
+- **The rules come from the base branch.** The job reads the rule script
+  of the base commit with `git show` and runs the judge with
+  `python3 -I`, so a pull request cannot weaken the check that judges it.
+  The job also lists, with `git diff --name-only --no-renames -z`, each
+  file that the pull request changes under `backend/tests/redaction_compare/`
+  (the input set and the code that reads the answers) and the file
+  `backend/tests/__init__.py` (it runs when the package is imported), and
+  passes the list with `--changed`. A moved file gives its old and its new
+  path. The judge reads the list as bytes and spells each path so that two
+  different paths never get the same spelling: a printable letter other than a space, a
+  quote or a backslash stays as it is (also a letter outside ASCII), a
+  backslash becomes `\\`, a byte that is not UTF-8 becomes `\xNN`, and any
+  other letter becomes `\uNNNN` (for example a line break is `\u000a`). The
+  job runs for any change in that folder, a `.md` file too. Each listed
+  file is a difference and needs its own reviewed entry: an approved entry
+  with `id: compare-package`, the path as the judge spells it as `path`,
+  and `part: changed`.
+  The approved file is the one that the pull request commits: it is the
+  open list that a reviewer reads. The job reads it, the base's approved
+  file and the rule script from git before any code of the pull request
+  runs. The job passes with "no compare on the base branch yet" only when
+  a git lookup of the base tree succeeds and finds no rule script. When
+  the lookup fails, or the base has the script, any failed step fails the
+  job: the lookup, the second checkout, either environment sync, either
+  record build, or the judge.
+- **The job log shows no names and no numbers, on purpose.** The log of
+  a public repo is public, so the job runs the judge with
+  `--summary-only`. Then the judge prints no input id, no step, no part id
+  and no number: only one closing line, either "no difference is left that
+  is not approved" or "differences are left that are not approved". A
+  stale approved entry is still printed, because it is in the committed
+  approved file already. The exit code is the same as without the flag.
+  The error output of the pull request's container goes to a file in the
+  job's temporary folder that the job never prints. When the record build
+  fails, the job prints one fixed line that says so and points to the local
+  run below, and the job fails.
+- **See the differences locally.** Without `--summary-only` the judge
+  prints each difference that is not approved (input id, step, kind) and
+  the counts. From the repo root, with the pull request branch checked out
+  and its changes committed, run the block below. It compares the same two
+  trees as CI: it fetches `main` and stops when the branch does not hold
+  the newest `origin/main`, so merge it first. Like CI, it passes the
+  changed files of the compare package with `--changed` only when the
+  judge of `main` knows that option, so a change there needs its approved
+  entry here too. It works in a new private folder from `mktemp -d`,
+  stops when a step fails (also either record build), and removes the
+  folder and the second checkout when it ends, so no record file is left
+  behind or read again by a later run.
+
+  ```bash
+  (
+    set -euo pipefail
+    git fetch -q origin main
+    if ! git merge-base --is-ancestor origin/main HEAD; then
+      echo "merge origin/main into this branch first, so the compare uses the trees of CI" >&2
+      exit 1
+    fi
+    tmp="$(mktemp -d)"
+    trap 'git worktree remove --force "$tmp/base" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    git worktree add --detach "$tmp/base" origin/main
+    rules="$tmp/base/scripts/ci/redaction_compare.py"
+    (cd "$tmp/base/backend" && uv sync --frozen \
+      && uv run python "$rules" --records "$tmp/base.jsonl")
+    (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
+    git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
+      > "$tmp/base-approved.yaml"
+    changed_args=()
+    if grep -q -e '--changed' "$rules"; then
+      git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/__init__.py backend/tests/redaction_compare > "$tmp/changed.txt"
+      changed_args=(--changed "$tmp/changed.txt")
+    fi
+    python3 -I "$rules" \
+      --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
+      ${changed_args[@]+"${changed_args[@]}"} \
+      --approved backend/tests/snapshots/redaction_compare_approved.yaml \
+      --base-approved "$tmp/base-approved.yaml"
+  )
+  ```
+
 ## Known issues / future work
 
 - **Wide patterns benefit from policy ordering.** The engine applies

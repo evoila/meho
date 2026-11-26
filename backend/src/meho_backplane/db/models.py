@@ -583,6 +583,16 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # The id (``sub``) of the login that a secret store accepted when the
+    # secret this call used was read. The read can be in this call or in an
+    # earlier call (a login MEHO kept in memory), so a value does not prove a
+    # new store read. Fixed texts: ``meho`` when the store saw MEHO's own
+    # identity; ``check-runner`` when the check runner read the secret and
+    # its token has no readable ``sub``; ``kept-login:reader-unknown`` when
+    # the call used a login MEHO kept in memory and it is not known whose
+    # login read it. NULL when no login read a secret for this call. Never a
+    # token, a store path or a store address.
+    secret_read_as: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Connector-boundary redaction middleware (G11.4-T2 #1071). The
     # dispatcher captures the raw connector response, hands it to the
     # redaction engine, and stores the raw payload here so an auditor can
@@ -5266,6 +5276,16 @@ class RunnerPrincipal(Base):
     # call (the runner list shows it). ``NULL`` until the runner calls after
     # migration 0124.
     package_set_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The one-time enrollment code (migration 0188): only its SHA-256 is
+    # stored, and the column is emptied when the runner is revoked. The id of
+    # the enrolled public key marks the code as used: the code then answers
+    # only a repeat with that same key.
+    enrollment_code_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enrollment_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    enrolled_key_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    key_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index(
@@ -5309,6 +5329,31 @@ class MachineLogin(Base):
     sub: Mapped[str] = mapped_column(Text, primary_key=True)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+
+class PrincipalBlock(Base):
+    """One admin block of a person in MEHO.
+
+    ``sub`` is the person's login id. ``scope`` is ``"*"`` for a block of a
+    platform admin (every tenant) or the tenant id as text for a block of a
+    tenant admin (that tenant only). MEHO reads the whole table with a cache
+    of a few seconds (:mod:`meho_backplane.auth.principal_block`) and refuses
+    every request of a blocked login. ``tenant_id`` has no foreign key: a
+    block must still hold when the tenant row is gone.
+    """
+
+    __tablename__ = "principal_block"
+
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    blocked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
@@ -5983,8 +6028,9 @@ class RunnerCheckResult(Base):
     # ``_RUNNER_RESULT_STATUSES``.
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # The handler's structured payload (a failed probe is still a result,
-    # not a runner error). Nullable: refused/error rows carry none.
-    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+    # not a runner error); a list for an operation that answers with a list.
+    # Nullable: refused/error rows carry none.
+    result_payload: Mapped[dict[str, object] | list[object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
         default=None,
@@ -6014,6 +6060,12 @@ class RunnerCheckResult(Base):
             "tenant_id",
             "runner_name",
             "check_ref",
+            "received_at",
+            postgresql_using="btree",
+        ),
+        # The clean-up job deletes rows older than the retention window.
+        Index(
+            "runner_check_results_received_at_idx",
             "received_at",
             postgresql_using="btree",
         ),
@@ -9564,6 +9616,15 @@ class Sensor(Base):
         default="__sensor__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Name of the runner (``runner_principal.name``, same tenant) that runs
+    # this check at a site. ``NULL`` means the central check loop runs it.
+    # A soft reference: the runner row is never hard-deleted.
+    runner_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # The runner's own time (``produced_at``) of the last result counted for
+    # this check. Only runner times are compared with it, never MEHO's clock.
+    runner_produced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

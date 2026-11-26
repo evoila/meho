@@ -71,7 +71,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.cache_key import target_secret_cache_key
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
     _AUTH_FLOWS_PATH,
@@ -84,6 +84,7 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.ops_authflow_rights import _shared_read
 from meho_backplane.connectors.keycloak.ops_write_grant import MEMBER_CAP, _group
 from meho_backplane.connectors.keycloak.ops_write_user_identity import _read_for_card
+from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -384,7 +385,7 @@ async def _signed_in(connector: KeycloakConnector, ctx: PreviewContext) -> bool:
     sign-in can lock the account.
     """
     await _shared_read(ctx, connector)
-    return target_cache_key(ctx.target) in connector._admin_tokens
+    return target_secret_cache_key(ctx.target) in connector._admin_tokens
 
 
 async def _read_binding(
@@ -397,6 +398,7 @@ async def _read_binding(
     realm_row = await connector._get_admin_json(
         ctx.target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=ctx.operator
     )
+    check_answered_realm("keycloak", realm_row, ctx.target)
     realm_flow = _text(realm_row.get("browserFlow")) if isinstance(realm_row, dict) else None
     if realm_flow is None:
         return None

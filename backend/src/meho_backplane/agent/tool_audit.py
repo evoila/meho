@@ -46,7 +46,8 @@ agent run has no request usage event to fall back on, so routine agent
 calls keep their row after the cutover.
 
 Status codes follow the MCP wrapper rows: 200 for success, 403 for a call
-the toolset refused (:class:`ToolRefusedRetry`), 400 for bad arguments, a
+the toolset refused (:class:`ToolRefusedRetry`) or a call of a blocked person
+(503 when the block list cannot be read), 400 for bad arguments, a
 retry the tool asked for, or a call to a tool name the run cannot use, 500
 for an error.
 """
@@ -75,6 +76,7 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
+from meho_backplane.agent.principal_block_gate import PrincipalBlockedRunError
 from meho_backplane.audit_cutover import (
     classified_record_seen,
     close_classified_record_scope,
@@ -181,6 +183,8 @@ def _cause(error: Exception) -> Exception:
 
 
 def _status_for(error: BaseException) -> int:
+    if isinstance(error, PrincipalBlockedRunError):
+        return error.status_code
     if isinstance(error, (ToolRetryError, ToolFailedError)):
         return 400
     if isinstance(error, ToolRefusedRetry):

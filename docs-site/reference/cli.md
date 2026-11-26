@@ -20,6 +20,10 @@ Every command accepts the global flags below.
 - `--verbose`, `-v` — enable verbose output.
 - `--work-ref` — external change-ticket reference, any ticket id on one line (for example `gh:evoila/meho#13` or `CHG0012345`; default: `$MEHO_WORK_REF`). The CLI sends it as the `Meho-Work-Ref` header on every backplane request, so the audit rows carry it. Five commands have their own `--work-ref` flag that tags the run with the reference: `operation call`, `scheduler create`, `runbook start`, `agent run`, and `broadcast announce`. On those commands only `$MEHO_WORK_REF` is sent as the header. List commands filter by reference with `--filter-work-ref`. The backplane cleans every ticket id with one rule: it removes white space at both ends, refuses an empty value, control characters (also a tab inside the id) and invisible characters, allows at most 256 characters, and stores the text in Unicode form NFC.
 
+## Version flag
+
+`meho --version` prints the CLI version line, the same line as `meho version`, and exits. It does not contact a backplane and has no short form. The flag works only on `meho` itself, not on a subcommand: some subcommands, such as `meho targets add`, have their own `--version` flag for a product version.
+
 ## Login session
 
 `meho login` makes a random id for the login session and stores it with the login. Every command sends it in the `Meho-Session-Id` header, next to `Meho-Work-Ref`. MEHO stores it as the session id of the audit rows of the request and marks those rows with `session_from_client: true`, so a CLI call is not counted as an agent session. A token refresh keeps the id; the next `meho login` makes a new one.
@@ -958,6 +962,8 @@ meho audit replay <session-id> [flags]
 ### `meho audit show`
 
 Fetch a single audit row by id
+
+The summary prints `secret_read_as` when the row has it. It is the id of the login that the secret store accepted when the secret this call used was read. That read can be in this call, or in an earlier call when the call used a login MEHO kept in memory. So a value does not prove that this call read the store again. It can also be one of three fixed texts: `meho` (the store saw MEHO's own identity), `check-runner` (the check runner read it, and its login has no id), or `kept-login:reader-unknown` (the call used a login MEHO kept in memory, and it is not known whose login read it). The line is missing when no login read a secret for this call. The backplane sends the field only while the switch `AUDIT_SECRET_READ_AS` is on (off by default).
 
 ```
 meho audit show <audit-id> [flags]
@@ -3463,7 +3469,7 @@ meho keycloak realm create [flags]
 
 #### `meho keycloak realm delete`
 
-Delete a whole Keycloak realm (destructive, a second person must approve)
+Delete a whole Keycloak realm (destructive, approval cannot be turned off)
 
 ```
 meho keycloak realm delete [flags]
@@ -3472,7 +3478,7 @@ meho keycloak realm delete [flags]
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
 - `--preview-hash` — the preview_hash from a first run of this command; with it, the delete waits for approval
-- `--realm` — the name of the realm to delete (required)
+- `--realm` — the name of the realm to delete: the target's managed realm (required)
 - `--target` — target slug to dispatch against (required)
 
 #### `meho keycloak realm get`
@@ -3497,7 +3503,7 @@ meho keycloak realm update [flags]
 
 - `--backplane` — backplane URL (defaults to the URL from the most recent `meho login`)
 - `--json` — emit the full OperationResult envelope as JSON
-- `--realm` — realm to update (defaults to the target's managed realm)
+- `--realm` — realm to update: must be the target's managed realm (the default); another realm is refused
 - `--representation-file`, `-f` — path to a JSON file with the partial RealmRepresentation body (required)
 - `--target` — target slug to dispatch against (required)
 
@@ -4300,6 +4306,49 @@ meho policy validate FILE [flags]
 - `--json` — print the server's answer as JSON
 - `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
+## `meho principal`
+
+Block and unblock people in MEHO (tenant_admin)
+
+```
+meho principal
+```
+
+### `meho principal block`
+
+Block a person in MEHO (tenant_admin)
+
+```
+meho principal block <sub> --reason <text> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the person is blocked (required)
+
+### `meho principal blocked`
+
+List the blocked people (tenant_admin)
+
+```
+meho principal blocked [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+
+### `meho principal unblock`
+
+Unblock a person in MEHO (tenant_admin; a platform admin for their own block)
+
+```
+meho principal unblock <sub> [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit raw JSON instead of the human summary
+- `--reason` — why the block is removed (required on your own login; kept in the audit log)
+
 ## `meho promote`
 
 Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)
@@ -4552,14 +4601,14 @@ meho runner-principal list [flags]
 
 ### `meho runner-principal register`
 
-Register a new runner principal (tenant_admin)
+Register a new runner principal (a person with tenant_admin)
 
 ```
 meho runner-principal register <name> [flags]
 ```
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
-- `--json` — emit raw RunnerPrincipalRead JSON instead of the human summary
+- `--json` — emit raw JSON instead of the human summary; it holds the runner and its one-time enrollment code
 - `--owner-sub` — OIDC sub of the kill-switch owner (defaults to the caller's sub)
 
 ### `meho runner-principal revoke`
@@ -4951,6 +5000,7 @@ meho sensor create [flags]
 - `--params` — optional op-params JSON object (inline JSON, @<path>, or @-)
 - `--retry-backoff-seconds` — accelerated re-check spacing in seconds while a state change is pending, 5..300 (omitted when unset; the server then applies its default of 15)
 - `--retry-times` — consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)
+- `--runner` — name of a runner that runs the check at its site (needs RUNNER_CHECKS_ENABLED)
 - `--severity` — worst rollup state a failing assertion drives: degraded | critical (default critical)
 - `--target` — optional dispatch-target JSON object (inline JSON, @<path>, or @-)
 - `--tenant` — target tenant UUID (platform_admin cross-tenant create)
@@ -5366,6 +5416,18 @@ meho targets list [flags]
 - `--json` — emit machine-readable JSON to stdout instead of the human table
 - `--limit` — max targets per page (1..500, server default 100 when omitted)
 - `--product`, `-p` — filter by product slug (exact match)
+
+### `meho targets outside-folder`
+
+List targets whose secret path is outside the tenant's folder
+
+```
+meho targets outside-folder [flags]
+```
+
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit machine-readable JSON to stdout instead of the human table
+- `--tenant` — tenant id to list (platform admin: a tenant you are not a member of, or the tenant chosen with `meho tenants use`; default: your own tenant, or every tenant for a platform admin)
 
 ### `meho targets probe`
 

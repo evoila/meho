@@ -1,0 +1,18 @@
+{% from "_components.html" import button %}
+{% set values = values | default({}) %}
+{% set errors = errors | default({}) %}
+<form class="space-y-4 max-w-xl" method="post" action="/ui/blocked-people" aria-label="Block a person">
+  {% include "principal_blocks/_hidden.html" %}
+  <label class="block space-y-1">
+    <span class="text-sm font-medium">Login id</span>
+    <input type="text" name="sub" value="{{ values.get('sub', '') }}" required maxlength="255" class="input w-full font-mono{% if errors.get('sub') %} input-error{% endif %}" />
+    {% if errors.get('sub') %}<span class="block text-error text-xs" role="alert" data-error-for="sub">{{ errors['sub'] }}</span>{% endif %}
+    <span class="block text-xs text-subtle">The exact login id (the <span class="font-mono">sub</span>) of the person.</span>
+  </label>
+  <label class="block space-y-1">
+    <span class="text-sm font-medium">Reason</span>
+    <textarea name="reason" required maxlength="500" rows="2" class="textarea w-full{% if errors.get('reason') %} textarea-error{% endif %}">{{ values.get('reason', '') }}</textarea>
+    {% if errors.get('reason') %}<span class="block text-error text-xs" role="alert" data-error-for="reason">{{ errors['reason'] }}</span>{% endif %}
+  </label>
+  {{ button("Block person", variant="danger", size="md", type="submit") }}
+</form>

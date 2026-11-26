@@ -75,6 +75,7 @@ __all__ = [
     "check_azure_url",
     "retry_after_seconds",
     "send",
+    "send_single_try",
 ]
 
 #: Most tries of one call, the first one included.
@@ -369,6 +370,31 @@ async def send(
                 response, target_name=target.name, retry_after_seconds=wait_hint
             )
         await _wait(budget, delay)
+
+
+async def send_single_try(
+    connector: AzureConnector,
+    target: AzureTargetLike,
+    method: str,
+    url: str,
+    *,
+    operator: Operator,
+    extra_hosts: Iterable[str] = (),
+    content: bytes | None = None,
+) -> httpx.Response:
+    """Send one request exactly once and return the answer, whatever its status.
+
+    For a call that must never be sent twice: no new login after a 401, no
+    wait and second try after a 429 or a 5xx, and no second try after a lost
+    connection (the ``httpx`` error is raised). The caller reads the status
+    itself. *url* is checked like in :func:`send`, inside the same login
+    limit and trace.
+    """
+    if not url.startswith("/"):
+        check_azure_url(target, url, extra_hosts=extra_hosts)
+    return await _send_once(
+        connector, target, method.upper(), url, operator, None, None, False, content
+    )
 
 
 async def _wait(budget: _Budget, delay: float) -> None:

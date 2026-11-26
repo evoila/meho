@@ -392,7 +392,7 @@
         },
         "keycloakCliClientId": {
           "type": "string",
-          "description": "Public OAuth client_id surfaced to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`. The CLI maps this field (NOT `keycloakAudience`) to the device-code `client_id`. Must be a Keycloak public client (no client secret) with the device-grant flow enabled and an audience mapper that injects `keycloakAudience` into the issued access token. Default `\"\"` keeps backwards compatibility with v0.3.1 — the backplane endpoint still returns the field but the CLI surfaces an actionable public-client error rather than silently misusing `keycloakAudience` (which is the confidential resource-server id and is rejected by Keycloak's device-grant endpoint with `401 unauthorized_client`). G0.9.1-T9, RDC dogfood Signal #16, 2026-05-21. See `deploy/values-examples/README.md` for the realm-side recipe."
+          "description": "Public OAuth client_id surfaced to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`. The CLI maps this field (NOT `keycloakAudience`) to the device-code `client_id`. Must be a Keycloak public client (no client secret) with the device-grant flow enabled and an audience mapper that injects `keycloakAudience` into the issued access token. Default `\"\"` keeps backwards compatibility with v0.3.1 — the backplane endpoint still returns the field but the CLI surfaces an actionable public-client error rather than silently misusing `keycloakAudience` (which is the confidential resource-server id and is rejected by Keycloak's device-grant endpoint with `401 unauthorized_client`). See `deploy/values-examples/README.md` for the realm-side recipe."
         },
         "keycloakCliApproveClientId": {
           "type": "string",
@@ -452,7 +452,7 @@
         "forwardedAllowIps": {
           "type": "string",
           "minLength": 1,
-          "description": "Comma-separated IPs / CIDRs uvicorn trusts as upstream proxies for `X-Forwarded-Proto` / `X-Forwarded-For` parsing (rendered into the `FORWARDED_ALLOW_IPS` env var; uvicorn reads it natively). Fixes the HTTPS→HTTP redirect downgrade behind a TLS-terminating Ingress (Issue #730, Signal #3, RDC dogfood 2026-05-20). Default `127.0.0.1` matches uvicorn's secure default and fails-closed in-cluster (the Ingress controller's pod IP is never the loopback). Operators MUST override for production with the Ingress controller's pod CIDR (e.g. `10.42.0.0/16` for the RKE2 default). `*` disables the allow-list and is acceptable only for ephemeral CI / single-tenant labs where every connecting peer is the cluster's own proxy. See `docs/cross-repo/reverse-proxy-contract.md`."
+          "description": "Comma-separated IPs / CIDRs uvicorn trusts as upstream proxies for `X-Forwarded-Proto` / `X-Forwarded-For` parsing (rendered into the `FORWARDED_ALLOW_IPS` env var; uvicorn reads it natively). It keeps the `https://` scheme of a TLS-terminating Ingress in the backplane's redirects. Default `127.0.0.1` matches uvicorn's secure default and fails-closed in-cluster (the Ingress controller's pod IP is never the loopback). Operators MUST override it with the ingress controller's own address (a `/32`, or the tightest slice you have subnetted the controller onto). Never use the whole pod network, and never `*`: any workload that can reach the backplane could then forge the client address. See `docs/cross-repo/reverse-proxy-contract.md`."
         },
         "targetSsrfAllowlist": {
           "type": "string",

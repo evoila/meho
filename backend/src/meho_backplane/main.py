@@ -124,6 +124,7 @@ from meho_backplane.api.v1.policy_classification import (
 from meho_backplane.api.v1.policy_classification import (
     router as api_v1_policy_classification_router,
 )
+from meho_backplane.api.v1.principal_blocks import router as api_v1_principal_blocks_router
 from meho_backplane.api.v1.read_docs import router as api_v1_read_docs_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_operation_picks import (
@@ -133,6 +134,7 @@ from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage
 from meho_backplane.api.v1.run_approvals import router as api_v1_run_approvals_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.runner_enrollment import router as api_v1_runner_enrollment_router
 from meho_backplane.api.v1.runner_principals import (
     router as api_v1_runner_principals_router,
 )
@@ -152,6 +154,9 @@ from meho_backplane.api.v1.sessions import (
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.targets_keycloak_realm import (
     router as api_v1_targets_keycloak_realm_router,
+)
+from meho_backplane.api.v1.targets_outside_tenant_folder import (
+    router as api_v1_targets_outside_tenant_folder_router,
 )
 from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
@@ -1213,6 +1218,10 @@ app.include_router(api_v1_doc_collections_router)
 # refuses (no managed realm, or a realm that is not a plain name). Two path
 # segments, so it never meets GET /{name}.
 app.include_router(api_v1_targets_keycloak_realm_router)
+# GET /api/v1/targets/checks/outside-tenant-folder: the targets whose secret
+# path is outside the tenant's folder. Two path segments, so it never meets
+# GET /{name}.
+app.include_router(api_v1_targets_outside_tenant_folder_router)
 app.include_router(api_v1_targets_router)
 # #3272 -- operator mutation surface for the per-tenant flight-recorder
 # capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
@@ -1435,7 +1444,12 @@ app.include_router(api_v1_agent_principals_router)
 # Reads gated to operator+; writes gated to tenant_admin. Tenant-scoped via
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_runner_enrollment_router)
 app.include_router(api_v1_runner_principals_router)
+# The admin block list: block, unblock and list logins that MEHO refuses on
+# every request. Person-only; tenant_admin, and a platform admin for their own
+# block (with a fresh sign-in and a reason); no MCP tool.
+app.include_router(api_v1_principal_blocks_router)
 # #4901 -- the agent session store: upload, list, show, download, delete and
 # the tenant's retention period. Person-only; rights per route in
 # session_store/rights.py; every call writes its own audit row.

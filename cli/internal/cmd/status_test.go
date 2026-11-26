@@ -226,7 +226,7 @@ func TestStatus_HumanShowsUpgradeDetails(t *testing.T) {
 			for _, want := range []string{
 				tc.dbLine,
 				"Readiness: ready (keycloak, vault, db ok)\n",
-				"Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured\n",
+				"Approvals: who may approve depends on your group in the current tenant (see Who may approve in the approvals guide); decisions on someone else's instruction are refused; approval key configured\n",
 				"Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)\n",
 			} {
 				if !strings.Contains(out, want) {

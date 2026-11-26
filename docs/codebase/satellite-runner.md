@@ -130,6 +130,10 @@ Each tick (`run_one_tick`):
    uplink is down.
 3. **Execute** each work item through `execute_work_item`.
 4. **Post** the result batch; on POST failure, write it to the spool.
+   When step 1 left a saved batch unsent, the new batch goes into the
+   spool behind it and is not posted this tick. MEHO keeps only the newest
+   reading of a check, so it gets the results of a check in the order the
+   runner made them.
 
 A wire version refusal on any of these calls is different from a down
 uplink: the runner logs `runner_wire_version_mismatch` with both versions,
@@ -244,6 +248,24 @@ work item, plus approval-bound minting.
   defence) and **single-use** (the approval's one-way `resumed_at` latch,
   claimed in the mint session so it is consumed iff the mint commits). No
   approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
+  The mint uses an approval only when the caller is the login that asked, the
+  approval matches the connector, and it is not past its own `expires_at`
+  (never later than the clean-up job's limit); it also refuses while the asker
+  is blocked (`asker_blocked`) or the block list cannot be read
+  (`asker_block_unreadable`). The mint audit row names the asker, the caller
+  and the approval. Every refused mint of a remote-write operation (also for
+  invalid params, a broken stored schema or a revoked runner) writes one
+  audit row in the same tenant: event class `policy_decision`, path
+  `gateway.command.mint`, status 403, the session id of the call, and in the
+  payload the caller, the approval request id the caller sent, the runner,
+  the operation and the refusal code, and no params. The mint commits this
+  row itself, in its own session, so it stays stored when the caller rolls
+  back, and `MintResult.refusal_audit_id` names a stored row. When that write
+  fails, MEHO logs it and the mint still refuses with the same code, with no
+  `refusal_audit_id`. The row of a successful mint stays in the caller's
+  transaction. No command row is written and the approval stays unused.
+  The refusals of other operations (unknown operation, an operation not
+  allowed for a runner, a read refused by policy) write a log line only.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
@@ -300,7 +322,7 @@ allowlist — and fail-closed when either is absent.
   (`load_runner_allowlist`) and ANDs the gate with the approval binding; an
   op-class/target off the allowlist (or no allowlist at all) →
   `MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`, before the single-use latch
-  (a refusal writes no rows / consumes no approval).
+  (a refusal writes one audit row, no command row, and uses up no approval).
 - **At the edge** — `_screen_item` re-runs the same matcher against the
   runner's **own** provisioning-config mirror (`satellite_write_allowlist`,
   parsed by `parse_runner_allowlist`), never the mint's and never a field on
@@ -695,6 +717,131 @@ five-state rollup #2506 defines (`UNKNOWN → degraded`). #2501 landed the
 marker + audit trail only; the flip is observable on the
 `runner_assignments` row and in the `gateway.runner.stale` audit path.
 
+### Checks that run at a site (`RUNNER_CHECKS_ENABLED`)
+
+Off by default. The switch changes the input of the MCP tool
+`meho_sensor_create`, so `GET /version` lists it under `agent_switches`.
+Off: `POST /api/v1/checks/results` only stores the rows, the
+runner's list holds only the hand-written items, a dead runner flips only
+`stale_at`, and `runner_name` is refused on a Sensor create.
+
+On, a Sensor with `runner_name = <runner>` is a check of that runner:
+
+- **List.** `gateway/assignment_service.py::materialize_assignment` adds one
+  work item for each active Sensor of the runner, after the hand-written
+  items. `check_ref` is the Sensor id. `runner_op_refusal` decides whether
+  the runner may run the op: an enabled, safe, handler-backed descriptor
+  whose *effective* policy (`lookup_descriptor`, operator overrides applied)
+  needs no approval, that is not a safe write and not a call that waits for
+  a person. Else the item is dropped with a warning; hand-written items use
+  the same check. Create, edit and the Dashboard file import refuse such an
+  op for a bound Sensor (`checks/runner_binding.py::require_runner_can_run`).
+  The Dashboard file import lists every such Sensor in one answer, together
+  with the other problems of the file.
+- **Only to a runner that can schedule.** The runner names what it can do in
+  the `X-MEHO-Runner-Features` header (`wire.FEATURES_HEADER`); a current
+  runner sends `scheduled-checks`. `GET /api/v1/checks/assignment` adds the
+  Sensor items only for a runner that names it. An older runner gets none and
+  MEHO logs `assignment_sensor_items_withheld`; its checks turn `unknown`
+  until it is updated. The word needs no wire version bump.
+- **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
+  `timezone`, and `next_due_at`: the Sensor's `next_fire_at` (or its
+  `created_at` when it has none), always in UTC. The runner
+  keeps the last run time per `check_ref`
+  (`runner/loop.py::RunnerState.last_run`). It runs an item once
+  `next_due_at` has come, when it has not run it since that time: also on
+  its first poll and after a restart, so a new Sensor waits one interval
+  and a nightly check never runs at noon. `meho sensor run` sets
+  `next_fire_at` to now, and a waiting state change pulls it to
+  `retry_backoff_seconds` after the reading; the new value reaches the
+  runner with its next list. Until a new due time arrives, the runner
+  repeats the item on its own interval or cron schedule, from a fresh or a
+  cached assignment. A hand-written item has no schedule and runs on every
+  tick.
+- **Results.** `api/v1/checks.py::post_results` first locks the runner's
+  assignment row (`gateway/repository.py::lock_assignment_row`), clears the
+  stale marker and commits. It screens the batch
+  (`gateway/runner_checks.py::screen_batch`), then `ingest_and_count` takes
+  the results one at a time, in batch order, each in its own transaction:
+  lock the row, take the time of the count, clean the result, store it
+  (`ingest_new_results`), count it, claim its Dashboard edge
+  (`checks/investigate.py::claim_transitions`) in the same transaction,
+  commit, then `after_commit` (pause mail, `send_claimed_transitions`: mails
+  and investigator). The edge is claimed before any other writer can see the
+  reading, so a critical reading and a later recovery, in one batch or two,
+  both reach the notifier. The claim reads the Dashboard and its members
+  again after it takes the Dashboard lock, so two runners that change
+  checks on one Dashboard each claim their own change. When a claim
+  fails, the whole transaction rolls back (state, stored result, the
+  claims of the other Dashboards) and the post fails, so the runner sends
+  the result again. A
+  result counts only when `check_ref` is the id of an **active Sensor of this
+  runner in this tenant** and `op_id` is the Sensor's op. Else it is stored,
+  logged (`runner_result_not_in_list`) and counted as `not_in_list`.
+- **The rule runs at the centre.** The runner sends `result` only: an
+  object, or a list for an op that answers with a list. Both sides clean it
+  like a central answer (`runner/result_clean.py::clean_result`:
+  `apply_connector_boundary_redaction`, then the default view
+  `hide_secret_values`; the error text through `_sanitize_free_text`,
+  redacted, then cut to 256 characters). The runner cleans the result of a
+  Sensor item before it posts it or writes it to its retry file; MEHO cleans
+  it again before it stores the row. MEHO reads the Sensor's assertion on
+  the stored, cleaned answer. A runner status other than `ok` reads
+  `unknown` (`runner_refused`, `runner_error`). A hand-written item still
+  sends only an object, since an older central MEHO accepts no list.
+- **Refused logins.** The runner sets `RunnerResult.error_code =
+  "connector_auth_failed"` by the dispatcher's rule: a handler raises
+  `ConnectorAuthError`, or an `httpx.HTTPStatusError` with a status that
+  `is_auth_failed_status` counts (`401`, `440`). The
+  centre counts it with `checks/auth_park.py::count_auth_outcome`, like a
+  central check, pauses the Sensor at `SENSOR_AUTH_FAILURE_PARK_THRESHOLD`
+  and sends the pause mail. A paused Sensor leaves the runner's list.
+- **Time.** The time of a counted result is the central clock, read after
+  the runner's row lock is held, and always later than the Sensor's
+  `last_evaluated_at`. So a batch that waited for the lock never counts a
+  reading at a time before one another batch already counted. `RunnerResult.produced_at`
+  (the runner clock) is compared only with `sensor.runner_produced_at`, the
+  runner time of the last counted result. A `produced_at` later than
+  `received_at` is refused: not stored, outcome `future_time`, and named in
+  the answer's `refused` list (`[{result_uid, reason}]`, left out when
+  empty); the runner logs `runner_result_refused_by_central`. A result
+  without `produced_at` is stored and not counted (`no_time`): without it
+  MEHO cannot tell a new result from a replay. A result at or before
+  `runner_produced_at` is dropped (`old`), also after the clean-up job
+  removed its stored copy. The row lock makes the compare and the update
+  one step across concurrent batches; the Sensor is read fresh
+  (`populate_existing`) under the lock. A re-posted `result_uid` is a
+  duplicate and is never counted.
+- **Next due time.** Each counted result moves `next_fire_at` to the time of
+  the count plus the interval (or the next cron match), and to at most
+  `retry_backoff_seconds` after it while a state change waits, so the rollup derives `unknown` for a check whose
+  runner stops reporting even before the sweeper flips it.
+- **Size.** 256 KB for one answer (compact JSON), 4 MB for a batch. An
+  answer over the cap is stored without payload (`error = "answer too
+  large"`) and the Sensor reads `unknown` with that reason (`too_large`).
+- **Stale runner.** `gateway/deadman.py::_flip_and_mark` handles each
+  candidate runner in one transaction: lock the assignment row, read
+  `last_seen_at` again (a runner that reported since the candidate query is
+  left alone), flip `stale_at`, record `unknown` (`runner_stale`) on each
+  active Sensor `retry_times + 1` times so the confirmation gate passes,
+  claim each Sensor's Dashboard edge, commit, then send the claimed mails.
+  The marking keeps each Sensor's `next_fire_at`, so a runner that comes
+  back runs the check at its scheduled time. If the marking
+  fails, the flip rolls back with it and the next sweep tries again. A
+  Sensor bind creates an empty assignment row (`ensure_assignment_row`) so
+  the sweeper watches a runner that has only Sensors. The next accepted
+  result batch clears the marker and normal results follow.
+- **Measure.** `runner_check_results_total{outcome}` with `counted`,
+  `not_in_list`, `too_large`, `future_time`, `no_time`, `old`. A stored
+  result is added after its transaction commits, so a result that rolls
+  back and is sent again counts once.
+- **Clean-up.** While the switch is on, raw rows older than
+  `RUNNER_CHECK_RESULTS_RETENTION_DAYS` (7) are deleted by the evidence prune
+  tick (`checks/evidence_retention.py`). With the switch off it deletes none.
+
+The hand-written list (`PUT /api/v1/checks/assignment/{runner}`) still works;
+the docs call it the old way.
+
 **Console fleet page (`/ui/runners`, #2589).** The read-only operator
 console surface for the fleet: one row per registered runner principal
 (`include_revoked=True` so a decommissioned runner still shows), with a
@@ -719,6 +866,183 @@ ORM row via `from_attributes`, so the CLI `runner-principal list` /
 stamp is a request side effect, and central enforcement is on by
 default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
 `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER` (default 3).
+
+## Runner login with a key pair made at the site
+
+A runner logs in in one of two modes. Which one runs is decided at start by
+`runner.login.open_signed_jwt_login`:
+
+- A login record (`runner-login.json`) in `MEHO_RUNNER_KEY_DIR`: key mode.
+- Else `MEHO_RUNNER_ENROLLMENT_CODE` set: enroll first, then key mode.
+- Else `MEHO_RUNNER_TOKEN` set: the fixed token mode (unchanged; no key,
+  no renewal).
+- Else a `RunnerConfigError` that names the variables.
+
+In key mode `MEHO_RUNNER_CENTRAL_URL` and the token address (from central, or
+`MEHO_RUNNER_TOKEN_URL`) must be https. Plain http works only for an address on
+the same machine, and then no proxy from the environment is used
+(`runner/login.py::check_https`). The check runs before the first request.
+
+**Enrollment.**
+
+- `RunnerPrincipalService.register` makes a one-time code
+  `<runner id hex>.<secret>` (`auth/runner_enrollment.py::new_enrollment_code`)
+  and returns it once in `RunnerPrincipalRegistered`. Only its SHA-256 and
+  its expiry (30 minutes) are stored (`runner_principal.enrollment_code_hash`,
+  `enrollment_code_expires_at`, migration `0188`).
+- The runner makes an EC P-256 key (`runner/login.py::load_or_create_private_key`;
+  the file `runner-key.pem` has mode `0600`) and posts the public key (a JWK)
+  with the code to `POST /api/v1/runner-principals/enroll`
+  (`api/v1/runner_enrollment.py`). That route has no login: the code is the
+  proof.
+- `enroll_runner_key` refuses a wrong, empty, used, expired or revoked code
+  (all give 403 `enrollment_code_invalid`). An expired code with no key yet
+  gets this 403 before the name and the key are checked. A used code gets it
+  for any key other than its own, before the name is checked. With a good,
+  unused code it refuses a private member in the key, a key that is not P-256
+  and a value that is no JWK object or is missing (422
+  `runner_public_key_invalid`, the list shape of every other validation error).
+- The runner sends its `MEHO_RUNNER_ID` as `runner_name`. When the code
+  belongs to a runner with another name, the route answers 409
+  `enrollment_code_for_another_runner` before anything changes, so the code
+  stays usable for its own runner.
+- The code enrolls one key, in two steps. First MEHO commits which key the
+  code accepted: `runner_principal.enrolled_key_id` (the RFC 7638 thumbprint,
+  `runner/key_id.py`). A key is accepted only before the code's end. Then,
+  under the lock again, MEHO puts the key on the Keycloak client and commits
+  `key_enrolled_at`. From the first step on, another key is refused. The
+  accepted key can finish the second step at any time, also after the code's
+  end: when Keycloak failed, or stored the key and the answer was lost, the
+  runner keeps its key, has no login record yet, and asks again at its next
+  start. A repeat after `key_enrolled_at` gives the same answer and changes
+  nothing.
+- Enrollment and revocation of one runner take turns: both hold one advisory
+  lock (`take_runner_lock`) from the read of the row until the commit.
+- `KeycloakAdminClient.set_client_signed_jwt_key` sets the client to
+  `client-jwt` and stores the key set in `jwks.string`. Its write leaves out
+  `enabled`, and Keycloak keeps a field that a `PUT` leaves out, so this write
+  never turns a disabled client on. When a call to Keycloak ends without an
+  answer and Keycloak applies the write after a revoke, it finds no client:
+  revoke deletes it.
+
+**The saved login.** The runner uses the login record only when it is for
+`MEHO_RUNNER_ID` and its key id is the one of the private key on disk. When the
+record is damaged, or the key is missing or another one, the runner enrolls
+with `MEHO_RUNNER_ENROLLMENT_CODE`. Without a code it stops with an error that
+says how to recover: put the files back, or register a new runner under a new
+name with a new, empty `MEHO_RUNNER_SPOOL_DIR` (the old spool's results carry
+the old name, and central refuses them under the new one). It never makes a
+new key for an old record without a code. The record is written in one step, so a stop leaves no half record.
+
+**Renewal.** `SignedJwtTokenProvider` signs a 60-second JWT (ES256, `kid`,
+`iss`=`sub`=client id, `aud`=issuer, unique `jti`) and posts it to the token
+endpoint with the `client_credentials` grant. It keeps the token and gets a new
+one when less than a quarter of its life (at least 30 seconds) is left.
+`RunnerClient` uses it through an `httpx.Auth` (`_ProviderAuth`): after a
+`401` it gets a new token and sends the call once more. Nothing in the module
+logs a key, a code, an assertion or a token.
+
+**The standard and Keycloak's way.** The key login follows RFC 7523 (a JWT
+as the proof of a client's login) and Keycloak's "Signed JWT" client
+authenticator. The lines the code follows:
+
+- RFC 7523
+  [section 2.2](https://www.rfc-editor.org/rfc/rfc7523#section-2.2): "The
+  value of the "client_assertion_type" is
+  "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"." The runner sends
+  this value with the `client_credentials` grant
+  (`runner/login.py::_ASSERTION_TYPE`, `SignedJwtTokenProvider._fetch`).
+- RFC 7523 [section 3](https://www.rfc-editor.org/rfc/rfc7523#section-3),
+  the claims, all set in `SignedJwtTokenProvider._assertion`:
+  - item 1: "The JWT MUST contain an "iss" (issuer) claim" and item 2.B:
+    "For client authentication, the subject MUST be the "client_id" of the
+    OAuth client." `iss` and `sub` are the client id `runner:<name>`.
+  - item 3: "The JWT MUST contain an "aud" (audience) claim containing a value
+    that identifies the authorization server". `aud` is the realm's issuer
+    address that central returns at enrollment.
+  - item 4: "The JWT MUST contain an "exp" (expiration time) claim that limits
+    the time window during which the JWT can be used." `exp` is `iat` + 60
+    seconds (`_ASSERTION_LIFETIME_SECONDS`).
+  - item 6: "The JWT MAY contain an "iat" (issued at) claim". `iat` is the
+    time of signing.
+  - item 7: "The JWT MAY contain a "jti" (JWT ID) claim that provides a unique
+    identifier for the token." `jti` is a new random id for each request.
+  - item 9: "The JWT MUST be digitally signed". The runner signs with its
+    P-256 key, `ES256`, and names the key in `kid`.
+- Keycloak, [Confidential client credentials](https://www.keycloak.org/docs/latest/server_admin/index.html#_client-credentials):
+  - "*Signed JWT* allows a client to authenticate with self-signed client
+    assertions. This enables the client to authenticate without a shared
+    secret." `KeycloakAdminClient.set_client_signed_jwt_key` sets the client's
+    authenticator to `client-jwt`.
+  - "In this authenticator you can enforce the *Signature algorithm* used by
+    the client (any algorithm is valid by default) and the *Max expiration*
+    allowed for the JWT token (... tokens should be issued right before the
+    authentication, 60 seconds by default)." MEHO sets the signing type of the
+    client to `ES256` (`token.endpoint.auth.signing.alg`). The runner signs
+    each request right before it sends it, with a life of 60 seconds.
+  - "The client uses the private key to sign the JWT, while Keycloak uses the
+    certificate or public key to verify the signature. Keycloak does not need
+    and does not store the client's private key." The runner keeps its
+    private key in `MEHO_RUNNER_KEY_DIR`; MEHO stores only the public key on
+    the client, as a key set in `jwks.string`.
+
+Three facts of the key login:
+
+- MEHO stores the runner's public key set on the Keycloak client, because
+  central cannot reach the runner. (Keycloak's page recommends a JWKS URL.)
+- The client's "Max expiration" setting is not set. The runner's signed
+  request lives 60 seconds, which equals Keycloak's default.
+- Replay protection of the request id (`jti`) is on Keycloak's side.
+
+The system it is proven on: the live test
+`backend/tests/integration/test_runner_key_login_keycloak.py` runs in CI
+against the Keycloak image `keycloak/keycloak:26.0` (the value of
+`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). It was proven on
+the Keycloak image `keycloak/keycloak:26.0` of the CI live test.
+
+**The key file.** `runner/login.py::_read_key_file` checks the mode of the
+open key file before it reads the key. Any right for the group or for
+other users (any of the last six mode bits) stops the runner with a
+`RunnerLoginError` that names the file and its mode, says to set mode `0600`
+and names the docs page; no request is sent. Any other mode works (for example
+`0600` and `0400`). In a Kubernetes pod with `fsGroup`, Kubernetes can add group rights to the key
+file at each mount, and the runner then stops. Mount the key so that it keeps
+mode `0600`: set no `fsGroup` for that pod, or use a volume driver that does
+not change file rights. `fsGroupChangePolicy: OnRootMismatch` keeps the mode
+only when the top folder of the volume already has the `fsGroup` group and the
+rights Kubernetes expects. When it does not, Kubernetes changes the rights of
+every file in the volume, and the runner stops (see
+[Configure a Security Context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)).
+
+**Register.** Only a person with `tenant_admin` can register a runner, because
+the answer carries the enrollment code. A service login or an agent login
+gets 403 `human_principal_required`, and a runner login gets 403
+`runner_scope_violation`, before anything is made. Before the Keycloak
+client is made, `RunnerPrincipalService.register` looks for a row with the
+same Keycloak client id, also a revoked row and a row of another tenant; when
+one exists it answers 409 `runner_principal_already_exists`, and no client and
+no Vault secret is made.
+
+**Refused enrollments.** When the code in a request matches a runner's stored
+code and the enrollment is still refused, `enroll_runner_key` writes one audit
+row in that runner's tenant (path `runner.principal.key_enrollment_refused`).
+It holds the runner's name, the answer's status, a reason (`runner_name_mismatch`
+409, `public_key_invalid` 422 for a key in any wrong form, `code_expired` 403,
+`code_used_by_another_key` 403, `runner_revoked` 403 for a revoke that ran
+while the enrollment waited) and the id of the offered key when the key can
+be read. It holds no code and no key. A code that matches no runner writes no
+audit row; the route writes a log line.
+
+**Revoke.** Revoke works the same for every runner, with a key or with a fixed
+token. `RunnerPrincipalService.revoke` turns the runner's Keycloak client off,
+then deletes the client. With the client, its public key and its Keycloak
+secret are gone. The runner row stays and is marked revoked, and its
+enrollment code is cleared. `meho runner-principal list` shows it only with
+revoked runners included; `show` shows it as revoked. The name stays taken: a
+new register of the same name gets 409. A revoked runner cannot be brought
+back: the deleted client cannot be turned on again. A new runner needs a new
+name and a new enrollment code. A token the runner already has works until it
+ends.
 
 ## Dependencies
 
@@ -751,8 +1075,8 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
   #2901 / #3187).
 - Heartbeat + central stale/unknown flipping — #2501.
 - The scoped per-runner service principal + credential scoping — #2502.
-  `MEHO_RUNNER_TOKEN` is the seam it fills; this chassis treats it as an
-  opaque bearer.
+  `MEHO_RUNNER_TOKEN` is the fixed-token seam; this chassis treats it as an
+  opaque bearer. The key mode above renews its own token.
 - Change ops over the gateway, any inbound listener, arbitrary TCP
   proxying — out of scope by the initiative's design principles.
 

@@ -102,7 +102,15 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import raise_if_send_refused
+from meho_backplane.auth.principal_block_run import (
+    mark_step_sent,
+    raise_if_step_was_refused,
+    request_was_sent,
+)
+from meho_backplane.auth.secret_read_as import track_secret_read_as
 from meho_backplane.connectors import OperationResult
+from meho_backplane.operations._principal_block_gate import refuse_step_if_blocked
 from meho_backplane.operations.composite_steps import (
     STEP_DONE,
     STEP_DONE_NO_RESULT,
@@ -498,6 +506,8 @@ def get_dispatch_child(
         params: dict[str, Any],
         target: Any = None,
     ) -> OperationResult:
+        # After a step was refused by the block list, no further step starts.
+        raise_if_step_was_refused()
         attempted_depth = _check_composite_depth(
             parent_op_id=parent_op_id,
             child_op_id=op_id,
@@ -540,6 +550,8 @@ def get_dispatch_child(
                 journal.finish(
                     entry, result.model_dump(mode="json"), ended_well=_child_ended_well(result)
                 )
+            # A step the block list refused stops the whole operation.
+            raise_if_step_was_refused()
             return result
         finally:
             if journal is not None:
@@ -717,7 +729,8 @@ def _resume_parent_for_current_composite(
     the steps this run of the composite went through, with their results
     (:class:`~meho_backplane.operations.composite_steps.StepJournal`), so the
     re-entry does not send them again; the key is left out when there are
-    none. ``None`` when no composite is on the stack, so the park keeps the
+    none. ``request_sent: true`` says that this run sent a step or a request
+    before the wait. ``None`` when no composite is on the stack, so the park keeps the
     unchanged generic re-dispatch of its ``op_id``.
     """
     ctx = composite_dispatch_var.get()
@@ -734,6 +747,8 @@ def _resume_parent_for_current_composite(
         steps = journal.stored()
         if steps:
             resume_parent["steps"] = steps
+    if request_was_sent():
+        resume_parent["request_sent"] = True
     return resume_parent
 
 
@@ -912,7 +927,15 @@ async def enforce_subop_policy(
     no person; otherwise the run stops with ``composite_resume_read_not_sent``.
     A read that a person approved is not sent again: the run stops with that
     error.
+
+    **A blocked person.** Before anything else, the seam reads the admin
+    block list (:mod:`._principal_block_gate`). When the operator is blocked,
+    or on an approved run the person who asked, or the list cannot be read,
+    it returns the refusal and the step is not sent, also on a resume.
     """
+    blocked = await refuse_step_if_blocked(op_id, operator)
+    if blocked is not None:
+        return blocked
     journal = current_step_journal()
     replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
     if journal is not None and replayed is not None:
@@ -929,25 +952,34 @@ async def enforce_subop_policy(
             params=params,
         )
         if refused is None:
+            await raise_if_send_refused()
             journal.start(connector_id, op_id, target, params, may_send_again=True)
+            mark_step_sent(op_id)
         return refused
-    gated = await _gate_subop(
-        operator=operator,
-        connector_id=connector_id,
-        op_id=op_id,
-        safety_level=safety_level,
-        requires_approval=requires_approval,
-        target=target,
-        params=params,
-        resume_state=resume_state,
-        after_main_effect=after_main_effect,
-    )
+    # The rows the gate writes for this step hold only what the step read.
+    with track_secret_read_as():
+        gated = await _gate_subop(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            target=target,
+            params=params,
+            resume_state=resume_state,
+            after_main_effect=after_main_effect,
+        )
     if isinstance(gated, OperationResult):
         return gated
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     if journal is not None:
         journal.start(
             connector_id, op_id, target, params, may_send_again=gated is _GoAhead.NO_PERSON
         )
+    mark_step_sent(op_id)
     return None
 
 
@@ -1003,7 +1035,14 @@ async def run_governed_subop(
     kept, stops the run with ``composite_resume_step_outcome_unknown``. An
     exception from *call* passes to the handler, and the step stays
     "started".
+
+    When the operator is blocked, or on an approved run the person who
+    asked, or the block list cannot be read, the step stops with the refusal
+    and *call* is not awaited, also on a resume.
     """
+    blocked = await refuse_step_if_blocked(op_id, operator)
+    if blocked is not None:
+        return SubopStep(stopped=blocked)
     journal = current_step_journal()
     replayed = journal.take(connector_id, op_id, target, params) if journal is not None else None
     if journal is not None and replayed is not None:
@@ -1023,25 +1062,31 @@ async def run_governed_subop(
             return SubopStep(stopped=refused)
         may_send_again = True
     else:
-        gated = await _gate_subop(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
-            target=target,
-            params=params,
-            resume_state=resume_state,
-            after_main_effect=after_main_effect,
-        )
+        with track_secret_read_as():
+            gated = await _gate_subop(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                target=target,
+                params=params,
+                resume_state=resume_state,
+                after_main_effect=after_main_effect,
+            )
         if isinstance(gated, OperationResult):
             return SubopStep(stopped=gated)
         may_send_again = gated is _GoAhead.NO_PERSON
+    # The check right before the step goes out, after its policy gate: a step
+    # that waited there while another step was refused is not sent, and its
+    # journal entry is not started.
+    await raise_if_send_refused()
     entry = (
         journal.start(connector_id, op_id, target, params, may_send_again=may_send_again)
         if journal is not None
         else None
     )
+    mark_step_sent(op_id)
     value = await call()
     if journal is not None and entry is not None:
         journal.finish(entry, value)
@@ -1422,21 +1467,27 @@ async def _gate_subop(
                     requester=resume_requester_var.get(),
                     category=descriptor.policy_category,
                     install_category=descriptor.policy_install_category,
+                    # A step always gets its own request.
+                    allow_same_call_reuse=False,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed
-            # transaction; the helper is fail-open.
-            await record_approval_step_event(
-                tenant_id=operator.tenant_id,
-                request=request,
-                decision="pending",
-                audit_id=request._audit_id,  # type: ignore[attr-defined]
-            )
+            # transaction; the helper is fail-open. A request that was
+            # reused (not made here) already had its step event.
+            reused = bool(getattr(request, "_reused", False))
+            if not reused:
+                await record_approval_step_event(
+                    tenant_id=operator.tenant_id,
+                    request=request,
+                    decision="pending",
+                    audit_id=request._audit_id,  # type: ignore[attr-defined]
+                )
             return result_awaiting_approval(
                 op_id,
                 request.id,
                 duration_ms,
-                audit_id=request.request_audit_id,
+                reused=reused,
+                audit_id=getattr(request, "_reuse_audit_id", None) or request.request_audit_id,
                 note=await rights_change_note(request),
             )
 

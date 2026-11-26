@@ -104,6 +104,8 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.principal_block import checking_logins_for_steps
+from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -143,6 +145,7 @@ from meho_backplane.operations._errors import (
     result_target_changed_since_approval,
     result_target_gone_since_approval,
 )
+from meho_backplane.operations._principal_block_gate import refuse_if_principal_blocked
 from meho_backplane.operations._secret_values import split_reveal_secret, with_reveal_secret
 from meho_backplane.operations._target_connector_limit import (
     restored_connector_limit,
@@ -150,6 +153,7 @@ from meho_backplane.operations._target_connector_limit import (
 )
 from meho_backplane.operations._validate import (
     TOKEN_CALL_WAIT,
+    compute_audit_params_hash,
     params_hash_candidates,
     params_hash_matches,
 )
@@ -185,6 +189,7 @@ from meho_backplane.operations.grant_approval import (
     check_rights_change_approval,
     grant_audit_fields,
     grant_changed_since_request,
+    grant_facts,
     is_rights_change,
 )
 from meho_backplane.operations.people_behind import (
@@ -267,6 +272,7 @@ __all__ = [
     "pending_chain_positions",
     "read_approval_result",
     "record_approval_step_event",
+    "refuse_resume_if_asker_blocked",
     "refuse_resume_if_preview_changed",
     "refuse_resume_if_release_changed",
     "refuse_resume_if_target_changed",
@@ -1322,17 +1328,52 @@ async def _link_reuse_key(
         )
 
 
+#: Status code of the ``approval.reuse`` row of a retry that got a request a
+#: person already approved. Only a waiting request has 202.
+_REUSE_APPROVED_STATUS_CODE: int = 200
+
+
+def _found_request_state(request: ApprovalRequest) -> str:
+    """The state of *request* as the ``approval.reuse`` row says it.
+
+    ``waiting``, or ``approved_`` plus the run phase
+    (:class:`ApprovalResultState`): ``approved_not_started``,
+    ``approved_started``, ``approved_executed``, ``approved_failed`` or
+    ``approved_uncertain``.
+    """
+    phase = approval_result_state(request)
+    return "waiting" if phase is None else f"approved_{phase.value}"
+
+
 async def _write_reuse_audit_row(
-    session: AsyncSession, operator: Operator, request: ApprovalRequest
+    session: AsyncSession,
+    operator: Operator,
+    request: ApprovalRequest,
+    params: dict[str, Any],
+    *,
+    say_state: bool = False,
 ) -> None:
     """Write the ``approval.reuse`` audit row of a call that got *request*.
 
     Same transaction as the call. The row names the reused request and the
-    caller's own session. Its id is kept in ``request._reuse_audit_id``, so
-    the answer's ``audit_id`` is this row and not the first call's
+    caller's own session. Its payload has the ``params_hash`` of the call's
+    own *params* (:func:`compute_audit_params_hash`, so secret values are
+    masked before the hash). Its id is kept in ``request._reuse_audit_id``,
+    so the answer's ``audit_id`` is this row and not the first call's
     ``approval.request`` row.
+
+    With *say_state* (a retry with the same key), the payload also has
+    ``request_state`` (see :func:`_found_request_state`). The status code is
+    202 for a waiting request and 200 for an approved one.
     """
     audit_id = uuid.uuid4()
+    payload: dict[str, Any] = {"params_hash": compute_audit_params_hash(params)}
+    status_code = _APPROVAL_STATUS_CODE
+    if say_state:
+        state = _found_request_state(request)
+        payload["request_state"] = state
+        if state != "waiting":
+            status_code = _REUSE_APPROVED_STATUS_CODE
     await _write_audit_row(
         session,
         audit_id=audit_id,
@@ -1340,11 +1381,31 @@ async def _write_reuse_audit_row(
         operator=operator,
         request=request,
         path=_REUSE_PATH,
-        status_code=_APPROVAL_STATUS_CODE,
+        status_code=status_code,
         duration_ms=0.0,
+        extra_payload=payload,
         caller_session=True,
     )
     request._reuse_audit_id = audit_id  # type: ignore[attr-defined]
+
+
+async def _reuse_for_key_retry(
+    session: AsyncSession,
+    operator: Operator,
+    reused: ApprovalRequest,
+    params: dict[str, Any],
+) -> ApprovalRequest:
+    """Give a retry with the same key its own audit row when the switch is on.
+
+    Needs ``APPROVAL_RETRY_OWN_AUDIT_ROW``. The row is the same
+    ``approval.reuse`` row that the same-call path writes. With the switch
+    off, the retry writes no row and the answer is the first call's.
+    """
+    from meho_backplane.settings import get_settings
+
+    if get_settings().approval_retry_own_audit_row:
+        await _write_reuse_audit_row(session, operator, reused, params, say_state=True)
+    return reused
 
 
 def _is_composite_step() -> bool:
@@ -1358,16 +1419,20 @@ def _same_call_reuse_applies(
     run_id: uuid.UUID | None,
     resume_parent: dict[str, Any] | None,
     requester: ResumeRequester | None,
+    allow_same_call_reuse: bool = True,
 ) -> bool:
     """True when a direct call may get the waiting request of the same call.
 
     Needs the switch ``APPROVAL_SAME_CALL_REUSE``. A call inside an agent
     run, a step of a multi-step operation (one sent through
-    ``dispatch_child``, or one saved to restart after approval), or a re-run
-    for an earlier requester always gets its own request.
+    ``dispatch_child``, or one saved to restart after approval), a step
+    checked by ``enforce_subop_policy`` (*allow_same_call_reuse* false), or a
+    re-run for an earlier requester always gets its own request.
     """
     from meho_backplane.settings import get_settings
 
+    if not allow_same_call_reuse:
+        return False
     if run_id is not None or resume_parent is not None or requester is not None:
         return False
     if _is_composite_step():
@@ -1400,6 +1465,7 @@ async def _find_same_call_pending_request(
     params: dict[str, Any],
     preview_hash: str | None,
     asker: _Asker,
+    principal_act: str | None,
 ) -> ApprovalRequest | None:
     """Return the waiting request of this login for the same call, or ``None``.
 
@@ -1416,13 +1482,17 @@ async def _find_same_call_pending_request(
     ``preview_hash`` and ``work_ref``, plus the same *asker*: the kind of
     login, the people behind it and the ``reveal_secret`` choice
     (:class:`_Asker`). The approval checks read only the kind and the list
-    stored on the request.
+    stored on the request. The acting agent (*principal_act*, ``None`` for a
+    direct call) must be the same too.
     """
     stmt = (
         select(ApprovalRequest)
         .where(
             ApprovalRequest.tenant_id == tenant_id,
             ApprovalRequest.principal_sub == principal_sub,
+            ApprovalRequest.principal_act == principal_act
+            if principal_act is not None
+            else ApprovalRequest.principal_act.is_(None),
             ApprovalRequest.op_id == op_id,
             ApprovalRequest.connector_id == connector_id,
             ApprovalRequest.target_id == target_id
@@ -1733,9 +1803,10 @@ def _policy_rule_fields() -> dict[str, Any]:
     return {"policy_rule": stamp.as_json(), "policy_version": stamp.policy_version}
 
 
-#: Audit path of a call that got the waiting request of the same call
-#: (``APPROVAL_SAME_CALL_REUSE``). The call writes this row, not a second
-#: ``approval.request`` row.
+#: Audit path of a call that gets an existing request. The call writes this
+#: row, not a second ``approval.request`` row. Two calls write it: a call that
+#: gets the waiting request of the same call (``APPROVAL_SAME_CALL_REUSE``),
+#: and a retry with the same key (``APPROVAL_RETRY_OWN_AUDIT_ROW``).
 _REUSE_PATH = "approval.reuse"
 
 #: Audit paths written on the task of the call that waits.
@@ -1743,6 +1814,16 @@ _CALLER_PATHS = frozenset({"approval.request", _REUSE_PATH})
 
 #: Audit paths that carry the runbook run and step of the call.
 _RUNBOOK_STEP_PATHS = frozenset({*_CALLER_PATHS, "approval.result"})
+
+
+def _request_row_columns() -> dict[str, Any]:
+    """The columns the rows of ``_CALLER_PATHS`` take from the waiting call's task.
+
+    The matched policy rule, and the login a secret store accepted
+    for the parking call so far (``secret_read_as``), for example the read of
+    the sink secret for the approval card of ``secret.move``.
+    """
+    return {**policy_rule_columns(), "secret_read_as": current_secret_read_as()}
 
 
 async def _write_audit_row(
@@ -1880,7 +1961,7 @@ async def _write_audit_row(
     # that expires an old overdue request writes that request's decision
     # row while the retry's own rule is bound.
     if path in _CALLER_PATHS:
-        policy_kwargs.update(policy_rule_columns())
+        policy_kwargs.update(_request_row_columns())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -1999,6 +2080,7 @@ async def create_pending_request(
     category: str | None = None,
     wait_reason: str | None = None,
     install_category: str | None = None,
+    allow_same_call_reuse: bool = True,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -2053,7 +2135,11 @@ async def create_pending_request(
         idempotency_key: Optional client-chosen retry key (#3486). When the
             same principal in the same tenant already has a ``pending`` or
             ``approved`` request with this key, that request is returned
-            instead of a new one: no new row, no new audit row. The
+            instead of a new one, with no new request row. When
+            ``APPROVAL_RETRY_OWN_AUDIT_ROW`` is off, the retry writes no
+            audit row. When it is on, the retry writes one
+            ``approval.reuse`` audit row and the request carries its id as
+            ``_reuse_audit_id`` (see ``_reuse_for_key_retry``). The
             returned row carries the transient attr ``_reused = True`` (and
             no ``_audit_id``), so the caller does not publish a second
             ``approval.pending`` event. A ``pending`` request already past
@@ -2090,6 +2176,11 @@ async def create_pending_request(
             ``policy_install_category``). The install's routing entries
             match on it, so a tenant that moves the operation to another
             category cannot take it away from the install's routing.
+
+        allow_same_call_reuse: ``False`` for the check of a step of a
+            multi-step operation (``enforce_subop_policy``): the step then
+            always gets its own request, whatever ``APPROVAL_SAME_CALL_REUSE``
+            says.
 
     Returns:
         The flushed :class:`ApprovalRequest` row (new, or reused).
@@ -2158,9 +2249,9 @@ async def create_pending_request(
             ),
         )
         if live is not None:
-            return _reuse(live)
+            return await _reuse_for_key_retry(session, operator, _reuse(live), params)
 
-    if _same_call_reuse_applies(run_id, resume_parent, requester):
+    if _same_call_reuse_applies(run_id, resume_parent, requester, allow_same_call_reuse):
         same_call = await _find_same_call_pending_request(
             session,
             tenant_id=operator.tenant_id,
@@ -2171,11 +2262,12 @@ async def create_pending_request(
             params=params,
             preview_hash=preview_hash,
             asker=asker,
+            principal_act=resolve_actor_sub(),
         )
         if same_call is not None:
             reused = _reuse(same_call)
             await _link_reuse_key(session, reused, idempotency_key)
-            await _write_reuse_audit_row(session, operator, reused)
+            await _write_reuse_audit_row(session, operator, reused, params)
             return reused
 
     if proposed_effect is None:
@@ -2246,7 +2338,9 @@ async def create_pending_request(
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
         if resume_parent is not None:
-            stored_resume_parent = {"op_id": resume_parent["op_id"]}
+            stored_resume_parent = {
+                key: resume_parent[key] for key in ("op_id", "request_sent") if key in resume_parent
+            }
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -2312,7 +2406,7 @@ async def create_pending_request(
             session, request, idempotency_key=idempotency_key, asker=asker
         )
         if winner is not None:
-            return _reuse(winner)
+            return await _reuse_for_key_retry(session, operator, _reuse(winner), params)
     request._expired_request = expired_request  # type: ignore[attr-defined]
     if handoff_payload is not None:
         request.execution_handle = store_handoff(
@@ -2351,20 +2445,34 @@ async def create_pending_request(
 
 
 async def rights_change_note(request: ApprovalRequest) -> str | None:
-    """The note for a change of rights that no other admin could approve (#6641).
+    """The note for a waiting change of rights that no other admin could approve.
 
-    The request is stored all the same, so an admin added later can still
-    approve it. ``None`` for any other request, when another admin could
-    approve, and when MEHO cannot count the admins
-    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`).
+    * A sure count of zero admins gives the "no admin" note for every
+      waiting change of rights (:func:`is_rights_change`), also
+      ``policy.apply``, ``policy.classify`` and a change in any other realm.
+    * The note that the person who asked is the only admin shows only where
+      a platform admin must approve: the card's ``login_realm`` fact is true
+      (:func:`~meho_backplane.operations.grant_approval.grant_facts`; a
+      missing realm fact counts as true). There the person who asked
+      approves it only as a platform admin who asked in the web console.
+
+    ``None`` for every other request, when another admin is found, when the
+    person who asked is not an admin, and when MEHO cannot count the admins
+    (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). The request
+    is stored all the same, so an admin added later can still approve it.
 
     The note is extra help only. When reading it fails, the answer is
     ``None`` and the request still waits for approval as stored.
     """
     if not is_rights_change(request):
         return None
+    facts = grant_facts(request)
     try:
-        return await only_admin_note(request.tenant_id, request.principal_sub)
+        return await only_admin_note(
+            request.tenant_id,
+            request.principal_sub,
+            login_realm=facts is not None and facts.login_realm,
+        )
     except Exception:
         _log().warning("rights_change_note_failed", request_id=str(request.id), exc_info=True)
         return None
@@ -3043,11 +3151,19 @@ async def find_remote_write_approval(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    approval_request_id: uuid.UUID,
+    asker_sub: str,
+    connector_id: str,
     op_id: str,
     target_id: uuid.UUID | None,
     params: dict[str, Any],
+    now: datetime | None = None,
 ) -> ApprovalRequest | None:
     """Find the committed approval that authorises a remote-write mint (read-only).
+
+    The approval is the request named by *approval_request_id*. Only the
+    login that asked (*asker_sub*) can use it, and it must match the
+    connector. An approval past its time limit is refused.
 
     Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
     the ``remote-write`` (caution) tier mints a capability **only** against a
@@ -3064,7 +3180,7 @@ async def find_remote_write_approval(
     approval, or -- later -- the signing key is unavailable) **without**
     consuming an approval. The single-use consumption is a separate atomic
     step, :func:`consume_remote_write_approval`, run only once the mint is
-    certain to proceed. Returns the newest matching un-consumed
+    certain to proceed. Returns the matching un-consumed
     (``resumed_at IS NULL``) approval, or ``None``.
     """
     target_clause = (
@@ -3072,21 +3188,24 @@ async def find_remote_write_approval(
         if target_id is not None
         else ApprovalRequest.target_id.is_(None)
     )
-    stmt = (
-        select(ApprovalRequest)
-        .where(
-            ApprovalRequest.tenant_id == tenant_id,
-            ApprovalRequest.op_id == op_id,
-            ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
-            ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
-            ApprovalRequest.resumed_at.is_(None),
-            target_clause,
-        )
-        .order_by(ApprovalRequest.decided_at.desc())
-        .limit(1)
+    stmt = select(ApprovalRequest).where(
+        ApprovalRequest.id == approval_request_id,
+        ApprovalRequest.tenant_id == tenant_id,
+        ApprovalRequest.principal_sub == asker_sub,
+        ApprovalRequest.connector_id == connector_id,
+        ApprovalRequest.op_id == op_id,
+        ApprovalRequest.params_hash.in_(params_hash_candidates(params)),
+        ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
+        ApprovalRequest.resumed_at.is_(None),
+        target_clause,
     )
     result = await session.execute(stmt)
-    return result.scalars().first()
+    approval = result.scalars().first()
+    if approval is None:
+        return None
+    if _deadline_has_passed(approval, now or _now(), _resolve_default_ttl()):
+        return None
+    return approval
 
 
 async def consume_remote_write_approval(
@@ -3230,6 +3349,10 @@ async def resume_dispatch_after_approval(
     release_refusal = await refuse_resume_if_release_changed(operator, request)
     if release_refusal is not None:
         return release_refusal
+
+    blocked_refusal = await refuse_resume_if_asker_blocked(operator, request)
+    if blocked_refusal is not None:
+        return blocked_refusal
 
     resolved_target, target_refusal = await refuse_resume_if_target_changed(operator, request)
     if target_refusal is not None:
@@ -3389,6 +3512,41 @@ async def refuse_resume_if_release_changed(
         request,
         refusal,
         audit_payload={"request_release": request.release_id, "running_release": running},
+    )
+
+
+async def refuse_resume_if_asker_blocked(
+    operator: Operator,
+    request: ApprovalRequest,
+) -> OperationResult | None:
+    """Refuse an approved run when the login that asked is blocked.
+
+    Returns ``None`` when the asker (``request.principal_sub``) is not
+    blocked, so the caller runs the request. Otherwise the operation never
+    runs and the vendor gets no call. The refusal is recorded like the
+    release refusal (:func:`refuse_resume_if_release_changed`): the claim
+    is taken, so the request never runs later, the stored run input is
+    deleted, one audit row records it, and the refusal is the stored run
+    result. A block-list read that fails refuses the run the same way.
+
+    Shared by both resume paths: the operator surfaces
+    (:func:`resume_dispatch_after_approval`) and the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`).
+    """
+    refusal = await refuse_if_principal_blocked(
+        request.op_id,
+        request.principal_sub,
+        request.tenant_id,
+        # The multi-step operation sent a step before it waited.
+        earlier_sent=(request.resume_parent or {}).get("request_sent") is True,
+    )
+    if refusal is None:
+        return None
+    return await _refuse_resume(
+        operator,
+        request,
+        refusal,
+        audit_payload={"asker_sub": request.principal_sub},
     )
 
 
@@ -3809,7 +3967,11 @@ def _composite_parent_binding(
     )
     requester_token = resume_requester_var.set(requester)
     try:
-        with composite_resume_steps(parent_op_id, resume_parent.get("steps")):
+        with composite_resume_steps(
+            parent_op_id,
+            resume_parent.get("steps"),
+            earlier_sent=resume_parent.get("request_sent") is True,
+        ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
         resume_requester_var.reset(requester_token)
@@ -3926,6 +4088,8 @@ async def _dispatch_resume_with_bound_context(
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
+            # Each step of the run also checks the person who asked.
+            checking_logins_for_steps(request.principal_sub, request.tenant_id),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

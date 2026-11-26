@@ -580,9 +580,11 @@ Authorization Grant (RFC 8628). End-to-end shape:
    the person named in `--scope` is never dropped. `--offline=false`
    asks for the short login.
 4. **Prompt.** The CLI prints the verification URL and `user_code` to
-   stdout. The operator opens the URL on any device with a browser,
-   signs in, and approves the request. (Browser auto-launch is
-   deferred to a future Task per the v0.1 scope.) Under `--print-token`
+   stdout (`stdoutPrompter`). The operator opens the URL on any device
+   with a browser, enters the `user_code`, signs in, and approves the
+   request. The CLI opens no browser, and the browser sends nothing back
+   to the CLI: the CLI learns of the login only by polling (step 5).
+   Under `--print-token`
    this prompt is written to stderr instead, so stdout stays reserved
    for the token — see step 7.
 5. **Polling.** `auth.pollDeviceToken` (our own loop, not the oauth2
@@ -901,7 +903,7 @@ field, so a response from an older backplane prints as it always did.
 | `DB: …` | `db` | `DB: migrated, revision 0115` |
 | `Server time: …` | `server_time` | `Server time: 2026-10-31T14:34:28Z` — the server's time in UTC (#5504); also printed for a login that chose no tenant |
 | `Readiness: …` | `readiness` | `Readiness: ready (keycloak, vault, db, broadcast, docs_backends ok)` |
-| `Approvals: …` | `approvals` | `Approvals: a second person must approve; decisions on someone else's instruction are refused; approval key configured` |
+| `Approvals: …` | `approvals` | `Approvals: you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in, which never runs alone, also not for a platform admin); MEHO refuses a change that resets or sets the password of your own login; decisions on someone else's instruction are refused; approval key configured` (the first part follows your role in the current tenant; with no tenant or an unknown role it is neutral, and a login with several tenants that chose none gets the neutral line too; a Reader, who gets the liveness answer, sees `Approvals: you cannot run changes`; for an Operator, the text "a few operations, for example registering a target, need the Admin role: you cannot run them or approve them" is added only with the switch `MEHO_STATUS_ROLE_FLOOR_EXAMPLE=1`, which is off by default until it is measured in #7007) |
 | `Features: …` | `features` | `Features: all configured` or `Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID)` |
 | `Sandbox mode: on …` | `sandbox_mode` | printed only when the mode is on (#4622) |
 | `Operation settings: written by release …` | `operation_catalog` | printed only when another release wrote the shared operation rows (#5019) |
@@ -2162,6 +2164,11 @@ removes one through `DELETE /api/v1/targets/{name}`.
   cached fingerprint survives. A connector that raises propagates as
   a 500; per the #477 accepted trade-off the CLI surfaces the
   underlying detail rather than masking it as a graceful failure.
+- `meho targets outside-folder [--tenant <id>]` — calls
+  `GET /api/v1/targets/checks/outside-tenant-folder` and lists the targets whose
+  secret path is outside the tenant's folder (tenant admin; a platform admin
+  sees every tenant). For one member tenant: `meho tenants use <name>`, then
+  `--tenant <its id>`. See `connectors-vault-tenant-scope.md`.
 - `meho targets discover <product> [--seed-target <name>]` — calls
   `GET /api/v1/targets/discover` (G9.1-T6 #454, the verb #256
   explicitly deferred here). Iterates every connector registered for

@@ -12,9 +12,11 @@ not a credential write keeps its literal body and query.
 
 The tests search the whole answer for the value, on the shared funnel
 (:func:`~meho_backplane.operations.meta_tools.preview_operation`), on the MCP
-tool handler and on the REST route. A preview writes no audit row and logs
-no input value; the tests check both. A hosted agent run saves the answer
-in its run record; a test searches the saved event for the value.
+tool handler and on the REST route. A preview adds no operation audit row
+and logs no input value: the tests count the audit rows before and after the
+preview, and search the logs for the value. The REST test mounts the route
+alone, so its count holds operation rows and no row of the HTTP request. A hosted
+agent run saves the answer in its run record; a test searches the saved event for the value.
 
 Every value below is made up.
 """
@@ -31,7 +33,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
@@ -204,11 +206,10 @@ def _assert_masked(envelope: dict[str, Any]) -> None:
     assert _SECRET not in json.dumps(envelope, default=str)
 
 
-async def _audit_rows_text() -> str:
+async def _audit_row_count() -> int:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
-        rows = (await s.execute(select(AuditLog))).scalars().all()
-    return json.dumps([(row.path, row.payload) for row in rows], default=str)
+        return (await s.execute(select(func.count()).select_from(AuditLog))).scalar_one()
 
 
 @pytest.mark.asyncio
@@ -219,13 +220,14 @@ async def test_preview_of_a_generic_credential_write_shows_the_mark(
     connector = await _seed_write_op(session, stub_embedding_service)
     await _seed_target()
 
+    rows_before = await _audit_row_count()
     with capture_logs() as logs:
         envelope = await preview_operation(_make_operator(), _write_arguments())
 
     _assert_masked(envelope)
     assert connector.calls == []
     assert _SECRET not in json.dumps(logs, default=str)
-    assert _SECRET not in await _audit_rows_text()
+    assert await _audit_row_count() == rows_before
 
 
 @pytest.mark.asyncio
@@ -236,10 +238,11 @@ async def test_mcp_preview_of_a_credential_write_shows_the_mark(
     await _seed_write_op(session, stub_embedding_service)
     await _seed_target()
 
+    rows_before = await _audit_row_count()
     envelope = await _preview_operation_handler(_make_operator(), _write_arguments())
 
     _assert_masked(envelope)
-    assert _SECRET not in await _audit_rows_text()
+    assert await _audit_row_count() == rows_before
 
 
 @pytest.mark.asyncio
@@ -257,13 +260,14 @@ async def test_rest_preview_of_a_credential_write_shows_the_mark(
 
     app.dependency_overrides[verify_jwt_and_bind] = _operator
     transport = httpx.ASGITransport(app=app)
+    rows_before = await _audit_row_count()
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/api/v1/operations/preview", json=_write_arguments())
 
     assert response.status_code == 200, response.text
     assert _SECRET not in response.text
     _assert_masked(response.json())
-    assert _SECRET not in await _audit_rows_text()
+    assert await _audit_row_count() == rows_before
 
 
 @pytest.mark.asyncio
@@ -410,6 +414,7 @@ async def test_preview_of_a_typed_credential_write_shows_the_mark(
         embedding_service=stub_embedding_service,
     )
 
+    rows_before = await _audit_row_count()
     envelope = await preview_dispatch(
         operator=_make_operator(),
         connector_id="demo-1.x",
@@ -421,4 +426,4 @@ async def test_preview_of_a_typed_credential_write_shows_the_mark(
     assert envelope["status"] == "ok", envelope
     assert envelope["redacted_body"] == {"user": "svc", "password": _MARK}
     assert _SECRET not in json.dumps(envelope, default=str)
-    assert _SECRET not in await _audit_rows_text()
+    assert await _audit_row_count() == rows_before

@@ -2,7 +2,7 @@
 
 MEHO reads Microsoft Entra ID (the directory of a Microsoft 365 and Azure
 tenant) through the Entra ID connector. One target is one tenant. The
-connector logs in with a login (an app registration with a client secret)
+connector logs in with a login (an app registration with a certificate or a client secret)
 from Vault, keeps the access token in its own cache, and calls Microsoft
 Graph v1.0 with it.
 
@@ -119,12 +119,23 @@ field to fix, never a value.
 ## Secret shape
 
 The secret at the target's `secret_ref` holds `tenant_id`, `client_id` (the
-application ID of the login) and `client_secret`, the same shape as the
-secret of an Azure target. So one login can serve both connectors. Every
-value is stripped of surrounding white space. A missing key or an ID that is
-not a GUID fails with `EntraSecretShapeError`, which names the key, never a
-value. If the target sets `extras.tenant_id` and it is not the secret's
-`tenant_id`, the call fails before the login.
+application ID of the login) and one of two ways to prove the app:
+
+- `client_secret`, the same shape as the secret of an Azure target. So one
+  login can serve both connectors.
+- `private_key` and `certificate` (both PEM, the key an RSA key without a
+  password). This is the way we recommend: Microsoft advises a certificate
+  for a program that signs in by itself, and a tenant can block new client
+  secrets. Only the public certificate is uploaded to the app.
+
+Both ways in one secret, or neither, fails with `EntraSecretShapeError`. So
+does a missing key or an ID that is not a GUID. The message names the keys
+and never a value. Every value is stripped of surrounding white space. If the
+target sets `extras.tenant_id` and it is not the secret's `tenant_id`, the
+call fails before the login.
+
+The setup steps for a person are in
+[`entra-onboarding.md`](../cross-repo/entra-onboarding.md), step 3.
 
 ## Login and token cache
 
@@ -132,11 +143,26 @@ The login is one client credentials request to Microsoft Entra ID with the
 Graph scope of the target's cloud (`https://graph.microsoft.com/.default` for
 the public cloud; see
 [`connectors-azure.md`](connectors-azure.md#login) for the request and its
-errors). `EntraConnector` keeps two caches, like the Azure connector:
+errors). With a certificate, the request holds `client_assertion_type` and
+`client_assertion` in place of `client_secret`. The assertion is built by
+`build_client_assertion` in `connectors/_shared/microsoft_login.py` as
+Microsoft's page on certificate credentials describes it: `PS256`, header
+`x5t#S256` (the SHA-256 thumbprint of the certificate, worked out from it),
+`aud` the token address of the tenant, `iss` and `sub` the client ID, a new
+`jti` for each request, `nbf` and `iat` now, `exp` five minutes later.
+`parse_credentials` checks the pair when it reads the secret
+(`check_certificate_pair`: a readable PEM, a key without a password, RSA, and
+a key that belongs to the certificate). A bad pair raises
+`EntraSecretShapeError` with the target and the secret path, so it never goes
+into the secret cache and a corrected secret is read on the next call. When Microsoft refuses the login, the error names the way used
+(for a certificate it says what to check: the certificate is uploaded to the
+app, has not run out, and the key belongs to it). The certificate login lives
+in `_shared/` so the Azure connector and later connector packages can use the
+same code. `EntraConnector` keeps two caches, like the Azure connector:
 
 - **Secret cache**, per MEHO tenant, target and secret reference.
-- **Token cache**, per MEHO tenant, target, Entra tenant, client ID and token
-  scope. MEHO asks for a new token five minutes before the old one runs out.
+- **Token cache**, per MEHO tenant, target, secret reference, Entra tenant,
+  client ID and token scope. MEHO asks for a new token five minutes before the old one runs out.
 
 Each cache key has its own lock, so many calls at the same moment start one
 login. A call without a person's token never gets a cached secret or token.

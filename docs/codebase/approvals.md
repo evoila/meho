@@ -226,8 +226,8 @@ or `"target_gone_since_approval"` and the `target_id`.
 This covers a request that was approved just before an update and had
 not run yet. A remote-write mint for a satellite runner checks the same
 rule: an approval from an older release mints nothing
-(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
-and the approval stays unused).
+(`REMOTE_WRITE_GATE_UNSATISFIED`). Like the other refused remote-write
+mints, the refusal writes one audit row, and the approval stays unused.
 
 **No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
 has no release identity. Only local development runs like this; every
@@ -344,6 +344,9 @@ names (`proposed_effect.blast_radius.object`) with the live one
   not the sibling values the children list.
 - The live card says the object is gone: the run goes ahead and the
   handler answers "already absent" or "not found" itself.
+- A card says the object is there (`present: true`), but its id or key
+  has no value: the run is refused (`REASON_UNREADABLE`). MEHO cannot
+  compare the object, so it is not read as absent.
 - The card does not build now (the op does not resolve, the builder
   declines, or it fails while reading, for example a user is found but
   the read of their groups fails): the run is refused
@@ -1656,8 +1659,16 @@ through the same `is_rights_change` check, so an upgrade weakens nothing.
 and the request window in the web interface shows the same sign
 (`data-approval-rights-change`).
 
-**A tenant with one admin (#6641).** There, nobody can approve that
-admin's change of rights. MEHO says so; it builds no exception.
+**A tenant with one admin, and a change a platform admin must approve.**
+A platform admin must approve a waiting change of rights where the card's
+`login_realm` fact is true: the change is in MEHO's own login realm, in
+`master` or in the target's admin realm, or MEHO could not make sure that
+it is not. The person who asked approves it only as a platform admin who
+asked in the web console. So when the person who asked is the only admin of
+the tenant, nobody else in the tenant can approve it. MEHO says so; it
+builds no exception. In every other realm, the person who asked approves
+the waiting change in the web console, so MEHO shows no one-admin note
+there.
 
 - `auth/tenant_admins.py` counts the admins of a tenant with MEHO's own
   Keycloak admin client: the enabled members of every group (at any level)
@@ -1673,19 +1684,64 @@ admin's change of rights. MEHO says so; it builds no exception.
   known" never gives a warning.
 - At request time, `rights_change_note` in `operations/approval_queue.py`
   runs after the request and its approval step event are saved (the
-  dispatcher and the composite step), outside the `try` that answers
-  "denied". A failed read of the note gives no note; the call still waits
-  for approval. When the requester is the only admin, the answer gets
-  `extras.approval_note`: "This change needs a second admin to approve it.
-  This tenant has only one admin." and a link to the approvals guide. The
-  note is added to `error` too. The request is still stored, so an admin
+  dispatcher, the composite step and the MCP read of an own request),
+  outside the `try` that answers "denied". For every waiting change of
+  rights (`is_rights_change(request)` is true) it calls
+  `only_admin_note(tenant_id, requester_sub, login_realm=...)` in
+  `auth/tenant_admins.py`:
+  - the "no admin" note shows for every waiting change of rights with a
+    sure count of zero admins, also `policy.apply`, `policy.classify` and
+    a change in any other realm;
+  - the one-admin note shows only when the person who asked is the only
+    admin of the tenant and the card's `login_realm` fact is true, by the
+    facts the approve uses: `grant_facts(request)` is not `None` and its
+    `login_realm` is true. The connector sets the fact for MEHO's own
+    login realm, for `master` and for the target's admin realm, and also
+    when it could not make sure that the change is not in one of them. A
+    card without the realm fact counts as the login realm, as in the
+    approve.
+
+  `policy.apply`, `policy.classify` (they have no realm) and a change in
+  another realm get no one-admin note. Two or more admins and a count that
+  is not known give no note. When the tenant has at least one admin, a
+  request whose asker is not an admin (an Operator, an agent or a service
+  login) gets no note. A failed read of the note gives
+  no note; the call still waits for approval. The one-admin note is in
+  `extras.approval_note` and at the end of `error`: "A platform admin must
+  approve this change. It is in MEHO's own login realm, in `master` or in
+  the target's admin realm, or MEHO could not make sure that it is not. You can
+  approve it yourself only if you are a platform admin and asked for it
+  in the web console. MEHO found no other admin in this tenant." and a
+  link to the approvals guide. The request is still stored, so an admin
   added later can approve it. `meho operation call` prints the note under
   the parked hint. The web console shows it in the waiting answer of the
   Keycloak pages, the operation run window, and the classify page.
 - `/api/v1/health` and `meho_status` report the count in
   `approvals.rights_change_admins`. `meho doctor` shows the line "second
-  admin": a warning with the same sentence for one admin, ok for two or
-  more, and no line when the count is not known or the backplane is older.
+  admin". For one admin it warns "This tenant has only one admin. Some
+  changes of rights in MEHO's own login realm need a platform admin other
+  than the person who asked." Its fix says "add a second platform admin in
+  Keycloak (in MEHO-Platform-Admins)" with the guide link. Two or more
+  admins give an ok line. When the count is not known or the backplane is
+  older, there is no line.
+- The fix of the `meho doctor` line "approval sign-in" says who runs
+  `keycloak.authflow.ensure_approval_flow`: a platform admin in the web
+  console runs it at once; asked with a token, it waits and a second
+  platform admin approves it.
+- The note for each number of admins (`only_admin_note`):
+
+  | Admins | Note |
+  |---|---|
+  | none | "This tenant has no admin." and the guide link, for every waiting change of rights. No sentence about who must approve, because one more admin would not be enough. |
+  | one, the requester | the full note above and the link, only where the card's `login_realm` fact is true; elsewhere no note |
+  | one, another person | no note. In MEHO's own login realm, in `master` and in the target's admin realm, only a platform admin approves; MEHO counts tenant admins and platform admins together, so there is no note also when that other admin is a tenant admin only. |
+  | two or more | no note |
+  | not known | no note |
+
+  The "no admin" note shows only for a sure count of zero. Today the read of
+  the realm gives "not known" instead of zero (see above), so this note comes
+  into use when that read changes. On an approved request (a retry with the
+  same key), the part about who must approve goes and the rest stays in every row.
 
 ## The "may I approve this?" answer (#3329)
 
@@ -2788,6 +2844,17 @@ for approval.
   `extras.approval_request_id` and `extras.approval_request_reused: true`.
   No new row, no new `approval.request` audit row, no second
   `approval.pending` event. The first row's audit record stands.
+  With the switch `APPROVAL_RETRY_OWN_AUDIT_ROW` on (off by default), the
+  retry writes one `approval.reuse` audit row of its own, in the same
+  transaction (`_reuse_for_key_retry`, the same row the same-call path
+  writes). It names the reused `approval_request_id`, the `params_hash`
+  of the retry's params and the retry's own agent session, and the
+  answer's `audit_id` is that row. It also holds
+  for a retry that gets an `approved` request, and for a retry that lost
+  the insert race to another retry. A retry that expires an old request
+  and parks a new one is not changed: it writes a new `approval.request`
+  row. With the switch off, the retry writes no row and `audit_id` is the
+  first call's.
 - **Asked the same way.** A request counts for the key only when it was
   asked the same way as this call (`_Asker` in `approval_queue.py`): the
   same kind of login (`principal_kind`), the same people behind the login
@@ -2820,8 +2887,13 @@ for approval.
   The answer keeps its `status` and `extras`, but its text is
   "awaiting_approval: the approval request `<id>` is already approved". This
   text is the same for every approved request, also for one that shows a
-  secret value. A retry of a waiting request keeps the text
-  "requires approval before execution".
+  secret value. When the request has the note of `rights_change_note` (see
+  [the note for a tenant with one admin](#the-rights-change-mark-an-admin-approves-it-in-the-web-console)),
+  the note follows this text. On an approved request, the note keeps only "MEHO
+  found no other admin in this tenant." and the guide link, also in
+  `extras.approval_note`: the part about who must approve is left out. A
+  retry of a waiting request keeps the text "requires approval before
+  execution" and the full note.
 - **A late retry.** A request can pass its deadline (`expires_at`) while
   it is still `pending`, because the expiry sweeper runs only every few
   minutes, or not at all when it is off. Such a request can no longer be
@@ -2868,6 +2940,17 @@ of this is the same:
   runner login can change between two calls. So a call whose people
   behind differ gets its own request with its own list. A person's own
   call has no people behind on either side.
+- the acting agent (`principal_act`). In this lookup
+  (`_find_same_call_pending_request`), a call with an acting agent never
+  gets the request of a direct call, and the other way round. A direct
+  call has none on either side.
+
+The check of a step of a multi-step operation (`enforce_subop_policy`)
+passes `allow_same_call_reuse=False` to `create_pending_request`, so a step
+always gets its own request and a normal "waits for approval" answer.
+
+A retry key that was linked to a request while the switch was on keeps
+finding that request after the switch is turned off.
 
 The answer has the same `approval_request_id` and
 `extras.approval_request_reused: true`. No new request row is made, and no
@@ -2875,15 +2958,47 @@ second `approval.pending` event is sent. The call writes one audit row of
 its own in the same transaction (`_write_reuse_audit_row`). It is not a
 second `approval.request` row:
 
-- `path` is `approval.reuse`, `status_code` is 202 (waits for approval),
-  and `event_class` is `policy_decision`.
+- `path` is `approval.reuse` and `event_class` is `policy_decision`.
+  `status_code` is 202 when the request waits for approval. The row of a
+  retry with the same key can have 200 instead: the table below says which
+  status code goes with each state (200 for an approved request).
 - `payload.approval_request_id` names the reused request.
+- The row of a retry with the same key (`APPROVAL_RETRY_OWN_AUDIT_ROW`) also
+  has `payload.request_state`, the state of the request it found, and a
+  status code that fits it:
+
+  | `request_state` | Meaning | `status_code` |
+  |---|---|---|
+  | `waiting` | The request waits for approval. | 202 |
+  | `approved_not_started` | Approved, and the run has not started. | 200 |
+  | `approved_started` | Approved, and the run has started without a stored result. | 200 |
+  | `approved_executed` | Approved, and the run ended ok. | 200 |
+  | `approved_failed` | Approved, and the run failed. | 200 |
+  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 |
+
+  An audit read shows an `approval.reuse` row by its status code. A row
+  with 202 reads as `pending`, and a row with 200 reads as `ok` in the
+  audit query (REST, CLI, MCP) and as "OK" in the web console
+  (`_derive_result_status` in `audit_query/query.py`, `resolve_status` in
+  `ui/references.py`). On this row, `ok` means that the retry got a request
+  a person approved. It does not say that the run went well:
+  `payload.request_state` holds the run state (for example
+  `approved_failed` or `approved_uncertain`).
+
+  The row of a call that gets the waiting request of the same call
+  (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
+  `request_state` and its status code is 202.
+- `payload.params_hash` is the hash of this call's params
+  (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the
   first call. `parent_audit_id` is the first call's `approval.request` row.
 - The answer's `audit_id` is the id of this new row.
 
-A retry with the same key writes no such row: it gets the first call's
-`approval.request` row as its `audit_id`, as before. A key that is different from the key of the waiting request does
+With `APPROVAL_RETRY_OWN_AUDIT_ROW` off (the default), a retry with the same
+key writes no such row, and its `audit_id` is the first call's
+`approval.request` row. With `APPROVAL_RETRY_OWN_AUDIT_ROW` on, a retry with
+the same key also writes this row, and its `audit_id` is this row.
+A key that is different from the key of the waiting request does
 not matter. MEHO keeps that other key in the table `approval_request_key`
 (one row per key, linked to the request; migration `0183`). The key lookup
 (`_find_idempotent_request`) reads it too, so a later retry with that key
@@ -3648,6 +3763,17 @@ whatever the overrides say. The one exception is a test install in
 sandbox mode (see "Sandbox mode" below).
 
 Turning approval off for an operation is the one loosening edit. It
+also ends the per-call wait of an operation that a connector marked with
+`declare_per_call_approval`. After it, a person in the web console runs a
+`caution` operation at once, a `dangerous` operation still waits because of its
+risk level, and a standing grant or a run approval still does not cover the
+operation. The edit is refused for a destructive operation
+(`approval_off_destructive`), for an operation with a caller-address
+parameter (`approval_off_caller_address`), and for a change of rights
+(`approval_off_rights_change`).
+An operation that writes or makes a credential, for example `harbor.robot.create`
+or `pfsense.openvpn.user.create`, keeps its approval: the edit does not end its
+wait. The edit
 needs `platform_admin`, a written reason, and a person. This holds for
 every edit that ends approval, also removing an override that required
 it (`meho connector remove-override`, `DELETE
@@ -4264,6 +4390,10 @@ runs under the **reviewing** operator's token
 so the preflight is the right early signal while the reviewer must carry
 the same grant.
 
+The audit row of the approved call names the reviewing operator in
+`secret_read_as` (the login the secret store accepted), and `operator_sub` is
+the reviewer too. The person who asked stays on the approval request row.
+
 `k8s.secret.read_to_ref` (#3844) also registers a preflight. The op reads
 a Kubernetes Secret and writes the value to Vault through the
 `vault.kv.put` handler, so it gets the same `vault.kv.put` check on the
@@ -4315,7 +4445,8 @@ How it works:
    A deny added while the request waited still stops it.
 
 The agent's own resume (`call_operation_with_approval`) runs as the agent,
-so the agent is the caller and the requester check adds nothing. When a
+so the agent is the caller and the requester check adds nothing. Its audit row names the agent's own login id in
+`secret_read_as`. When a
 reviewer runs an opted-in op and the card has no `requester` record, or
 its `sub` does not match the row, the run is refused before any appliance
 call: `policy_denied: the requester's policy … cannot be checked … -- ask
@@ -5995,6 +6126,55 @@ group rules (only a MEHO-Admin approves their own delete).
   [`dispatch-request-preview.md`](dispatch-request-preview.md)).
 
 Details: [`service-principal-grants.md`](service-principal-grants.md#sandbox-mode-4622).
+
+## The approval table
+
+The table holds, for every operation of the core: its class, its risk
+level, whether it needs approval, and why no grant can cover it (the kind
+from `never_covered_reason`, or `null`). A change of one of these shows in
+the diff of this file. The file is
+`backend/tests/snapshots/approval_table.json`. A row is one typed operation
+of one connector, with its operation id and connector id, sorted by
+operation id and then connector id. It is the built-in default only: no
+install override, no tenant policy row, no connector package outside this
+repository, no operation made from an API file at run time.
+
+- **The test.** `backend/tests/test_approval_table_snapshot.py` registers all
+  typed operations (as `test_credential_calls_always_wait.py` does), builds
+  the table with `backend/tests/approval_table.py` and compares it with the
+  file. On a difference it names the new, removed and changed rows. It runs
+  a fresh registration pass with `POLICY_CLASSIFICATION` on, so the policy
+  operations are in the table, and without a local
+  `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, so local grant rules never reach
+  the file. The short test run of a one-connector pull request runs it too.
+- **Write the file again.** From `backend/`:
+  `MEHO_WRITE_APPROVAL_TABLE=1 uv run pytest -o tmp_path_retention_policy=failed tests/test_approval_table_snapshot.py`.
+  Only the value `1` writes. Commit the file.
+- **The CI job.** The step "Judge the approval table against the base
+  branch" of the job "Secret hiding compared with the base branch" runs
+  `scripts/ci/approval_table_judge.py` on the table of the base branch and
+  the table of the pull request. Both the script and the base table are read
+  from the base branch, so a pull request cannot weaken the rule that
+  judges it. It runs no code of the pull request. When the base has no
+  script or no table yet, it prints so and passes. The job is not a required
+  check.
+- **What fails.** An operation that gets a lower risk level (`destructive` >
+  `dangerous` > `caution` > `safe`); loses "needs approval"; loses "no grant
+  can cover it"; moves from `credential_read`, `credential_write` or
+  `credential_mint` to another class; or is removed. A new row passes, and
+  so does a change to more approval or a higher level.
+- **List a wanted change.** Add one entry for each change, with a one-line
+  reason, to `backend/tests/snapshots/approval_table_approved.yaml`:
+  `op_id`, `connector_id`, `change` (`lowered_level`, `lost_approval`,
+  `lost_never`, `left_credential` or `removed`) and `reason`. Only entries
+  that the pull request adds count. An entry that matches no change is
+  stale and fails the job. An entry already on the base branch approves
+  nothing and never fails. Write each value on one line: plain text, or
+  text in quotes. The judge stops on an empty reason and on any other YAML
+  form (for example a block that starts with `|` or `>`). A `#` after a
+  space or a tab starts a comment, which is not part of the value.
+- **The judge tests.** `backend/tests/test_approval_table_judge.py` runs the
+  judge on hand-made table pairs.
 
 ## References
 

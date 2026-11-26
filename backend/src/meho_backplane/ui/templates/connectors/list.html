@@ -39,8 +39,8 @@
 >
   <header class="flex flex-wrap items-center justify-between gap-4">
     <div>
-      {# The sidebar entry stays "Connectors" (operator-facing label
-         parity with the URL path); the page heading uses the backend
+      {# The sidebar entry says "Targets" (the web address stays
+         /ui/connectors); the page heading uses the backend
          taxonomy "Targets" so the noun an operator reads on the page
          matches what they're inspecting -- a row in the ``targets``
          table, not a connector class. G0.15-T10 #1218 / Option B. #}
@@ -91,7 +91,7 @@
     hx-include="closest form"
     hx-push-url="true"
     role="search"
-    aria-label="Filter connectors"
+    aria-label="Filter targets"
     onsubmit="return false;"
   >
     <div class="card-body grid gap-3 md:grid-cols-3">

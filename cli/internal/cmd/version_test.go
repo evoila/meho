@@ -6,10 +6,16 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/discovery"
 	"github.com/evoila/meho/cli/internal/version"
 )
 
@@ -167,5 +173,137 @@ func TestVersionCommandRejectsArgs(t *testing.T) {
 	if !strings.Contains(stderr.String(), "unknown command") &&
 		!strings.Contains(stderr.String(), "accepts") {
 		t.Fatalf("unexpected error message on stderr: %q", stderr.String())
+	}
+}
+
+// TestRootVersionFlagPrintsTheCLIVersionLine pins `meho --version`: it
+// prints exactly the CLI line of `meho version`, on stdout, with nothing
+// on stderr. `-v` stays the short form of --verbose, so --version has
+// no short form.
+func TestRootVersionFlagPrintsTheCLIVersionLine(t *testing.T) {
+	origVersion, origCommit, origDate := version.Version, version.Commit, version.Date
+	t.Cleanup(func() {
+		version.Version = origVersion
+		version.Commit = origCommit
+		version.Date = origDate
+	})
+	version.Version = "v9.9.9-test"
+	version.Commit = "deadbeef"
+	version.Date = "2026-05-10T00:00:00Z"
+	withTempXDG(t)
+
+	run := func(args ...string) (string, string) {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	flagOut, flagErr := run("--version")
+	cmdOut, _ := run("version")
+	if flagOut != cmdOut {
+		t.Fatalf("--version differs from `meho version`:\n got: %q\nwant: %q", flagOut, cmdOut)
+	}
+	if want := "meho v9.9.9-test (commit deadbeef, built 2026-05-10T00:00:00Z)\n"; flagOut != want {
+		t.Fatalf("--version output:\n got: %q\nwant: %q", flagOut, want)
+	}
+	if flagErr != "" {
+		t.Fatalf("--version wrote to stderr: %q", flagErr)
+	}
+}
+
+func TestRootVersionFlagHasNoShortForm(t *testing.T) {
+	root := newRootCmdFor(nil)
+	vf := root.Flags().Lookup("version")
+	if vf == nil {
+		t.Fatal("root has no --version flag")
+	}
+	if vf.Shorthand != "" {
+		t.Fatalf("--version has the short form -%s; -v belongs to --verbose", vf.Shorthand)
+	}
+	verbose := root.PersistentFlags().Lookup("verbose")
+	if verbose == nil || verbose.Shorthand != "v" {
+		t.Fatalf("--verbose must keep -v, got %+v", verbose)
+	}
+}
+
+// TestRootVersionFlagSkipsCommandDiscovery runs the real root command
+// with a saved backplane: `meho --version` must send the backplane no
+// request, so an unreachable server cannot delay it. `meho version`
+// still fetches the command list and the backplane version.
+func TestRootVersionFlagSkipsCommandDiscovery(t *testing.T) {
+	xdg := withTempXDG(t)
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+	t.Cleanup(setDynamicRegistrar(nil))
+
+	run := func(args ...string) string {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		return stdout.String()
+	}
+
+	for _, args := range [][]string{{"--version"}, {"--verbose", "--version"}, {"--version=true"}} {
+		out := run(args...)
+		if out != cliVersionLine()+"\n" {
+			t.Fatalf("%v output: %q", args, out)
+		}
+		if n := requests.Load(); n != 0 {
+			t.Fatalf("%v sent the backplane %d request(s), want 0", args, n)
+		}
+	}
+
+	run("version")
+	if requests.Load() == 0 {
+		t.Fatal("`meho version` sent the backplane no request; it must still fetch the command list and the backplane version")
+	}
+}
+
+// TestRootVersionFlagFalseOrHelpKeepsCommandDiscovery checks the inputs
+// where cobra prints help, not the version line: `--version=0` is false
+// in cobra's flag parsing, and --help wins over --version. The help must
+// then list the commands the backplane provides.
+func TestRootVersionFlagFalseOrHelpKeepsCommandDiscovery(t *testing.T) {
+	xdg := withTempXDG(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != discovery.Endpoint {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"commands":[{"name":"fromthebackplane","short":"a command the backplane provides"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL, auth.StoredToken{BackplaneURL: srv.URL, AccessToken: jwtMarker, Expiry: time.Now().Add(time.Hour)})
+	t.Cleanup(setDynamicRegistrar(nil))
+
+	for _, args := range [][]string{{"--version=0", "--help"}, {"--version=false", "--help"}, {"--version", "--help"}, {"--version", "-h"}} {
+		var stdout, stderr bytes.Buffer
+		root := newRootCmdFor(args)
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("execute %v: %v", args, err)
+		}
+		if !strings.Contains(stdout.String(), "fromthebackplane") {
+			t.Fatalf("%v: help is missing the backplane command:\n%s", args, stdout.String())
+		}
 	}
 }

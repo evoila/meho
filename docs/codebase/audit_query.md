@@ -24,7 +24,7 @@ class it knows. Nothing is guessed from `method` / `path`.
 | Class | Written by |
 |---|---|
 | `operation_execution` | Dispatch rows that ran (`ok` or `error`), the row of a multi-step operation that stopped part-way because a step waits for approval (`awaiting_approval`) or was denied (`denied`, #4275), runbook abort, gateway command mint / result, satellite effect rows, topology / ingest / add-on writes, sweepers and reapers. |
-| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, and the `denied` row of a step inside a multi-step operation. |
+| `policy_decision` | Dispatch rows a gate refused (`denied`, rate limit, unqualified target version), a call of an ingested licence read that MEHO keeps off (`denied`, `payload["error"]["error_code"] = license_read_off`, #5791), the `approval.request` park row, the `approval.reuse` row (a call that gets an existing request writes it instead of a second `approval.request` row: the call that gets the waiting request of the same call with `APPROVAL_SAME_CALL_REUSE` on, and a retry with the same key with `APPROVAL_RETRY_OWN_AUDIT_ROW` on; both are off by default; its payload names `approval_request_id` and `params_hash`, and for a retry also `request_state`), the `denied` row of a step inside a multi-step operation, and the `approval.status` row: the row of a refused read of your own approval request over MCP. That row has `method = APPROVAL`, a payload `outcome` of `approval_request_not_found`, `connector_not_allowed`, `request_wrong_operation` or `approval_result_unreadable`, and status code 404, 409 or 422. The `approval_request_not_found` row is in the caller's tenant, holds only the id the caller sent (`asked_request_id`), and is linked to no request. The other rows carry `approval_request_id`, `op_id` and `connector_id`, and their parent is the request's `approval.request` row. |
 | `config_change` | Two settings rows (`method = SERVICE`). The `meho_connector_edit_op` row: an operator turned one operation on or off, or changed or removed its risk level, approval rule, description or guidance (#5791). The `meho_connector_tenant_setting` row: a tenant turned one built-in operation or a whole group on or off for itself, or set it back to the install default (#5864). `payload["op_id"]` names the edited operation (a group switch names `payload["group_key"]`), so a search by op id finds the edit. No operation ran, so a filter on `operation_execution` does not return these rows. The other connector review rows (enable, disable, group edits) stay `operation_execution`. Edit rows written before migration `0137` keep `operation_execution`; no row is changed. |
 | `approval_decision` | `approval.decision` rows (approve, reject, expire; an approve row's payload names the `approval_rule` that allowed it), the `approval.withdraw` row (the sender took its request back, #5717), and the standing-grant auto-approval row. |
 | `security_event` | Refresh-token replay, broken satellite effect chain, un-reported gateway mint alarm, and the `mcp.session_open` row of a new MCP session (with `AUDIT_CLIENT_IDENTITY` on). A filter on `security_event` therefore also returns session starts. |
@@ -358,7 +358,7 @@ take `event_class` as a required argument.
 | `principal_sub` | `str \| None` | `audit_log.operator_sub = value` (exact). Only the "my recent" views set it, from the caller's own token. Not on the REST body or the MCP input schema. |
 | `op_id` | `str \| None` | Glob (`*` ↔ `%`). Matched against `payload->>'op_id'` (MCP rows) **OR** derived `http.<method>:<path>` (HTTP rows). |
 | `op_class` | `str \| None` | Exact match against `payload->>'op_class'`. |
-| `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"` / `"withdrawn"`. Maps to status-code ranges. `withdrawn` matches the `approval.withdraw` rows (`method = APPROVAL`, `path = approval.withdraw`), and `ok` never does (#5717). `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). |
+| `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"` / `"pending"` / `"withdrawn"`. Maps to status-code ranges. `withdrawn` matches the `approval.withdraw` rows (`method = APPROVAL`, `path = approval.withdraw`), and `ok` never does (#5717). `pending` (202) is history: the run stopped to wait for approval, and the row stays `pending` after the decision. It matches the `approval.request` row and, since #4275, the stopped operation's own `operation_execution` row; add `event_class` to pick one. To see what waits now, use the approval queue (`meho approvals list`). An `approval.reuse` row with status code 202 reads as `pending`, and one with status code 200 reads as `ok` (in the web console: "OK"). On this row, `ok` means that the retry got a request a person approved. It does not say that the run went well: `payload.request_state` holds the run state (for example `approved_failed` or `approved_uncertain`). |
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | `audit_log.parent_audit_id = :value` — **exact match**, so it returns the direct children of one row, not the whole subtree. Uses the `audit_log_parent_audit_id_idx` index. Main use: find the decision row and the run row of one approval request, which are linked only by this column (#4030). The replay CTE walks the full subtree. |
@@ -390,7 +390,7 @@ Field-to-source mapping:
 | `method` / `path` / `status_code` / `request_id` / `duration_ms` / `payload` | Columns of the same name on `audit_log`. An approval row in the older form shows its `payload` through `approval_payload_view` (`audit_query/approval_payload.py`): `principal_sub` is the row's `operator_sub`, and the requester's id is in `requester_sub`. See "Who the payload names" in [`approvals.md`](approvals.md). |
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. MCP, dispatch and route-declared HTTP rows store the class the broadcast event carries (`resolve_op_class`, see [broadcast.md](broadcast.md)), so the `op_class` filter finds them. A dispatch row of a hand-written (typed or multi-step) operation stores the class that follows from its risk level: `read` for `safe`, `write` for `caution` and higher (#4979, #5064, see [broadcast.md](broadcast.md)). For the MCP `call_operation` outer-wrapper row this is `"tool_call"` (G0.15-T3 #1212) — the inner DISPATCH row carries the domain `read` / `write` class. |
-| `result_status` | An `approval.withdraw` row → `"withdrawn"` (#5717): the operation never ran. Every other row is derived from `status_code` — 401/403 → `"denied"`, 202 → `"pending"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. `pending` is history (the run stopped to wait for approval; it stays `pending` after the decision), so check the approval queue for what waits now. `denied` on an `operation_execution` row means a step was refused; earlier steps may have written (#4275). |
+| `result_status` | An `approval.withdraw` row → `"withdrawn"` (#5717): the operation never ran. Every other row is derived from `status_code` — 401/403 → `"denied"`, 202 → `"pending"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. `pending` is history (the run stopped to wait for approval; it stays `pending` after the decision), so check the approval queue for what waits now. `denied` on an `operation_execution` row means a step was refused; earlier steps may have written (#4275). An `approval.reuse` row with status code 202 → `"pending"`, and one with status code 200 → `"ok"` (the web console shows "OK"). On this row, `ok` means that the retry got a request a person approved. It does not say that the run went well: `payload.request_state` holds the run state (for example `approved_failed` or `approved_uncertain`). |
 | `principal_name` | `payload['principal_name']` when present. Four writers set it: MCP rows (#1212, `write_mcp_audit_row`), approval request and decision rows (#3300), `DISPATCH` operation run and refusal rows (#4029, `operations/_audit.py:write_audit_row`), and the tool rows of MEHO's own agent runs (`agent/tool_audit.py:write_agent_tool_row`). Each takes the name from `auth/display_name.py:principal_display_name` (#3885): the token's `name` claim, else for an agent token the registered agent name, else for any machine token its client id. The name always belongs to the row's `operator_sub`. On an approved run that is the approver when a person approves through the console, CLI or REST (`resume_dispatch_after_approval`), and the agent when MEHO's own agent waits for the approval and resumes the run itself (`agent/approval_wait.py:_resume_approved_or_already_resumed`). It is `None` when none of these gives a name. HTTP-chassis rows remain `None` — the `verify_jwt_and_bind` middleware does not bind `name` to contextvars, so the audit middleware sees no source for it. |
 | `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); exact-match filterable since #4030. |
 | `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
@@ -402,6 +402,7 @@ Field-to-source mapping:
 | `sandbox_mode` | `audit_log.sandbox_mode` — `true` when the instance ran in sandbox mode when it wrote the row (#4622, see [decisions/sandbox-mode.md](../decisions/sandbox-mode.md)). Rows from before the column existed read `false`. Every audit answer carries it (#5312), so a person can check the mark of a sandbox test with MEHO alone. Not a filter: one database has one mode. The CLI table shows no column for it; `--json` shows it. |
 | `actor_sub` | `audit_log.actor_sub` (#5773) — the agent that acted for the person in `principal_sub`, in an agent run the person started (`agent:<name>`). `None` when nobody acted for another login, for example a person's own call or an agent that runs on its own login. |
 | `actor_name` | The agent's name, read from `actor_sub` (the part after `agent:`). `None` when `actor_sub` is `None` or has another form. The CLI shows the actor in `audit show`, in the PRINCIPAL column of `audit query` (`<principal> via <actor>`) and at the end of each `audit replay` line. |
+| `secret_read_as` | `audit_log.secret_read_as` (migration `0185`) — the id (`sub`) of a login. The field names the login under which the secret this call used was read from the store, in this call or in an earlier call of the same caller. Empty means: no login read a secret from a store for this call. That is so when the call used no secret, when the store refused the read, or when the secret came with a single-use handoff token (`secret.handoff.import`), which is read with that token and not with a login. A call that reads the secret itself names that login. A call that uses a login MEHO kept in memory names the login that read it when it was kept, or the fixed text `kept-login:reader-unknown`. A direct call: the caller's own id. An approved call: the approver's id, because MEHO runs the approved call with the approver's login (the person who asked stays on the approval request). An agent that resumes its own call: the agent's login id. A hosted agent run that a person started: the person's id. A check runner call: the runner's own login id, not the sensor owner in `principal_sub`, and the fixed text `check-runner` when the runner's token has no `sub`. Google Secret Manager: the caller's id with federation, and the fixed text `meho` when the store saw MEHO's own identity. `None` in those empty cases. Never a token, a store path or a store address. One call has one value; a step inside a multi-step call has its own value and the parent row does not take it. MEHO writes the column on every install, but an answer carries the field only while `AUDIT_SECRET_READ_AS` is on (off by default). `meho audit show` prints it when present. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 | `stored_session_id` | Only in the answer of `GET /api/v1/audit/show/{audit_id}` (`AuditEntryDetail`, #4904); the list, query and replay answers and the MCP audit tools do not have the field. The stored agent session the row belongs to: a hosted run, an uploaded session whose MCP calls MEHO matched to this row's `agent_session_id`, or an uploaded session whose `meho` command wrote this CLI row. Sent only with the switch `AUDIT_SESSION_LINKS` on (off by default), to a person who may read sessions, for a row with a stored session; otherwise the answer has no such field. `meho audit show` prints it as `stored_session:`. See [session-store.md](session-store.md#links-from-audit-rows). |
 
@@ -409,6 +410,84 @@ The three computed fields use the same rules the audit writers apply when
 they store the row, so a row returned by the query API and the stored row
 agree on the `(op_id, op_class, result_status)` trio. Since #3758 no
 automatic Broadcast event is published for a row; the row is the record.
+
+### `secret_read_as`: whose login the secret store accepted
+
+The field names the login under which the secret this call used was read from the store, in this call or in an earlier call of the same caller.
+
+Empty means: no login read a secret from a store for this call. That is so
+when:
+
+- the call used no secret;
+- the store refused the read;
+- the secret came with a single-use handoff token (`secret.handoff.import`),
+  which is read with that token and not with a login.
+
+There are three cases:
+
+- **The call read the secret itself.** The field names the login of that
+  read.
+- **The call used a login that MEHO kept in memory.** A connector keeps a
+  target's login after the first store read. The field names the login that
+  read the secret when it was kept. When the kept entry does not know who
+  read it, the field holds the fixed text `kept-login:reader-unknown`. It
+  never names the present caller in that case. The fixed text never takes the
+  place of a login the same call has already noted. A second caller always reads
+  the secret once with their own login first (`SecretReaders`,
+  `connectors/_shared/secret_readers.py`), so a row never names a caller who
+  did not read. A read counts for the exact secret reference the target held
+  at the read. A connector notes the kept login only when it takes the kept
+  entry. An SSH connection that MEHO keeps open (`connectors/adapters/ssh.py`)
+  keeps the login id of the store read made before it was opened, and a call
+  that uses the open connection again names that login.
+- **No login read a secret from a store.** The field is empty (the list
+  above).
+
+The fixed texts cannot be taken for a login id: MEHO's own ids start with
+`agent:`, `system:` or `__`, and the login server's ids are UUIDs. A check
+runner whose token has no `sub` is named `check-runner`, never the Sensor's
+owner. A read of a deleted latest version returns no secret data, so it names
+no login. The read of the sink secret for the approval card of `secret.move`
+names the caller when it returns a secret that is not deleted. The
+`approval.request` row of the call that waits for approval holds that value.
+Each `approval.reuse` row holds the value of its own call. MEHO writes that
+row in two ways: for a call that gets a request that already waits for the
+same call (switch `APPROVAL_SAME_CALL_REUSE`), and for a retry with the same
+`idempotency_key` (switch `APPROVAL_RETRY_OWN_AUDIT_ROW`). With both switches
+off, MEHO writes no `approval.reuse` row.
+
+Switch: `AUDIT_SECRET_READ_AS` (`Settings.audit_secret_read_as`), off by
+default. MEHO writes the column `audit_log.secret_read_as` on every
+install. With the switch off, no audit read (REST, CLI, MCP, web console)
+shows the field, and every answer is the same as without it. With it on,
+each row in an answer carries the field. The measurement of the switch is
+tracked in the issue "Task: Measure the AUDIT_SECRET_READ_AS switch (audit
+answers name whose login read the secret) before it is on by default". The
+switch stays off by default until that measurement is done.
+
+How the value gets to the row: the dispatcher opens one scope for each call
+(`auth/secret_read_as.py`), at the start of `dispatch()`, before the first
+check. So every row a call writes, a refusal row included, holds only what
+that call read. The step gate of a multi-step call (`operations/composite.py`)
+opens its own scope too, so the refusal or approval row of a step never holds
+the value of the parent call. Each Vault secret read (the target login read in
+`connectors/_shared/vault_creds.py`, `vault.kv.read`, the secret copy and
+compare reads, the read of the existing sink secret before a `secret.move` with
+`merge: true` writes it (noted also when the write then fails, and also for
+the second read that tells why the write failed), the pfSense VPN
+user read, the KV password read of
+`vault.auth.userpass.write` and `vault.kv.generate`, the read of the current
+version inside `vault.kv.patch` (noted also when the write after it fails)) and
+the Google Secret Manager read
+(`connectors/_shared/gsm_creds.py`) note the login id after the store returned
+the secret. `vault.token.create_and_store` and `harbor.robot.create` with a
+`vault_target` store the new secret with the `vault.kv.patch` handler, so their
+rows name the caller the same way when that read returned the existing item. A
+login that passed, followed by a refused read or by no read at all, notes
+nothing. For Vault the id is the `sub` of the token MEHO sent. The
+audit writer reads it when it writes the row. The row is written once, at the
+end of the call, and is never updated. The same people see the field who see
+the row today: a service login reads only the rows of its own calls.
 
 ### The `client` block: which login client made the call
 

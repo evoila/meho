@@ -1152,6 +1152,61 @@
         }
       }
     },
+    "/api/v1/targets/checks/outside-tenant-folder": {
+      "get": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Outside Tenant Folder",
+        "description": "List the live targets whose own secret path is outside the tenant's folder.",
+        "operationId": "outside_tenant_folder_api_v1_targets_checks_outside_tenant_folder_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutsideTenantFolderList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -10447,6 +10502,48 @@
         }
       }
     },
+    "/api/v1/runner-principals/enroll": {
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Enroll Runner",
+        "description": "Register a runner's public key with its one-time code.\n\nNo login is needed: the code is the proof. A wrong, empty, used, expired or\nrevoked code all get 403 ``enrollment_code_invalid``, whatever the name and\nthe key are. A used code with another key gets the same 403. A good code of\na runner with another name gets 409 ``enrollment_code_for_another_runner``,\nand the code stays usable for its own runner. A good, unused code with a\nbad key gets 422. A repeat of a used code with the key it enrolled gives\nthe same answer again.",
+        "operationId": "enroll_runner_api_v1_runner_principals_enroll_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerEnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerEnrollResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runner-principals": {
       "get": {
         "tags": [
@@ -10528,7 +10625,7 @@
           "runner-principals"
         ],
         "summary": "Register Runner Principal",
-        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\nThe answer carries a one-time enrollment code, shown only here. The runner\nsends it with its own public key to ``POST /api/v1/runner-principals/enroll``.\n\nOnly a person with ``tenant_admin`` may call it. A service login or an\nagent login gets 403 ``human_principal_required``, and a runner login gets\n403 ``runner_scope_violation``, before anything is made. The minted\nKeycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 when a runner with the same Keycloak client id exists, also a\nrevoked one or one of another tenant; 503 when Keycloak admin is not\nconfigured.",
         "operationId": "register_runner_principal_api_v1_runner_principals_post",
         "parameters": [
           {
@@ -10558,7 +10655,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                  "$ref": "#/components/schemas/RunnerPrincipalRegistered"
                 }
               }
             }
@@ -10636,7 +10733,7 @@
           "runner-principals"
         ],
         "summary": "Revoke Runner Principal",
-        "description": "Revoke a runner principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks the DB\nrow ``revoked=true``. Returns the updated row. ``tenant_admin`` only.\nReturns 404 when absent or already revoked.",
+        "description": "Revoke a runner principal (kill switch).\n\nTurns the runner's Keycloak client off (blocks new token grants) and\ndeletes it, and marks the DB row ``revoked=true``. Returns the updated row.\n``tenant_admin`` only. Returns 404 when absent or already revoked.",
         "operationId": "revoke_runner_principal_api_v1_runner_principals__name__revoke_delete",
         "parameters": [
           {
@@ -10783,6 +10880,168 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RunnerWriteAllowlistEntryRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/principals/blocked": {
+      "get": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "List Blocked Principals",
+        "description": "List the blocked logins the admin may see.",
+        "operationId": "list_blocked_principals_api_v1_principals_blocked_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "Block Principal Route",
+        "description": "Block a login. Blocking again in the same scope updates the reason.",
+        "operationId": "block_principal_route_api_v1_principals_blocked_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlockCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/principals/blocked/{sub}": {
+      "delete": {
+        "tags": [
+          "principals"
+        ],
+        "summary": "Unblock Principal Route",
+        "description": "Unblock a login. On their own login an admin removes this tenant's block only.",
+        "operationId": "unblock_principal_route_api_v1_principals_blocked__sub__delete",
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "title": "Sub"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnblockBody",
+                "nullable": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnblockResponse"
                 }
               }
             }
@@ -11468,7 +11727,7 @@
           "checks"
         ],
         "summary": "Get Assignment",
-        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038).\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). A runner on another wire version gets a\n409 that names both versions. Work for a connector package is left out\nwhen the runner's package set differs from central's (#5038). The work\nof a counted check goes only to a runner that names\n``scheduled-checks`` in its ``X-MEHO-Runner-Features`` header.\n``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
         "operationId": "get_assignment_api_v1_checks_assignment_get",
         "parameters": [
           {
@@ -11489,6 +11748,16 @@
               "type": "string",
               "nullable": true,
               "title": "Known Version"
+            }
+          },
+          {
+            "name": "X-MEHO-Runner-Features",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "X-Meho-Runner-Features"
             }
           },
           {
@@ -20226,6 +20495,147 @@
         }
       }
     },
+    "/ui/blocked-people": {
+      "get": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Index",
+        "operationId": "_index_ui_blocked_people_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Block",
+        "operationId": "_block_ui_blocked_people_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__block_ui_blocked_people_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "422": {
+            "description": "The page again, with the error next to its field.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/blocked-people/unblock": {
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Unblock",
+        "operationId": "_unblock_ui_blocked_people_unblock_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__unblock_ui_blocked_people_unblock_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "200": {
+            "description": "The confirm page (the form has no confirm=yes).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The login is the admin's own login.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The login has no block you may remove.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/runs": {
       "get": {
         "tags": [
@@ -28556,7 +28966,7 @@
           "delegated_decision_posture"
         ],
         "title": "ApprovalsStatus",
-        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the\nconsole's approval client (#6282): ``auto`` reads each client's\nbinding, so the two can differ. ``sign_in_level_warning`` is a short\nsentence whenever the level is not required in practice for either\nclient or a read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, a change of rights cannot be approved."
+        "description": "The approval settings in force (#4830).\n\n``custody`` is the state of the approval key: ``configured``,\n``missing`` or ``malformed``. ``effective_posture`` says whether a\nsecond person must approve (``four_eyes_enforced``) or one operator\nmay approve their own request (``single_operator_break_glass``).\n``delegated_decision_posture`` says whether a decision made on\nsomeone else's instruction is allowed. The three values come from\n:func:`meho_backplane.features.build_features_block`; they are state\nwords only, never a key value. ``sign_in`` is the state of the\napproval client's own login flow in Keycloak (#6280,\n:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``\nis the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,\n``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is\nwhat MEHO does now with an approval sign-in that lacks the approval\nlevel: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``\nonly while ``sign_in`` shows for sure that the realm does not give the\nlevel, and ``required`` when it is ``ok`` or its read failed).\n``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the\nconsole's approval client (#6282): ``auto`` reads each client's\nbinding, so the two can differ. ``sign_in_level_warning`` is a short\nsentence whenever the level is not required in practice for either\nclient or a read failed, else ``None``.\n``rights_change_admins`` is how many admins of the caller's tenant could\napprove a change of rights (#6641,\n:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot\ncount them. With one admin, some changes of rights in MEHO's own login\nrealm cannot be approved."
       },
       "ApproveRequestBody": {
         "properties": {
@@ -29043,6 +29453,11 @@
             "nullable": true,
             "title": "Actor Name"
           },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -29212,6 +29627,11 @@
             "type": "string",
             "nullable": true,
             "title": "Actor Name"
+          },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
           },
           "broadcast_event_id": {
             "type": "string",
@@ -29692,6 +30112,98 @@
         "title": "BackendReadiness",
         "description": "Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).\n\nThe liveness snapshot a probe reads back from a collection's backend.\nThe collection-probe route persists ``doc_count`` / ``last_ingested_at``\n/ ``readiness`` onto the ``doc_collections`` row and transitions\n``status`` from this result **on success only** \u2014 modelled on\n:class:`~meho_backplane.connectors.schemas.FingerprintResult`, which\n``probe_target`` caches onto ``Target.fingerprint`` the same way.\n\n``index_built`` is the managed-RAG footgun this surface exists to\nhide: a managed-RAG ANN index answers searches only once it has been\nexplicitly (re)built, and rebuilds serialize per project. ``False``\nmeans the backend is reachable but the index is not yet answerable \u2014\nthe probe maps it to ``status='rebuilding'`` / ``'provisioning'`` so\nthe search path can fail typed rather than return a silent empty 200.\n\nFrozen so a persisted snapshot cannot be mutated after the probe\nreads it. ``detail`` is the free-form JSON the ``readiness`` column\nstores verbatim for operator diagnostics (never agent-facing)."
       },
+      "BlockCreate": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "sub",
+          "reason"
+        ],
+        "title": "BlockCreate",
+        "description": "Body of ``POST /api/v1/principals/blocked``."
+      },
+      "BlockListResponse": {
+        "properties": {
+          "blocked": {
+            "items": {
+              "$ref": "#/components/schemas/BlockRead"
+            },
+            "type": "array",
+            "title": "Blocked"
+          }
+        },
+        "type": "object",
+        "required": [
+          "blocked"
+        ],
+        "title": "BlockListResponse",
+        "description": "Response of ``GET /api/v1/principals/blocked``."
+      },
+      "BlockRead": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "blocked_by_sub": {
+            "type": "string",
+            "title": "Blocked By Sub"
+          },
+          "blocked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Blocked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "scope",
+          "reason",
+          "blocked_by_sub",
+          "blocked_at"
+        ],
+        "title": "BlockRead",
+        "description": "One block of the list."
+      },
+      "Body__block_ui_blocked_people_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body__block_ui_blocked_people_post"
+      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -29849,6 +30361,26 @@
         },
         "type": "object",
         "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
+      },
+      "Body__unblock_ui_blocked_people_unblock_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub"
+        ],
+        "title": "Body__unblock_ui_blocked_people_unblock_post"
       },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {
@@ -34554,6 +35086,10 @@
           "op_id": {
             "type": "string",
             "title": "Op Id"
+          },
+          "runner_name": {
+            "type": "string",
+            "title": "Runner Name"
           },
           "raw_state": {
             "type": "string",
@@ -40006,6 +40542,68 @@
         "title": "OutcomeUnknownView",
         "description": "Why an approved request is on the \"outcome unknown\" list (#5026)."
       },
+      "OutsideTenantFolderItem": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "secret_ref": {
+            "type": "string",
+            "title": "Secret Ref"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "name",
+          "secret_ref",
+          "reason"
+        ],
+        "title": "OutsideTenantFolderItem",
+        "description": "One target whose secret path is outside the tenant's folder, and why."
+      },
+      "OutsideTenantFolderList": {
+        "properties": {
+          "all_tenants": {
+            "type": "boolean",
+            "title": "All Tenants"
+          },
+          "check_off": {
+            "type": "boolean",
+            "title": "Check Off"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "title": "Message"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OutsideTenantFolderItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "all_tenants",
+          "check_off",
+          "items"
+        ],
+        "title": "OutsideTenantFolderList",
+        "description": "The targets outside the folder; ``all_tenants`` says how far the list goes."
+      },
       "PairAddonRequest": {
         "properties": {
           "name": {
@@ -41184,6 +41782,25 @@
         "title": "RefreshResult",
         "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle.\n\n``no_populator_for_product`` discriminates the two all-zero-count\nno-op classes (#2093): ``None`` means the resolved connector ships a\ntopology populator (a ``discover_topology`` override) and the counts\nreflect a real reconcile \u2014 all-zero is \"populator ran clean, nothing\nchanged\". A product slug means the connector inherits the base-class\nno-op default, so the refresh was a no-op **by coverage gap**, not by\ngraph convergence; ``populated_products`` then lists the registered\nproducts that DO ship a populator so a consumer can identify the gap\nwithout reading meho source."
       },
+      "RefusedResult": {
+        "properties": {
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "result_uid",
+          "reason"
+        ],
+        "title": "RefusedResult",
+        "description": "A result MEHO refused, named in the answer to a result batch.\n\n``reason`` is ``future_time``: the runner time of the result is later\nthan MEHO's clock. MEHO neither stores nor counts such a result."
+      },
       "RejectRequestBody": {
         "properties": {
           "reason": {
@@ -41427,6 +42044,11 @@
             "nullable": true,
             "title": "Actor Name"
           },
+          "secret_read_as": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Read As"
+          },
           "broadcast_event_id": {
             "type": "string",
             "format": "uuid",
@@ -41669,6 +42291,13 @@
           "duplicates": {
             "type": "integer",
             "title": "Duplicates"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/RefusedResult"
+            },
+            "type": "array",
+            "title": "Refused"
           }
         },
         "type": "object",
@@ -41677,7 +42306,7 @@
           "duplicates"
         ],
         "title": "ResultIngestResponse",
-        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``accepted + duplicates`` equals the batch length."
+        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``refused`` names the results MEHO refused and did not\nstore (with ``RUNNER_CHECKS_ENABLED`` on: a runner time later than\nMEHO's clock). It is left out of the answer when there is none.\n``accepted + duplicates + len(refused)`` equals the batch length."
       },
       "ResultQueryBody": {
         "properties": {
@@ -42507,6 +43136,69 @@
         "title": "RunnerAssignment",
         "description": "The runner's current work assignment, fetched each tick.\n\n``assignment_version`` is an opaque digest the runner echoes back as\n``known_version`` so central can answer an unchanged assignment with a\n``304`` (see :meth:`RunnerClient.fetch_assignment`)."
       },
+      "RunnerEnrollRequest": {
+        "properties": {
+          "enrollment_code": {
+            "type": "string",
+            "title": "Enrollment Code"
+          },
+          "public_key": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Public Key"
+          },
+          "runner_name": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Runner Name",
+            "description": "The name the runner was registered under (its MEHO_RUNNER_ID). A code of a runner with another name is refused before anything changes."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enrollment_code",
+          "public_key",
+          "runner_name"
+        ],
+        "title": "RunnerEnrollRequest",
+        "description": "A runner's one-time code, its public key (a JWK, EC P-256) and its name."
+      },
+      "RunnerEnrollResponse": {
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "issuer": {
+            "type": "string",
+            "title": "Issuer"
+          },
+          "token_endpoint": {
+            "type": "string",
+            "title": "Token Endpoint"
+          },
+          "signing_alg": {
+            "type": "string",
+            "title": "Signing Alg"
+          },
+          "key_id": {
+            "type": "string",
+            "title": "Key Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "client_id",
+          "issuer",
+          "token_endpoint",
+          "signing_alg",
+          "key_id"
+        ],
+        "title": "RunnerEnrollResponse",
+        "description": "What the runner needs to sign its login request."
+      },
       "RunnerPrincipal": {
         "properties": {
           "sub": {
@@ -42653,6 +43345,97 @@
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."
       },
+      "RunnerPrincipalRegistered": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
+          },
+          "wire_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Wire Version"
+          },
+          "package_set_digest": {
+            "type": "string",
+            "nullable": true,
+            "title": "Package Set Digest"
+          },
+          "enrollment_code": {
+            "type": "string",
+            "title": "Enrollment Code"
+          },
+          "enrollment_code_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Enrollment Code Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "last_seen_at",
+          "enrollment_code",
+          "enrollment_code_expires_at"
+        ],
+        "title": "RunnerPrincipalRegistered",
+        "description": "The answer of ``register``: the principal and its one-time enrollment code.\n\nThe code is shown once and never stored. The runner sends it with its\npublic key to enroll; it works once and until ``enrollment_code_expires_at``."
+      },
       "RunnerResult": {
         "properties": {
           "result_uid": {
@@ -42672,8 +43455,16 @@
             "title": "Status"
           },
           "result": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
             "nullable": true,
             "title": "Result"
           },
@@ -42681,6 +43472,17 @@
             "type": "string",
             "nullable": true,
             "title": "Error"
+          },
+          "produced_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Produced At"
+          },
+          "error_code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error Code"
           }
         },
         "type": "object",
@@ -42773,6 +43575,27 @@
             "type": "string",
             "nullable": true,
             "title": "Package Set"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "nullable": true,
+            "title": "Timezone"
+          },
+          "next_due_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Due At"
           }
         },
         "type": "object",
@@ -43543,6 +44366,12 @@
             "nullable": true,
             "title": "Tenant Id"
           },
+          "runner_name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Runner Name"
+          },
           "force": {
             "type": "boolean",
             "title": "Force",
@@ -43723,6 +44552,10 @@
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
+          },
+          "runner_name": {
+            "type": "string",
+            "title": "Runner Name"
           },
           "created_at": {
             "type": "string",
@@ -47082,6 +47915,38 @@
         "title": "UISessionContext",
         "description": "Per-request session identity exposed on ``request.state``.\n\nFrozen so a route handler that stashes the context on a logger\nor forwards it to a service layer cannot accidentally mutate\nfields downstream. The shape mirrors :class:`Operator` for the\nfields T5 (#866) needs to render an authenticated page header;\n``raw_jwt`` / ``tenant_role`` are intentionally absent because\nthe session-cookie path does not load them today (the encrypted\nrow carries only the access token, not the decoded claims).\n\n``tenant_slug`` / ``tenant_name`` are populated by the middleware\nfrom a same-request lookup against the ``tenant`` table (keyed on\n:attr:`tenant_id`). The fields are surfaced into every UI template\nby the chassis context processor so the page header's tenant chip\nrenders the operator-readable name without each route having to\nre-fetch the row (G0.15-T9 #1217). Both are ``None`` only when the\ntenant row was deleted between session-creation and the request\n(an ops anomaly; the operator still authenticates fine, the chip\njust falls back to the tenant UUID).\n\n``tenant_id`` is the session's current tenant (#5240).\n``tenant_chosen`` is ``False`` while a person with several tenants\nhas not picked one; the middleware then lets the request reach only\nthe tenant picker. ``can_switch_tenant`` makes the sidebar tenant box\na switch."
       },
+      "UnblockBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UnblockBody",
+        "description": "Body of ``DELETE /api/v1/principals/blocked/{sub}``.\n\nThe reason is needed when the login is the caller's own. On another\nperson's login it is optional and goes into the audit row."
+      },
+      "UnblockResponse": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "removed": {
+            "type": "integer",
+            "title": "Removed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "removed"
+        ],
+        "title": "UnblockResponse",
+        "description": "Response of ``DELETE /api/v1/principals/blocked/{sub}``."
+      },
       "UsageReport": {
         "properties": {
           "since": {
@@ -47709,6 +48574,10 @@
     {
       "name": "policy",
       "x-maturity": "beta"
+    },
+    {
+      "name": "principals",
+      "x-maturity": "ga"
     },
     {
       "name": "retrieval",

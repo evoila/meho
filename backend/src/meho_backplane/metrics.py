@@ -113,6 +113,20 @@ TOPOLOGY_REFRESH_TOTAL: Counter = Counter(
     labelnames=("outcome",),
 )
 
+#: Counter of the results a runner posted for its checks, by what MEHO did
+#: with them: ``counted`` (set the state of a check), ``not_in_list`` (not a
+#: check of this runner and tenant: stored, not counted), ``too_large``
+#: (answer over the size cap: the check reads ``unknown``), ``future_time``
+#: (the runner time is later than MEHO's clock: refused, not stored),
+#: ``no_time`` (no runner time: stored, not counted) and ``old`` (made at or
+#: before the last counted result: dropped). Only counted while
+#: ``RUNNER_CHECKS_ENABLED`` is on.
+RUNNER_CHECK_RESULTS_TOTAL: Counter = Counter(
+    "runner_check_results_total",
+    "Runner check results by outcome.",
+    labelnames=("outcome",),
+)
+
 #: Counter for background-loop ticks skipped because the subsystem's
 #: process-wide PG advisory lock was already held, partitioned by
 #: ``subsystem`` (``sensor_runner`` / ``scheduler`` / ``event_drain`` /

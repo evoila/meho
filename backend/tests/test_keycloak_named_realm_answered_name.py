@@ -20,7 +20,9 @@ A new realm (``keycloak.realm.create``) that Keycloak does not know is
 judged by its name as typed, and that name must be plain ASCII. A side of a
 ``secret.move`` is judged without a Keycloak call: a name that is not plain
 ASCII counts as a protected realm, and so does every side when the name of
-a protected realm is not plain ASCII.
+a protected realm is not plain ASCII. There, when the person who asked is
+the only admin of the tenant, the waiting move shows the full one-admin
+note.
 
 Fixture values are made up.
 """
@@ -29,20 +31,34 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
+from meho_backplane.auth import tenant_admins
 from meho_backplane.connectors.keycloak.realm_params import (
     check_realm_params,
     is_plain_realm_name,
 )
-from meho_backplane.db.models import ApprovalRequestStatus
+from meho_backplane.connectors.keycloak.secret_endpoint import (
+    KeycloakClientSecretSourceEndpoint,
+    KeycloakCredentialSecretEndpoint,
+)
+from meho_backplane.connectors.secret.ops import register_secret_broker_operations
+from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoint
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.operations import dispatch
+from meho_backplane.operations._preview import blast_radius_missing_reason
 from meho_backplane.operations.grant_approval import GRANT_REASON_STRICTER
+from tests._vault_fakes import install_fake_client
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
 from tests.test_approval_grant_to_self import (
     _REALM,
+    _REQUESTER,
     _approve,
     _FakeTarget,
     _park,
@@ -75,7 +91,7 @@ _NAMED: list[_Write] = [
         {"realm": "{realm}", "representation": {"smtpServer": {"host": "mail.example"}}},
         target_realm=_HOME,
     ),
-    _Write(_REALM_DELETE, {"realm": "{realm}"}, target_realm=_HOME),
+    _Write(_REALM_DELETE, {"realm": "{realm}"}),
     _Write(
         "keycloak.user.check_login",
         {"realm": "{realm}", "username": "alice", "password_secret_ref": _VAULT},
@@ -95,6 +111,12 @@ async def test_a_realm_keycloak_answers_as_a_protected_realm_needs_a_platform_ad
 ) -> None:
     fake.realm_answers[_TYPED] = answered
     effect, params = await _effect(fake, write, _TYPED)
+    if write.op_id == _REALM_DELETE:
+        # A delete whose answered name is not the managed realm gets no card, so it never waits.
+        assert effect["preview_unavailable"] is True
+        assert "(realm_name_mismatch)" in effect["preview_error"]
+        assert blast_radius_missing_reason(effect) is not None
+        return
     assert effect["preview"]["grant"]["login_realm"] is True
     request_id = await _park(params, effect, op_id=write.op_id)
 
@@ -144,10 +166,27 @@ async def test_a_named_realm_that_keycloak_answers_as_the_login_realm_at_run_sta
 _NEW = _Write(_CREATE, {"realm": "{realm}", "representation": {"realm": "{realm}"}})
 
 
+#: Creates that name no realm: no ``realm`` value, an empty name, a null name.
+_NEW_UNNAMED: list[_Write] = [
+    _Write(_CREATE, {"representation": {"enabled": True}}, target_realm="team-new"),
+    _Write(
+        _CREATE,
+        {"realm": "", "representation": {"realm": "", "enabled": True}},
+        target_realm="team-new",
+    ),
+    _Write(
+        _CREATE,
+        {"realm": None, "representation": {"realm": None, "enabled": True}},
+        target_realm="team-new",
+    ),
+]
+
+
 @pytest.mark.asyncio
 async def test_a_new_realm_with_a_plain_name_needs_only_a_tenant_admin(
     fake: _FakeKeycloak,  # noqa: F811
 ) -> None:
+    """A create that names the target's managed realm keeps a tenant admin as approver."""
     fake.missing_realms.add("team-new")
     effect, params = await _effect(fake, _NEW, "team-new")
     assert effect["preview"]["grant"]["login_realm"] is False
@@ -166,6 +205,36 @@ async def test_a_new_realm_that_keycloak_answers_as_a_protected_realm_needs_a_pl
 ) -> None:
     fake.realm_answers["Meho"] = answered
     effect, params = await _effect(fake, _NEW, "Meho")
+    assert effect["preview"]["grant"]["login_realm"] is True
+    request_id = await _park(params, effect, op_id=_CREATE)
+
+    assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", _NEW_UNNAMED, ids=["no-realm", "empty-name", "null-name"])
+async def test_a_new_realm_with_no_name_needs_a_platform_admin_on_every_target(
+    write: _Write,
+    fake: _FakeKeycloak,  # noqa: F811
+) -> None:
+    """The target's managed realm is not a login realm; a platform admin must still approve."""
+    fake.missing_realms.add("team-new")
+    effect, params = await _effect(fake, write, "team-new")
+    assert check_realm_params(_CREATE)(params) is None
+    assert effect["preview"]["grant"]["login_realm"] is True
+    request_id = await _park(params, effect, op_id=_CREATE)
+
+    assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+    await _approve(request_id, _person("person-platform", platform_admin=True), params)
+    assert await _status(request_id) == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+async def test_an_unnamed_new_realm_on_a_target_of_the_login_realm_needs_a_platform_admin(
+    fake: _FakeKeycloak,  # noqa: F811
+) -> None:
+    write = _Write(_CREATE, {"representation": {"enabled": True}}, target_realm=_REALM)
+    effect, params = await _effect(fake, write, _REALM)
     assert effect["preview"]["grant"]["login_realm"] is True
     request_id = await _park(params, effect, op_id=_CREATE)
 
@@ -292,6 +361,87 @@ async def test_a_plain_side_needs_a_platform_admin_when_a_protected_name_has_an_
     request_id = await _park(params, effect, op_id=write.op_id)
 
     assert "platform admin must approve" in await _tenant_admin_refused(request_id, params)
+
+
+#: The one-admin note on a waiting request, word for word.
+_ONE_ADMIN_NOTE = (
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
+    "You can approve it yourself only if you are a platform admin and asked for it in the "
+    "web console. MEHO found no other admin in this tenant. See "
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+    "#changes-of-rights-need-another-admin"
+)
+
+
+@pytest.fixture
+async def _secret_move_registered() -> None:
+    """Register the ``secret.move`` row so the test can run it through ``dispatch``."""
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    await register_secret_broker_operations(embedding_service=service)
+
+
+def _count_side_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every read and write of a Vault or Keycloak side of a ``secret.move``."""
+    calls: list[str] = []
+    for cls in (
+        VaultKvSecretEndpoint,
+        KeycloakCredentialSecretEndpoint,
+        KeycloakClientSecretSourceEndpoint,
+    ):
+        for name in ("read_secret", "write_secret"):
+
+            async def _record(*_args: object, _name: str = f"{cls.__name__}.{name}") -> None:
+                calls.append(_name)
+                raise AssertionError(f"{_name} ran before approval")
+
+            monkeypatch.setattr(cls, name, _record)
+    return calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_secret_move_registered")
+@pytest.mark.parametrize("write", _SIDES, ids=["sink", "source"])
+async def test_a_plain_side_with_an_accented_admin_realm_waits_with_the_one_admin_note(
+    write: _Write,
+    fake: _FakeKeycloak,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _protect_accented(monkeypatch, "admin-realm")
+    monkeypatch.setattr(tenant_admins, "_kept", {})
+
+    async def _only_the_asker(*_args: object) -> frozenset[str]:
+        return frozenset({_REQUESTER})
+
+    monkeypatch.setattr(tenant_admins, "_read", _only_the_asker)
+    vault = install_fake_client(monkeypatch)
+    side_calls = _count_side_calls(monkeypatch)
+    fake.realm = _OTHER_REALM
+    params = {**_fill(copy.deepcopy(write.params), _OTHER_REALM), "reason": "rotate"}
+
+    result = await dispatch(
+        operator=_person(_REQUESTER),
+        connector_id="secret-broker-1.x",
+        op_id="secret.move",
+        target=None,
+        params=params,
+    )
+
+    assert result.status == "awaiting_approval"
+    assert result.extras["approval_note"] == _ONE_ADMIN_NOTE
+    assert result.error is not None
+    assert result.error.endswith(_ONE_ADMIN_NOTE)
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(ApprovalRequest))).scalars().all()
+    assert [(row.op_id, row.status) for row in rows] == [
+        ("secret.move", ApprovalRequestStatus.PENDING.value)
+    ]
+    assert rows[0].proposed_effect["preview"]["grant"]["login_realm"] is True
+    assert vault.secrets.kv.v2.put_calls == []
+    assert side_calls == []
 
 
 @pytest.mark.asyncio

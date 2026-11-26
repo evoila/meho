@@ -120,6 +120,8 @@ _ADMIN_WRITES: list[tuple[str, str, str, dict[str, Any] | None]] = [
     ),
     ("tenant-group-setting", "PUT", "/api/v1/connectors/demo/tenant-settings/groups/demo", {}),
     ("mail-recipient-policy", "PATCH", "/api/v1/tenants/mail-recipient-policy", {}),
+    ("principal-block", "POST", "/api/v1/principals/blocked", {}),
+    ("principal-unblock", "DELETE", "/api/v1/principals/blocked/demo", None),
 ]
 
 

@@ -18,12 +18,12 @@ This chapter does not need it.
 
 | You bring | Requirements |
 |---|---|
-| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
+| **Kubernetes cluster** | Kubernetes 1.28 or newer, with an ingress controller (the examples use ingress-nginx; k3s and RKE2 bring Traefik: then change the ingress class, the controller namespace and two network rules, see [k3s](#k3s)) and a default storage class. The built-in parts keep their data on disks the cluster makes. |
 | **Helm** | [Helm](https://helm.sh/) 3.8 or newer on your workstation, so it can install from an OCI registry. Helm 4 is recommended. |
 | **A DNS name** | A hostname for MEHO, for example `meho.example.com`, that points to your ingress controller. |
 | **Cluster capacity** | With the default values, all parts together (MEHO, PostgreSQL, Keycloak, OpenBao and Valkey) ask for 0.77 CPU and 2.2 GiB of memory (requests). They may use up to 4.2 CPU and 5.1 GiB of memory (limits). They need 20 GiB of disk: 10 GiB for PostgreSQL and 10 GiB for OpenBao. Short setup jobs and the migration step run at install and upgrade. Each asks for 0.05 CPU and 256 MiB, so leave a little room. Bigger estates need more. See `values.yaml` to change each part. |
 | **A browser** | The web console is built with Tailwind CSS 4, which is made for Chrome 111, Safari 16.4 and Firefox 128 or newer. Use a browser at least that new. |
-| **Two admins** | Plan for two admins. A change of rights (for example adding a person to a group or giving a role) needs a second admin to approve it. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
+| **A second platform admin** | Plan for a second platform admin. An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See [who approves a change of rights](../guides/approvals-and-break-glass.md#changes-of-rights-need-another-admin). |
 
 Everything else ships inside the Helm release: the activity-feed store
 (Valkey), the database migrations and the operations catalog.
@@ -50,10 +50,12 @@ Create `values.yaml`:
 image:
   # Pin an immutable tag: v<x.y.z> for a release (see
   # https://github.com/evoila/meho/releases).
-  tag: "v0.45.0"
+  tag: "<REPLACE: a release tag>"
 
 ingress:
   enabled: true
+  # The class of your ingress controller. k3s and RKE2 use traefik: see
+  # the notes for your platform.
   className: nginx
   host: meho.example.com
   tls:
@@ -67,12 +69,33 @@ coreKeycloak:
   # A UUID you pick once for your first tenant, and keep.
   # For example, make one with: uuidgen | tr 'A-Z' 'a-z'
   firstTenantId: "<REPLACE: a new UUID>"
+
+# The web console at https://meho.example.com/ui/. It is off by default.
+# The install makes the Secret that holds its login secret.
+uiConsole:
+  enabled: true
+config:
+  uiKeycloakClientId: meho-web
 ```
 
 That is all. Leave `postgres.credentialsSecret`, `vault.address`,
 `config.vaultAddr`, `config.keycloakIssuerUrl` and `keycloak.issuer`
 empty. The chart sets them, and Helm stops with an error that names the
 key if you set one. You never type a database password.
+
+### Tell the chart where your ingress controller runs
+
+The network rules let only one namespace reach MEHO. The default is
+`ingress-nginx`. If your controller runs in another namespace, set
+`networkPolicy.ingressControllerNamespace` to it. Without it, the
+controller is blocked.
+
+MEHO also needs to reach its own address, `ingress.host`. The first-start
+checks `dns` and `certificate` use it. Name the pods of your ingress
+controller in `networkPolicy.ingressControllerEgress.podLabels`, and the
+port of their HTTPS entry point in `networkPolicy.ingressControllerEgress.port`
+(the default is 8443). With no labels, MEHO has no rule for its own
+address. [k3s](#k3s) shows both keys for Traefik.
 
 ### Give hosted agents a model (optional)
 
@@ -132,6 +155,26 @@ and a rule for the port you expect never matches. Write the rule for
 the real Pod and its port, not for the load balancer address. For
 ingress-nginx the port is usually 443. Check the `targetPort` of your
 ingress Service.
+
+### Let MEHO accept targets on private addresses
+
+MEHO refuses a target on a private address (for example `192.168.x.x`
+or `10.x.x.x`) by default. Most systems MEHO manages are on such
+addresses. To allow them, list their networks in
+`config.targetSsrfAllowlist`, separated by commas:
+
+```yaml
+config:
+  # List only the networks of the systems MEHO manages. Never 0.0.0.0/0.
+  # Never the pod and service networks of your cluster.
+  targetSsrfAllowlist: "192.0.2.0/24"
+```
+
+This is a second rule, next to `networkPolicy.extraEgress` above. The
+network rule decides what the pod may reach. This list decides which
+addresses MEHO accepts as a target. A target needs both. The default
+stays on until you set it. For the details, see
+[Targets and secrets](../guides/targets-and-secrets.md).
 
 ### If a certificate comes from an internal authority
 
@@ -223,7 +266,7 @@ Download the `meho` CLI for your platform from the
 [releases page](https://github.com/evoila/meho/releases):
 
 ```bash
-TAG=<the release tag of your backplane, for example v0.45.0>
+TAG=<the release tag of your backplane, for example vX.Y.Z>
 TARBALL=meho_${TAG#v}_linux_amd64.tar.gz   # or darwin_arm64, etc.
 curl -LO https://github.com/evoila/meho/releases/download/${TAG}/${TARBALL}
 curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS
@@ -250,8 +293,11 @@ meho login https://meho.example.com
     MEHO, later commands go to the new one. Run `meho status` after the
     login to see which backplane you talk to.
 
-The CLI prints a verification URL and a code. You approve it in a
-browser. The install made one Admin login with a temporary password
+The CLI prints an address and a short code. Open the address on any
+device with a browser and enter the code. No browser opens on the
+machine where the CLI runs, and nothing comes back to it.
+
+The install made one Admin login with a temporary password
 (`admin`, in `MEHO-Admins` and `MEHO-Platform-Admins`). It is in the
 Secret `meho-core-first-login`. Read the admin's login with:
 
@@ -271,10 +317,145 @@ Prove the whole chain:
 meho status
 ```
 
+### If you are the only admin
+
+The first login is an Admin, and an Admin may approve their own changes,
+at every risk level. This is on purpose, so one person can use MEHO. Read
+the rule in
+[Who may approve](../guides/approvals-and-break-glass.md#who-may-approve).
+Do not turn on the emergency switch for this.
+
+- A change of rights (who may do what in MEHO) runs only with a click in
+  the web console.
+- `meho status` shows the rule for your own role on its `Approvals` line.
+- MEHO refuses a change that resets or sets the password of your own
+  login, before it waits. No approval allows it. Another person asks for it
+  and a platform admin approves it. So you need a second active platform
+  admin first: MEHO also refuses this reset for the last active platform
+  admin, when another person asks for it.
+- Some operations need the Admin role from the person who runs them and
+  from the person who approves them, for example registering or changing a
+  target, the topology writes, the space writes, the policy changes and
+  signing out a tool. A person with a lower role is refused when they run
+  one and when they approve one, also with break-glass on.
+- In MEHO's own login realm, a change that can change the sign-in MEHO asks
+  for before an approval never runs alone, also not for a platform admin
+  with a fresh sign-in. It waits, and a second platform admin approves it.
+  This holds for a change that MEHO lets wait. MEHO refuses some of these
+  changes at once, for example a change of the login flow of an approval
+  client.
+
+To add a second admin:
+
+1. Route the Keycloak admin console. This is one upgrade, with the same
+   chart version you installed. If you did not pin a version, run
+   `helm list -n meho` and read it from the `CHART` column (for example
+   `meho-chart-1.2.3` is version `1.2.3`):
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=true
+    ```
+
+2. Log in to the console as the console admin. Its steps are in
+   [The console admin](keycloak-realm.md#the-console-admin).
+3. Create the person and join them to the group **MEHO-Admins**. The
+   steps are in [Local users](login/local-users.md). An admin alone
+   cannot approve a change of rights that someone sent with a token in MEHO's own login realm. Only a second
+   person who is a platform admin approves it. If this person should do
+   that, also join them to the group **MEHO-Platform-Admins**. The rule
+   is in
+   [More rules for a change of one login or one group](../guides/approvals-and-break-glass.md#more-rules-for-a-change-of-one-login-or-one-group).
+4. Set the route back when you are done:
+
+    ```bash
+    helm upgrade meho oci://ghcr.io/evoila/meho-chart \
+      --namespace meho --version <chart-version> \
+      --reuse-values --set coreKeycloak.ingress.exposeAdmin=false
+    ```
+
+If your values file already sets `coreKeycloak.ingress.exposeAdmin`,
+change it there instead: `true` to open the admin console, `false` to
+close it. Each time, run the install command of Step 4 with these
+options, so the chart stays at the version you run:
+
+- `--version <chart-version>`: the version you installed (item 1 above
+  says how to find it);
+- the same `-f` values files you used for the installation, in the same
+  order.
+
+```bash
+helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+  --namespace meho --version <chart-version> \
+  -f values.yaml
+```
+
 **You now have a running MEHO and a logged-in operator.** Go on with
 [the setup page and the settings file](setup-page.md).
 
 ## Notes for your platform
+
+### k3s
+
+k3s brings Traefik, in the namespace `kube-system`, and enforces
+network rules. Use the example file
+[`values-k3s.yaml`](https://github.com/evoila/meho/blob/main/deploy/values-examples/values-k3s.yaml).
+It was made from the Traefik chart of k3s v1.37.2+k3s1. Download the
+file of your release, next to your `values.yaml`, and take it as it is:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/evoila/meho/<release tag>/deploy/values-examples/values-k3s.yaml
+```
+
+It sets:
+
+- `ingress.className: traefik`, and the annotation
+  `traefik.ingress.kubernetes.io/router.entrypoints: websecure`. MEHO
+  then answers on HTTPS only.
+- `networkPolicy.ingressControllerNamespace: kube-system`. Only pods in
+  `kube-system`, where Traefik runs, may reach MEHO. This rule names the
+  namespace, not the Traefik pods, so every pod in `kube-system` can reach
+  MEHO.
+- `networkPolicy.ingressControllerEgress.podLabels` with the label
+  `app.kubernetes.io/name: traefik`. MEHO can then reach its own address
+  through Traefik, on the pod port 8443.
+- `uiConsole.enabled: true` and `config.uiKeycloakClientId: meho-web`:
+  the web console.
+- `coreKeycloak.networkPolicy` and `coreVault.networkPolicy`, on. Only
+  MEHO and the setup Jobs reach them. Keycloak also lets in every pod in
+  `kube-system`, where Traefik runs, for browser and CLI logins.
+- `corePostgres.persistence.storageClass` and
+  `coreVault.persistence.storageClass`, empty. The disks use the default
+  class of k3s, `local-path`.
+
+In your own `values.yaml` from Step 3, remove only the line
+`className: nginx`. The example file sets the class. Keep the `uiConsole`
+and `config` lines: they set the same values as the example file. If you
+remove them, an empty `config:` is left, Helm reads it as no value, and
+the install fails. Then pass both files in Step 4, the example file
+first:
+
+```bash
+helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
+  --namespace meho --create-namespace \
+  -f values-k3s.yaml -f values.yaml
+```
+
+MEHO's call to its own address works when the name `ingress.host`
+resolves to an address that `kubectl -n kube-system get svc traefik`
+shows under `EXTERNAL-IP`. k3s then sends the call straight to Traefik.
+We read this from the k3s and Kubernetes sources. It is not yet tested on
+a live k3s cluster. [Issue 6922](https://github.com/evoila/meho/issues/6922)
+checks it.
+If the name resolves to another address (for example a public address
+that a router translates, or a proxy in front), the file's rule does not
+match. Add a rule for that address in `networkPolicy.extraEgress`.
+
+Also list the networks of your systems in `networkPolicy.extraEgress`
+and `config.targetSsrfAllowlist`, as in Step 3. Never put the pod and
+service networks of k3s (`10.42.0.0/16` and `10.43.0.0/16` by default)
+in `config.targetSsrfAllowlist`, so `10.0.0.0/8` is a bad value on k3s.
 
 ### VKS (vSphere Kubernetes Service)
 

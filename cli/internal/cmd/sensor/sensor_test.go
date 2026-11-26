@@ -330,6 +330,54 @@ func TestBuildCreateBodyCron(t *testing.T) {
 	}
 }
 
+// runCreateCapturingRawBody runs `meho sensor create` against a test server
+// and returns the raw JSON body the CLI sent.
+func runCreateCapturingRawBody(t *testing.T, runner string) map[string]any {
+	t.Helper()
+	var raw map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/sensors", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(fakeSensor(t, "interval"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	if err := runCreate(cmd, createOptions{
+		Name:              "disk",
+		ConnectorID:       "vmware-rest-9.0",
+		OpID:              "vmware.vm.list",
+		AssertionArg:      stubAssertion,
+		CadenceKind:       "interval",
+		IntervalSeconds:   60,
+		Runner:            runner,
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runCreate: %v; stderr=%s", err, stderr.String())
+	}
+	return raw
+}
+
+func TestRunCreateLeavesRunnerNameOutWhenUnset(t *testing.T) {
+	raw := runCreateCapturingRawBody(t, "")
+	if _, ok := raw["runner_name"]; ok {
+		t.Errorf("runner_name must be left out of the body when --runner is unset; got %v", raw)
+	}
+}
+
+func TestRunCreateSendsRunnerName(t *testing.T) {
+	raw := runCreateCapturingRawBody(t, "site-runner")
+	if raw["runner_name"] != "site-runner" {
+		t.Errorf("expected runner_name=site-runner on the wire; got %v", raw["runner_name"])
+	}
+}
+
 // ---------------------------------------------------------------
 // list verb — end-to-end via httptest.Server
 // ---------------------------------------------------------------

@@ -46,11 +46,15 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.checks.auth_park import AUTH_FAILED_ERROR_CODE
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors._shared.wrapped_creds import screen_remote_write_credential
 from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.operations._errors import is_auth_failed_status
 from meho_backplane.operations._handler_resolve import (
     forget_target_if_changed,
     get_or_create_connector_instance,
@@ -59,6 +63,7 @@ from meho_backplane.operations._handler_resolve import (
 )
 from meho_backplane.runner.effect_audit import EffectAuditChain
 from meho_backplane.runner.package_set import local_package_set, package_set_mismatch_message
+from meho_backplane.runner.result_clean import clean_error_text, clean_result
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
@@ -86,8 +91,29 @@ def _result(
     item: RunnerWorkItem,
     status: str,
     *,
-    payload: dict[str, Any] | None,
+    payload: dict[str, Any] | list[Any] | None,
     error: str | None,
+    error_code: str | None = None,
+) -> RunnerResult:
+    """Build the result of *item*.
+
+    The result of a check that MEHO counts (it has a ``next_due_at``) is
+    cleaned of secret values here, so neither the retry file nor the post
+    holds them.
+    """
+    result = _raw_result(item, status, payload=payload, error=error, error_code=error_code)
+    if item.next_due_at is None:
+        return result
+    return clean_result(result, connector_id=None, tenant=str(item.principal.tenant_id))
+
+
+def _raw_result(
+    item: RunnerWorkItem,
+    status: str,
+    *,
+    payload: dict[str, Any] | list[Any] | None,
+    error: str | None,
+    error_code: str | None,
 ) -> RunnerResult:
     return RunnerResult(
         result_uid=uuid.uuid4().hex,
@@ -96,6 +122,8 @@ def _result(
         status=status,
         result=payload,
         error=error,
+        produced_at=datetime.now(UTC),
+        error_code=error_code,
     )
 
 
@@ -278,18 +306,39 @@ async def _invoke(handler: Callable[..., Awaitable[Any]], item: RunnerWorkItem) 
     try:
         payload = await handler(operator, item.target_descriptor, dict(item.params))
     except Exception as exc:  # a failed check is a result, never a crashed tick
+        # Only the cleaned text goes to the log: the error of a call can hold a secret.
         _log.warning(
             "runner_item_handler_raised",
             op_id=item.op_id,
             check_ref=item.check_ref,
-            exc_info=True,
+            error_type=type(exc).__name__,
+            error=clean_error_text(str(exc)),
         )
-        return _result(item, "error", payload=None, error=f"{type(exc).__name__}: {exc}")
-    if not isinstance(payload, dict):
         return _result(
-            item, "error", payload=None, error=f"handler returned non-dict {type(payload).__name__}"
+            item,
+            "error",
+            payload=None,
+            error=f"{type(exc).__name__}: {exc}",
+            error_code=AUTH_FAILED_ERROR_CODE if _is_refused_login(exc) else None,
         )
-    return _result(item, "ok", payload=payload, error=None)
+    if isinstance(payload, dict) or (isinstance(payload, list) and item.next_due_at is not None):
+        return _result(item, "ok", payload=payload, error=None)
+    return _result(
+        item, "error", payload=None, error=f"handler returned non-dict {type(payload).__name__}"
+    )
+
+
+def _is_refused_login(exc: Exception) -> bool:
+    """True when *exc* is a refused login, by the rule of a central call.
+
+    A failed login (:class:`ConnectorAuthError`), or an HTTP answer whose
+    status the dispatcher counts as a refused login (``401``, and ``440``).
+    """
+    if isinstance(exc, ConnectorAuthError):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and is_auth_failed_status(
+        exc.response.status_code
+    )
 
 
 async def execute_command_once(

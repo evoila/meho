@@ -102,6 +102,18 @@ op a connector marks with `declare_per_call_approval` (`op_classes.py`; today
 operation registered as a change of rights, such as the Keycloak writes that
 change a token or a role): a person approves each
 call, and grant create refuses such a grant — `per_call_approval_grant_reason`.
+A platform admin can turn approval off for some of these operations, for
+example `msad.group.add-member`, for the whole install or for one tenant's own
+copy. Both the console and the REST API or CLI need a written reason; the REST
+API and the CLI also need a fresh sign-in. The edit is written to the audit
+log. After it, a person in the web console runs a `caution` operation at once,
+and a `dangerous` operation still waits because of its risk level. A standing
+grant still does not cover the operation. MEHO refuses the edit for an
+operation registered as a change of rights, such as the Keycloak writes named
+above (`approval_off_rights_change`), for an operation with a caller-address
+parameter (`approval_off_caller_address`), and for a destructive operation
+(`approval_off_destructive`). The table "Edit rules" in `spec-ingestion.md`
+has the full list.
 At call time one function gives these refusals: `never_covered_reason` in
 `service_grants.py`. It returns the kind and the reason of the first that
 holds: a credential call, per-call approval, a caller-address field,

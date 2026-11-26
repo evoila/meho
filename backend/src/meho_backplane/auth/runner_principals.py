@@ -58,6 +58,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.keycloak_admin import (
@@ -66,6 +67,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakClientNotFoundError,
 )
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.runner_enrollment import new_enrollment_code, take_runner_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, RunnerPrincipal
 from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
@@ -82,6 +84,7 @@ __all__ = [
     "RunnerPrincipalExistsError",
     "RunnerPrincipalNotFoundError",
     "RunnerPrincipalRead",
+    "RunnerPrincipalRegistered",
     "RunnerPrincipalService",
 ]
 
@@ -132,11 +135,11 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
 
 
 class RunnerPrincipalExistsError(Exception):
-    """Raised when register collides with an existing (tenant_id, name)."""
+    """Raised when register finds the name (its Keycloak client id) already taken."""
 
     def __init__(self, name: str) -> None:
         self.name = name
-        super().__init__(f"runner principal {name!r} already exists for this tenant")
+        super().__init__(f"runner principal {name!r} already exists")
 
 
 class RunnerPrincipalNotFoundError(Exception):
@@ -188,6 +191,17 @@ class RunnerPrincipalRead(BaseModel):
     package_set_digest: str | None = None
 
 
+class RunnerPrincipalRegistered(RunnerPrincipalRead):
+    """The answer of ``register``: the principal and its one-time enrollment code.
+
+    The code is shown once and never stored. The runner sends it with its
+    public key to enroll; it works once and until ``enrollment_code_expires_at``.
+    """
+
+    enrollment_code: str
+    enrollment_code_expires_at: datetime
+
+
 class RunnerPrincipalService:
     """Tenant-scoped register / list / get / revoke for runner principals.
 
@@ -202,7 +216,7 @@ class RunnerPrincipalService:
         tenant_id: uuid.UUID,
         created_by_sub: str,
         payload: RunnerPrincipalCreate,
-    ) -> RunnerPrincipalRead:
+    ) -> RunnerPrincipalRegistered:
         """Register a new runner principal.
 
         Generates the runner id up front, creates the Keycloak client
@@ -217,7 +231,9 @@ class RunnerPrincipalService:
         ValueError
             When *name* contains characters outside the safe alphabet.
         RunnerPrincipalExistsError
-            Duplicate ``(tenant_id, name)`` (DB unique-index or Keycloak 409).
+            A row with the same Keycloak client id exists (active or revoked,
+            any tenant), checked before anything is made; or a DB unique-index
+            or Keycloak 409.
         KeycloakAdminNotConfiguredError / KeycloakAdminError
             Keycloak admin unconfigured / any Admin API failure.
         SchedulerVaultBrokerError
@@ -236,6 +252,10 @@ class RunnerPrincipalService:
         # the Keycloak hardcoded-claim mapper and as the row's explicit id
         # (token claim == row id is the guard's binding invariant).
         runner_id = uuid.uuid4()
+
+        # The client id is the name, across all tenants. A revoked row keeps
+        # its name taken, so check before anything is made in Keycloak or Vault.
+        await self._ensure_client_id_free(client_id, tenant_id=tenant_id, name=payload.name)
 
         # Phase 1: create the Keycloak client + capture its generated secret.
         # Any failure after create_client rolls the just-created client back
@@ -262,7 +282,9 @@ class RunnerPrincipalService:
         )
 
         # Phase 2: insert the DB row with the explicit generated id (rolls
-        # back the Keycloak client on any failure — see _insert_row).
+        # back the Keycloak client on any failure — see _insert_row). The row
+        # carries the hash of the one-time enrollment code.
+        code, code_hash, code_expires_at = new_enrollment_code(runner_id)
         row = RunnerPrincipal(
             id=runner_id,
             tenant_id=tenant_id,
@@ -272,6 +294,8 @@ class RunnerPrincipalService:
             owner_sub=owner,
             revoked=False,
             created_by_sub=created_by_sub,
+            enrollment_code_hash=code_hash,
+            enrollment_code_expires_at=code_expires_at,
         )
         entry = await self._insert_row(row, internal_id=internal_id, name=payload.name)
         self._log.info(
@@ -282,7 +306,32 @@ class RunnerPrincipalService:
             runner_id=str(runner_id),
             created_by_sub=created_by_sub,
         )
-        return entry
+        return RunnerPrincipalRegistered(
+            **entry.model_dump(),
+            enrollment_code=code,
+            enrollment_code_expires_at=code_expires_at,
+        )
+
+    async def _ensure_client_id_free(
+        self, client_id: str, *, tenant_id: uuid.UUID, name: str
+    ) -> None:
+        """Raise :class:`RunnerPrincipalExistsError` when a row holds *client_id*.
+
+        Looks at every row: active or revoked, of any tenant.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            taken = await session.scalar(
+                select(RunnerPrincipal.id).where(RunnerPrincipal.keycloak_client_id == client_id)
+            )
+        if taken is not None:
+            self._log.info(
+                "runner_principal_register_name_taken",
+                tenant_id=str(tenant_id),
+                name=name,
+                keycloak_client_id=client_id,
+            )
+            raise RunnerPrincipalExistsError(name)
 
     async def _provision_keycloak_client(
         self,
@@ -498,9 +547,17 @@ class RunnerPrincipalService:
         return RunnerPrincipalRead.model_validate(row)
 
     async def _disable_keycloak_client(
-        self, keycloak_internal_id: str, *, tenant_id: uuid.UUID, name: str
+        self,
+        keycloak_internal_id: str,
+        *,
+        tenant_id: uuid.UUID,
+        name: str,
     ) -> None:
         """Disable the runner's Keycloak client — the authoritative kill switch.
+
+        Then deletes the client, so its public key is gone for good. A key
+        write that Keycloak applies later finds no client and changes nothing.
+        This runs for every runner, also when MEHO has no record of a key.
 
         Called *before* the DB row is marked revoked so a non-404 failure
         aborts the revoke without falsely reporting a still-token-issuing
@@ -511,6 +568,7 @@ class RunnerPrincipalService:
         try:
             async with kc_client:
                 await kc_client.disable_client(keycloak_internal_id)
+                await kc_client.delete_client(keycloak_internal_id)
         except KeycloakClientNotFoundError:
             self._log.warning(
                 "runner_principal_revoke_keycloak_not_found",
@@ -518,6 +576,24 @@ class RunnerPrincipalService:
                 name=name,
                 keycloak_internal_id=keycloak_internal_id,
             )
+
+    async def _active_row(
+        self, session: AsyncSession, tenant_id: uuid.UUID, name: str
+    ) -> RunnerPrincipal:
+        """Return the current row of a runner that is not revoked."""
+        result = await session.execute(
+            select(RunnerPrincipal)
+            .where(
+                RunnerPrincipal.tenant_id == tenant_id,
+                RunnerPrincipal.name == name,
+                RunnerPrincipal.revoked.is_(False),
+            )
+            .execution_options(populate_existing=True)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            raise RunnerPrincipalNotFoundError(name)
+        return row
 
     async def revoke(
         self,
@@ -531,10 +607,13 @@ class RunnerPrincipalService:
         ``operator_sub``: the operator who revokes; the row is written in their name.
 
         Phase 1: look up the principal (must exist and not already be
-        revoked) to obtain its ``keycloak_internal_id``.
+        revoked) to obtain its ``keycloak_internal_id``, and take the
+        runner's lock. Enrollment takes the same lock, so the two take turns.
         Phase 2: disable the Keycloak client (``enabled=false``) — the
-        authoritative kill switch.
-        Phase 3: commit ``revoked=true`` in the DB.
+        authoritative kill switch — and then delete the client with its
+        public key.
+        Phase 3: commit ``revoked=true`` in the DB. The commit releases the
+        lock.
 
         Keycloak is disabled *before* the DB row is marked so a Keycloak
         failure aborts the revoke without falsely reporting a runner as
@@ -553,42 +632,26 @@ class RunnerPrincipalService:
             unchanged, so the runner stays active and the operator can retry.
         """
         started = time.monotonic()
-        sessionmaker = get_sessionmaker()
-        # Phase 1: validate + fetch the Keycloak internal id (read-only).
-        async with sessionmaker() as session:
-            result = await session.execute(
-                select(RunnerPrincipal).where(
-                    RunnerPrincipal.tenant_id == tenant_id,
-                    RunnerPrincipal.name == name,
-                    RunnerPrincipal.revoked.is_(False),
-                )
-            )
-            row = result.scalar_one_or_none()
-            if row is None:
-                raise RunnerPrincipalNotFoundError(name)
+        async with get_sessionmaker()() as session:
+            # Phase 1: find the runner, then wait for an enrollment that runs
+            # now. Read the row again under the lock.
+            row = await self._active_row(session, tenant_id, name)
+            await take_runner_lock(session, row.id)
+            row = await self._active_row(session, tenant_id, name)
             keycloak_internal_id = row.keycloak_internal_id
 
-        # Phase 2: disable the Keycloak client FIRST (authoritative kill
-        # switch) — before any DB write, so a runner is never marked revoked
-        # while it can still mint tokens.
-        await self._disable_keycloak_client(keycloak_internal_id, tenant_id=tenant_id, name=name)
-
-        # Phase 3: persist revoked=true now that the client is disabled.
-        async with sessionmaker() as session:
-            result = await session.execute(
-                select(RunnerPrincipal).where(
-                    RunnerPrincipal.tenant_id == tenant_id,
-                    RunnerPrincipal.name == name,
-                )
+            # Phase 2: disable the Keycloak client FIRST (authoritative kill
+            # switch) — before any DB write, so a runner is never marked
+            # revoked while it can still mint tokens.
+            await self._disable_keycloak_client(
+                keycloak_internal_id, tenant_id=tenant_id, name=name
             )
-            row = result.scalar_one_or_none()
-            if row is None:
-                # Raced deletion between Phase 1 and Phase 3.
-                raise RunnerPrincipalNotFoundError(name)
-            if not row.revoked:
-                row.revoked = True
-                row.updated_at = datetime.now(UTC)
-                await session.flush()
+
+            # Phase 3: persist revoked=true now that the client is disabled.
+            row.revoked = True
+            row.enrollment_code_hash = None
+            row.updated_at = datetime.now(UTC)
+            await session.flush()
             await session.refresh(row)
             entry = RunnerPrincipalRead.model_validate(row)
             await session.commit()

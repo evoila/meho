@@ -267,10 +267,14 @@ group of a removed or changed line.
 
 ### 4. Check that it works
 
-1. **Command line.** Run `meho login https://meho.example.com`. Open the
-   link it prints. Keycloak sends you to authentik. Log in with your
-   password and MFA. Keycloak may ask once "Grant Access to …": click
-   **Yes**. Then run `meho status`. It must show your tenant and role.
+1. **Command line.** Run `meho login https://meho.example.com`. The CLI
+   prints an address and a short code. Open the address on any device
+   with a browser and enter the code. Keycloak sends you to authentik.
+   Log in with your password and MFA. Keycloak may ask once "Grant
+   Access to …": click **Yes**. No browser opens on the machine where
+   the CLI runs, and the browser does not send you back to the CLI: the
+   CLI sees the login by itself. Then run `meho status`. It must show
+   your tenant and role.
 2. **Web console.** Open `https://meho.example.com/ui/`. You land on
    authentik, then on the MEHO dashboard with your name and role.
 3. **Claude Code.** Log in with the MEHO plugin

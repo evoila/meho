@@ -118,7 +118,12 @@ audited round-trip is below.
 
 **1. Point your MCP client at MEHO.** Drop this into your repo as
 `.mcp.json` (full example, including the `mcp-remote` stdio variant, in
-[`mcp.json.example`](./examples/r4-local-claude/mcp.json.example)):
+[`mcp.json.example`](./examples/r4-local-claude/mcp.json.example)).
+This fixed token **ends after 5 minutes**. Every call then fails until
+you make a new token and restart the client. For a login that renews
+itself, run `mcp-remote` in login mode instead, as described on the
+[Other MCP clients](./docs-site/clients/mcp-remote-shim.md#connect-with-a-login-that-renews-itself)
+page:
 
 ```json
 {
@@ -135,7 +140,9 @@ audited round-trip is below.
 ```
 
 The token comes from `meho login https://meho.example.com` (Keycloak
-device-code flow) — the agent never sees a backend credential.
+device-code flow: the CLI prints an address and a short code, and you
+enter the code in a browser on any device) — the agent never sees a
+backend credential.
 
 **2. Ask the agent to do something.** In your Claude Code session:
 
@@ -457,7 +464,7 @@ with the built-in parts.
 **Is the agent runtime included?**
 No — bring your own. MEHO governs what an agent is allowed to do; it does
 not run the model. Point any MCP client (Claude Code, Cursor, Cline,
-Continue, custom) at the backplane and operate under your own identity.
+Continue, opencode, custom) at the backplane and operate under your own identity.
 
 **Does MEHO replace Teleport / StrongDM?**
 No. Those broker *human* sessions (SSH/DB/k8s). MEHO governs *agent*

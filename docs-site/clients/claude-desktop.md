@@ -194,8 +194,11 @@ the field and turn the extension off and on again. See
 you have not used MEHO for the `meho-mcp` client's offline idle limit: 48
 hours with the
 [recommended realm setting](../install/keycloak-realm.md#how-long-an-mcp-login-lasts).
-Without it, the login ends at the realm's SSO idle limit (30 minutes by
-default). If you change the scopes field, keep `offline_access` in it.
+Without it, the login ends at the realm's SSO idle limit: 1 hour on a realm
+the MEHO chart created new.
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has.
+If you change the scopes field, keep `offline_access` in it.
 
 ### A login of its own for Claude Desktop
 

@@ -446,6 +446,15 @@ class Operator(BaseModel):
     tenant_chosen: bool = True
     #: The role comes from the platform admin group, not a role group (#5239).
     role_from_platform_admin: bool = False
+    #: The token's own tenant, when a platform admin works in another tenant
+    #: and the token has no ``meho_tenants`` list. ``None`` otherwise. With
+    #: a list, :attr:`tenants` already holds each tenant and its role. Only
+    #: :func:`~meho_backplane.auth.current_tenant.select_current_tenant`
+    #: sets it.
+    token_tenant_id: UUID | None = None
+    #: The role the token gives in :attr:`token_tenant_id`. ``None`` when
+    #: :attr:`token_tenant_id` is ``None``.
+    token_tenant_role: TenantRole | None = None
     #: An agent token that says ``tenant_admin``. MEHO acts with the
     #: ``operator`` role for it (:func:`~meho_backplane.auth.jwt._cap_agent_role`).
     #: Vault reads the role from the token itself, so

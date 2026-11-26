@@ -130,6 +130,67 @@ keep that inside each sensor's tenant:
   `docs/cross-repo/vault-provisioning.md`, "Bounding the check-runner
   principal".
 
+## Warning for every caller
+
+The check-runner and a tenant with its own Vault role are refused when a
+target's own path is outside the tenant's folder. Every other caller is
+checked too, and gets a warning instead of a refusal. The read goes on.
+Move the secret into the tenant's folder.
+
+- **Where.** The shared loader (`_resolve_and_load` in
+  `connectors/_shared/vault_creds.py`) calls
+  `outside_tenant_folder_reason` for every store read of a target's own
+  Vault secret. The helper never raises. It uses the same rules as
+  `enforce_tenant_scope`: the same path joining, the same segment border
+  and `PLATFORM_EXEMPT_PATHS` for reads. A test pins the two together.
+- **The warning.** The server log gets `target_secret_ref_outside_tenant_folder`
+  with the target id and name, the tenant id and `secret_ref_prefix`, the
+  first part of the path. A slash, a backslash, a percent sign, a question
+  mark and a number sign each end the first part. A path with one part
+  shows only `…`. MEHO writes the warning at most once an hour for each target in
+  each server process. After a restart, or with more than one server
+  process, the warning can come more often. Nothing goes into the answer,
+  the trace or the audit row.
+- **Never stops the read.** The warning is written only for a read that
+  MEHO goes on to make. A read that the store backend refuses first (no
+  operator token, or a path in the store's API form) writes no folder
+  warning. An error in the warning step (the path check, the cut of the
+  path, the log call) never stops the read: it goes on and returns the
+  same credentials.
+- **Check off.** When `VAULT_KV_TENANT_SCOPE_PREFIX` is empty and the tenant
+  has no own Vault role, the helper answers "not outside" and nothing is
+  logged. Only Vault and OpenBao paths are checked, not `gsm:` or
+  `wrapped:` refs.
+- **The list.** `GET /api/v1/targets/checks/outside-tenant-folder` and
+  `meho targets outside-folder` list the targets whose path is outside the
+  folder, read from the targets table when asked. Two path segments, so the
+  route never meets `GET /api/v1/targets/{name}`. A tenant admin sees their
+  own tenant. A platform admin sees every tenant, or one with `tenant_id`.
+  `tenant_id` goes through `authorize_tenant_scope`
+  (`backend/src/meho_backplane/auth/rbac.py`), the check that these routes
+  and tools share. The REST routes are sensors, the scheduler, check
+  dashboards and dashboard files, connector tenant settings, instance
+  settings, audit reflex, retrieve usage and operation picks, and this
+  list. The MCP tools are those of sensors and the scheduler. The topology
+  tools (`backend/src/meho_backplane/mcp/tools/topology.py`) use their own
+  tenant check. A tenant the admin is a
+  member of is chosen with the `Meho-Tenant` header, so their role there
+  applies, and `tenant_id` of that same tenant then lists only it. The list
+  of every tenant leaves out each other tenant where the admin is a member
+  without the `tenant_admin` role. That includes the token's own tenant of
+  a token without a tenant list (`Operator.token_tenant_id` and
+  `token_tenant_role`).
+  The list and the warning use the same path rule
+  (`outside_tenant_folder_reason`). A target is listed, and a read of its
+  secret warns, when its secret path lies outside the tenant's folder,
+  whoever built the path. With a folder setting that is not the default, a
+  path MEHO built from the target name is listed and warns. A path MEHO
+  built inside the default folder is not listed. A target of a tenant with
+  its own store role is listed, and a read of its secret is refused with
+  no warning. The list checks each path against the default store mount.
+  The warning checks the mount of the real read. With the check off, the
+  answer has `check_off: true` and no rows.
+
 ## The namespace convention
 
 The rule is configured by one setting,

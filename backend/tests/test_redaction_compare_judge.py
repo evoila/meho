@@ -56,7 +56,7 @@ def _judge(
     base: dict[str, object],
     head: dict[str, object],
     approved: str = "approved: []\n",
-    summary_only: bool = False,
+    full_list: bool = True,
 ) -> int:
     (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
     (tmp_path / "head.jsonl").write_text(json.dumps(head) + "\n", encoding="utf-8")
@@ -66,7 +66,7 @@ def _judge(
             tmp_path / "base.jsonl",
             tmp_path / "head.jsonl",
             tmp_path / "approved.yaml",
-            summary_only=summary_only,
+            full_list=full_list,
         )
     )
 
@@ -150,7 +150,9 @@ def test_an_approved_difference_passes(tmp_path: Path) -> None:
 
 
 def test_a_stale_approved_entry_fails(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    code = _judge(tmp_path, _record(["s2"], ["p0"]), _record(["s2"], ["p0"]), _APPROVED_SHOWN)
+    code = _judge(
+        tmp_path, _record(["s2"], ["p0"]), _record(["s2"], ["p0"]), _APPROVED_SHOWN, full_list=True
+    )
     assert code == 1
     assert "stale" in capfd.readouterr().out
 
@@ -200,7 +202,7 @@ def test_a_record_removed_from_the_head_fails(
     (tmp_path / "head.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
     (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
     code = judge_module.judge(
-        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml", full_list=True
     )
     assert code == 1
     assert "other.input redact: removed" in capfd.readouterr().out
@@ -211,7 +213,7 @@ def test_an_empty_head_fails(tmp_path: Path, capfd: pytest.CaptureFixture[str]) 
     (tmp_path / "head.jsonl").write_text("", encoding="utf-8")
     (tmp_path / "approved.yaml").write_text("approved: []\n", encoding="utf-8")
     code = judge_module.judge(
-        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml"
+        tmp_path / "base.jsonl", tmp_path / "head.jsonl", tmp_path / "approved.yaml", full_list=True
     )
     assert code == 1
     assert "removed" in capfd.readouterr().out
@@ -250,6 +252,7 @@ def _judge_with_base_approved(
             tmp_path / "head.jsonl",
             tmp_path / "approved.yaml",
             tmp_path / "base-approved.yaml",
+            full_list=True,
         )
     )
 
@@ -269,7 +272,7 @@ def test_the_ci_mode_names_no_input_and_gives_no_number(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     base, head = _record(["s2"], ["p0"]), _record(["p0"], ["s2"], "b", "q")
-    code = _judge(tmp_path, base, head, summary_only=True)
+    code = _judge(tmp_path, base, head, full_list=False)
     out = capfd.readouterr().out
     assert code == 1
     assert out.splitlines() == [out.strip()]
@@ -281,7 +284,7 @@ def test_the_ci_mode_names_no_input_and_gives_no_number(
 def test_the_ci_mode_with_no_difference_passes_with_one_line(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    code = _judge(tmp_path, _record(["s2"], ["p0"]), _record(["s2"], ["p0"]), summary_only=True)
+    code = _judge(tmp_path, _record(["s2"], ["p0"]), _record(["s2"], ["p0"]), full_list=False)
     out = capfd.readouterr().out
     assert code == 0
     assert out == "no difference is left that is not approved\n"
@@ -296,7 +299,7 @@ def test_the_ci_mode_still_fails_on_a_stale_entry_and_prints_it(
         _record(["s2"], ["p0"]),
         _record(["s2"], ["p0"]),
         _APPROVED_SHOWN,
-        summary_only=True,
+        full_list=False,
     )
     lines = capfd.readouterr().out.splitlines()
     assert code == 1
@@ -305,11 +308,11 @@ def test_the_ci_mode_still_fails_on_a_stale_entry_and_prints_it(
     assert lines[1] == "no difference is left that is not approved"
 
 
-def test_without_the_ci_mode_the_judge_names_each_difference_and_counts(
+def test_with_the_full_list_the_judge_names_each_difference_and_counts(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     base, head = _record(["s2"], ["p0"]), _record(["p0"], ["s2"], "b", "q")
-    assert _judge(tmp_path, base, head) == 1
+    assert _judge(tmp_path, base, head, full_list=True) == 1
     assert capfd.readouterr().out.splitlines() == [
         "form.plain.password.bare redact: shown:s2",
         "form.plain.password.bare redact: hidden:p0",
@@ -454,6 +457,7 @@ def _judge_changed(tmp_path: Path, changed: list[str], approved: str = "approved
             tmp_path / "base.jsonl",
             tmp_path / "head.jsonl",
             tmp_path / "approved.yaml",
+            full_list=True,
             changed=changed,
         )
     )
@@ -737,7 +741,12 @@ def _old_judge() -> str:
     """The judge without the --changed option, as a base branch can still have it."""
     text = _SCRIPT.read_text(encoding="utf-8")
     assert 'parser.add_argument("--changed")' in text
-    return text.replace("--changed", "--not-known").replace("args.changed", "args.not_known")
+    return (
+        text.replace("--changed", "--not-known")
+        .replace("args.changed", "args.not_known")
+        .replace("--full-list", "--not-listed")
+        .replace("args.full_list", "args.not_listed")
+    )
 
 
 def _local_repo(
@@ -809,7 +818,7 @@ def test_the_local_command_with_an_older_judge_runs_without_changed(tmp_path: Pa
     done = _run_local_block(tmp_path, clone)
     assert "unrecognized arguments" not in done.stderr
     assert done.returncode == 0, done.stderr
-    assert "0 difference(s), 0 not approved" in done.stdout
+    assert done.stdout.endswith("no difference is left that is not approved\n")
 
 
 def test_the_local_command_stops_when_main_moved_and_uses_the_trees_of_ci_after_a_merge(
@@ -911,3 +920,216 @@ def test_the_job_lists_exact_bytes_from_git_for_unusual_names(tmp_path: Path) ->
     names = judge_module.read_changed(out / "changed.txt")
     assert sorted(names) == sorted(judge_module.path_name(_PACKAGE + name) for name in raw)
     assert len(set(names)) == 3
+
+
+# --- the summary is the default, and the full list is refused in CI ---------
+
+
+def _run_judge(
+    tmp_path: Path, *options: str, ci: bool = False, approved: str = "approved: []\n"
+) -> subprocess.CompletedProcess[str]:
+    base, head = _record(["s2"], ["p0"]), _record([], ["p0", "s2"], "b")
+    (tmp_path / "base.jsonl").write_text(json.dumps(base) + "\n", encoding="utf-8")
+    (tmp_path / "head.jsonl").write_text(json.dumps(head) + "\n", encoding="utf-8")
+    (tmp_path / "approved.yaml").write_text(approved, encoding="utf-8")
+    env = {"PATH": os.environ.get("PATH", "")}
+    if ci:
+        env["GITHUB_ACTIONS"] = "true"
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(_SCRIPT),
+            "--judge",
+            str(tmp_path / "base.jsonl"),
+            str(tmp_path / "head.jsonl"),
+            "--approved",
+            str(tmp_path / "approved.yaml"),
+            *options,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_the_judge_with_no_output_option_prints_only_the_summary(tmp_path: Path) -> None:
+    done = _run_judge(tmp_path)
+    assert done.returncode == 1, done.stderr
+    assert done.stdout.count("\n") == 1
+    assert "not approved" in done.stdout
+    _assert_names_nothing(done.stdout)
+
+
+def test_the_summary_only_option_gives_the_same_output_as_no_option(tmp_path: Path) -> None:
+    plain = _run_judge(tmp_path)
+    flagged = _run_judge(tmp_path, "--summary-only")
+    assert (flagged.returncode, flagged.stdout) == (plain.returncode, plain.stdout)
+
+
+def test_the_full_list_prints_each_difference_when_not_in_ci(tmp_path: Path) -> None:
+    done = _run_judge(tmp_path, "--full-list")
+    assert done.returncode == 1, done.stderr
+    assert "form.plain.password.bare redact: shown:s2" in done.stdout
+    assert "difference(s)" in done.stdout
+
+
+def test_the_full_list_is_refused_in_ci_with_one_fixed_message(tmp_path: Path) -> None:
+    done = _run_judge(tmp_path, "--full-list", ci=True)
+    assert done.returncode != 0
+    assert done.stdout == ""
+    assert done.stderr.strip() == judge_module.FULL_LIST_REFUSED
+    assert "form.plain.password.bare" not in done.stderr
+
+
+@pytest.mark.parametrize("short", ["--judg", "--summ", "--full", "--appr", "--chang"])
+def test_a_short_form_of_an_option_is_refused(tmp_path: Path, short: str) -> None:
+    done = _run_judge(tmp_path, short, "x")
+    assert done.returncode == 2
+    assert done.stdout == ""
+    assert "unrecognized arguments" in done.stderr or "ambiguous" in done.stderr
+
+
+def test_the_workflow_judge_call_gives_only_the_summary_in_ci(tmp_path: Path) -> None:
+    commands = _compare_step_text().split("run: |", 1)[1]
+    assert "--summary-only" in commands
+    assert "--full-list" not in commands
+    done = _run_judge(tmp_path, "--summary-only", ci=True)
+    assert done.returncode == 1
+    assert done.stdout.count("\n") == 1
+    _assert_names_nothing(done.stdout)
+
+
+# --- the job's and the local block's checks for an option of the judge -------
+
+_PROBE = re.compile(r"grep -q -e '(--[a-z-]+)'")
+
+
+def _known_options() -> set[str]:
+    parser = judge_module.build_parser()
+    return {option for action in parser._actions for option in action.option_strings}
+
+
+def _check_probes(text: str) -> list[str]:
+    """The option names that the text looks for in the judge; each must be a known option."""
+    names = _PROBE.findall(text)
+    assert names, "no check for an option of the judge was found"
+    unknown = [name for name in names if name not in _known_options()]
+    assert not unknown, f"the judge has no option {unknown}"
+    return names
+
+
+def test_the_job_checks_for_an_option_that_the_judge_knows() -> None:
+    assert _check_probes(_compare_step_text()) == ["--changed"]
+
+
+def test_the_local_block_checks_for_options_that_the_judge_knows() -> None:
+    assert _check_probes(_local_block()) == ["--changed", "--full-list"]
+
+
+def test_a_wrong_option_name_in_the_job_check_fails_the_test() -> None:
+    step = _compare_step_text().replace("grep -q -e '--changed'", "grep -q -e '--changd'")
+    with pytest.raises(AssertionError, match="no option"):
+        _check_probes(step)
+
+
+@pytest.mark.parametrize("name", ["--changed", "--full-list"])
+def test_a_wrong_option_name_in_the_local_block_check_fails_the_test(name: str) -> None:
+    block = _local_block().replace(f"grep -q -e '{name}'", f"grep -q -e '{name}x'")
+    with pytest.raises(AssertionError, match="no option"):
+        _check_probes(block)
+
+
+# --- the tree that the job builds the pull request records from ----------------
+
+
+def _step_part(start: str, end: str) -> str:
+    step = _compare_step_text()
+    first = step.index(start)
+    return step[first : step.index(end, first)]
+
+
+def _staged_tree(tmp_path: Path) -> Path:
+    """Run the job's own staging lines on a pull request that edits tests and source files."""
+    repo = tmp_path / "repo"
+    (repo / "backend" / "tests" / "redaction_compare").mkdir(parents=True)
+    (repo / "backend" / "src").mkdir()
+    for name, text in (
+        ("backend/tests/helper.py", "VALUE = 'base'\n"),
+        ("backend/tests/redaction_compare/answers.py", "A = 1\n"),
+        ("backend/src/engine.py", "STEP = 'base'\n"),
+    ):
+        (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "backend/tests/helper.py").write_text("VALUE = 'pull request'\n", encoding="utf-8")
+    (repo / "backend/tests/extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
+    (repo / "backend/src/engine.py").write_text("STEP = 'pull request'\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "change")
+    head = _git(repo, "rev-parse", "HEAD")
+    out = tmp_path / "out"
+    out.mkdir()
+    lines = _step_part('stage="${dir}/head-input"', 'cp "${dir}/redaction_compare.py"')
+    subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", lines],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "base": base, "head": head, "dir": str(out)},
+        check=True,
+    )
+    return out / "head-input" / "backend"
+
+
+def test_the_staged_tree_holds_the_tests_of_the_base(tmp_path: Path) -> None:
+    staged = _staged_tree(tmp_path)
+    assert (staged / "tests" / "helper.py").read_text(encoding="utf-8") == "VALUE = 'base'\n"
+    assert not (staged / "tests" / "extra.py").exists()
+    assert (staged / "tests" / "redaction_compare" / "answers.py").is_file()
+
+
+def test_the_staged_tree_holds_the_source_of_the_pull_request(tmp_path: Path) -> None:
+    staged = _staged_tree(tmp_path)
+    assert (staged / "src" / "engine.py").read_text(encoding="utf-8") == "STEP = 'pull request'\n"
+
+
+def test_the_local_command_builds_the_head_records_with_the_tests_of_main(
+    tmp_path: Path,
+) -> None:
+    _, clone = _local_repo(tmp_path, _SCRIPT.read_text(encoding="utf-8"))
+    answers = clone / "backend" / "tests" / "redaction_compare" / "answers.py"
+    answers.write_text(_RECORDS.replace('"s1"', '"x"').replace('["p0"]', '["p0", "s1"]'), "utf-8")
+    _git(clone, "commit", "-q", "-am", "the change would show a part")
+    approved = clone / "backend" / "tests" / "snapshots" / "redaction_compare_approved.yaml"
+    approved.write_text(_entries(_PACKAGE_FILE), encoding="utf-8")
+    done = _run_local_block(tmp_path, clone)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+# --- the base record build keeps its error output out of the log ---------------
+
+
+def test_a_failed_base_build_prints_one_fixed_line_and_no_error_output(tmp_path: Path) -> None:
+    lines = _step_part('if ! (cd "${dir}/base/backend"', 'cp "${dir}/redaction_compare.py"')
+    lines = lines[: lines.index("# The pull request:")]
+    out = tmp_path / "out"
+    (out / "base" / "backend").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text('#!/bin/sh\necho "$MARKER" >&2\necho "$MARKER"\nexit 1\n', "utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    marker = "marker-" + os.urandom(8).hex()
+    done = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", lines],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "dir": str(out), "MARKER": marker},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode != 0
+    assert "records of the base could not be built" in done.stdout
+    assert done.stdout.count("\n") == 1
+    assert marker not in done.stdout + done.stderr
+    assert marker in (out / "base.err").read_text(encoding="utf-8")

@@ -1056,10 +1056,12 @@ before a reviewer reads the pull request.
 - **The CI job** "Secret hiding compared with the base branch" makes a
   second checkout of the base commit and builds the base records there,
   with the base's own code and input set. It builds the pull request
-  records with the pull request's own code and input set in a container
-  with no mounted folder: the files go in on stdin and the records come
-  out on stdout. So the pull request's code can write only its own
-  records. Both files stay in the job's temporary folder. Then it runs
+  records in a container with no mounted folder: the files go in on stdin
+  and the records come out on stdout. The input holds `backend/tests/`
+  from the base commit and every other file of `backend/` from the pull
+  request (so its `backend/src/` is the code that is compared). The
+  pull request's code can write only its own records. Both files stay in
+  the job's temporary folder. Then it runs
   the rule of `scripts/ci/redaction_compare.py --judge` on the two record
   files. It fails when a part that the base hides is now shown, when a
   plain part that the base shows is now hidden, when the answer changed in
@@ -1081,9 +1083,9 @@ before a reviewer reads the pull request.
   input, step and part again, add a new entry (for example with a new
   reason).
 - **The rules come from the base branch.** The job reads the rule script
-  of the base commit with `git show` and runs the judge with
-  `python3 -I`, so a pull request cannot weaken the check that judges it.
-  The job also lists, with `git diff --name-only --no-renames -z`, each
+  and the base's approved file of the base commit with `git show` and runs
+  the judge with `python3 -I`. The job definition itself is the pull
+  request's `ci.yml`. The job also lists, with `git diff --name-only --no-renames -z`, each
   file that the pull request changes under `backend/tests/redaction_compare/`
   (the input set and the code that reads the answers) and the file
   `backend/tests/__init__.py` (it runs when the package is imported), and
@@ -1106,17 +1108,23 @@ before a reviewer reads the pull request.
   job: the lookup, the second checkout, either environment sync, either
   record build, or the judge.
 - **The job log shows no names and no numbers, on purpose.** The log of
-  a public repo is public, so the job runs the judge with
-  `--summary-only`. Then the judge prints no input id, no step, no part id
-  and no number: only one closing line, either "no difference is left that
+  a public repo is public, so the judge prints only its summary by
+  default: no input id, no step, no part id and no number, only one
+  closing line, either "no difference is left that
   is not approved" or "differences are left that are not approved". A
   stale approved entry is still printed, because it is in the committed
-  approved file already. The exit code is the same as without the flag.
-  The error output of the pull request's container goes to a file in the
-  job's temporary folder that the job never prints. When the record build
-  fails, the job prints one fixed line that says so and points to the local
-  run below, and the job fails.
-- **See the differences locally.** Without `--summary-only` the judge
+  approved file already. The exit code is the same with or without
+  `--full-list`. The judge refuses `--full-list` with one fixed message
+  when the variable `GITHUB_ACTIONS` is `true` (GitHub sets it on every
+  Actions runner, also on our own runner pool), and its option parser takes
+  only full option names. The job still passes `--summary-only`, which the
+  judge accepts and which changes nothing, because the job runs the judge
+  of the base commit. The test `test_ci_redaction_compare_summary_only.py`
+  checks the workflow text as a second guard. The error output of both
+  record builds goes to a file in the job's temporary folder that the job
+  never prints. When a record build fails, the job prints one fixed line
+  that says so and points to the local run below, and the job fails.
+- **See the differences locally.** With `--full-list` the judge
   prints each difference that is not approved (input id, step, kind) and
   the counts. From the repo root, with the pull request branch checked out
   and its changes committed, run the block below. It compares the same two
@@ -1124,7 +1132,10 @@ before a reviewer reads the pull request.
   the newest `origin/main`, so merge it first. Like CI, it passes the
   changed files of the compare package with `--changed` only when the
   judge of `main` knows that option, so a change there needs its approved
-  entry here too. It works in a new private folder from `mktemp -d`,
+  entry here too. It passes `--full-list` only when the judge of `main`
+  knows that option. Like the job, it builds the pull request records from
+  `backend/tests/` of `origin/main` and every other file of `backend/` from
+  the branch. It works in a new private folder from `mktemp -d`,
   stops when a step fails (also either record build), and removes the
   folder and the second checkout when it ends, so no record file is left
   behind or read again by a later run.
@@ -1143,7 +1154,12 @@ before a reviewer reads the pull request.
     rules="$tmp/base/scripts/ci/redaction_compare.py"
     (cd "$tmp/base/backend" && uv sync --frozen \
       && uv run python "$rules" --records "$tmp/base.jsonl")
-    (cd backend && uv run python "$rules" --records "$tmp/head.jsonl")
+    mkdir "$tmp/head"
+    git archive HEAD backend | tar -x -C "$tmp/head"
+    rm -rf "$tmp/head/backend/tests"
+    git archive origin/main backend/tests | tar -x -C "$tmp/head"
+    (cd "$tmp/head/backend" && uv sync --frozen \
+      && uv run python "$rules" --records "$tmp/head.jsonl")
     git show origin/main:backend/tests/snapshots/redaction_compare_approved.yaml \
       > "$tmp/base-approved.yaml"
     changed_args=()
@@ -1151,9 +1167,14 @@ before a reviewer reads the pull request.
       git diff --name-only --no-renames -z origin/main HEAD -- backend/tests/__init__.py backend/tests/redaction_compare > "$tmp/changed.txt"
       changed_args=(--changed "$tmp/changed.txt")
     fi
+    full_args=()
+    if grep -q -e '--full-list' "$rules"; then
+      full_args=(--full-list)
+    fi
     python3 -I "$rules" \
       --judge "$tmp/base.jsonl" "$tmp/head.jsonl" \
       ${changed_args[@]+"${changed_args[@]}"} \
+      ${full_args[@]+"${full_args[@]}"} \
       --approved backend/tests/snapshots/redaction_compare_approved.yaml \
       --base-approved "$tmp/base-approved.yaml"
   )

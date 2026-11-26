@@ -16,7 +16,7 @@ and [connector-packages.md](../codebase/connector-packages.md) (the start-up che
   The kit ships only with MEHO's own release files and image, never on a public package index.
 - The kit has **its own version number**, starting at 1.0. The first number goes up
   when a change can break a package. The second number goes up when a name is added,
-  or when a function gets a new input that is given by name and has a default.
+  or when a function gets a new input that is given only by name and has a default.
 - A connector package says which kit versions it fits, in the normal Python way:
   `dependencies = ["meho-connector-kit>=1.0,<2"]`. The overlay build (the build that adds
   connector packages to the public MEHO image) refuses a package that does not fit. MEHO
@@ -158,13 +158,17 @@ How a change to the kit is noticed:
 
    Added by the owner on 26 November 2026:
 
-   - A new input that is given by name and has a default does not break such a package. It needs
-     only the second number. A package built against the older kit keeps working with no rebuild.
-   - Three cases still need the first number, even with a default, because they can break a
+   - A new input that is given only by name and has a default does not break such a package. It
+     needs only the second number. A package built against the older kit keeps working with no
+     rebuild. "Given only by name" means the input comes after the `*` in the function's inputs:
+     the caller must write its name; it can never be given by its place.
+   - Four cases still need the first number, even with a default, because they can break a
      package:
-     - a new input that is not given by name, because it can shift the place of the others;
+     - a new input that can be given by its place, also when it is added last;
      - a new input with no default;
-     - a change of the default or the meaning of an input that exists.
+     - a change of the default or the meaning of an input that exists;
+     - a new input given only by name, on a function that already takes any further named inputs
+       (`**`): a name that went into those before now goes to the new input.
 4. **The pull request** shows the changed list file, so a person sees the kit change before the
    merge. The kit owner must approve it, through the code owners file (decision 3).
 5. **The release.** A small script in `scripts/release/` compares the list file at the last release

@@ -1121,10 +1121,11 @@ The run still checks what can change while the call waits
 (`operations/approved_run_rights.py`): the grants of an agent that asked,
 a revoked agent login (also the acting agent of a hosted agent run), a
 blocked login, and the risk level. An approved step of a multi-step
-operation gets the same checks before it clears. On the first run, MEHO
-uses the role it checked when the login asked, because it has no newer
-token of that login. A role lowered while the request waits counts at a
-re-run. To stop a login at once, block it.
+operation gets the same checks before it clears. When a person runs an
+approved call from an approvals surface, the call runs as that person.
+MEHO does not read the role of the login that asked again then, because
+it has no newer token of that login. A role lowered while the request
+waits counts at a re-run. To stop a login at once, block it.
 
 ## The approval groups and how a person approves (#3325)
 
@@ -2564,7 +2565,9 @@ code in `refusal`, and `status_code` `403`, `409` or `422`. A refusal of
 the rights check also carries the full text in `reason`. A re-run refused
 to a caller who did not make the request (`insufficient_role` or
 `not_request_owner`) writes a row with the caller as `operator_sub` and
-the request id, and no other field of the request.
+`principal_sub`, the request id, and `requester_sub` set to `null`. It
+has no other field of the request, so no audit view shows the caller as
+the requester.
 
 **Response.** `RerunResponseBody`: `approval_request_id`, `attempt`,
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.
@@ -5450,7 +5453,9 @@ result row, or a self-approval), so every reader finds the requester in
 `requester_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
 (the audit REST API, `meho audit query` / `show` / `replay`, the MCP audit
 tools and the session replay) and the console's audit row drawer
-(`ui/routes/audit/routes.py:_build_drawer_context`).
+(`ui/routes/audit/routes.py:_build_drawer_context`). A row with a
+`requester_sub` key is never read as the older form, also when its value
+is `null`.
 
 ### Session-replay lineage (#2086)
 

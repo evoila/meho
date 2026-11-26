@@ -11,9 +11,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 
-from meho_backplane.auth.principal_block import reset_block_cache
+from meho_backplane.auth import principal_block
+from meho_backplane.auth.principal_block import BlockedPerson, reset_block_cache
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from tests.test_ui_agent_grants import _TENANT_A, _TENANT_B, _bff_env, _csrf_headers
@@ -201,4 +202,36 @@ def test_a_confirm_with_a_set_that_matches_no_blocks_removes_nothing(shown: str)
     assert _CHANGED in forged.text
     assert unknown.status_code == 404
     assert _block_rows() == [(_LOGIN, str(_TENANT_A), "reason a")]
+    assert _audit_payloads("principal.unblock") == []
+
+
+def test_a_block_set_again_during_the_confirm_stays_and_the_page_shows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second database session sets the block again after the confirm read it."""
+    _tenants()
+    _seed_blocks((_LOGIN, str(_TENANT_A), "reason a"))
+    read_blocks = principal_block._read_blocks
+
+    async def _read_then_set_again(session: Any, sub: str) -> list[BlockedPerson]:
+        blocks = await read_blocks(session, sub)
+        async with get_sessionmaker()() as other, other.begin():
+            await other.execute(
+                update(PrincipalBlock)
+                .where(PrincipalBlock.sub == sub)
+                .values(reason="set again", blocked_by_sub="another-admin")
+            )
+        return blocks
+
+    client, mock, csrf = _client(platform_admin=True)
+    try:
+        first = _open(client, csrf)
+        monkeypatch.setattr(principal_block, "_read_blocks", _read_then_set_again)
+        confirm = _confirm(client, csrf, first)
+    finally:
+        mock.stop()
+    assert confirm.status_code == 200, confirm.text
+    assert _CHANGED in confirm.text
+    assert "set again" in confirm.text and "another-admin" in confirm.text
+    assert _block_rows() == [(_LOGIN, str(_TENANT_A), "set again")]
     assert _audit_payloads("principal.unblock") == []

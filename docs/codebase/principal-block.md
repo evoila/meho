@@ -235,6 +235,21 @@ block and unblock writes one audit row (`principal.block` or
 `principal.unblock`); the request row of the form keeps its own
 `http.post:` name.
 
+Block and unblock of one login at the same moment: an unblock reads the
+blocks of the login with a row lock (`SELECT ... FOR UPDATE`, in the order
+of the scope) and holds it until it ends. A second unblock of the same
+login waits, then finds no block and answers 404 `principal_not_blocked`.
+A block writes its row in one statement (insert, or update when the row
+is there). When it meets an unblock of the same login, it waits for the
+unblock to end and then writes the block, so a block that a person asks
+for is always written. The audit rows are in the order the two took
+effect. The delete of an unblock also removes a block only while it is
+still the block that was read (same reason, admin and time). When one was
+set again in the meantime, MEHO removes nothing: the console shows the
+confirm page again with the current blocks, and the REST route answers
+409 `principal_block_changed`. Tests on PostgreSQL:
+`tests/integration/test_principal_unblock_row_lock_pg.py`.
+
 ## Dependencies
 
 - `session_store/audit.py` (`add_audit_row`) for the audit row.

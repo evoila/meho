@@ -31,7 +31,10 @@ When it runs it plans again
 (:func:`~meho_backplane.policy.service.apply_policy`). When the stored
 policy changed after the plan, it writes nothing and says so. The
 install's policy (``scope: install``) is imported only when a platform
-admin approves it.
+admin approves it. With the ``CUSTOM_POLICY`` switch on, the install's
+file may hold the outer limit (``limits``,
+:mod:`~meho_backplane.policy.limits`); the plan and the run read the
+switch when they run.
 
 The operation exists only while the ``POLICY_CLASSIFICATION`` switch is
 on, like ``policy.classify``.
@@ -55,7 +58,11 @@ from meho_backplane.operations.typed_register import (
 from meho_backplane.policy.document import MAX_POLICY_BYTES
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.store import classification_enabled
-from meho_backplane.policy.switches import classification_on_in_environment
+from meho_backplane.policy.switches import (
+    classification_on_in_environment,
+    custom_policy_on,
+)
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -276,6 +283,7 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
             based_on=params["based_on"],
             imported_by=importer,
             approved_by=operator.sub,
+            custom_policy=custom_policy_on(get_settings()),
         )
 
 
@@ -294,6 +302,7 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
             scope=params["scope"],
             tenant_id=ctx.operator.tenant_id,
             content=str(params["file"]).encode("utf-8"),
+            custom_policy=custom_policy_on(get_settings()),
         )
     return {
         "scope": plan.scope,

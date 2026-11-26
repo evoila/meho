@@ -316,6 +316,47 @@ bindings:
     the import of bindings, also need the setting `CUSTOM_POLICY` or
     `POLICY_CLASSIFICATION` (Helm `config.policy.classification`).
 
+## The outer limit for personal agents
+
+The install's policy file can say how far a tenant's rule for personal
+agents may go, for the whole install. This is the outer limit:
+
+```yaml
+policy: v1
+limits:
+  personal_agent_up_to: caution   # safe, caution or dangerous
+```
+
+- `personal_agent_up_to` is the highest risk level that a tenant's rule
+  for personal agents may let run at once. A `destructive` operation
+  always waits, so `destructive` is not a value.
+- Without a `limits` part, the limit is `safe`. An empty part
+  (`limits: {}`) means the same.
+- Only the install's file holds `limits`. A tenant's file with `limits`
+  is refused: "`limits` belongs to the install's policy file. Only a
+  platform admin sets the outer limit; a tenant's file stays inside it."
+- Only a platform admin imports the install's file:
+  `meho policy import FILE --scope install`. The import is a change of the
+  policy. In the web console it runs at once after a fresh sign-in. With
+  a token it waits until a platform admin approves it in the web console.
+  An agent, a service login or a hosted agent run cannot ask for it.
+- `meho policy export --scope install` writes the `limits` part. An
+  exported file imports again with "No change.".
+- If MEHO cannot read a stored limit, it uses `safe`, the strictest
+  limit, and logs one warning that names the place. Import the install's
+  file again to fix it.
+- No call decision reads the limit yet: every call gets the same answer
+  as without it.
+
+!!! note "Off by default"
+
+    The outer limit needs the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`). While it is off, a file with `limits`
+    is refused: "`limits` needs CUSTOM_POLICY: the outer limit counts only
+    while the CUSTOM_POLICY setting is on. Remove the part, or ask the
+    person who runs MEHO to turn the setting on." A limit stored while the
+    setting was on is then ignored, and the export leaves it out.
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is

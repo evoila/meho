@@ -19,6 +19,7 @@ Then, when an operation needs a second pair of eyes:
 | Guide | What you will have at the end |
 |---|---|
 | [Approvals and break-glass](approvals-and-break-glass.md) | What waits for approval and who may approve it, how to approve in the web interface or on the command line, how a **single operator** approves their own change as a MEHO-Admin, the emergency switch for deployment admins, and how to prove to an auditor which way your deploy runs. |
+| [Who is calling: person, personal agent, service agent](who-is-calling.md) | Which kinds of caller MEHO knows, how it tells them apart, and what runs at once for each kind today. |
 | [Add a tenant](tenant-bootstrap.md) | A new tenant with its role groups and first users, each change approved by a second person, a first login that shows the new tenant, and a first secret read from Vault. |
 | [One person in several tenants](several-tenants.md) | A second tenant in Keycloak with its own Vault login role, a person in both tenants, and a switch between them in the web interface, on the command line and in MCP. |
 

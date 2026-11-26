@@ -403,7 +403,7 @@ you need nothing outside the cluster. The kind example file
    `ingress.host`, signed by a small CA it makes at the same time
    ([`codebase/core-secrets.md`](codebase/core-secrets.md)). Your
    workstation does not know this CA. So `meho login` stops with a
-   certificate error before the browser opens, and the browser warns.
+   certificate error before it prints the address and the code, and the browser warns.
    Save the CA certificate from the TLS Secret and trust it:
 
    ```bash

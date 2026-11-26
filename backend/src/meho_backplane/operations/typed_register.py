@@ -1024,6 +1024,20 @@ def _validate_hard_to_undo(op_id: str, *, hard_to_undo: str | None, safety_level
         )
 
 
+def _validate_changes_rights(op_id: str, *, changes_rights: bool, safety_level: str) -> None:
+    """Refuse ``changes_rights=True`` on a ``safe`` op.
+
+    A ``safe`` operation changes nothing, so it cannot give or take rights.
+    The message names the op and says why.
+    """
+    if changes_rights and safety_level == "safe":
+        raise ValueError(
+            f"op {op_id!r} declares changes_rights=True but safety_level='safe'; "
+            "a safe operation changes nothing, so it cannot change rights. "
+            "Give it a higher safety_level or leave changes_rights out"
+        )
+
+
 def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
     """Validate the ``group_key`` / ``when_to_use`` pairing at the boundary.
 
@@ -1364,7 +1378,8 @@ async def register_typed_operation(
         ``docs/codebase/policy-classification.md``.
     changes_rights
         ``True`` when a call gives or takes rights, a login or an access
-        policy in the target system. Default ``False``. Stored on the row.
+        policy in the target system. Default ``False``. Refused on a
+        ``safe`` op. Stored on the row.
     llm_instructions
         Optional structured agent guidance ("when to call",
         "parameter hints", "output format"). The agent prompt
@@ -1404,6 +1419,7 @@ async def register_typed_operation(
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
         bounded enum, ``hard_to_undo`` unknown or set on a ``safe`` op,
+        ``changes_rights=True`` on a ``safe`` op,
         or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see ``when_to_use`` param description).
     HandlerRefError
@@ -1440,6 +1456,7 @@ async def register_typed_operation(
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
     _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
+    _validate_changes_rights(op_id, changes_rights=changes_rights, safety_level=safety_level)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1611,6 +1628,7 @@ async def register_composite_operation(
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
         bounded enum, ``hard_to_undo`` unknown or set on a ``safe`` op,
+        ``changes_rights=True`` on a ``safe`` op,
         or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
@@ -1652,6 +1670,7 @@ async def register_composite_operation(
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
     _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
+    _validate_changes_rights(op_id, changes_rights=changes_rights, safety_level=safety_level)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)

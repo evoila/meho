@@ -345,14 +345,20 @@ connector kit (kit 1.7 or higher).
 | `changes_rights` | yes or no (the default) | A call gives or takes rights, a login or an access policy in the target system. |
 
 - Registration refuses `hard_to_undo` on a `safe` operation, and any word
-  other than the three. The error names the operation and says why.
+  other than the three. It also refuses `changes_rights` on a `safe`
+  operation. The error names the operation and says why.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
   (a CHECK allows only the three words) and
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
-- No rule of MEHO reads the two fields. No call waits, runs or is refused
-  because of them.
+- With the switch `CUSTOM_POLICY` on, an operation with `hard_to_undo` has
+  a delete sign, the same as a `DELETE` call. So no standing grant and no
+  run approval covers it: a person approves each call. In sandbox mode a
+  delete grant still covers it. The one read site is
+  `_delete_shaped_reason_by_descriptor` in `operations/service_grants.py`.
+  With the switch off, `hard_to_undo` changes no answer.
+- No rule of MEHO reads `changes_rights` yet.
 
 ## Known limits
 

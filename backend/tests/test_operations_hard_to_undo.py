@@ -248,3 +248,26 @@ async def test_a_multi_step_op_with_an_unknown_word_is_refused_and_writes_no_row
             embedding_service=embedding,
         )
     assert await _row(session, op_id) is None
+
+
+@pytest.mark.asyncio
+async def test_registration_refuses_changes_rights_on_a_safe_op(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    with pytest.raises(ValueError, match=r"undo-demo\.widget\.peek.*changes_rights=True.*safe"):
+        await _register(session, embedding, "undo-demo.widget.peek", changes_rights=True)
+    assert await _row(session, "undo-demo.widget.peek") is None
+
+
+@pytest.mark.asyncio
+async def test_a_multi_step_op_with_changes_rights_on_a_safe_op_is_refused(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    op_id = "undo-demo.composite.peek"
+    with pytest.raises(ValueError, match=r"undo-demo\.composite\.peek.*changes_rights=True.*safe"):
+        await register_composite_operation(
+            **_composite(op_id, safety_level="safe", requires_approval=False, changes_rights=True),
+            session=session,
+            embedding_service=embedding,
+        )
+    assert await _row(session, op_id) is None

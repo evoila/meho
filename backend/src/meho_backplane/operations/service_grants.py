@@ -116,6 +116,7 @@ from meho_backplane.operations.credential_read import has_credential_read_floor
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
@@ -323,10 +324,10 @@ def delete_grant_reason(
 
     One rule for every reader: a configured name pattern, a vendor delete
     action name (#4632), and, when a descriptor is given, the ``destructive``
-    safety level, the HTTP verb ``DELETE`` or the ``destructive`` tag.
-    ``None`` when the op has no delete sign. In sandbox mode (#4622) an op
-    with a delete sign needs a delete grant; elsewhere it can never be
-    granted.
+    safety level, the HTTP verb ``DELETE``, the ``destructive`` tag or, with
+    the switch ``CUSTOM_POLICY`` on, ``hard_to_undo``. ``None`` when the
+    op has no delete sign. In sandbox mode (#4622) an op with a delete sign
+    needs a delete grant; elsewhere it can never be granted.
     """
     reason = delete_shaped_refusal_reason(op_id, patterns)
     if reason is None and descriptor is not None:
@@ -608,6 +609,11 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     ``destructive``-tagged typed ops are the shapes an operator resolves
     into the ``destructive`` tier, so once the tier is set it is itself the
     authoritative signal.
+
+    With the switch ``CUSTOM_POLICY`` on, a fourth sign counts: the
+    operation's own definition says a call is hard to undo
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.hard_to_undo`).
+    With the switch off, the field changes no answer.
     """
     if descriptor.safety_level == "destructive":
         return (
@@ -627,7 +633,19 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
             f"op {descriptor.op_id!r} carries the 'destructive' tag; "
             "delete-shaped operations are never grantable"
         )
-    return None
+    return _hard_to_undo_reason(descriptor)
+
+
+def _hard_to_undo_reason(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason when the switch is on and the op is hard to undo."""
+    from meho_backplane.settings import get_settings
+
+    if descriptor.hard_to_undo is None or not custom_policy_on(get_settings()):
+        return None
+    return (
+        f"op {descriptor.op_id!r} is hard to undo (hard_to_undo={descriptor.hard_to_undo!r}); "
+        "it counts as a delete, so no standing grant and no run approval covers it"
+    )
 
 
 async def _resolve_descriptor_for_classification(

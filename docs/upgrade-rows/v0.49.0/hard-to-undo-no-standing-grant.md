@@ -1,0 +1,5 @@
+## Note
+With the switch `CUSTOM_POLICY` on, an operation whose own definition says a call is hard to undo (`hard_to_undo`: it deletes, stops or overwrites something for good) counts as a delete. A standing grant of a service login and a run approval no longer cover it: a person approves each call. In sandbox mode a delete grant still covers it. With the switch off, nothing changes. See https://github.com/evoila/meho/blob/main/docs/codebase/policy-classification.md.
+
+## Action
+Before you turn `CUSTOM_POLICY` on, list the standing grants this touches with this query on the MEHO database: `SELECT g.tenant_id, g.principal_sub, g.connector_id, g.op_id, d.hard_to_undo FROM service_principal_grant g JOIN endpoint_descriptor d ON d.op_id = g.op_id AND g.connector_id = d.impl_id \|\| '-' \|\| d.version WHERE g.revoked_at IS NULL AND d.hard_to_undo IS NOT NULL;` Each row is a grant that stops covering its operation. Plan for a person to approve those calls. A run approval that lists such an operation stops covering it too; ask a person to approve those calls.

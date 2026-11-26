@@ -30,12 +30,13 @@
 //   * When the tab becomes visible again, refresh at once.
 //   * After a decision (the approve/deny POST returns
 //     ``HX-Trigger: meho:approval-decided``), close the modal and refresh.
-// New requests (#6932): the history list is not fetched by the poll (that
-// would drop its "Load more" pages). The first badge swap after the list
-// was drawn stores its count as ``data-baseline`` on the list's
-// new-requests line. When a later swap brings another count, the line shows "N new requests" (or "The waiting list changed") with a
-// "Show" button that fetches the list. This reads the count the badge
-// already polls; it sends no request of its own.
+// New requests (#6932): the poll does not fetch the history list (that
+// would drop its "Load more" pages). The server draws the bell's count,
+// taken before the rows were read, as ``data-baseline`` on the list's
+// new-requests line. When a badge swap brings another count, the line
+// shows "N new requests." (or "The waiting list changed.") with a "Show"
+// button that fetches the list. This file keeps no count of its own and
+// sends no request of its own.
 // Plain JS timers, not ``hx-trigger="every 5s [filter]"``: htmx evaluates
 // trigger filters with ``eval``, which the console's CSP does not allow.
 
@@ -85,7 +86,7 @@ document.addEventListener("alpine:init", () => {
 });
 
 // Show the new-requests line of the Approvals page when a bell badge swap
-// brings a count that differs from the first count after the list was drawn.
+// brings a count that differs from the count the list was drawn with.
 document.addEventListener("htmx:afterSwap", (event) => {
   const target = event.detail && event.detail.target;
   if (!target || typeof target.id !== "string" || !target.id.endsWith("-approvals-badge")) {
@@ -100,12 +101,14 @@ document.addEventListener("htmx:afterSwap", (event) => {
   if (Number.isNaN(count)) {
     return;
   }
+  // A line without the server's count stays hidden.
   if (notice.dataset.baseline === undefined) {
-    // A newly drawn list: the bell's next count is its starting point.
-    notice.dataset.baseline = String(count);
     return;
   }
   const baseline = Number(notice.dataset.baseline);
+  if (Number.isNaN(baseline)) {
+    return;
+  }
   const text = notice.querySelector("[data-approvals-new-notice-text]");
   if (count === baseline) {
     notice.hidden = true;

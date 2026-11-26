@@ -716,14 +716,35 @@ async def _render_badge(request: Request, session: UISessionContext) -> HTMLResp
     a recent backlog, not the full pending set). Tenant-scoped via the
     session.
     """
+    count, for_you = await _badge_count(session)
+    context: dict[str, object] = {"pending_count": count, "for_you": for_you}
+    return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
+
+
+async def _badge_count(session: UISessionContext) -> tuple[int, bool]:
+    """The bell's count, and whether it counts only what this person may approve.
+
+    The bell badge and the Pending / For you lists (#6932) both use it, so
+    the list's starting count is the number the bell shows.
+    """
     operator = await _operator_or_none(session) if routing_enabled() else None
     if operator is not None:
         # Approver routing: count only what this person may approve.
-        count, for_you = await _count_waiting_for(session, operator), True
-    else:
-        count, for_you = len(await _list_pending_for_session(session)), False
-    context: dict[str, object] = {"pending_count": count, "for_you": for_you}
-    return get_templates().TemplateResponse(request, "approvals/_badge.html", context)
+        return await _count_waiting_for(session, operator), True
+    return len(await _list_pending_for_session(session)), False
+
+
+async def _list_baseline(session: UISessionContext, tab: str) -> int | None:
+    """The bell's count for a Pending or For you list, taken before its rows are read.
+
+    A request that arrives between the count and the rows is then in the
+    list but not in the count, so the new-requests line shows once too
+    often, never too seldom. Other tabs get ``None`` and no count query.
+    """
+    if tab not in ("pending", _FOR_YOU_TAB):
+        return None
+    count, _ = await _badge_count(session)
+    return count
 
 
 async def _render_panel(request: Request, session: UISessionContext) -> HTMLResponse:
@@ -905,6 +926,7 @@ def _history_view(
         "has_more": has_more,
         "in_order_work_ref": in_order_work_ref,
         "new_notice": work_ref_error is None and tab in ("pending", _FOR_YOU_TAB),
+        "list_baseline": None,
     }
 
 
@@ -931,7 +953,9 @@ async def _render_index(
     No CSRF cookie is set here: this surface is read-only (the decision
     POSTs live on the detail modal, which mints its own token).
     """
+    baseline = await _list_baseline(session, tab)
     context = await _build_history_context(session, tab, work_ref, offset, order)
+    context["list_baseline"] = baseline
     context["active_surface"] = "approvals"
     context["page_title"] = "Approvals"
     return _history_response(
@@ -961,7 +985,10 @@ async def _render_history(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown approvals list partial '{partial}'.",
         )
+    # The "Load more" rows have no new-requests line, so no count query.
+    baseline = None if partial == _HISTORY_PARTIAL_ROWS else await _list_baseline(session, tab)
     context = await _build_history_context(session, tab, work_ref, offset, order)
+    context["list_baseline"] = baseline
     refused = context["work_ref_error"] is not None
     if partial == _HISTORY_PARTIAL_ROWS and not refused:
         return get_templates().TemplateResponse(

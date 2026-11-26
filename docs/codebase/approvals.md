@@ -4918,12 +4918,16 @@ re-fetches its active tab on them, so a decision made in the open page
 drops out of its Pending tab without a reload. A new request, or a
 decision made by another person, does not re-fetch the list (that would
 drop its "Load more" pages). The Pending and For you lists have a
-new-requests line (`data-approvals-new-notice`, `_history.html`). The
-list load sends no count query: `approvals-bell.js` stores the first bell
-count after the list is drawn as `data-baseline`. When a later bell badge
-swap brings another count, it shows "N new requests." or "The waiting
-list changed." with a "Show" button that re-fetches the list like a tab.
-It reads the count the bell already polls and sends no request of its
+new-requests line (`data-approvals-new-notice`, `_history.html`). Every
+answer that draws one of these lists (the full page and each list fetch)
+takes the bell's count with `_badge_count`, the function the bell badge
+uses, before it reads the rows, and draws it as `data-baseline`. A request
+that arrives between the count and the rows can show the line once too
+often, never too seldom. This costs one count query per list draw; the
+"Load more" rows send none and have no line. When a later bell badge swap
+brings another count, `approvals-bell.js` shows "N new requests." or "The
+waiting list changed." with a "Show" button that re-fetches the list like
+a tab. The script keeps no count of its own and sends no request of its
 own. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the

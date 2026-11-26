@@ -4080,30 +4080,58 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pending_list_has_the_new_requests_line_without_a_count() -> None:
-    """The waiting list has the line and a "Show" button, but no count of its own.
+def _new_notice_baseline(body: str) -> int | None:
+    """The ``data-baseline`` of the list's new-requests line, or None without one."""
+    match = re.search(r"<div hidden data-approvals-new-notice[^>]*>", body)
+    assert match is not None, "the list has no new-requests line"
+    baseline = re.search(r'data-baseline="(\d+)"', match.group(0))
+    return int(baseline.group(1)) if baseline else None
 
-    The script takes its starting count from the bell, so the list load
-    asks the database nothing more.
+
+def _badge_count_of(body: str) -> int:
+    match = re.search(r'data-pending-count="(\d+)"', body)
+    assert match is not None
+    return int(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("routing", "tabs"),
+    [(False, ("pending",)), (True, ("pending", "for_you"))],
+    ids=["routing-off", "routing-on"],
+)
+def test_list_baseline_is_the_bell_count_for_the_same_session(
+    monkeypatch: pytest.MonkeyPatch, routing: bool, tabs: tuple[str, ...]
+) -> None:
+    """The Pending and For you lists carry the bell's count as ``data-baseline``.
+
+    With routing on, the bell counts only what this person may approve, so
+    the own request below is left out of both numbers.
     """
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true" if routing else "false")
+    get_settings.cache_clear()
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_request(tenant_id=_TENANT_A, op_id="pending.one")
     _seed_request(tenant_id=_TENANT_A, op_id="pending.two")
+    _seed_request(tenant_id=_TENANT_A, op_id="own.request", principal_sub=_REVIEWER_SUB)
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
 
-    with respx.mock(assert_all_called=False):
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+    ):
         client = _authenticated_client(session_id)
-        response = client.get("/ui/approvals/list?tab=pending", headers=_HX_HEADERS)
-        page = client.get("/ui/approvals?tab=pending")
+        badge = _badge_count_of(client.get("/ui/approvals/badge", headers=_HX_HEADERS).text)
+        bodies = [
+            client.get(f"/ui/approvals/list?tab={tab}", headers=_HX_HEADERS).text for tab in tabs
+        ]
+        bodies.append(client.get(f"/ui/approvals?tab={tabs[-1]}").text)
 
-    for body in (response.text, page.text):
-        assert "<div hidden data-approvals-new-notice>" in body
-        assert "data-baseline" not in body
+    assert badge == (2 if routing else 3)
+    for body in bodies:
+        assert _new_notice_baseline(body) == badge
         # "Show" fetches the same list a tab does; nothing is polled for it.
         assert body.count('hx-trigger="meho:approval-bump from:body, meho:approval-decided') == 1
-    assert 'hx-get="/ui/approvals/list?tab=pending"\n          hx-target="#approvals-history"' in (
-        response.text
-    )
 
 
 def test_other_views_have_no_new_requests_line() -> None:
@@ -4122,12 +4150,12 @@ def test_other_views_have_no_new_requests_line() -> None:
 
 
 def test_bell_script_shows_the_line_from_the_polled_count_only() -> None:
-    """The script reads the badge swap; it adds no timer and no request."""
+    """The script reads the badge swap; it adds no timer, no request and no count."""
     script = (static_root_dir() / "src" / "app" / "approvals-bell.js").read_text(encoding="utf-8")
     assert script.count("setInterval(") == 1
     assert "htmx:afterSwap" in script
     assert "data-approvals-new-notice" in script
-    # The first badge count after the list is drawn is its starting point.
-    assert "notice.dataset.baseline = String(count);" in script
+    # The starting count comes from the server; the script never sets one.
+    assert re.search(r"dataset\.baseline\s*=[^=]", script) is None
     for request_marker in ("fetch(", "XMLHttpRequest", "htmx.ajax", "hx-get"):
         assert request_marker not in script.split("// Show the new-requests line", 1)[1]

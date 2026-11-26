@@ -66,6 +66,7 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -195,7 +196,7 @@ async def _to_thread_jwt_login(
     client: hvac.Client, *, role: str, jwt: str, mount_path: str
 ) -> None:
     """Run :func:`_do_jwt_login` off the event loop."""
-    await asyncio.to_thread(_do_jwt_login, client, role=role, jwt=jwt, mount_path=mount_path)
+    await to_thread_checked(_do_jwt_login, client, role=role, jwt=jwt, mount_path=mount_path)
 
 
 async def _to_thread_revoke_self(client: hvac.Client) -> None:
@@ -223,7 +224,7 @@ def _do_read_health(client: hvac.Client) -> Any:
 
 async def _to_thread_read_health(client: hvac.Client) -> Any:
     """Run :func:`_do_read_health` off the event loop."""
-    return await asyncio.to_thread(_do_read_health, client)
+    return await to_thread_checked(_do_read_health, client)
 
 
 def _resolve_role_for_tenant(overrides_csv: str, tenant_id: UUID) -> str | None:

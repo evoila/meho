@@ -50,12 +50,12 @@ or makes the change. Before MEHO asks for approval of a write,
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops import vault_capability_preflight
 from meho_backplane.connectors.vault.ops_auth import (
     AUTH_WHEN_TO_USE,
@@ -132,7 +132,7 @@ async def vault_auth_jwt_role_list(
     mount = _mount(params)
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.adapter.list, f"/v1/auth/{mount}/role")
+            payload = await to_thread_checked(client.adapter.list, f"/v1/auth/{mount}/role")
         except hvac.exceptions.InvalidPath:
             return {"mount": mount, "keys": []}
     return {"mount": mount, "keys": _extract_keys(payload)}
@@ -148,7 +148,7 @@ async def vault_auth_jwt_role_read(
     """
     path = _role_auth_path(_mount(params), str(params["role_name"]).strip())
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.adapter.get, f"/v1/{path}")
+        payload = await to_thread_checked(client.adapter.get, f"/v1/{path}")
     return _extract_data(payload)
 
 
@@ -176,11 +176,11 @@ async def vault_auth_jwt_role_write(
     async with vault_client_for_target(operator, target) as client:
         if missing:
             try:
-                current = _extract_data(await asyncio.to_thread(client.adapter.get, api_path))
+                current = _extract_data(await to_thread_checked(client.adapter.get, api_path))
             except hvac.exceptions.InvalidPath:
                 current = {}
             kept = {field: current[field] for field in missing if current.get(field)}
-        await asyncio.to_thread(client.adapter.post, api_path, json=settings | kept)
+        await to_thread_checked(client.adapter.post, api_path, json=settings | kept)
     return {
         "mount": mount,
         "role_name": role_name,
@@ -201,7 +201,7 @@ async def vault_auth_jwt_config_read(
     """
     mount = _mount(params)
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.adapter.get, f"/v1/auth/{mount}/config")
+        payload = await to_thread_checked(client.adapter.get, f"/v1/auth/{mount}/config")
     data = _extract_data(payload)
     return {"mount": mount} | {k: data[k] for k in VAULT_AUTH_JWT_CONFIG_FIELDS if k in data}
 

@@ -111,6 +111,13 @@ reads the login that the dispatcher noted for the running call
 `checking_logins_for_steps`. It reads a copy of the list that is at most 5
 seconds old, so it reads the database at most once in 5 seconds per process.
 
+Each call of the Vault and secret connectors passes this check right before
+it is sent. These calls run a blocking library in a worker thread, so they
+go through `to_thread_checked` (`auth/send_check.py`): it runs the check on
+the event loop, notes the send, and then starts the thread. The Vault login
+and the HTTP client that reaches another instance's store do the same. Outside
+an operation the check does nothing.
+
 Once a check of a run refused, every later check of the same run refuses
 too, also when the list can be read again. The operation answers with the
 refusal, also when its handler catches the error of the step. An inventory

@@ -127,6 +127,7 @@ from typing import TYPE_CHECKING, Any, Final
 import hvac.exceptions
 
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors.pfsense.openvpn_config import (
@@ -596,13 +597,13 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     """
     try:
         async with vault_client_for_operator(operator) as client:
-            mount_info = await asyncio.to_thread(
+            mount_info = await to_thread_checked(
                 client.adapter.get, f"/v1/sys/internal/ui/mounts/{mount}"
             )
             if not _mount_is_kv2(mount_info):
                 raise _not_kv2(mount, path)
             try:
-                answer = await asyncio.to_thread(
+                answer = await to_thread_checked(
                     client.secrets.kv.v2.read_secret_version,
                     path=path,
                     mount_point=mount,
@@ -646,7 +647,7 @@ async def _store_password(
     version, data = state
     try:
         async with vault_client_for_operator(operator) as client:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.secrets.kv.v2.create_or_update_secret,
                 path=path,
                 secret={**data, field: password},

@@ -41,11 +41,11 @@ namespace.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 
 __all__ = [
     "VAULT_SYS_CLUSTER_PARAMETER_SCHEMA",
@@ -283,7 +283,7 @@ async def vault_sys_ha_status(
     """
     _ = params  # schema-validated empty object; no inputs to extract.
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        response = await asyncio.to_thread(client.adapter.get, HA_STATUS_API_PATH)
+        response = await to_thread_checked(client.adapter.get, HA_STATUS_API_PATH)
     data = _unwrap_data(response)
     raw_nodes = data.get("Nodes", data.get("nodes"))
     nodes = raw_nodes if isinstance(raw_nodes, list) else []
@@ -319,7 +319,7 @@ async def vault_sys_raft_autopilot_state(
     """
     _ = params
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        response = await asyncio.to_thread(client.adapter.get, RAFT_AUTOPILOT_STATE_API_PATH)
+        response = await to_thread_checked(client.adapter.get, RAFT_AUTOPILOT_STATE_API_PATH)
     data = _unwrap_data(response)
     raw_servers = data.get("servers")
     if isinstance(raw_servers, dict):

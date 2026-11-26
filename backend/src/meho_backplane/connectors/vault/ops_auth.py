@@ -74,12 +74,12 @@ keep working.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors.vault.ops_auth_schemas import (
     VAULT_AUTH_APPROLE_LIST_LLM_INSTRUCTIONS,
@@ -160,7 +160,7 @@ async def vault_auth_userpass_list(
     mount: str = str(params.get("mount", "userpass")).strip()
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.auth.userpass.list_user, mount_point=mount)
+            payload = await to_thread_checked(client.auth.userpass.list_user, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
             raise VaultAuthBackendNotMountedError(
                 f"userpass auth backend not mounted at {mount!r}"
@@ -191,7 +191,7 @@ async def vault_auth_userpass_read(
     mount: str = str(params.get("mount", "userpass")).strip()
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(
+            payload = await to_thread_checked(
                 client.auth.userpass.read_user,
                 username=username,
                 mount_point=mount,
@@ -221,7 +221,7 @@ async def vault_auth_approle_list(
     mount: str = str(params.get("mount", "approle")).strip()
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.auth.approle.list_roles, mount_point=mount)
+            payload = await to_thread_checked(client.auth.approle.list_roles, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
             raise VaultAuthBackendNotMountedError(
                 f"approle auth backend not mounted at {mount!r}"
@@ -249,7 +249,7 @@ async def vault_auth_approle_read(
     mount: str = str(params.get("mount", "approle")).strip()
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(
+            payload = await to_thread_checked(
                 client.auth.approle.read_role,
                 role_name=role_name,
                 mount_point=mount,
@@ -315,7 +315,7 @@ async def _reclassify_not_found(
         client.auth.userpass.list_user if backend == "userpass" else client.auth.approle.list_roles
     )
     try:
-        await asyncio.to_thread(list_fn, mount_point=mount)
+        await to_thread_checked(list_fn, mount_point=mount)
     except hvac.exceptions.InvalidPath as list_exc:
         raise VaultAuthBackendNotMountedError(
             f"{backend} auth backend not mounted at {mount!r}"

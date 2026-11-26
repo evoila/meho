@@ -32,12 +32,12 @@ revokes every spelling of the username it finds there. Both calls need
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops_auth import VaultAuthBackendNotMountedError
 from meho_backplane.connectors.vault.ops_userpass_lifecycle_schemas import (
     VAULT_AUTH_USERPASS_DISABLE_LLM_INSTRUCTIONS,
@@ -186,7 +186,7 @@ async def _switch(
     username, mount = _clean_inputs(params)
     revoke = bool(params.get("revoke_tokens", False)) and disabled
     async with vault_client_for_target(operator, target) as client:
-        return await asyncio.to_thread(
+        return await to_thread_checked(
             _switch_sync,
             client,
             username=username,

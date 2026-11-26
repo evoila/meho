@@ -40,12 +40,12 @@ request is made.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops import vault_capability_preflight
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_token_role_schemas import (
@@ -124,7 +124,7 @@ async def vault_token_role_write(
     }
 
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(client.adapter.post, token_role_api_path(role_name), json=settings)
+        await to_thread_checked(client.adapter.post, token_role_api_path(role_name), json=settings)
 
     return {"role_name": role_name, "written": True, "settings": settings}
 
@@ -143,7 +143,7 @@ async def vault_token_role_read(
     role_name: str = str(params["role_name"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.auth.token.read_role, role_name=role_name)
+        payload = await to_thread_checked(client.auth.token.read_role, role_name=role_name)
 
     return _extract_data(payload)
 
@@ -159,7 +159,7 @@ async def vault_token_role_list(
     """
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.auth.token.list_roles)
+            payload = await to_thread_checked(client.auth.token.list_roles)
         except hvac.exceptions.InvalidPath:
             return {"keys": []}
 

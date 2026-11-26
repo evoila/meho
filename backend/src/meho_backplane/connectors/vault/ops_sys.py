@@ -93,11 +93,11 @@ based) and FastAPI does not auto-offload blocking I/O inside an
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops_sys_bootstrap import (
     VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS,
     VAULT_SYS_AUTH_ENABLE_PARAMETER_SCHEMA,
@@ -460,7 +460,7 @@ async def vault_sys_seal_status(
     """
     _ = params  # schema-validated empty object; no inputs to extract.
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        return await asyncio.to_thread(client.sys.read_seal_status)
+        return await to_thread_checked(client.sys.read_seal_status)
 
 
 async def vault_sys_mounts_list(
@@ -491,7 +491,7 @@ async def vault_sys_mounts_list(
     """
     _ = params
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        response = await asyncio.to_thread(client.sys.list_mounted_secrets_engines)
+        response = await to_thread_checked(client.sys.list_mounted_secrets_engines)
         # hvac returns the full Vault envelope ({request_id, data, ...}).
         # The mount map lives under ``data``; fall back to the whole
         # response on the (older-hvac) chance the envelope is unwrapped.
@@ -519,7 +519,7 @@ async def vault_sys_auth_list(
     """
     _ = params
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        response = await asyncio.to_thread(client.sys.list_auth_methods)
+        response = await to_thread_checked(client.sys.list_auth_methods)
         auth_methods = response.get("data", response) if isinstance(response, dict) else response
         return {"auth_methods": auth_methods}
 

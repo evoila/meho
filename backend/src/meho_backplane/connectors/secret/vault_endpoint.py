@@ -57,7 +57,6 @@ policy denies.
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -66,6 +65,7 @@ import structlog
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.secret_read_as import record_caller_kv_read, record_caller_secret_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
     strip_credential_value,
@@ -262,7 +262,7 @@ class VaultKvSecretEndpoint:
         # so the platform-path allow-list applies on the read side.
         enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=True)
         async with self._client(operator, "vault.kv.read") as client:
-            payload = await asyncio.to_thread(
+            payload = await to_thread_checked(
                 client.secrets.kv.v2.read_secret_version,
                 path=self._path,
                 mount_point=self._mount,
@@ -308,7 +308,7 @@ class VaultKvSecretEndpoint:
         body: dict[str, str] = {self._field: material.value.decode("utf-8")}
         async with self._client(operator, "vault.kv.put") as client:
             try:
-                await asyncio.to_thread(
+                await to_thread_checked(
                     client.secrets.kv.v2.create_or_update_secret,
                     path=self._path,
                     secret=body,
@@ -345,7 +345,7 @@ class VaultKvSecretEndpoint:
         value = material.value.decode("utf-8")
         expect = _approved_sink_expectation()
         async with self._client(operator, "vault.kv.patch") as client:
-            await asyncio.to_thread(self._merge_write, client, value, expect, operator)
+            await to_thread_checked(self._merge_write, client, value, expect, operator)
 
     def _merge_write(
         self, client: hvac.Client, value: str, expect: _SinkExpectation, operator: Operator
@@ -447,7 +447,7 @@ class VaultKvSecretEndpoint:
         try:
             self.check_write_allowed(operator)
             async with self._client(operator, op_id) as client:
-                exists, field = await asyncio.to_thread(self._read_state, client, operator)
+                exists, field = await to_thread_checked(self._read_state, client, operator)
         except Exception as exc:
             _log.info(
                 "secret_broker.vault.sink_state_unknown",

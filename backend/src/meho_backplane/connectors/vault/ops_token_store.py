@@ -78,6 +78,7 @@ import structlog
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault import ops as _kv_ops
 from meho_backplane.connectors.vault.ops_token_store_preview import (
     TOKEN_STORE_OP,
@@ -303,7 +304,7 @@ async def _revoke(minted: _Minted) -> bool:
         client.auth.token.revoke_self()
 
     try:
-        await asyncio.to_thread(_do)
+        await to_thread_checked(_do)
     except Exception as exc:
         _log.warning(
             "vault_token_store_revoke_failed",
@@ -334,9 +335,9 @@ async def _create_token(client: Any, role_name: Any, kwargs: dict[str, Any]) -> 
     raised here.
     """
     if role_name:
-        work = asyncio.to_thread(client.auth.token.create, role_name=role_name, **kwargs)
+        work = to_thread_checked(client.auth.token.create, role_name=role_name, **kwargs)
     else:
-        work = asyncio.to_thread(client.auth.token.create_orphan, **kwargs)
+        work = to_thread_checked(client.auth.token.create_orphan, **kwargs)
     task = asyncio.ensure_future(work)
     cancelled = False
     while not task.done():

@@ -19,11 +19,11 @@ so a huge folder cannot make one call run for a long time.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -59,7 +59,7 @@ async def _list_names(client: Any, *, mount: str, path: str) -> list[str]:
     is raised unchanged.
     """
     try:
-        payload = await asyncio.to_thread(
+        payload = await to_thread_checked(
             client.secrets.kv.v2.list_secrets,
             path=path,
             mount_point=mount,

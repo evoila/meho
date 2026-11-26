@@ -59,7 +59,6 @@ handoff error too.
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 from typing import TYPE_CHECKING, Any, Final, NoReturn
 
@@ -70,6 +69,7 @@ import requests.exceptions
 import structlog
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.send_check import check_before_send, to_thread_checked
 from meho_backplane.connectors._shared.cache_key import DEFAULT_PORTS, effective_scheme
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
@@ -275,7 +275,7 @@ async def _wrap_on_local_store(
     payload = {_WRAP_FIELD: material.value.decode("utf-8"), CHECK_KEY_FIELD: check_key.hex()}
     try:
         async with _auth_vault.vault_client_for_operator(operator) as client:
-            response = await asyncio.to_thread(client.sys.wrap, payload=payload, ttl=ttl_seconds)
+            response = await to_thread_checked(client.sys.wrap, payload=payload, ttl=ttl_seconds)
     except (
         _auth_vault.VaultClientError,
         hvac.exceptions.VaultError,
@@ -399,6 +399,11 @@ def _pin_store_addresses(host: str) -> list[str] | None:
         raise _blocked("the store target", exc) from exc
 
 
+async def _check_request_before_send(_request: httpx.Request) -> None:
+    """Request hook: the block check right before each request to the other store."""
+    await check_before_send()
+
+
 def _build_store_client(store: _RemoteStore) -> httpx.AsyncClient:
     """Build the HTTP client that reaches the other instance's store.
 
@@ -411,6 +416,7 @@ def _build_store_client(store: _RemoteStore) -> httpx.AsyncClient:
         transport=build_pinned_async_transport(_pin_store_addresses, verify=store.verify),
         timeout=get_settings().vault_timeout_seconds,
         follow_redirects=False,
+        event_hooks={"request": [_check_request_before_send]},
     )
 
 

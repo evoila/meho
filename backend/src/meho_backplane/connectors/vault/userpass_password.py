@@ -23,7 +23,6 @@ password in KV, never a login whose password nobody knows. The KV write uses
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import string
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 import hvac.exceptions
 
 from meho_backplane.auth.secret_read_as import record_caller_secret_read
+from meho_backplane.auth.send_check import to_thread_checked
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -280,7 +280,7 @@ async def apply_credential_source(
     inline_password: str | None,
 ) -> dict[str, Any]:
     """Write the login with the planned password source; return a value-free summary."""
-    return await asyncio.to_thread(
+    return await to_thread_checked(
         _apply_sync,
         client,
         plan,

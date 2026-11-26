@@ -66,13 +66,13 @@ one place.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 
 __all__ = [
     "VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS",
@@ -433,7 +433,7 @@ async def vault_sys_auth_enable(
     description: str | None = params.get("description")
     async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.sys.enable_auth_method,
                 method_type=method_type,
                 path=path,
@@ -474,7 +474,7 @@ async def vault_sys_mounts_enable(
     description: str | None = params.get("description")
     async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.sys.enable_secrets_engine,
                 backend_type=backend_type,
                 path=path,
@@ -510,7 +510,7 @@ async def vault_sys_auth_tune(
     path: str = str(params["path"]).strip()
     kwargs = _tune_kwargs(params)
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        await asyncio.to_thread(client.sys.tune_auth_method, path=path, **kwargs)
+        await to_thread_checked(client.sys.tune_auth_method, path=path, **kwargs)
         return {"path": path, "tuned": True}
 
 
@@ -533,5 +533,5 @@ async def vault_sys_mounts_tune(
     path: str = str(params["path"]).strip()
     kwargs = _tune_kwargs(params)
     async with _auth_vault.vault_client_for_operator(operator) as client:
-        await asyncio.to_thread(client.sys.tune_mount_configuration, path=path, **kwargs)
+        await to_thread_checked(client.sys.tune_mount_configuration, path=path, **kwargs)
         return {"path": path, "tuned": True}

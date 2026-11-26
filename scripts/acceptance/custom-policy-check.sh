@@ -222,7 +222,7 @@ REQUESTS=()
 
 # At every end of the run, also on an error or a stop signal: withdraw the
 # requests of this run that still wait, and remove the private files.
-# shellcheck disable=SC2317  # called by the trap
+# shellcheck disable=SC2317,SC2329  # called by the trap
 on_exit() {
     local rc=$?
     trap - EXIT INT TERM

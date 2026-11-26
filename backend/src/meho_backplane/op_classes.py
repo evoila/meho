@@ -51,6 +51,7 @@ __all__ = [
     "declared_op_class",
     "declared_op_ids",
     "hidden_stored_param",
+    "hidden_stored_param_refusal",
     "is_credential_capable",
     "is_root_shell",
     "is_safe_write",
@@ -81,6 +82,7 @@ _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
+_HIDDEN_STORED_REFUSALS: dict[str, str] = {}
 
 
 def declare_op_classes(
@@ -345,7 +347,11 @@ def call_always_waits(op_id: str, params: Mapping[str, Any]) -> bool:
 
 
 def declare_hidden_stored_param(
-    op_id: str, name: str, check: Callable[[Mapping[str, Any]], bool]
+    op_id: str,
+    name: str,
+    check: Callable[[Mapping[str, Any]], bool],
+    *,
+    refusal: str | None = None,
 ) -> None:
     """Hide the param *name* of a stored request of *op_id* when *check* flags its params.
 
@@ -355,8 +361,28 @@ def declare_hidden_stored_param(
     it replaces a secret-named value. For example the manifest of a
     ``k8s.apply`` that holds a Kubernetes Secret. A new entry for the same
     op id replaces the old one.
+
+    *refusal* is the text of the answer when such a request cannot be kept
+    because the install has no key for the encrypted hand-off
+    (:func:`hidden_stored_param_refusal`).
     """
     _HIDDEN_STORED_PARAMS[op_id] = (name, check)
+    if refusal is None:
+        _HIDDEN_STORED_REFUSALS.pop(op_id, None)
+    else:
+        _HIDDEN_STORED_REFUSALS[op_id] = refusal
+
+
+def hidden_stored_param_refusal(op_id: str, params: Mapping[str, Any]) -> str | None:
+    """The refusal *op_id* declared for a request whose param is kept only in the hand-off.
+
+    ``None`` when *op_id* declared no refusal text, or when
+    :func:`hidden_stored_param` does not hide a param of *params*.
+    """
+    refusal = _HIDDEN_STORED_REFUSALS.get(op_id)
+    if refusal is None or hidden_stored_param(op_id, params) is None:
+        return None
+    return refusal
 
 
 def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
@@ -394,3 +420,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()
+    _HIDDEN_STORED_REFUSALS.clear()

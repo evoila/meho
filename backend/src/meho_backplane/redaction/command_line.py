@@ -36,12 +36,14 @@ from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
     "HIDDEN",
+    "PASSWORD_P_PROGRAMS",
     "hide_command_text",
     "hide_flag_value",
     "hide_in_text",
     "hide_shell_script",
     "is_secret_shaped_name",
     "reads_shell_script",
+    "takes_password_after_p",
 ]
 
 #: Put in place of a value the approver must not see.
@@ -338,6 +340,19 @@ def _hide_glued_value(word: str, *, p_rule: str, script_mode: bool) -> str | Non
 _SCRIPT_P_PROGRAMS = re.compile(
     r"sshpass|mysql[A-Za-z0-9_-]*|mariadb[A-Za-z0-9_-]*|mongo[A-Za-z0-9_-]*|login"
 )
+
+
+#: The programs that take a password after ``-p`` (:data:`_SCRIPT_P_PROGRAMS`),
+#: for a caller that reads a command line item by item (``k8s.apply``).
+PASSWORD_P_PROGRAMS: Final[re.Pattern[str]] = _SCRIPT_P_PROGRAMS
+
+
+def takes_password_after_p(word: str) -> bool:
+    """Whether the program *word* (a path is read by its last part) takes a password after ``-p``.
+
+    The programs of :data:`_SCRIPT_P_PROGRAMS`: ``mysql``, ``/usr/bin/sshpass``.
+    """
+    return _SCRIPT_P_PROGRAMS.fullmatch(word.rsplit("/", 1)[-1]) is not None
 
 
 def hide_shell_script(script: str) -> str:

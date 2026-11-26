@@ -3973,6 +3973,7 @@ async def _handle_needs_approval(
     # approval request links back to the paused run.
     from meho_backplane.agent.invoke import current_agent_run_id_var
     from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.op_classes import hidden_stored_param_refusal
     from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
         IdempotencyKeyConflictError,
@@ -4140,7 +4141,8 @@ async def _handle_needs_approval(
     except ApprovalHandoffKeyError:
         return result_denied(
             op_id,
-            "credential-write approval custody is unavailable; configure a valid "
+            hidden_stored_param_refusal(op_id, params)
+            or "credential-write approval custody is unavailable; configure a valid "
             "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
             duration_ms,
         )

@@ -19,7 +19,7 @@ the encrypted handoff of the run.
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
-from meho_backplane.broadcast.events import is_secret_param_name
+from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
 from meho_backplane.connectors.kubernetes.manifest_yaml import (
     ManifestYamlError,
     load_manifest_documents,
@@ -31,11 +31,16 @@ from meho_backplane.op_classes import (
     declare_op_classes,
     declare_sandbox_delete_grant,
 )
+from meho_backplane.redaction import get_default_policy, redact
 from meho_backplane.redaction.command_line import (
+    HIDDEN,
+    PASSWORD_P_PROGRAMS,
     hide_command_text,
     hide_flag_value,
     hide_in_text,
+    is_secret_shaped_name,
     reads_shell_script,
+    takes_password_after_p,
 )
 
 declare_op_classes(
@@ -179,8 +184,48 @@ SECRET_VALUE_FIELDS: Final[tuple[str, ...]] = ("data", "stringData", "binaryData
 
 
 def _is_secret_shaped(value: Any) -> bool:
-    """True for a text with a secret shape of its own (a password in a URL, a known token)."""
-    return isinstance(value, str) and hide_in_text(value) != value
+    """True for a text that the card hides by its shape.
+
+    That is a password in a URL or a token with a known vendor prefix
+    (:func:`~meho_backplane.redaction.command_line.hide_in_text`), or a value
+    the shared redaction hides with its default rules (an ``Authorization``
+    header, for example).
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    return hide_in_text(value) != value or redact(value, get_default_policy()).redacted != value
+
+
+#: Kubernetes fields with a secret-shaped name that hold a yes/no setting,
+#: never a secret. The card shows their value, and they do not count.
+PLAIN_SETTINGS: Final[frozenset[str]] = frozenset({"automountServiceAccountToken"})
+
+
+def _is_shown_scalar(value: Any) -> bool:
+    """True for a value the card hides under a secret name: a text that is not empty,
+    a number, a yes/no value or a date. A map, a list and an empty value are not."""
+    if isinstance(value, str):
+        return value != ""
+    return value is not None and not isinstance(value, Mapping | list)
+
+
+def _has_secret_named_value(node: Mapping[str, Any]) -> bool:
+    """True when a key of *node* with a secret name holds a text, a number or a yes/no value.
+
+    The name rule is that of
+    :func:`~meho_backplane.broadcast.events.is_secret_param_name`. The
+    ``value`` of a ``{name, value}`` pair whose name it marks counts too. A
+    field of :data:`PLAIN_SETTINGS` does not count.
+    """
+    if is_secret_name_value_pair(node) and _is_shown_scalar(node.get("value")):
+        return True
+    return any(
+        isinstance(key, str)
+        and key not in PLAIN_SETTINGS
+        and is_secret_param_name(key)
+        and _is_shown_scalar(value)
+        for key, value in node.items()
+    )
 
 
 #: A container's ``command`` and ``args`` lists. In this order they make one
@@ -200,7 +245,22 @@ def _argument_text(part: Any) -> str | None:
     return str(part)
 
 
-def hide_command_secrets(parts: list[Any]) -> list[Any]:
+def _hide_apply_item(text: str, previous: str, *, p_program: bool) -> tuple[str, str | None]:
+    """One item of a ``k8s.apply`` command line with its secret values hidden.
+
+    ``-p`` takes a password only in a command of a program that takes one
+    there (:func:`~meho_backplane.redaction.command_line.takes_password_after_p`,
+    *p_program* for the items before this one). There a value glued to it
+    (``-pVALUE``) is hidden too. ``-uuser:password`` hides the password.
+    Returned with the text is the secret flag that waits for the next item.
+    """
+    shell = reads_shell_script(previous)
+    if p_program and not shell and text.startswith("-p"):
+        return (text, "secret") if text == "-p" else (f"-p{HIDDEN}", None)
+    return hide_command_text(hide_in_text(text), None, shell=shell, p_programs=PASSWORD_P_PROGRAMS)
+
+
+def hide_command_secrets(parts: list[Any], *, p_after_programs: bool = False) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
     The words stay, so the approver still reads what runs. Hidden are: what
@@ -220,23 +280,38 @@ def hide_command_secrets(parts: list[Any]) -> list[Any]:
     is a shell command string: there a value is one shell word, quotes and
     backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
     shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
+
+    *p_after_programs* is the rule of ``k8s.apply`` (its card and the
+    check of its stored request, :func:`_hide_apply_item`): ``-p`` is a
+    secret flag only after a program that takes a password there
+    (``mysql -p x``, ``mysql -pVALUE``; ``mkdir -p /data`` stays), a
+    password glued to ``-u`` is hidden (``curl -uuser:password``), and the
+    item after a secret flag is its value also when it starts with a dash
+    (``--password -x``).
     """
     hidden: list[Any] = []
     pending: str | None = None
     previous = ""
+    p_program = False
     for part in parts:
         text = _argument_text(part)
         if text is None:
             hidden.append(part)
             previous = ""
             continue
-        if pending is not None and not (isinstance(part, str) and part.startswith("-")):
+        if pending is not None and (
+            p_after_programs or not (isinstance(part, str) and part.startswith("-"))
+        ):
             shown = hide_flag_value(pending, text)
             pending = None
+        elif p_after_programs:
+            shown, pending = _hide_apply_item(text, previous, p_program=p_program)
         else:
             shown, pending = hide_command_text(
                 hide_in_text(text), pending, shell=reads_shell_script(previous)
             )
+        if not reads_shell_script(previous) and takes_password_after_p(text):
+            p_program = True
         hidden.append(part if shown == text else shown)
         previous = text
     return hidden
@@ -247,7 +322,7 @@ def _has_secret_command_line(node: Any) -> bool:
     if not isinstance(node, Mapping):
         return False
     line = [part for key in _COMMAND_LISTS if isinstance(node.get(key), list) for part in node[key]]
-    return bool(line) and hide_command_secrets(line) != line
+    return bool(line) and hide_command_secrets(line, p_after_programs=True) != line
 
 
 def _is_nested_secret(node: Any) -> bool:
@@ -267,10 +342,16 @@ def _is_nested_secret(node: Any) -> bool:
 
 
 def _is_secret_env_entry(entry: Any) -> bool:
-    """True for an ``env`` entry with a secret name and a value of its own."""
+    """True for an ``env`` entry with a secret name and a value of its own.
+
+    A secret name is one of the command-line rule
+    (:func:`~meho_backplane.redaction.command_line.is_secret_shaped_name`):
+    it holds PASS, PWD, SECRET, TOKEN, KEY, CREDENTIAL or AUTH
+    (``PGPASSWORD``, ``API_TOKEN``), or the name rule marks it.
+    """
     return (
         isinstance(entry, Mapping)
-        and is_secret_param_name(str(entry.get("name", "")))
+        and is_secret_shaped_name(str(entry.get("name", "")))
         and entry.get("value") not in (None, "")
     )
 
@@ -282,22 +363,30 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
 
 
 class _SecretValueCheck:
-    """A check for one manifest: True when an object holds a secret-looking value.
+    """A check for one manifest: True when an object holds a value the approval card hides.
 
-    An object holds one when it holds a Secret object at any depth
-    (:func:`_is_nested_secret`), when a key of its ``data``, ``stringData`` or
-    ``binaryData`` has a secret name (the name rule of
-    :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
-    an ``env`` entry at any depth, the object itself included, has a secret
-    name and a value, when the ``command`` and ``args`` of an object at any
-    depth, read as one command line, hold a value the approval card hides
-    (:func:`hide_command_secrets`: the argument after ``--password``, for
-    example), or when a text at any depth has a secret shape
-    (:func:`~meho_backplane.redaction.command_line.hide_in_text`). Each value
-    of the manifest is read once, and the names of each ``data``,
-    ``stringData``, ``binaryData`` and ``env`` value are read once, also when YAML aliases
-    name them many times. The ``items`` of a list object are read as objects
-    of their own.
+    The check and the card follow one rule, so a value the card hides as a
+    secret is never in the stored params. An object holds such a value when:
+
+    * it holds a Secret object at any depth (:func:`_is_nested_secret`), or
+      a key of its ``data``, ``stringData`` or ``binaryData`` has a secret
+      name (the name rule of
+      :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`);
+    * a key with a secret name at any depth holds a text, a number or a
+      yes/no value (:func:`_has_secret_named_value`);
+    * an ``env`` entry at any depth, the object itself included, has a
+      secret name of the command-line rule and a value
+      (:func:`_is_secret_env_entry`);
+    * the ``command`` and ``args`` of a map at any depth, read as one
+      command line, hold a value the card hides (:func:`hide_command_secrets`
+      with the ``k8s.apply`` rule: the argument after ``--password``, for
+      example);
+    * a text at any depth has a secret shape (:func:`_is_secret_shaped`).
+
+    Each value of the manifest is read once, and the names of each
+    ``data``, ``stringData``, ``binaryData`` and ``env`` value are read
+    once, also when YAML aliases name them many times. The ``items`` of a
+    list object are read as objects of their own.
     """
 
     def __init__(self) -> None:
@@ -330,7 +419,11 @@ class _SecretValueCheck:
             return True
         if not self._first_visit(doc, self._seen):
             return False
-        if self._has_secret_env(doc) or _has_secret_command_line(doc):
+        if (
+            self._has_secret_env(doc)
+            or _has_secret_command_line(doc)
+            or _has_secret_named_value(doc)
+        ):
             return True
         stack = _children(doc, skip_items=_is_list_kind(str(doc["kind"])))
         while stack:
@@ -342,6 +435,7 @@ class _SecretValueCheck:
                 or self._has_secret_env(node)
                 or _is_nested_secret(node)
                 or _has_secret_command_line(node)
+                or (isinstance(node, Mapping) and _has_secret_named_value(node))
             ):
                 return True
             stack.extend(_children(node, skip_items=False))
@@ -366,4 +460,14 @@ def manifest_holds_credential(params: Mapping[str, Any]) -> bool:
 # value, holds that value. A stored request keeps it only in the encrypted
 # handoff of the run
 # (meho_backplane.operations.approval_queue.create_pending_request).
-declare_hidden_stored_param("k8s.apply", "manifest", manifest_holds_credential)
+#: The answer to such an apply on an install without the hand-off key.
+HANDOFF_KEY_REFUSAL: Final[str] = (
+    "MEHO cannot keep this request: MEHO keeps this manifest only in the encrypted "
+    "hand-off, because it holds a secret value or MEHO cannot read it, and the hand-off "
+    "needs a key. Set APPROVAL_HANDOFF_ENCRYPTION_KEY on the MEHO server (in the Helm "
+    "chart: approvalHandoff), then send the call again."
+)
+
+declare_hidden_stored_param(
+    "k8s.apply", "manifest", manifest_holds_credential, refusal=HANDOFF_KEY_REFUSAL
+)

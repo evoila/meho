@@ -12,9 +12,13 @@ The message keeps:
 
 * the explanation of the parser, for example
   ``expected ',' or ']', but got '<stream end>'``. A quoted part of it stays
-  only when it names a token of the YAML grammar (``','``, ``'<stream end>'``);
-  any other quoted part (an alias name, a tag, a character of the manifest)
-  becomes ``'…'``;
+  when it names a token of the YAML grammar (``','``, ``'<stream end>'``),
+  or when it is fixed text of the parser that says what it wanted
+  (``expected a digit or '.'``) and not the text it read (after ``found``
+  or ``got``). Any other quoted part (an alias name, a tag, a character of
+  the manifest) becomes ``'…'``. For a ``%`` escape in a tag that is not
+  UTF-8 the explanation is ``a %-escape in a tag is not valid UTF-8``, with
+  no byte value;
 * the line and the column of each part, or the position of a character the
   reader refuses;
 * for a value that its tag cannot read (``!!int abc``), a fixed explanation
@@ -69,6 +73,19 @@ _TOKEN_NAMES: Final[frozenset[str]] = frozenset(
 #: ``repr`` writes it.
 _QUOTED: Final[re.Pattern[str]] = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
+#: The quoted parts of PyYAML's fixed message texts that are not token
+#: names (``expected a digit or '.'``, ``expected '!'``). Each tells the
+#: caller what the parser wanted, and stays, except right after ``found``
+#: or ``got``, where the parser quotes the text it read.
+_FIXED_QUOTES: Final[frozenset[str]] = frozenset({".", " ", "!", ">"})
+
+#: The words after which the parser quotes text of the manifest.
+_READ_TEXT_BEFORE: Final[tuple[str, ...]] = ("found ", "got ")
+
+#: The explanation for a ``%`` escape in a tag that is not UTF-8. The
+#: parser's own text names the byte value.
+_ESCAPE_NOT_UTF8: Final[str] = "a %-escape in a tag is not valid UTF-8"
+
 #: Shown in place of a quoted part that is not a token name.
 _QUOTE_HIDDEN: Final[str] = "'…'"
 
@@ -100,12 +117,31 @@ class _ManifestLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml has no stu
 
 
 def _keep_token_names(text: str) -> str:
-    """*text* with each quoted part that is not a token name replaced."""
+    """*text* with each quoted part replaced that is neither a token name nor fixed text.
+
+    A part of :data:`_FIXED_QUOTES` stays only where it is not the text the
+    parser read (right after ``found`` or ``got``).
+    """
 
     def _one(match: re.Match[str]) -> str:
-        return match.group(0) if match.group(0)[1:-1] in _TOKEN_NAMES else _QUOTE_HIDDEN
+        inner = match.group(0)[1:-1]
+        if inner in _TOKEN_NAMES:
+            return match.group(0)
+        read_text = text[: match.start()].endswith(_READ_TEXT_BEFORE)
+        return match.group(0) if inner in _FIXED_QUOTES and not read_text else _QUOTE_HIDDEN
 
     return _QUOTED.sub(_one, text)
+
+
+def _problem_text(text: str) -> str:
+    """The parser's explanation, with no text of the manifest (:func:`_keep_token_names`).
+
+    A ``%`` escape in a tag that is not UTF-8 gives :data:`_ESCAPE_NOT_UTF8`
+    instead of the decoder's text, which names the byte value.
+    """
+    if "codec can't decode" in text:
+        return _ESCAPE_NOT_UTF8
+    return _keep_token_names(text)
 
 
 def _place(mark: Any) -> str:
@@ -121,7 +157,7 @@ def _explanation(exc: BaseException) -> str:
         reason = exc.reason if isinstance(exc.reason, str) else ""
         return f"unacceptable character: {reason} (position {exc.position})"
     parts = [
-        f"{_keep_token_names(text)}{_place(getattr(exc, mark, None))}"
+        f"{_problem_text(text)}{_place(getattr(exc, mark, None))}"
         for text, mark in (
             (getattr(exc, "context", None), "context_mark"),
             (getattr(exc, "problem", None), "problem_mark"),

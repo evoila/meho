@@ -111,6 +111,7 @@ from kubernetes_asyncio import client
 
 from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
 from meho_backplane.connectors.kubernetes.op_classes import (
+    PLAIN_SETTINGS,
     SECRET_VALUE_FIELDS,
     hide_command_secrets,
 )
@@ -265,15 +266,20 @@ _NAME_VALUE_LISTS = ("env", "httpHeaders")
 _COMMAND_LISTS = ("command", "args")
 
 
-def _hide_command_line(node: dict[str, Any]) -> dict[str, list[Any]]:
+def _hide_command_line(
+    node: dict[str, Any], *, p_after_programs: bool = False
+) -> dict[str, list[Any]]:
     """The ``command`` and ``args`` lists of *node* with their secret values hidden.
 
     Both lists are read as one command line, so a secret flag that ends
     ``command`` hides the first argument of ``args``. Keys whose value is
-    not a list are left out.
+    not a list are left out. *p_after_programs* is the ``k8s.apply`` rule
+    (:func:`~.op_classes.hide_command_secrets`).
     """
     lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
-    hidden = hide_command_secrets([part for parts in lists.values() for part in parts])
+    hidden = hide_command_secrets(
+        [part for parts in lists.values() for part in parts], p_after_programs=p_after_programs
+    )
     out: dict[str, list[Any]] = {}
     start = 0
     for key, parts in lists.items():
@@ -299,11 +305,6 @@ def _hide_secret_values(secret: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: Kubernetes fields with a secret-shaped name that hold a yes/no setting,
-#: never a secret. The card shows their value.
-_PLAIN_SETTINGS = frozenset({"automountServiceAccountToken"})
-
-
 def _is_secret_scalar(key: Any, item: Any, *, secret_pair: bool) -> bool:
     """True for a value that is not a text, a map or a list, under a secret name.
 
@@ -311,11 +312,11 @@ def _is_secret_scalar(key: Any, item: Any, *, secret_pair: bool) -> bool:
     ``password: yes`` as a yes/no value. A secret name is a key the name rule marks
     (:func:`~meho_backplane.broadcast.events.is_secret_param_name`), or the
     ``value`` of a ``{name, value}`` pair whose name it marks
-    (*secret_pair*). A field of :data:`_PLAIN_SETTINGS` keeps its value.
+    (*secret_pair*). A field of :data:`~.op_classes.PLAIN_SETTINGS` keeps its value.
     """
     if item is None or isinstance(item, str | dict | list) or not isinstance(key, str):
         return False
-    if key in _PLAIN_SETTINGS:
+    if key in PLAIN_SETTINGS:
         return False
     return is_secret_param_name(key) or (secret_pair and key == "value")
 
@@ -491,8 +492,9 @@ def names_as_on_card(manifest: str, message: str, *, redact: ManifestRedactor) -
     ``manifest.*.metadata.name`` hides a name there. So in *message* each
     object label is replaced by the label of the shown document, and each
     of these texts that the card shows in another form by that form (a
-    message of the API server can name the object too). The longest text
-    wins where two start at one place.
+    message of the API server can name the object too), where no letter or
+    digit touches it. The longest text wins where two start at one place.
+    The HTTP status (``(HTTP 404 Not Found)``) stays as it is.
     """
     raw_docs = _parse_manifest(manifest)
     shown_docs = redact(card_documents(manifest))
@@ -506,9 +508,22 @@ def names_as_on_card(manifest: str, message: str, *, redact: ManifestRedactor) -
     changed = sorted((text for text, to in swaps.items() if text != to), key=len, reverse=True)
     if not changed:
         return message
-    # One pass, so a replaced text is not replaced again.
-    pattern = re.compile("|".join(re.escape(text) for text in changed))
-    return pattern.sub(lambda match: swaps[match.group(0)], message)
+    # One pass, so a replaced text is not replaced again. A text is replaced
+    # only where no letter or digit touches it, so a name ``4`` stays out of
+    # ``8443``. The HTTP status of the error stays as it is.
+    pattern = re.compile(
+        "(?<![A-Za-z0-9])(?:" + "|".join(re.escape(text) for text in changed) + ")(?![A-Za-z0-9])"
+    )
+    parts = _HTTP_STATUS.split(message)
+    return "".join(
+        part if index % 2 else pattern.sub(lambda match: swaps[match.group(0)], part)
+        for index, part in enumerate(parts)
+    )
+
+
+#: The HTTP status of a refused apply (``(HTTP 404 Not Found)``, from
+#: ``ops_write_dangerous._reject``). :func:`names_as_on_card` keeps it.
+_HTTP_STATUS = re.compile(r"(\(HTTP [0-9]{3}(?: [A-Za-z][A-Za-z -]*)?\))")
 
 
 def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
@@ -663,7 +678,7 @@ def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
     left out.
     """
     commands = {
-        where: _hide_command_line(handler["exec"]).get("command")
+        where: _hide_command_line(handler["exec"], p_after_programs=True).get("command")
         for where, handler in _exec_handlers(container).items()
     }
     return {where: command for where, command in commands.items() if command is not None}
@@ -675,7 +690,7 @@ def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {"object": label, "container": container.get("name")}
     if "image" in container:
         entry["image"] = container.get("image")
-    entry.update(_hide_command_line(container))
+    entry.update(_hide_command_line(container, p_after_programs=True))
     exec_commands = _exec_commands(container)
     if exec_commands:
         entry["exec_commands"] = exec_commands
@@ -745,7 +760,8 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     (:func:`_containers_in`): the init, main and ephemeral containers of a
     pod spec, and every other dict with a ``command`` or ``args`` list, so
     each command line the echo shows only by size is named here. Each entry
-    has the object, the container name, the image, the
+    has the object (named as the card shows the document), the container
+    name, the image, the
     ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
     each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
     hidden the way the Job previews hide them
@@ -763,9 +779,16 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     command line. This list is for the person who approves: an agent never
     reads it (:func:`_register_kubernetes_write_preview_builders`).
     """
+    docs = card_documents(manifest)
+    # Each label is built from the document as the card shows it, after
+    # *redact*: a rule for a field path such as ``manifest.*.metadata.name``
+    # hides the name in the label too.
+    labels = [_object_label(doc) for doc in redact(docs)] if docs else []
+    if len(labels) != len(docs):
+        labels = [_HIDDEN] * len(docs)
     entries = [
-        _run_command_entry(_object_label(doc), container)
-        for doc in card_documents(manifest)
+        _run_command_entry(label, container)
+        for doc, label in zip(docs, labels, strict=True)
         for container in _containers_in(doc)
     ]
     redacted = redact(entries) if entries else []

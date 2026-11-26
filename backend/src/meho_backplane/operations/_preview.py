@@ -242,11 +242,13 @@ def preview_failure_reason(exc: Exception) -> str:
     password or token into its ``Status`` message (#3876), and the
     marker is stored in the durable approval row. Redaction runs first
     so the cap cannot cut a secret into a fragment the patterns no
-    longer match. If the redactor fails, the message is withheld.
+    longer match. If the redactor fails, the message is withheld. A null
+    character becomes the two characters ``\\0``, as PostgreSQL cannot
+    store it in the row.
     """
     message = str(exc)
     if message:
-        message = _redact_preview_message(message)
+        message = _redact_preview_message(message).replace("\x00", "\\0")
     reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     if len(reason) > _PREVIEW_ERROR_MAX_LEN:
         reason = reason[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"

@@ -76,6 +76,8 @@ The text names no admin and no reason.
   sent, and the step the block list refused in it.
 - `meho_backplane/agent/principal_block_gate.py`: the check for hosted
   agent runs (`PrincipalBlockGate`).
+- `meho_backplane/ui/routes/principal_blocks.py`: the console page
+  `/ui/blocked-people`.
 - CLI: `cli/internal/cmd/principal/`.
 
 ## Control flow
@@ -196,6 +198,34 @@ CLI: `meho principal block <sub> --reason <text>`,
 On a 401 with the challenge, `unblock` opens the browser approval sign-in
 (the same way as `meho approvals approve`) and sends the call again with
 that token; the token stays in memory for this one run.
+
+Console: the page `/ui/blocked-people` lists the blocks the admin may see
+(login id, tenant, reason, who blocked, when), blocks a login with a
+reason, and unblocks a login after a confirm step. It calls the same
+functions as the REST routes, so the rules are the same: only a person
+with `tenant_admin` may open the page or send a form (403 for anyone
+else), a tenant admin works in their own tenant, a platform admin in
+every tenant, and blocking your own login shows a refusal and writes no
+block. The admin check uses the signed-in session only. The unblock
+button of a row opens a confirm page; only its form (`confirm=yes`)
+removes blocks. The confirm page names the login, its blocks and the
+scope: for a platform admin the button reads "Unblock in all tenants",
+and the page says that every block of the login goes, also the blocks of
+tenant admins. The page never unblocks the admin's own login (403
+`own_login`), and it shows no button on that row. The hint on that row
+names the tenant of the block. A platform admin removes a block on their
+own login with `meho principal unblock <sub> --reason <text>`, run in
+the tenant of that block, with a fresh sign-in. On their own login, MEHO
+removes only the block of the current tenant. A block in every tenant
+stays until another platform admin removes it. When MEHO cannot read the blocks, the page and
+both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
+`POST` form with the CSRF token and the page's tenant (`meho_tenant`)
+in hidden fields, so it works without JavaScript, and a form from a page
+of another tenant answers 409. A done form answers 303 back to the page. A refused block
+answers 422 and shows the page with the message next to its field. Each
+block and unblock writes one audit row (`principal.block` or
+`principal.unblock`); the request row of the form keeps its own
+`http.post:` name.
 
 ## Dependencies
 

@@ -352,6 +352,23 @@ def test_create_modal_renders_for_tenant_admin() -> None:
     assert 'name="port"' in body
 
 
+def test_create_modal_secret_ref_placeholder_is_a_path_meho_accepts() -> None:
+    """The secret ref example is the per-tenant path, not a shape MEHO refuses (#6917)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/connectors/create")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert 'placeholder="tenants/&lt;tenant-id&gt;/&lt;name&gt;"' in response.text
+    assert "secret/data/targets" not in response.text
+
+
 def test_create_modal_rejects_operator_role_with_403() -> None:
     """An operator (non-admin) GET on the create modal is 403'd server-side."""
     _seed_tenant(_TENANT_A, "tenant-a")

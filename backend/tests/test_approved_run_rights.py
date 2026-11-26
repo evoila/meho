@@ -507,3 +507,21 @@ async def test_first_run_in_the_agent_wait_checks_the_agent_again(switch: str, c
     assert envelope["status"] == "denied", envelope
     assert _RUNS == []
     assert approval_result_state(await _request(request_id)) is ApprovalResultState.FAILED
+
+
+@pytest.mark.usefixtures("op")
+async def test_first_run_on_the_approve_route_after_the_risk_level_went_up(
+    switch: str, client: tuple[httpx.AsyncClient, Any]
+) -> None:
+    """The card says ``caution``; the operation is ``dangerous`` when a reviewer approves it."""
+    await _grant(_OP, "needs-approval")
+    request_id = await _park(_operator())
+    await _raise_risk_level("dangerous")
+
+    response = await _approve_on_route(client, request_id)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == "denied", response.text
+    assert "a new approval is needed" in response.json()["dispatch_error"]
+    assert _RUNS == []
+    assert approval_result_state(await _request(request_id)) is ApprovalResultState.FAILED

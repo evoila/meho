@@ -463,12 +463,14 @@ class PreviewBindingMissingError(ApprovalError):
 class ApprovalSignInReusedError(ApprovalError):
     """This sign-in cannot give this approval: it is used up (#3979, #5515).
 
-    Raised by :func:`approve_request` in two cases, both read from the
-    person's earlier ``approval.decision`` audit rows with the same
-    ``sign_in_key``:
+    Raised by :func:`approve_request` in two cases. Both are read from the
+    person's earlier audit rows with the same ``sign_in_key``: the
+    ``approval.decision`` rows, and the ``principal.unblock`` row of an
+    own-login unblock:
 
     * the request is ``destructive`` and the sign-in already approved
-      something: a destructive approve needs a sign-in of its own;
+      something or removed the person's own block: a destructive approve
+      needs a sign-in of its own;
     * the sign-in already approved a ``destructive`` request: that sign-in
       approves nothing more.
 
@@ -2560,14 +2562,16 @@ async def _check_sign_in_use(
     :class:`ApprovalSignInTooOldError` otherwise): the approval window, or
     for a ``destructive`` request its own limit. Inside the window one
     sign-in may approve several requests (#5515). A ``destructive`` request
-    is the exception: its sign-in must have approved nothing else, and
-    after it that sign-in approves nothing more
-    (:class:`ApprovalSignInReusedError` in both cases). The check is the
-    same for an approve on REST and in the web interface.
+    is the exception: its sign-in must not have approved anything else or
+    removed the person's own block, and after it that sign-in approves
+    nothing more (:class:`ApprovalSignInReusedError` in both cases). The
+    check is the same for an approve on REST and in the web interface.
 
-    The earlier approves of the sign-in are the person's
-    ``approval.decision`` audit rows with the same ``sign_in_key``,
-    written since the sign-in. The scan is short: the window is minutes.
+    The earlier uses of the sign-in are the person's audit rows with the
+    same ``sign_in_key``, written since the sign-in: the
+    ``approval.decision`` rows, and the ``principal.unblock`` row of an
+    own-login unblock (:func:`~meho_backplane.auth.sign_in_use.earlier_sign_in_uses`).
+    The scan is short: the window is minutes.
 
     Two approves with the same sign-in can run at the same moment, on two
     replicas. So the check first takes a transaction-level PostgreSQL

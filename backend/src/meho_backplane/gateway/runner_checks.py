@@ -19,7 +19,8 @@ Steps for one result batch (see :func:`screen_batch` and
    of the batch has been stored. MEHO counts a refused result once, whatever
    MEHO process takes its batch and however often the batch is sent: the
    mark that it was counted is a row in ``runner_refused_results``, kept as
-   long as the stored runner results.
+   long as the stored runner results. Only a result id of 1 to 64 lowercase
+   letters, digits and underscores gets that mark and is counted.
 2. Cap the size of each answer and of the whole batch. An answer over the cap
    is stored without its payload and the Sensor reads ``unknown`` with the
    reason ``answer too large``.
@@ -137,6 +138,11 @@ _ANSWER_TOO_LARGE = "answer too large"
 
 _FUTURE_TIME = "future_time"
 
+#: The form of a result id and a code in a set-aside notice: 1 to 64 lowercase
+#: letters, digits and underscores. The runner keeps a code in the same form,
+#: and MEHO keeps the mark of a counted refused result only for an id in it.
+_NOTICE_ID = re.compile(r"[a-z0-9_]{1,64}")
+
 
 async def _count_refused_once(
     tenant_id: uuid.UUID, runner_name: str, refused: list[RefusedResult]
@@ -147,8 +153,13 @@ async def _count_refused_once(
     that has none. Only the rows this call added are counted, after the
     commit. Two processes that take the same batch at the same time add the
     row once: the second waits for the first and then adds nothing.
+
+    Only a result id of 1 to 64 lowercase letters, digits and underscores
+    (:data:`_NOTICE_ID`, the form the runner makes) gets a row and is
+    counted. A refused result with another id gets no row and is not
+    counted; the answer to the runner names it as refused all the same.
     """
-    uids = sorted({entry.result_uid for entry in refused})
+    uids = sorted({entry.result_uid for entry in refused if _NOTICE_ID.fullmatch(entry.result_uid)})
     if not uids:
         return
     now = datetime.now(UTC)
@@ -722,10 +733,6 @@ async def mark_left_off_sensors(
 
 
 _RESULT_REFUSED = "result_refused"
-
-#: The form of a result id and a code in a set-aside notice: 1 to 64 lowercase
-#: letters, digits and underscores. The runner keeps a code in the same form.
-_NOTICE_ID = re.compile(r"[a-z0-9_]{1,64}")
 
 
 def _kept_notice(notice: SetAsideNotice) -> SetAsideNotice | None:

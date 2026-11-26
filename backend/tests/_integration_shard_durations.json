@@ -66,6 +66,7 @@
   "tests/integration/test_runner_enroll_revoke_turns_pg.py": 7.58,
   "tests/integration/test_runner_key_login_keycloak.py": 22.16,
   "tests/integration/test_runner_refused_count_pg.py": 15.08,
+  "tests/integration/test_runner_refused_long_id_pg.py": 8.0,
   "tests/integration/test_scheduler_vault_credentials_dev_e2e.py": 10.87,
   "tests/integration/test_search_clear_lead_pg.py": 4.95,
   "tests/integration/test_search_filters_pg.py": 6.03,

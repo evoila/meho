@@ -8,7 +8,9 @@ counter ``runner_check_results_total{outcome="future_time"}`` rises once for
 it: the mark that it was counted is a row in ``runner_refused_results``, so
 the count holds for every MEHO process on the database and has no limit of
 results kept in memory. The clean-up job of the runner results removes old
-marks. The test with two MEHO processes on one PostgreSQL database is in
+marks. Only a result id in the form the runner makes (1 to 64 lowercase
+letters, digits and underscores) gets a mark and is counted. The test with
+two MEHO processes on one PostgreSQL database is in
 :mod:`tests.integration.test_runner_refused_count_pg`.
 """
 
@@ -74,6 +76,21 @@ async def test_each_runner_and_each_result_id_is_counted_once() -> None:
 
     assert _outcome("future_time") - before == 3
     assert await _marks() == 3
+
+
+@pytest.mark.parametrize("uid", ["a" * 65, "Upper", "with-dash", "with space", ""])
+async def test_a_refused_result_whose_id_is_not_in_the_runner_form_gets_no_mark(
+    uid: str,
+) -> None:
+    await _seed_identities()
+    before = _outcome("future_time")
+
+    await _refuse(uid, "a" * 64)
+
+    assert _outcome("future_time") - before == 1
+    async with get_sessionmaker()() as session:
+        kept = (await session.scalars(select(RunnerRefusedResult.result_uid))).all()
+    assert kept == ["a" * 64]
 
 
 async def test_the_clean_up_job_removes_old_marks_and_keeps_new_ones() -> None:

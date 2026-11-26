@@ -74,5 +74,7 @@ def build_policy_router() -> APIRouter:
         methods=["GET"],
         name="ui_policy",
         response_class=HTMLResponse,
+        # An HTML page for the browser; it stays out of the API file and the Go client.
+        include_in_schema=False,
     )
     return router

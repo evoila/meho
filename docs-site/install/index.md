@@ -427,17 +427,22 @@ To check the state, read `features.approval_custody` on `GET /ready`.
 With the metrics token on (`metricsAuth.enabled: true`, the default),
 `/ready` shows the `features` block only to a caller that sends the
 token as a bearer token. The chart keeps the token in the Secret
-`<release>-metrics-auth`, under the key `token`:
+`<release>-metrics-auth`, under the key `token`. This command reads the
+token and gives the header to curl on standard input (`-H @-`, curl
+7.55.0 or newer), so the token is on no command line and in no shell
+history:
 
 ```bash
-TOKEN=$(kubectl -n <namespace> get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d)
-curl -s -H "Authorization: Bearer $TOKEN" https://<your-backplane>/ready | jq .features.approval_custody
+kubectl -n <namespace> get secret <release>-metrics-auth -o jsonpath='{.data.token}' \
+  | base64 -d | sed 's/^/Authorization: Bearer /' \
+  | curl -s -H @- https://<your-backplane>/ready | jq .features.approval_custody
 ```
 
 With `metricsAuth.enabled: false`, `/ready` shows the block to every
-caller: leave out the header. With your own Secret in
-`metricsAuth.existingSecret`, read the token from that Secret, under
-the key in `metricsAuth.secretKey`.
+caller: `curl -s https://<your-backplane>/ready | jq .features.approval_custody`.
+With your own Secret in `metricsAuth.existingSecret`, put that Secret's
+name in the command, and the key in `metricsAuth.secretKey` in place of
+`token`.
 
 ### Your own PostgreSQL
 

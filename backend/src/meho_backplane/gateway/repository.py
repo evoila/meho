@@ -25,6 +25,7 @@ from meho_backplane.runner.wire import RunnerResult
 __all__ = [
     "ensure_assignment_row",
     "get_assignment_row",
+    "get_set_aside_markers",
     "get_stale_markers",
     "ingest_new_results",
     "ingest_results",
@@ -54,6 +55,26 @@ async def get_stale_markers(
         )
     )
     return dict(result.tuples().all())
+
+
+async def get_set_aside_markers(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+) -> dict[str, tuple[int, datetime | None]]:
+    """Return ``{runner_name: (set_aside_count, set_aside_last_at)}`` for a tenant.
+
+    The count of result batches a runner has set aside, as the runner last
+    said, and when it set the newest one aside. Read-only.
+    """
+    result = await session.execute(
+        select(
+            RunnerAssignmentRow.runner_name,
+            RunnerAssignmentRow.set_aside_count,
+            RunnerAssignmentRow.set_aside_last_at,
+        ).where(RunnerAssignmentRow.tenant_id == tenant_id)
+    )
+    return {name: (count, last_at) for name, count, last_at in result.tuples().all()}
 
 
 async def get_assignment_row(

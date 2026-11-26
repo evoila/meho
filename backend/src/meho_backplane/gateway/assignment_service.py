@@ -221,6 +221,7 @@ async def materialize_assignment(
     principal: wire.RunnerPrincipal,
     runner_package_set: str,
     runner_features: frozenset[str] = frozenset(),
+    left_off: dict[UUID, str] | None = None,
 ) -> wire.RunnerAssignment:
     """Materialise the runner's stored document into the versioned wire shape.
 
@@ -236,6 +237,10 @@ async def materialize_assignment(
     request) holds :data:`~meho_backplane.runner.wire.FEATURE_SCHEDULED_CHECKS`.
     An older runner would run them on every poll, so it gets none of them
     and a warning is logged.
+
+    When *left_off* is given, it gets one entry for each bound Sensor that is
+    not in the assignment: the Sensor id and the reason. The caller records
+    the reason on the Sensor (:func:`~meho_backplane.gateway.runner_checks.mark_left_off_sensors`).
     """
     row = await repository.get_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
     raw_items: list[dict[str, Any]] = list(row.items) if row is not None else []
@@ -258,13 +263,22 @@ async def materialize_assignment(
                 runner=runner_name,
                 sensors=len(sensors),
             )
+            if left_off is not None:
+                left_off.update({sensor.id: "runner_cannot_schedule" for sensor in sensors})
             sensors = []
         for sensor in sensors:
+            reasons: dict[UUID, str] = {}
             sensor_item = await _materialize_sensor(
-                session, tenant_id=tenant_id, sensor=sensor, principal=principal
+                session,
+                tenant_id=tenant_id,
+                sensor=sensor,
+                principal=principal,
+                dropped=reasons,
             )
             if sensor_item is not None and _package_set_matches(sensor_item, runner_package_set):
                 work_items.append(sensor_item)
+            elif left_off is not None:
+                left_off[sensor.id] = reasons.get(sensor.id, "connector_package_set_mismatch")
 
     return wire.RunnerAssignment(
         assignment_version=compute_assignment_version(work_items),
@@ -387,8 +401,11 @@ async def _materialize_sensor(
     tenant_id: UUID,
     sensor: Sensor,
     principal: wire.RunnerPrincipal,
+    dropped: dict[UUID, str],
 ) -> wire.RunnerWorkItem | None:
     """Materialise one Sensor bound to a runner, or ``None`` (logged) if it cannot run.
+
+    When it cannot run, ``dropped[sensor.id]`` holds the reason.
 
     ``check_ref`` is the Sensor id. The connector comes from the Sensor, the
     target from its stored target name. Secret-reveal params are taken off,
@@ -398,6 +415,7 @@ async def _materialize_sensor(
     target_name = _sensor_target_name(sensor)
     if sensor.target is not None:
         if target_name is None:
+            dropped[sensor.id] = "sensor_target_unreadable"
             _log.warning(
                 "assignment_item_dropped",
                 reason="sensor_target_unreadable",
@@ -407,6 +425,7 @@ async def _materialize_sensor(
         try:
             target = await resolve_target(session, tenant_id, target_name)
         except (TargetNotFoundError, AmbiguousTargetError):
+            dropped[sensor.id] = "target_unresolved"
             _log.warning(
                 "assignment_item_dropped",
                 reason="target_unresolved",
@@ -424,6 +443,7 @@ async def _materialize_sensor(
     )
     refusal = runner_op_refusal(descriptor, sensor.op_id, sensor.params)
     if refusal is not None:
+        dropped[sensor.id] = refusal
         _log.warning(
             "assignment_item_dropped",
             reason=refusal,

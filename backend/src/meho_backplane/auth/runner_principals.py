@@ -56,6 +56,7 @@ from typing import Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -159,6 +160,10 @@ class RunnerPrincipalCreate(BaseModel):
     owner_sub: str | None = None
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class RunnerPrincipalRead(BaseModel):
     """Row representation returned by every accessor."""
 
@@ -189,6 +194,14 @@ class RunnerPrincipalRead(BaseModel):
     #: The digest of the runner's connector packages, sent on its last call
     #: (#5038); ``None`` until it has called since this field existed.
     package_set_digest: str | None = None
+    #: How many result batches the runner has set aside, as it last said, and
+    #: when it set the newest one aside. Only the list and get answers hold
+    #: them, and only with ``RUNNER_CHECKS_ENABLED`` on. With the switch on,
+    #: the count is there for every runner (``0`` for a runner that has never
+    #: set a batch aside), and the time only once the runner has set a batch
+    #: aside. A field that is ``None`` is left out of the answer, never ``null``.
+    set_aside_count: int | SkipJsonSchema[None] = Field(default=None, exclude_if=_is_none)
+    set_aside_last_at: datetime | SkipJsonSchema[None] = Field(default=None, exclude_if=_is_none)
 
 
 class RunnerPrincipalRegistered(RunnerPrincipalRead):

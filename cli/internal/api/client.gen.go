@@ -15156,6 +15156,27 @@ type UiSensorsListUiSensorsGetParams struct {
 	CadenceKind *string `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
 }
 
+// UiSettingsApplyUiSettingsApplyPostMultipartBody defines parameters for UiSettingsApplyUiSettingsApplyPost.
+type UiSettingsApplyUiSettingsApplyPostMultipartBody struct {
+	// File The meho-settings.yaml file (the upload form).
+	File *openapi_types.File `json:"file,omitempty"`
+
+	// FileB64 The same file bytes as base64 (the Apply form of the preview).
+	FileB64 *string `json:"file_b64,omitempty"`
+
+	// Reason Why you make the change. Needed when the file turns announce_gate_enabled off or run_approval_target_kinds on.
+	Reason *string `json:"reason,omitempty"`
+}
+
+// UiSettingsPreviewUiSettingsPreviewPostMultipartBody defines parameters for UiSettingsPreviewUiSettingsPreviewPost.
+type UiSettingsPreviewUiSettingsPreviewPostMultipartBody struct {
+	// File The meho-settings.yaml file (the upload form).
+	File *openapi_types.File `json:"file,omitempty"`
+
+	// FileB64 The same file bytes as base64 (the Apply form of the preview).
+	FileB64 *string `json:"file_b64,omitempty"`
+}
+
 // UiTenantPickerUiTenantGetParams defines parameters for UiTenantPickerUiTenantGet.
 type UiTenantPickerUiTenantGetParams struct {
 	Notice *string `form:"notice,omitempty" json:"notice,omitempty"`
@@ -15905,6 +15926,12 @@ type UiSchedulerCancelModalUiSchedulerTriggerIdCancelGetJSONRequestBody = UISess
 
 // UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody defines body for UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost for application/json ContentType.
 type UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody = UISessionContext
+
+// UiSettingsApplyUiSettingsApplyPostMultipartRequestBody defines body for UiSettingsApplyUiSettingsApplyPost for multipart/form-data ContentType.
+type UiSettingsApplyUiSettingsApplyPostMultipartRequestBody UiSettingsApplyUiSettingsApplyPostMultipartBody
+
+// UiSettingsPreviewUiSettingsPreviewPostMultipartRequestBody defines body for UiSettingsPreviewUiSettingsPreviewPost for multipart/form-data ContentType.
+type UiSettingsPreviewUiSettingsPreviewPostMultipartRequestBody UiSettingsPreviewUiSettingsPreviewPostMultipartBody
 
 // AnnotateUiTopologyEdgesPostFormdataRequestBody defines body for AnnotateUiTopologyEdgesPost for application/x-www-form-urlencoded ContentType.
 type AnnotateUiTopologyEdgesPostFormdataRequestBody = BodyAnnotateUiTopologyEdgesPost
@@ -19605,6 +19632,15 @@ type ClientInterface interface {
 
 	// UiSensorsListUiSensorsGet request
 	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsUiSettingsGet request
+	UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsApplyUiSettingsApplyPostWithBody request with any body
+	UiSettingsApplyUiSettingsApplyPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSettingsPreviewUiSettingsPreviewPostWithBody request with any body
+	UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTenantPickerUiTenantGet request
 	UiTenantPickerUiTenantGet(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -27704,6 +27740,42 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx conte
 
 func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsUiSettingsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsUiSettingsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsApplyUiSettingsApplyPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsApplyUiSettingsApplyPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody(c.Server, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -54332,6 +54404,91 @@ func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiS
 	return req, nil
 }
 
+// NewUiSettingsUiSettingsGetRequest generates requests for UiSettingsUiSettingsGet
+func NewUiSettingsUiSettingsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiSettingsApplyUiSettingsApplyPostRequestWithBody generates requests for UiSettingsApplyUiSettingsApplyPost with any type of body
+func NewUiSettingsApplyUiSettingsApplyPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/apply")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody generates requests for UiSettingsPreviewUiSettingsPreviewPost with any type of body
+func NewUiSettingsPreviewUiSettingsPreviewPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/settings/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewUiTenantPickerUiTenantGetRequest generates requests for UiTenantPickerUiTenantGet
 func NewUiTenantPickerUiTenantGetRequest(server string, params *UiTenantPickerUiTenantGetParams) (*http.Request, error) {
 	var err error
@@ -57648,6 +57805,15 @@ type ClientWithResponsesInterface interface {
 
 	// UiSensorsListUiSensorsGetWithResponse request
 	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
+
+	// UiSettingsUiSettingsGetWithResponse request
+	UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error)
+
+	// UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse request with any body
+	UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error)
+
+	// UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse request with any body
+	UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error)
 
 	// UiTenantPickerUiTenantGetWithResponse request
 	UiTenantPickerUiTenantGetWithResponse(ctx context.Context, params *UiTenantPickerUiTenantGetParams, reqEditors ...RequestEditorFn) (*UiTenantPickerUiTenantGetResponse, error)
@@ -68000,6 +68166,69 @@ func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiSettingsUiSettingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsUiSettingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsUiSettingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsApplyUiSettingsApplyPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsApplyUiSettingsApplyPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsApplyUiSettingsApplyPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSettingsPreviewUiSettingsPreviewPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSettingsPreviewUiSettingsPreviewPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSettingsPreviewUiSettingsPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTenantPickerUiTenantGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -74381,6 +74610,33 @@ func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseUiSensorsListUiSensorsGetResponse(rsp)
+}
+
+// UiSettingsUiSettingsGetWithResponse request returning *UiSettingsUiSettingsGetResponse
+func (c *ClientWithResponses) UiSettingsUiSettingsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiSettingsUiSettingsGetResponse, error) {
+	rsp, err := c.UiSettingsUiSettingsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsUiSettingsGetResponse(rsp)
+}
+
+// UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse request with arbitrary body returning *UiSettingsApplyUiSettingsApplyPostResponse
+func (c *ClientWithResponses) UiSettingsApplyUiSettingsApplyPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
+	rsp, err := c.UiSettingsApplyUiSettingsApplyPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsApplyUiSettingsApplyPostResponse(rsp)
+}
+
+// UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse request with arbitrary body returning *UiSettingsPreviewUiSettingsPreviewPostResponse
+func (c *ClientWithResponses) UiSettingsPreviewUiSettingsPreviewPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
+	rsp, err := c.UiSettingsPreviewUiSettingsPreviewPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSettingsPreviewUiSettingsPreviewPostResponse(rsp)
 }
 
 // UiTenantPickerUiTenantGetWithResponse request returning *UiTenantPickerUiTenantGetResponse
@@ -87883,6 +88139,54 @@ func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListU
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsUiSettingsGetResponse parses an HTTP response from a UiSettingsUiSettingsGetWithResponse call
+func ParseUiSettingsUiSettingsGetResponse(rsp *http.Response) (*UiSettingsUiSettingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsUiSettingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsApplyUiSettingsApplyPostResponse parses an HTTP response from a UiSettingsApplyUiSettingsApplyPostWithResponse call
+func ParseUiSettingsApplyUiSettingsApplyPostResponse(rsp *http.Response) (*UiSettingsApplyUiSettingsApplyPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsApplyUiSettingsApplyPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiSettingsPreviewUiSettingsPreviewPostResponse parses an HTTP response from a UiSettingsPreviewUiSettingsPreviewPostWithResponse call
+func ParseUiSettingsPreviewUiSettingsPreviewPostResponse(rsp *http.Response) (*UiSettingsPreviewUiSettingsPreviewPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSettingsPreviewUiSettingsPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

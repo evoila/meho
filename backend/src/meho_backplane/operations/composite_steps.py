@@ -61,6 +61,7 @@ import structlog
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.op_classes import CREDENTIAL_CHANGE_OP_CLASSES
 from meho_backplane.operations._secret_values import hides_secret_values
 from meho_backplane.operations._validate import compute_params_hash, params_hash_matches
 from meho_backplane.redaction.secret_fields import scrub_secret_fields
@@ -96,9 +97,9 @@ STEP_RUN_AGAIN = "run_again"
 #: The statuses of a step that a resume does not stop at.
 _FINISHED = frozenset({STEP_DONE, STEP_DONE_NO_RESULT, STEP_RUN_AGAIN})
 
-#: Classes of an operation that writes or makes a credential. MEHO never
-#: stores its result: it may hold a secret under any field name.
-_CREDENTIAL_CHANGE_CLASSES = frozenset({"credential_mint", "credential_write"})
+#: Classes of an operation that writes, makes or uses a credential. MEHO
+#: never stores its result: it may hold a secret under any field name.
+_CREDENTIAL_CHANGE_CLASSES = CREDENTIAL_CHANGE_OP_CLASSES | {"credential_use"}
 
 #: The credential reads a resume may send again: each one only reads, and
 #: changes and stores nothing on any system. A credential read that is not
@@ -117,7 +118,7 @@ def _may_send_again(op_id: str) -> bool:
 
 
 def _is_credential_change(op_id: str) -> bool:
-    """True when *op_id* writes or makes a credential."""
+    """True when *op_id* writes, makes or uses a credential."""
     return classify_op(op_id) in _CREDENTIAL_CHANGE_CLASSES
 
 

@@ -105,6 +105,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.op_classes import (
+    CREDENTIAL_OP_CLASSES,
     is_credential_capable,
     needs_per_call_approval,
     params_make_credential_call,
@@ -334,17 +335,15 @@ def delete_grant_reason(
     return reason
 
 
-#: The op classes of an operation that reads, writes or makes a credential.
-CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_write", "credential_mint"}
-)
+#: The op classes of an operation that reads, writes, makes or uses a credential.
+CREDENTIAL_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES
 
 
 def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
     """Return why no grant and no run approval covers *op_id*, or ``None`` when one can.
 
-    An operation that reads, writes or makes a credential (the classes in
-    :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
+    An operation that reads, writes, makes or uses a credential (the classes
+    in :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
     grant, no agent grant and no run approval covers it. The class comes
     from *stored_op_class* (the class a connector's safety floor stored on
     the row of an ingested operation) and from the op id
@@ -382,7 +381,8 @@ def credential_refusal(op_id: str, stored_op_class: str | None = None) -> str | 
 def credential_call_waits(op_id: str, stored_op_class: str | None = None) -> bool:
     """Return whether a call of *op_id* waits for a person because of its credential class.
 
-    True for every ``credential_mint`` and ``credential_write`` operation.
+    True for every ``credential_mint``, ``credential_write`` and
+    ``credential_use`` operation.
     A ``credential_read`` operation waits when its floor applies
     (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`):
     a read that is marked in code as one that returns no secret value runs

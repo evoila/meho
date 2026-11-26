@@ -51,7 +51,8 @@ Design contract
   reuses the single-sourced sensitivity classification from
   :func:`~meho_backplane.broadcast.events.classify_op` (shipped by
   G11.7-T1 #1401): an op that classifies as a credential class
-  (``credential_read`` / ``credential_mint`` / ``credential_write``) gets
+  (``credential_read`` / ``credential_mint`` / ``credential_write`` /
+  ``credential_use``) gets
   **no generic params-echo default** -- the generic echo can only do
   key-name / value-shape redaction and is not trusted to scrub a
   connector-specific secret shape, so a credential-class op with no
@@ -90,6 +91,7 @@ from meho_backplane.broadcast.events import (
     is_snmp_community_key,
     resolve_op_class,
 )
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 from meho_backplane.settings import parse_bool_env
 
@@ -137,9 +139,7 @@ _log = structlog.get_logger(__name__)
 #: Sensitivity classes whose preview must never be stored verbatim.
 #: Mirrors the aggregate-only set in
 #: :func:`~meho_backplane.broadcast.events.redact_payload`.
-_SENSITIVE_CLASSES: frozenset[str] = frozenset(
-    {"credential_read", "credential_mint", "credential_write"}
-)
+_SENSITIVE_CLASSES: frozenset[str] = CREDENTIAL_OP_CLASSES
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default *because the op is a

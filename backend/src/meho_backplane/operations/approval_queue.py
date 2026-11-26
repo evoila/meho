@@ -121,7 +121,7 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
-from meho_backplane.op_classes import hidden_stored_param
+from meho_backplane.op_classes import SECRET_REQUEST_OP_CLASSES, hidden_stored_param
 from meho_backplane.operations._audit import (
     SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
@@ -2328,11 +2328,11 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    # A credential write, and a call whose param a connector hides (the
+    # A credential write or use, and a call whose param a connector hides (the
     # manifest of a k8s.apply of a Secret), keep their params and the
     # parent's params only in the encrypted one-time handoff: the row never
     # holds them, also not when the request is approved and never runs.
-    if classify_op(op_id) == "credential_write" or (
+    if classify_op(op_id) in SECRET_REQUEST_OP_CLASSES or (
         params is not None and hidden_stored_param(op_id, params) is not None
     ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}

@@ -88,7 +88,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.op_classes import is_credential_capable
+from meho_backplane.op_classes import CREDENTIAL_CHANGE_OP_CLASSES, is_credential_capable
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -140,9 +140,7 @@ CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 
 #: The classes of an operation that writes or makes a credential. When the
 #: code turns approval on for such an operation, no override turns it off.
-_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_write", "credential_mint"}
-)
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = CREDENTIAL_CHANGE_OP_CLASSES
 
 
 def hidden_classification_fields() -> set[str]:

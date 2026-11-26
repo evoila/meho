@@ -200,6 +200,12 @@ CSP does not allow.
   - `credential_write` (`vault.kv.put`, `vault.auth.userpass.write` /
     `.update_password`, `k8s.secret.create`, G11.7-T1 #1401) —
     **request params** carry the secret; aggregate-only.
+  - `credential_use` — the request carries a secret, or MEHO sends a
+    stored secret to the target, but the operation writes and makes no
+    credential (for example a read inside a VM guest that logs in with
+    the stored guest password). Only a connector declares it.
+    Aggregate-only, and a request override never makes it full, like
+    `credential_write`.
   - `approval` (`approval.*` lifecycle op ids) — full detail. Every
     `approval.*` op id gets this class.
   - `checks` (`checks.transition`) — full detail. Checks publish
@@ -223,8 +229,16 @@ CSP does not allow.
   class first, then the pattern rules. The server imports every connector
   package at start, so the declarations are in place before the first
   call. A connector may declare `credential_read`, `credential_mint`,
-  `credential_write` and `write`; declaring a second, different class
-  for the same op id fails at import. `broadcast/events.py` keeps lists
+  `credential_write`, `credential_use` and `write`; declaring a second, different class
+  for the same op id fails at import. `op_classes.py` also names the class
+  sets that other modules use, so a new class is added in one place:
+  `CREDENTIAL_OP_CLASSES` (reads, writes, makes or uses a credential:
+  the body stays out of the broadcast, the flight recorder and the
+  approval preview, and no grant covers the call),
+  `CREDENTIAL_CHANGE_OP_CLASSES` (writes or makes a credential) and
+  `SECRET_REQUEST_OP_CLASSES` (the request carries a secret: a waiting
+  call keeps its params only in the one-time store, and its preview and
+  its error texts hide the values). `broadcast/events.py` keeps lists
   only for the core connectors (`vault`, `keycloak`, `secret`,
   `targets`, `topology` and the checks plane);
   `tests/test_op_classes.py` fails when another connector's op id lands

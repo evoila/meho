@@ -123,12 +123,15 @@ a sandbox delete grant.
 
 ### Credential calls
 
-One rule, in `service_grants.py`: a call that reads, writes or makes a
-credential always waits for a person. No standing grant, no agent grant
-and no run approval covers it.
+One rule, in `service_grants.py`: a call that reads, writes, makes or
+uses a credential always waits for a person. No standing grant, no agent
+grant and no run approval covers it.
 
-- The classes are `credential_read`, `credential_write` and
-  `credential_mint` (`CREDENTIAL_CLASSES`). The class comes from the class
+- The classes are `credential_read`, `credential_write`,
+  `credential_mint` and `credential_use` (`CREDENTIAL_CLASSES`, the same
+  set as `CREDENTIAL_OP_CLASSES` in `op_classes.py`). A person's own call
+  of a `credential_use` operation follows its risk level and approval
+  mark, like any other call. The class comes from the class
   stored on the row of an ingested operation first, then from the op id
   (`resolve_op_class`: a connector's `declare_op_classes`, or the core
   lists in `broadcast/events.py`). A step of a multi-step operation has

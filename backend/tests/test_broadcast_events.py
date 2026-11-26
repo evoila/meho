@@ -512,6 +512,7 @@ class TestClassifyOp:
         import textwrap
 
         from meho_backplane.broadcast import OP_CLASS_ENUM
+        from meho_backplane.op_classes import DECLARABLE_OP_CLASSES
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(classify_op)))
         classifier_range = {
@@ -524,6 +525,8 @@ class TestClassifyOp:
         # Guard the extraction itself: a refactor that stops returning
         # plain string literals would silently shrink the extracted set.
         assert classifier_range, "extracted no return literals from classify_op"
+        # classify_op also returns any class a connector declares.
+        classifier_range |= DECLARABLE_OP_CLASSES
         assert set(OP_CLASS_ENUM) == classifier_range, (
             f"OP_CLASS_ENUM and classify_op's range drifted: "
             f"enum-only={sorted(set(OP_CLASS_ENUM) - classifier_range)}, "

@@ -23,7 +23,9 @@ import pytest
 import respx
 from httpx import ASGITransport
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import reset_block_cache
@@ -31,10 +33,12 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    AuditLog,
     PrincipalBlock,
     Tenant,
 )
 from meho_backplane.main import app
+from meho_backplane.operations import approval_queue
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import create_pending_request
 from meho_backplane.settings import get_settings
@@ -49,6 +53,7 @@ from ._oidc_jwt_helpers import (
 )
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-00000000c10a")
+_TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000c10b")
 _PERSON = "platform-person"
 _OTHER = "other-person"
 _PARAMS: dict[str, Any] = {"disk_gb": 40}
@@ -124,8 +129,7 @@ def _sign_in(key: Any, sid: str, *, sub: str = _PERSON) -> str:
 async def _seed_block(sub: str = _PERSON) -> None:
     """Block *sub* in the tenant."""
     async with get_sessionmaker()() as session:
-        if await session.get(Tenant, _TENANT) is None:
-            session.add(Tenant(id=_TENANT, slug="one-use", name="One use"))
+        await _ensure_tenant(session, _TENANT)
         session.add(
             PrincipalBlock(
                 sub=sub,
@@ -144,18 +148,22 @@ async def _blocked(sub: str = _PERSON) -> bool:
         return rows.first() is not None
 
 
-async def _park(*, destructive: bool) -> uuid.UUID:
+async def _ensure_tenant(session: Any, tenant: uuid.UUID) -> None:
+    if await session.get(Tenant, tenant) is None:
+        session.add(Tenant(id=tenant, slug=f"one-use-{tenant.hex[-4:]}", name="One use"))
+        await session.flush()
+
+
+async def _park(*, destructive: bool, tenant: uuid.UUID = _TENANT) -> uuid.UUID:
     requester = Operator(
         sub="op-requester",
         raw_jwt="<test-raw-jwt>",
-        tenant_id=_TENANT,
+        tenant_id=tenant,
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
     async with get_sessionmaker()() as session:
-        if await session.get(Tenant, _TENANT) is None:
-            session.add(Tenant(id=_TENANT, slug="one-use", name="One use"))
-            await session.flush()
+        await _ensure_tenant(session, tenant)
         request = await create_pending_request(
             session,
             operator=requester,
@@ -181,11 +189,16 @@ async def _status(request_id: uuid.UUID) -> str:
         return row.status
 
 
-async def _approve(ac: httpx.AsyncClient, request_id: uuid.UUID, token: str) -> httpx.Response:
+async def _approve(
+    ac: httpx.AsyncClient, request_id: uuid.UUID, token: str, tenant: uuid.UUID | None = None
+) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"}
+    if tenant is not None:
+        headers["Meho-Tenant"] = str(tenant)
     return await ac.post(
         f"/api/v1/approvals/{request_id}/decide",
         json={"decision": "approved", "reason": ""},
-        headers={"Authorization": f"Bearer {token}"},
+        headers=headers,
     )
 
 
@@ -277,3 +290,67 @@ async def test_removing_the_block_of_another_person_does_not_use_up_a_sign_in(
     assert (await _unblock(ac, _sign_in(key, "s-other"), _OTHER)).status_code == 200
 
     assert (await _approve(ac, destructive, _sign_in(key, "s-other"))).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_that_removed_the_own_block_in_one_tenant_cannot_approve_in_another(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_block()
+    destructive = await _park(destructive=True, tenant=_TENANT_B)
+
+    assert (await _unblock(ac, _sign_in(key, "s-tenants-unblock"))).status_code == 200
+    refused = await _approve(ac, destructive, _sign_in(key, "s-tenants-unblock"), _TENANT_B)
+
+    _assert_used(refused)
+    assert await _status(destructive) == ApprovalRequestStatus.PENDING.value
+    assert not await _blocked()
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_that_approved_in_one_tenant_cannot_remove_the_own_block_in_another(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_block()
+    destructive = await _park(destructive=True, tenant=_TENANT_B)
+
+    approved = await _approve(ac, destructive, _sign_in(key, "s-tenants-approve"), _TENANT_B)
+    assert approved.status_code == 200, approved.text
+    refused = await _unblock(ac, _sign_in(key, "s-tenants-approve"))
+
+    _assert_used(refused)
+    assert await _blocked()
+    assert await _status(destructive) == ApprovalRequestStatus.APPROVED.value
+
+
+async def _unblock_rows() -> list[AuditLog]:
+    """The ``principal.unblock`` rows that name a removed login (not the request records)."""
+    async with get_sessionmaker()() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    return [r for r in rows if "unblocked_sub" in (r.payload or {})]
+
+
+@pytest.mark.parametrize("step", ["lock", "scan"])
+@pytest.mark.asyncio
+async def test_a_database_error_in_the_sign_in_check_answers_503_and_keeps_the_block(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    ac, key = _client
+    await _seed_block()
+
+    async def _fail(*args: Any, **kwargs: Any) -> Any:
+        raise OperationalError("SELECT 1", {}, ConnectionError("database went away"))
+
+    if step == "lock":
+        monkeypatch.setattr(approval_queue, "take_approval_lock", _fail)
+    else:
+        monkeypatch.setattr(principal_block, "earlier_sign_in_uses", _fail)
+
+    response = await _unblock(ac, _sign_in(key, "s-database-down"))
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "principal_block_check_unavailable"
+    assert await _blocked()
+    assert await _unblock_rows() == []

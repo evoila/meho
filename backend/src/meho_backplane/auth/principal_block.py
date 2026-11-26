@@ -434,15 +434,23 @@ async def _delete_read_blocks(session: AsyncSession, blocks: list[BlockedPerson]
 async def _refuse_used_sign_in(
     session: AsyncSession, operator: Operator, sign_in: dict[str, Any]
 ) -> None:
-    """Raise :class:`SignInAlreadyUsedError` when an approve already used the sign-in."""
+    """Raise :class:`SignInAlreadyUsedError` when an approve already used the sign-in.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the lock or the
+    audit rows cannot be read, so nothing is removed.
+    """
     # Imported here: the approval queue imports this module.
-    from meho_backplane.operations.approval_queue import take_approval_lock
+    from meho_backplane.operations import approval_queue
 
     key = str(sign_in["sign_in_key"])
-    await take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
-    uses = await earlier_sign_in_uses(
-        session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
-    )
+    try:
+        await approval_queue.take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
+        uses = await earlier_sign_in_uses(
+            session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
+        )
+    except Exception as exc:
+        _log.warning("principal_unblock_sign_in_check_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     if any(use.kind == "approval" for use in uses):
         _log.warning("principal_unblock_sign_in_reused", operator_sub=operator.sub)
         raise SignInAlreadyUsedError
@@ -465,9 +473,10 @@ async def unblock_principal(
     admin a block in this tenant, raises :class:`OwnBlockStaysError` and
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
-    is none, and :class:`PrincipalBlockUnavailableError` when the table
-    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given. A *sign_in* that an
+    is none, and :class:`PrincipalBlockUnavailableError` when the table,
+    the lock of the sign-in or the audit rows cannot be read. *reason* and
+    *sign_in* (the proof of a fresh sign-in) go into the audit row when
+    they are given. A *sign_in* that an
     ``approval.decision`` audit row already names is used up: the call
     raises :class:`SignInAlreadyUsedError` and removes nothing. The scan
     and the removal run under the advisory lock of the sign-in

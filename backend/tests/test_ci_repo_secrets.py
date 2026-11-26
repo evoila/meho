@@ -304,7 +304,7 @@ def test_ci_test_images_use_the_proxy_and_hide_it(job_id: str, tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     assert exported, job_id
     for key, image in exported.items():
-        assert key.startswith("MEHO_TEST_") and key.endswith("_IMAGE")
+        assert key.endswith("_IMAGE") and key.startswith(("MEHO_TEST_", "RYUK_CONTAINER_"))
         assert image.startswith(PROXY + "/"), (key, image)
     assert PROXY in masks
     assert "proxy.example.test" in masks

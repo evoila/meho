@@ -39,7 +39,9 @@ _EXCEPTIONS_FILE = _TESTS / "ci_test_image_exceptions.json"
 
 _SECRETS_STEP = "Read the CI repository secrets"
 _VARIABLE = re.compile(r"MEHO_TEST_[A-Z0-9_]+_IMAGE")
-_IMAGE_LINE = re.compile(r"^\s*(MEHO_TEST_[A-Z0-9_]+_IMAGE):\s*(\S+)\s*$", re.MULTILINE)
+_IMAGE_LINE = re.compile(
+    r"^\s*((?:MEHO_TEST_[A-Z0-9_]+_IMAGE|RYUK_CONTAINER_IMAGE)):\s*(\S+)\s*$", re.MULTILINE
+)
 # A name with a tag or a digest, with or without a registry and path.
 _IMAGE_NAME = re.compile(
     r"^(?:[a-z0-9.-]+(?::\d+)?/)?(?:[a-z0-9._-]+/)*[a-z0-9._-]+"
@@ -296,6 +298,22 @@ def test_every_exception_has_a_reason_and_still_applies() -> None:
         assert entry["image"] in literal_images(source), (
             f"this exception no longer applies: {entry}"
         )
+
+
+@pytest.mark.parametrize("job_id", _ALL_JOBS)
+def test_the_cleanup_helper_of_testcontainers_comes_through_the_proxy(job_id: str) -> None:
+    """The library starts its Ryuk helper image on every daemon that runs a container test.
+
+    It names ``testcontainers/ryuk`` on Docker Hub by default. The variable
+    ``RYUK_CONTAINER_IMAGE`` is the library's own switch for another name.
+    """
+    from testcontainers.core.config import testcontainers_config
+
+    job = _jobs("ci.yml")[job_id]
+    assert not variables_not_through_proxy(job, {"RYUK_CONTAINER_IMAGE"})
+    # Same repository and tag as the library's default, behind the proxy name.
+    default = "/".join(testcontainers_config.ryuk_image.rsplit("/", 2)[-2:])
+    assert image_block(job)["RYUK_CONTAINER_IMAGE"].endswith(f"/{default}")
 
 
 @pytest.mark.parametrize(

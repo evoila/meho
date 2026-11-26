@@ -174,6 +174,21 @@ def _is_secret_shaped(value: Any) -> bool:
     return isinstance(value, str) and hide_in_text(value) != value
 
 
+def _is_nested_secret(node: Any) -> bool:
+    """True for a Secret object held inside another object (a template, for example).
+
+    It has the kind ``Secret`` and either the core ``apiVersion`` ``v1`` or a
+    ``data``, ``stringData`` or ``binaryData`` field. A mapping that only
+    names a Secret (a reference with a ``kind`` and a ``name``) does not count.
+    """
+    return (
+        isinstance(node, Mapping)
+        and isinstance(node.get("kind"), str)
+        and node["kind"].lower() in CREDENTIAL_KINDS
+        and (node.get("apiVersion") == "v1" or any(f in node for f in _NAMED_VALUE_FIELDS))
+    )
+
+
 def _is_secret_env_entry(entry: Any) -> bool:
     """True for an ``env`` entry with a secret name and a value of its own."""
     return (
@@ -192,7 +207,8 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
 class _SecretValueCheck:
     """A check for one manifest: True when an object holds a secret-looking value.
 
-    An object holds one when a key of its ``data``, ``stringData`` or
+    An object holds one when it holds a Secret object at any depth
+    (:func:`_is_nested_secret`), when a key of its ``data``, ``stringData`` or
     ``binaryData`` has a secret name (the name rule of
     :func:`~meho_backplane.broadcast.events.scrub_secret_named_values`), when
     an ``env`` entry at any depth, the object itself included, has a secret
@@ -241,7 +257,7 @@ class _SecretValueCheck:
             node = stack.pop()
             if not self._first_visit(node, self._seen):
                 continue
-            if _is_secret_shaped(node) or self._has_secret_env(node):
+            if _is_secret_shaped(node) or self._has_secret_env(node) or _is_nested_secret(node):
                 return True
             stack.extend(_children(node, skip_items=False))
         return False

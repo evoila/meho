@@ -74,8 +74,10 @@ and its risky fields after the apply, read only from the places that
 Kubernetes defines. MEHO reads the live object only when the login that
 asked has the role Operator or higher; for any other login the card says
 "not read". It changes no approval rule. When the dry run fails, the card
-still shows the manifest and the subject line, and names the document the
-dry run stopped at. See `approvals.md`.
+of a person still shows the manifest and the subject line, and names the
+document the dry run stopped at. See `approvals.md`. When the manifest is
+not valid YAML, the error names only the line and the column, never the
+text of that line.
 The stored request of a `k8s.apply` of a Secret, or of a manifest with a
 secret-looking value, keeps its manifest only in the encrypted one-time
 handoff of the run, as a credential write does. Such a call needs
@@ -90,7 +92,11 @@ handoff of the run, as a credential write does. Such a call needs
   reads its value from a Secret (`valueFrom`) does not count;
 - a text at any depth has a secret shape of its own: the rule of
   `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
-  token with a known vendor prefix).
+  token with a known vendor prefix);
+- it holds a Secret object at any depth, for example as a template: a map
+  with the kind `Secret` and either the `apiVersion` `v1` or a `data`,
+  `stringData` or `binaryData` field. A map that only names a Secret (a
+  `kind` and a `name`) does not count.
 
 The check reads each value of the manifest once, and the names of each
 `data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name

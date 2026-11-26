@@ -560,9 +560,10 @@ def register_preview_failure_keys(
     When the builder of *op_id* raises, the stored request holds the
     ``preview_unavailable`` marker. *build* gets the context and the error,
     and adds what the card can still show from the params alone. MEHO keeps
-    only the keys of :data:`PERSON_ONLY_EFFECT_KEYS`, which a caller that is
-    not a person never reads, and of :data:`PREVIEW_FAILURE_ECHO_KEYS`. The
-    agent's own preview gets none, and a *build* that raises adds nothing.
+    only the keys of :data:`PERSON_ONLY_EFFECT_KEYS` and of
+    :data:`PREVIEW_FAILURE_ECHO_KEYS`, which a caller that is not a person
+    never reads. The agent's own preview gets none, and a *build* that
+    raises adds nothing.
     """
     _PREVIEW_FAILURE_KEYS[op_id] = build
 
@@ -585,10 +586,11 @@ def register_agent_preview_filter(
 #: (:func:`register_preview_failure_keys`).
 PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
 
-#: Top-level keys that a failed preview still holds for every reader of the
-#: stored request, with the values hidden as on a preview that worked: the
+#: Top-level keys that a failed preview still holds for the card a person
+#: reads, with the values hidden as on a preview that worked: the
 #: ``k8s.apply`` manifest, its subject line, and the document its dry run
-#: stopped at (:func:`register_preview_failure_keys`).
+#: stopped at (:func:`register_preview_failure_keys`). A caller that is not a
+#: person reads the failed preview without them (:func:`proposed_effect_for_agent`).
 PREVIEW_FAILURE_ECHO_KEYS: Final[frozenset[str]] = frozenset(
     {"manifest", "subject", "dry_run_stop"}
 )
@@ -690,8 +692,10 @@ def proposed_effect_for_agent(
       (:func:`register_agent_preview_filter`), after the person-only keys
       are gone.
 
-    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
-    the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
+    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`),
+    the keys a failed preview keeps for the card
+    (:data:`PREVIEW_FAILURE_ECHO_KEYS`) and the internal keys
+    (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
     of :data:`SWITCHED_EFFECT_KEYS` or a field of :data:`SWITCHED_OBJECT_FIELDS`
     is in it only while its switch is on. Every other ``proposed_effect`` comes
     back unchanged.
@@ -699,6 +703,12 @@ def proposed_effect_for_agent(
     if not isinstance(effect, dict):
         return effect
     effect = without_person_only_effect_keys(effect)
+    if effect.get("preview_unavailable") is True and not PREVIEW_FAILURE_ECHO_KEYS.isdisjoint(
+        effect
+    ):
+        effect = {
+            key: value for key, value in effect.items() if key not in PREVIEW_FAILURE_ECHO_KEYS
+        }
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}
@@ -1094,9 +1104,9 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     stores the ``preview_unavailable`` marker with the server's message in
     ``preview_error``, so the reviewer sees that the apply will be
     rejected instead of a clean-looking preview with no
-    ``resourceVersion`` and no ``uid`` (#3876). That marker still holds the
-    manifest, the subject line and the document the dry run stopped at,
-    and for a person what each container runs (:func:`_k8s_apply_failure_keys`).
+    ``resourceVersion`` and no ``uid`` (#3876). For a person, that marker
+    still holds the manifest, the subject line, the document the dry run
+    stopped at and what each container runs (:func:`_k8s_apply_failure_keys`).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
@@ -1232,10 +1242,15 @@ def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, 
     if not isinstance(manifest, str):
         return {}
     redactor = _k8s_apply_redactor(ctx)
+
+    def _identities() -> list[dict[str, Any]]:
+        # Redacted like the manifest echo, so a label never shows what the echo hides.
+        return redactor([_identity(doc) for doc in _parse_manifest(manifest)])
+
     builders: dict[str, Callable[[], Any]] = {
         "manifest": lambda: apply_manifest_echo(manifest, redact=redactor),
-        "subject": lambda: apply_subject([_identity(doc) for doc in _parse_manifest(manifest)]),
-        "dry_run_stop": lambda: _dry_run_stop(_parse_manifest(manifest), error),
+        "subject": lambda: apply_subject(_identities()),
+        "dry_run_stop": lambda: _dry_run_stop(_identities(), error),
         RUN_COMMANDS_KEY: lambda: apply_run_commands(manifest, redact=redactor),
     }
     keys: dict[str, Any] = {}
@@ -1260,16 +1275,19 @@ def _identity(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _dry_run_stop(docs: list[dict[str, Any]], error: Exception) -> str | None:
-    """Which document of a manifest of more than one document the dry run stopped at."""
+def _dry_run_stop(identities: list[dict[str, Any]], error: Exception) -> str | None:
+    """Which document of a manifest of more than one document the dry run stopped at.
+
+    *identities* are the redacted ``kind``, ``namespace`` and ``name`` of each document.
+    """
     done = getattr(error, _APPLY_DOCUMENTS_DONE, None)
-    if len(docs) < 2 or not isinstance(done, int) or not 0 <= done < len(docs):
+    if len(identities) < 2 or not isinstance(done, int) or not 0 <= done < len(identities):
         return None
     from meho_backplane.connectors.kubernetes.ops_write_preview import apply_subject
 
-    label = apply_subject([_identity(docs[done])])
-    sentence = f"The dry run stopped at document {done + 1} of {len(docs)} ({label})."
-    if done + 1 < len(docs):
+    label = apply_subject([identities[done]])
+    sentence = f"The dry run stopped at document {done + 1} of {len(identities)} ({label})."
+    if done + 1 < len(identities):
         sentence += " The documents after it had no dry run."
     return sentence
 

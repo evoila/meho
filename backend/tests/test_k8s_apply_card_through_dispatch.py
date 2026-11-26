@@ -22,6 +22,7 @@ and the MCP approvals tool.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import secrets
 import uuid
@@ -33,6 +34,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import respx
+import structlog
 import yaml
 from sqlalchemy import func, select
 
@@ -304,9 +306,13 @@ def test_the_same_apply_waits_for_a_token_person_a_console_person_and_an_agent(
     # Only dry runs reached the stand-in server.
     assert {verb for verb, _, _ in server.requests} <= {"apply", "get"}
     for row, audit in zip(rows, audits, strict=True):
-        # The card of the stored request and its audit row. The stored params
-        # keep the manifest for the run after the approval.
-        stored = json.dumps([row.proposed_effect, audit.payload, audit.raw_payload], default=str)
+        # The manifest holds a Secret, so the stored request keeps it only in
+        # the encrypted handoff of the run: the row has no params.
+        assert row.params is None
+        assert row.execution_handle is not None
+        stored = json.dumps(
+            [row.params, row.proposed_effect, audit.payload, audit.raw_payload], default=str
+        )
         for value in values:
             assert value not in stored
         card = _console_card(row)
@@ -384,13 +390,21 @@ def _assert_failed_card(row: ApprovalRequest, stop: str) -> None:
     assert "object_summary" not in json.dumps(effect)
     assert effect["subject"] == "Namespace/web, Deployment/web/api, Service/web/api"
     assert effect["dry_run_stop"] == stop
-    for name, view in _views(row).items():
+    views = _views(row)
+    person = views.pop("rest-person")
+    assert [doc["kind"] for doc in person["manifest"]] == ["Namespace", "Deployment", "Service"]
+    assert person["manifest"][2]["spec"]["ports"][0]["targetPort"] == 8181
+    assert person["subject"] == effect["subject"]
+    assert person["dry_run_stop"] == stop
+    # A caller that is not a person reads the failed preview as before: the
+    # marker and the error, without the manifest, the subject or the stop.
+    for name, view in {"rest-person": person, **views}.items():
         assert view["preview_unavailable"] is True, name
-        assert [doc["kind"] for doc in view["manifest"]] == ["Namespace", "Deployment", "Service"]
-        assert view["manifest"][2]["spec"]["ports"][0]["targetPort"] == 8181, name
-        assert view["subject"] == effect["subject"], name
-        assert view["dry_run_stop"] == stop, name
+        assert view["preview_error"] == effect["preview_error"], name
         assert "object_summary" not in json.dumps(view), name
+    for name, view in views.items():
+        assert not {"manifest", "subject", "dry_run_stop", "run_commands"} & set(view), name
+        assert "8181" not in json.dumps(view), name
     card = _console_card(row)
     assert "What the apply sends" in card
     assert stop in card
@@ -439,3 +453,77 @@ def test_an_unreadable_manifest_card_says_the_summary_could_not_be_made(
     card = _console_card(row)
     assert "Blast radius unknown" in card
     assert _SUMMARY_FAILED in card
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def test_a_rejected_name_with_a_token_is_hidden_in_both_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _StandInServer(refused_kinds=frozenset({"Service"}))
+    _setup(monkeypatch, server)
+    token = ".".join([_b64(b'{"alg":"HS256"}'), _b64(b'{"sub":"x"}'), secrets.token_hex(16)])
+    manifest = (
+        "apiVersion: v1\nkind: Namespace\nmetadata: {name: web}\n"
+        "---\n"
+        f"apiVersion: v1\nkind: Service\nmetadata: {{name: 'web-{token}', namespace: web}}\n"
+    )
+
+    row = _park(_login("person-token"), manifest)
+
+    effect = row.proposed_effect
+    assert effect["preview_unavailable"] is True
+    assert effect["subject"].startswith("Namespace/web, Service/web/web-")
+    assert effect["dry_run_stop"].startswith("The dry run stopped at document 2 of 2 (Service/")
+    for label in (effect["subject"], effect["dry_run_stop"]):
+        assert token not in label
+    assert token not in json.dumps(effect)
+    assert token not in _console_card(row)
+
+
+def test_a_date_in_a_config_map_still_waits_for_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _StandInServer(refused_kinds=frozenset({"ConfigMap"}))
+    _setup(monkeypatch, server)
+    manifest = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: settings, namespace: prod}\n"
+        "data: {day: 2024-01-31, at: 2024-01-31T10:00:00Z}\n"
+        "---\n"
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: report, namespace: prod}\n"
+        "spec: {containers: [{name: app, image: report:1, args: [2024-01-31]}]}\n"
+    )
+
+    row = _park(_login("person-token"), manifest)
+
+    effect = row.proposed_effect
+    assert effect["preview_unavailable"] is True
+    assert effect["manifest"][0]["data"] == {"day": "2024-01-31", "at": "2024-01-31T10:00:00+00:00"}
+    assert effect["run_commands"][0]["args"] == ["2024-01-31"]
+    assert "2024-01-31" in _console_card(row)
+
+
+def test_a_malformed_secret_puts_no_value_in_the_error_or_the_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _StandInServer()
+    _setup(monkeypatch, server)
+    value = _made_up_name()
+    manifest = (
+        "apiVersion: v1\nkind: Secret\nmetadata: {name: s, namespace: prod}\n"
+        f"stringData:\n  note: {value}: x\n"
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        row = _park(_login("person-token"), manifest)
+
+    effect = row.proposed_effect
+    assert effect["preview_unavailable"] is True
+    assert "line 5, column" in effect["preview_error"]
+    assert row.params is None
+    assert value not in json.dumps(effect)
+    assert value not in json.dumps(logs, default=str)
+    assert any(entry.get("event") == "proposed_effect_preview_failed" for entry in logs)
+    assert value not in _console_card(row)

@@ -194,6 +194,10 @@ async def _gate(
         "",
         "---\n",
         None,
+        "apiVersion: example.test/v1\nkind: Widget\nmetadata: {name: w}\n"
+        + "spec: {template: {apiVersion: v1, kind: Secret, metadata: {name: inner}}}\n",
+        "apiVersion: example.test/v1\nkind: Widget\nmetadata: {name: w}\n"
+        + "spec: {templates: [{template: {kind: Secret, stringData: {other: x}}}]}\n",
     ],
     ids=[
         "secret",
@@ -208,6 +212,8 @@ async def _gate(
         "empty",
         "only-separator",
         "not-text",
+        "secret-template-in-a-custom-kind",
+        "secret-template-one-level-deeper",
     ],
 )
 def test_a_manifest_with_a_secret_or_that_meho_cannot_read_counts(manifest: Any) -> None:

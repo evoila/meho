@@ -190,6 +190,14 @@ class KubernetesSecretRefError(ValueError):
     """
 
 
+def _yaml_error_place(exc: yaml.YAMLError) -> str:
+    """`` (line L, column C)`` of a YAML error, or empty text when it names no place."""
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    if mark is None:
+        return ""
+    return f" (line {mark.line + 1}, column {mark.column + 1})"
+
+
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
 
@@ -203,7 +211,11 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     try:
         docs = list(yaml.safe_load_all(manifest))
     except yaml.YAMLError as exc:
-        raise ApplyManifestError(f"manifest is not valid YAML/JSON: {exc}") from exc
+        # The parser's own text quotes the manifest line, which can hold a
+        # Secret value: name only where the error is.
+        raise ApplyManifestError(
+            f"manifest is not valid YAML/JSON{_yaml_error_place(exc)}"
+        ) from None
 
     parsed: list[dict[str, Any]] = []
     for idx, doc in enumerate(docs):

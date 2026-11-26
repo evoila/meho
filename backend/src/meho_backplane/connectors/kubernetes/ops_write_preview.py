@@ -99,6 +99,7 @@ and the park then stores the ``preview_unavailable`` marker with the reason.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 from collections.abc import Callable
 from typing import Any
@@ -407,7 +408,23 @@ def _entry_bytes(entry: dict[str, Any]) -> int:
     each entry adds a ``, `` separator, and the ``[`` and ``]`` of the list
     take the place of the separator the last entry does not need.
     """
-    return len(json.dumps(entry, default=str).encode("utf-8")) + 2
+    return len(json.dumps(entry, default=_as_text).encode("utf-8")) + 2
+
+
+def _json_safe(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """*entries* safe to store as JSON.
+
+    YAML reads an unquoted date or time as a date object, which the database
+    cannot store. Each one becomes its ISO text, as the client sends it. Run
+    on the result only, which the size limit keeps small.
+    """
+    safe: list[dict[str, Any]] = json.loads(json.dumps(entries, default=_as_text))
+    return safe
+
+
+def _as_text(value: Any) -> str:
+    """A date or time in ISO form, and any other value as its text."""
+    return value.isoformat() if isinstance(value, datetime.date) else str(value)
 
 
 def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict[str, Any]]:
@@ -445,7 +462,7 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
             continue
         echo.append(_omitted_summary(len(docs) - index))
         break
-    return echo
+    return _json_safe(echo)
 
 
 def apply_subject(applied: Any) -> str | None:
@@ -587,10 +604,16 @@ _RUN_KEYS = ("command", "args", "exec_commands")
 
 def _command_text(entry: dict[str, Any]) -> str:
     """What *entry* runs as one text: its command line and its hook and probe commands."""
-    parts = [f"{key}: {json.dumps(entry[key])}" for key in ("command", "args") if key in entry]
+    parts = [
+        f"{key}: {json.dumps(entry[key], default=_as_text)}"
+        for key in ("command", "args")
+        if key in entry
+    ]
     exec_commands = entry.get("exec_commands")
     if isinstance(exec_commands, dict):
-        parts.extend(f"{where}: {json.dumps(cmd)}" for where, cmd in exec_commands.items())
+        parts.extend(
+            f"{where}: {json.dumps(cmd, default=_as_text)}" for where, cmd in exec_commands.items()
+        )
     return "; ".join(parts)
 
 
@@ -689,7 +712,7 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
             break
         shown.append(fitted)
         used += _entry_bytes(fitted)
-    return shown
+    return _json_safe(shown)
 
 
 def _run_commands_shown_to_agents() -> bool:

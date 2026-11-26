@@ -3745,12 +3745,17 @@ has no such key and makes no extra read, and the stored request it reads
 leaves it out.
 
 When the dry run of a `k8s.apply` fails, the stored request has the
-`preview_unavailable` marker and no `object_summary`. It still has, for
-every reader of the request, the `manifest` echo and the `subject` line,
-built from the manifest text with the same hiding as on a preview that
-worked (`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). For a
-manifest of more than one document, `dry_run_stop` names the document the
-dry run stopped at and says that the documents after it had no dry run.
+`preview_unavailable` marker and no `object_summary`. For a person, it
+still has the `manifest` echo and the `subject` line, built from the
+manifest text with the same hiding as on a preview that worked
+(`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
+line and `dry_run_stop` use the names after that hiding, so they never
+show what the echo hides. Dates and times that YAML reads from the
+manifest are stored as their ISO text. For a manifest of more than one
+document, `dry_run_stop` names the document the dry run stopped at and
+says that the documents after it had no dry run. A caller that is not a
+person (the agent REST view and the MCP approvals tools) reads the failed
+request as before: the marker and the error, without these keys.
 The console card shows these in a "What the apply sends" block, and from
 the `preview_unavailable` mark the sentence "The summary of the objects
 could not be made, because the dry run failed." A key that cannot be built

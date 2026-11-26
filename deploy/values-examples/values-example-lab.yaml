@@ -11,9 +11,9 @@
 # validation at `helm install` time instead of CrashLoopBackOff'ing
 # silently against the wrong system. Some fields have no marker: they
 # hold example values that the chart accepts, for example `ingress.host`,
-# the Vault and PostgreSQL addresses, `config.forwardedAllowIps` and
-# `config.targetSsrfAllowlist`. Check every value before you install, not
-# only the marked ones. Replace `config.forwardedAllowIps` with your
+# the Vault and PostgreSQL addresses, `config.forwardedAllowIps` and the
+# private ranges a target may use. Check every value before you install,
+# not only the marked ones. Replace `config.forwardedAllowIps` with your
 # ingress controller's own address.
 #
 # See `deploy/values-examples/README.md` for the substitution recipe

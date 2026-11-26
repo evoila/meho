@@ -34,7 +34,8 @@ forgets to substitute one fails-loud at `helm install` rather than
 silently connecting to the wrong system or CrashLoopBackOff'ing at first
 request. Some fields have no marker: they hold example values that the
 chart accepts, for example `ingress.host`, the Vault and PostgreSQL
-addresses, `config.forwardedAllowIps` and `config.targetSsrfAllowlist`.
+addresses, `config.forwardedAllowIps` and the private ranges a target
+may use.
 So check every value before you install, not only the marked ones.
 Replace `config.forwardedAllowIps` with your ingress controller's own
 address.

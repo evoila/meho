@@ -869,8 +869,7 @@ async def _mint_remote_write(
     key + the per-runner allowlist) **before** the single-use latch: the tier is
     satisfiable only when **both** the committed approval **and** the allowlist
     pass, and either absent fails closed. The human approval decision is the
-    authorization (policy gate bypassed for this tier, the mould of
-    ``approve_request``'s ``_approved=True`` re-dispatch); on a win the capability
+    authorization (the policy gate does not run for this tier); on a win the capability
     is **signed** for offline edge verification, and the same allowlist matcher is
     re-run at the DB-free edge (``executor._screen_item``), defence in depth.
     """

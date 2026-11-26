@@ -35,7 +35,10 @@ still works alone. With it off, each part follows its own switch.
 One module decides whether a part is on:
 `backend/src/meho_backplane/policy/switches.py`. Code asks it (or the
 helpers that call it: `classification_enabled`, `shadow_enabled`,
-`routing_enabled`), never the settings or the environment. `GET /ready`
+`routing_enabled`), never the settings or the environment. Whether
+`CUSTOM_POLICY` itself is on: `custom_policy_on(settings)`, or
+`custom_policy_on_in_environment()` for code that runs before the
+settings are loaded. `GET /ready`
 shows `features.policy.custom_policy`, and for each part whether it is
 on, by its own switch or by `CUSTOM_POLICY`. `GET /version` lists
 `CUSTOM_POLICY` with the other switches that change what an agent sees.

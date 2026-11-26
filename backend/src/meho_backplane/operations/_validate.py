@@ -36,6 +36,7 @@ from typing import Any, Final
 import structlog
 from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
+from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
@@ -1166,6 +1167,9 @@ async def policy_gate(
     :func:`~meho_backplane.policy.stamp.take_rule` (#6044). An MCP profile
     with a connector list may deny first (:func:`_profile_denial`, #6099)."""
     forget_rule()
+    revoked = await _revoked_agent_denial(operator)
+    if revoked is not None:
+        return PermissionVerdict.DENY, revoked
     requester_denial = _requester_denial(operator, descriptor, params)
     if requester_denial is not None:
         return PermissionVerdict.DENY, requester_denial
@@ -1181,6 +1185,44 @@ async def policy_gate(
         params=params,
         decide_only=decide_only,
     )
+
+
+async def _revoked_agent_denial(operator: Operator) -> str | None:
+    """Why an agent login that MEHO revoked may not call, or ``None``.
+
+    Read from the agent's row (``DELETE /api/v1/agent-principals/{name}/revoke``),
+    so a token that has not ended yet is refused too. Both logins are
+    checked: the caller, when it is an agent login, and the acting agent of
+    a hosted agent run (:func:`resolve_actor_sub`). A login with no row is
+    left to the other checks.
+    """
+    from meho_backplane.db.models import AgentPrincipal
+
+    client_ids = []
+    if operator.principal_kind is PrincipalKind.AGENT and operator.client_id:
+        client_ids.append(operator.client_id)
+    actor_sub = resolve_actor_sub()
+    if actor_sub is not None:
+        client_ids.append(actor_sub)
+    if not client_ids:
+        return None
+    async with get_sessionmaker()() as session:
+        revoked = (
+            (
+                await session.execute(
+                    select(AgentPrincipal.keycloak_client_id).where(
+                        AgentPrincipal.tenant_id == operator.tenant_id,
+                        AgentPrincipal.keycloak_client_id.in_(client_ids),
+                        AgentPrincipal.revoked.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+    if revoked is None:
+        return None
+    return f"policy_denied: the agent login {revoked!r} is revoked in MEHO"
 
 
 async def _profile_denial(

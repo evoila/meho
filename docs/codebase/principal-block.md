@@ -41,6 +41,17 @@ A platform admin's way back:
   `fresh_sign_in_required`. The block stays in both cases.
 - The audit row `principal.unblock` holds the reason and the sign-in
   (`sign_in`).
+- One sign-in removes the own block or approves a `destructive` request,
+  not both. A sign-in that already approved
+  a request (an `approval.decision` row with the same `sign_in_key`) cannot
+  remove the own block: 401 `fresh_sign_in_already_used`, and the block
+  stays. A sign-in that removed the own block cannot approve a
+  `destructive` request, with the same 401. Both read the person's earlier
+  audit rows through `earlier_sign_in_uses` in `auth/sign_in_use.py`, under
+  the advisory lock of the sign-in. When the lock or the audit rows cannot
+  be read, the own-login unblock answers 503
+  `principal_block_check_unavailable`, and the block stays. Removing the
+  block of another person uses no sign-in.
 - The way back uses the approval sign-in client of the login server
   (`meho-cli-approve` in MEHO's own setup). An install without that client
   has no way back; another platform admin or a tenant admin of that tenant

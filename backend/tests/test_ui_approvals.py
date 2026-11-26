@@ -4080,8 +4080,12 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pending_list_carries_the_count_it_was_drawn_with() -> None:
-    """The waiting list holds the bell's count and a "Show" button for the list."""
+def test_pending_list_has_the_new_requests_line_without_a_count() -> None:
+    """The waiting list has the line and a "Show" button, but no count of its own.
+
+    The script takes its starting count from the bell, so the list load
+    asks the database nothing more.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_request(tenant_id=_TENANT_A, op_id="pending.one")
     _seed_request(tenant_id=_TENANT_A, op_id="pending.two")
@@ -4093,7 +4097,8 @@ def test_pending_list_carries_the_count_it_was_drawn_with() -> None:
         page = client.get("/ui/approvals?tab=pending")
 
     for body in (response.text, page.text):
-        assert 'data-approvals-new-notice data-baseline="2"' in body
+        assert "<div hidden data-approvals-new-notice>" in body
+        assert "data-baseline" not in body
         # "Show" fetches the same list a tab does; nothing is polled for it.
         assert body.count('hx-trigger="meho:approval-bump from:body, meho:approval-decided') == 1
     assert 'hx-get="/ui/approvals/list?tab=pending"\n          hx-target="#approvals-history"' in (
@@ -4122,5 +4127,7 @@ def test_bell_script_shows_the_line_from_the_polled_count_only() -> None:
     assert script.count("setInterval(") == 1
     assert "htmx:afterSwap" in script
     assert "data-approvals-new-notice" in script
+    # The first badge count after the list is drawn is its starting point.
+    assert "notice.dataset.baseline = String(count);" in script
     for request_marker in ("fetch(", "XMLHttpRequest", "htmx.ajax", "hx-get"):
         assert request_marker not in script.split("// Show the new-requests line", 1)[1]

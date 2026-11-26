@@ -53,9 +53,8 @@
     order             -- str: the order in use, "oldest" or "newest" (#3596)
     order_choice      -- str: the operator's explicit choice, "" when none
     work_ref_error    -- str | None: why the work_ref filter was refused (no rows)
-    waiting_count     -- int | None: the bell's count when the list was drawn
-                         (Pending and For you tabs only; None hides the
-                         new-requests line, #6932)
+    new_notice        -- bool: the list has a new-requests line (Pending and
+                         For you tabs only, #6932)
     in_order_work_ref -- str | None: the change ticket the "Approve group in
                          order" button runs (#3597); None hides the button
 -#}
@@ -70,12 +69,13 @@
   hx-include="[name='work_ref']"
 >
   {# ---------- New-requests line (#6932) ---------- #}
-  {#- Shown by ``approvals-bell.js`` when the bell's count differs from
-      ``data-baseline`` (the count when this list was drawn). "Show" fetches
-      the region again, like a tab. The region itself is not fetched by the
+  {#- ``approvals-bell.js`` keeps the first bell count after this list was
+      drawn as ``data-baseline``, and shows the line when a later count
+      differs. The list itself sends no count query. "Show" fetches the
+      region again, like a tab. The region itself is not fetched by the
       poll, so "Load more" pages stay until the person clicks. -#}
-  {% if waiting_count is not none %}
-    <div hidden data-approvals-new-notice data-baseline="{{ waiting_count }}">
+  {% if new_notice %}
+    <div hidden data-approvals-new-notice>
       <div role="status" class="alert alert-info flex items-center gap-3 text-sm">
         <span data-approvals-new-notice-text></span>
         <button

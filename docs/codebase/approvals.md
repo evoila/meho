@@ -4914,15 +4914,17 @@ columns are **never** projected onto any UI view, the badge, or a
 broadcast frame: the `render.project_request_to_view` projection omits
 them by construction. Live updates ride the app-shell bell's body-wide
 `meho:approval-bump` / `meho:approval-decided` events — the history list
-re-fetches its active tab on them, so a decision made elsewhere drops out
-of the open Pending tab without a reload. A request that arrives or is
-decided elsewhere does not re-fetch the list (that would drop its "Load
-more" pages). The Pending and For you lists carry the bell's count from
-when they were drawn (`data-baseline` on `data-approvals-new-notice`,
-`_history.html`). When a bell badge swap brings another count,
-`approvals-bell.js` shows "N new requests." or "The waiting list changed."
-with a "Show" button that re-fetches the list like a tab. It reads the
-count the bell already polls and sends no request of its own. The decision **reason** lives on
+re-fetches its active tab on them, so a decision made in the open page
+drops out of its Pending tab without a reload. A new request, or a
+decision made by another person, does not re-fetch the list (that would
+drop its "Load more" pages). The Pending and For you lists have a
+new-requests line (`data-approvals-new-notice`, `_history.html`). The
+list load sends no count query: `approvals-bell.js` stores the first bell
+count after the list is drawn as `data-baseline`. When a later bell badge
+swap brings another count, it shows "N new requests." or "The waiting
+list changed." with a "Show" button that re-fetches the list like a tab.
+It reads the count the bell already polls and sends no request of its
+own. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).

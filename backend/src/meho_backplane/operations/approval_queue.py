@@ -1229,9 +1229,10 @@ async def _find_idempotent_request(
     """Return the live request that holds *idempotency_key* for this caller.
 
     A request of :func:`_key_holders` counts only when *asker* asked it: the
-    same kind of login, the same people behind the login and the same
-    choice to reveal secret values. A request asked otherwise is not
-    returned, so the call gets its own request.
+    same kind of login, the same people behind the login, the same choice
+    to reveal secret values, the same acting agent and the same agent run
+    (:meth:`_Asker.asked`). A request asked otherwise is not returned, so
+    the call gets its own request.
     """
     holders = await _key_holders(
         session,
@@ -2139,9 +2140,14 @@ async def create_pending_request(
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
         idempotency_key: Optional client-chosen retry key (#3486). When the
-            same principal in the same tenant already has a ``pending`` or
-            ``approved`` request with this key, that request is returned
-            instead of a new one, with no new request row. When
+            same login in the same tenant already has a ``pending`` or
+            ``approved`` request with this key, and that request was asked
+            the same way as this call (:class:`_Asker`: the kind of login,
+            the people behind it, the ``reveal_secret`` choice, the acting
+            agent and the agent run), that request is returned instead of
+            a new one, with no new request row. Otherwise the call gets its
+            own request, and the key is kept for it in
+            ``approval_request_key``. When
             ``APPROVAL_RETRY_OWN_AUDIT_ROW`` is off, the retry writes no
             audit row. When it is on, the retry writes one
             ``approval.reuse`` audit row and the request carries its id as

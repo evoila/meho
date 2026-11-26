@@ -2838,7 +2838,8 @@ for approval.
 - **First call.** The new `approval_request` row stores the key
   (`idempotency_key` column, migration `0105`).
 - **Retry of the identical call.** If the same principal in the same tenant
-  has a `pending` or `approved` request with this key,
+  has a `pending` or `approved` request with this key, and that request was
+  asked the same way as this call (see "Asked the same way" below),
   `create_pending_request` returns that request. The reply is the normal
   `awaiting_approval` envelope (HTTP 200) with the **same**
   `extras.approval_request_id` and `extras.approval_request_reused: true`.

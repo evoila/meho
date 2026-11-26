@@ -79,6 +79,7 @@ from meho_backplane.policy.classification import RISK_LEVELS, Taxonomy
 from meho_backplane.policy.document import ACCEPTED_KINDS, read_kind
 from meho_backplane.policy.evaluate import approver_groups
 from meho_backplane.policy.store import _documents
+from meho_backplane.policy.switches import approver_routing_on, classification_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -119,8 +120,8 @@ ROUTING_INVALID_RULE: Final[str] = "invalid"
 
 
 def routing_enabled() -> bool:
-    """True when the ``POLICY_APPROVER_ROUTING`` switch is on."""
-    return get_settings().policy_approver_routing
+    """True when ``POLICY_APPROVER_ROUTING`` or ``CUSTOM_POLICY`` is on."""
+    return approver_routing_on(get_settings())
 
 
 @dataclass(frozen=True)
@@ -507,7 +508,7 @@ def category_routing_warnings(raw_routes: Sequence[Mapping[str, Any]]) -> list[s
     entry fits nothing. Empty in every other case.
     """
     settings = get_settings()
-    if not settings.policy_approver_routing or settings.policy_classification:
+    if not approver_routing_on(settings) or classification_on(settings):
         return []
     return [
         f"`routing[{index}]` matches on `category`: {CATEGORY_WITHOUT_CLASSIFICATION}"

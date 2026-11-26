@@ -253,6 +253,9 @@ data:
   # routing section, and the policy file's bindings give login groups a
   # group kind and categories. Off by default.
   POLICY_APPROVER_ROUTING: {{ .Values.config.policy.approverRouting | quote }}
+  # The one switch of the custom policy model. With it on, the three
+  # switches above count as on. Off by default.
+  CUSTOM_POLICY: {{ .Values.config.policy.customPolicy | quote }}
   # The shared knowledge scope and the weekly knowledge upkeep. Rendered
   # always; the defaults match the backplane's own defaults (nothing
   # shared, upkeep off, once a week when on).

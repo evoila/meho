@@ -32,7 +32,14 @@ from meho_backplane.connectors.policy.apply import register_policy_apply_operati
 from meho_backplane.connectors.policy.classify import register_policy_classify_operation
 from meho_backplane.connectors.policy.preview import register_policy_classify_preview_operation
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog, Base, EndpointDescriptor
+from meho_backplane.db.models import (
+    AgentPermission,
+    ApprovalRequest,
+    AuditLog,
+    Base,
+    EndpointDescriptor,
+    Tenant,
+)
 from meho_backplane.main import app
 from meho_backplane.mcp.handlers import handle_tools_list
 from meho_backplane.mcp.registry import registered_tool_names
@@ -114,7 +121,12 @@ _CALLERS: list[tuple[str, dict[str, Any] | None, int, int]] = [
     ("person, platform admin, reader", {"platform_admin": True, "tenant_role": _READER}, 200, 200),
     ("person, operator", {"tenant_role": _OPERATOR}, 403, 403),
     ("person, reader", {"tenant_role": _READER}, 403, 403),
-    ("agent, operator with a grant", {**_AGENT, "tenant_role": _OPERATOR}, 403, 403),
+    (
+        "agent, operator with a grant",
+        {**_AGENT, "tenant_role": _OPERATOR, "sub": "agent-g"},
+        403,
+        403,
+    ),
     ("agent, reader", {**_AGENT, "tenant_role": _READER}, 403, 403),
     ("agent, tenant admin", dict(_AGENT), 403, 403),
     ("agent, platform admin", {**_AGENT, "platform_admin": True}, 403, 403),
@@ -135,7 +147,10 @@ def _send(
 ) -> int:
     if claims is None:
         return client.get(route, params={"scope": scope}).status_code
-    sub = "caller-" + uuid.uuid5(uuid.NAMESPACE_OID, repr(sorted(claims.items()))).hex[:8]
+    claims = dict(claims)
+    sub = claims.pop("sub", None) or (
+        "caller-" + uuid.uuid5(uuid.NAMESPACE_OID, repr(sorted(claims.items()))).hex[:8]
+    )
     status: int = get(client, key, route, scope, sub=sub, **claims).status_code
     return status
 
@@ -145,6 +160,19 @@ async def test_an_agent_is_refused_and_every_other_caller_gets_the_export_answer
     client: TestClient, embedding: AsyncMock
 ) -> None:
     await setup(embedding)
+    async with get_sessionmaker()() as session:
+        session.add(Tenant(id=TENANT, slug="tenant-a", name="Tenant A"))
+        await session.flush()
+        session.add(
+            AgentPermission(
+                tenant_id=TENANT,
+                principal_sub="agent-g",
+                op_pattern="*",
+                verdict="auto-execute",
+                created_by_sub="admin-a",
+            )
+        )
+        await session.commit()
     key = make_rsa_keypair("kid-co-callers")
 
     seen: list[tuple[str, str, int, int, int]] = []

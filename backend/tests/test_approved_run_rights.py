@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""An approved run checks the caller's rights at the time it runs.
+"""An approved request is checked again when it runs.
 
 Each test goes through the whole path: the real ``dispatch`` makes the
 call wait for approval, a person approves it, and then the call runs: on
@@ -10,13 +10,15 @@ re-run route after a failed first run. The operation is a stand-in that
 counts its runs. Each test runs with ``AGENT_GRANT_REQUIRED`` ``off`` and
 ``on``.
 
-* A new call of the caller that would be refused now refuses the approved
-  run, and nothing runs: a ``deny`` grant, a grant taken away (``on``), a
-  role lowered to ``read_only``.
-* A new call that would wait for approval runs on the approval, unless the
-  risk level went up past what the person who approved may approve.
-* A refused re-run leaves the request as it was, so it may run later when
-  a new call would pass too.
+* The grants of an agent that asked count again: a ``deny`` grant, or a
+  grant taken away (``on``), refuses the run, and nothing runs. A re-run
+  also checks the caller's role from the caller's token now.
+* A risk level that went up past what the person who approved may approve
+  refuses the run.
+* A refused re-run leaves the request as it was: it stays approved and can
+  run again later.
+
+The table of cases is in ``test_approved_run_rights_cases.py``.
 """
 
 from __future__ import annotations
@@ -522,6 +524,6 @@ async def test_first_run_on_the_approve_route_after_the_risk_level_went_up(
 
     assert response.status_code == 200, response.text
     assert response.json()["dispatch_status"] == "denied", response.text
-    assert "a new approval is needed" in response.json()["dispatch_error"]
+    assert "so this approval does not cover it" in response.json()["dispatch_error"]
     assert _RUNS == []
     assert approval_result_state(await _request(request_id)) is ApprovalResultState.FAILED

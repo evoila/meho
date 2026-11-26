@@ -1214,6 +1214,7 @@ async def _gate_subop(
         resume_requester_var,
         rights_change_note,
     )
+    from meho_backplane.operations.approved_run_rights import approved_step_grant_refusal
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
         _build_park_effect,
@@ -1246,14 +1247,14 @@ async def _gate_subop(
     # here — reproducing the approved step through the governed path — instead
     # of re-parking forever. Checked before ``policy_gate`` so a service /
     # agent principal whose sub-op parked resumes without a standing grant.
-    if _subop_resume_cleared(op_id=op_id, params=params):
-        return _GoAhead.PERSON
+    # The grants of the agent that asked are read below, before it clears.
+    cleared = _subop_resume_cleared(op_id=op_id, params=params)
 
     # Before the approved step, every step is one the first run did,
     # and the stored ones were replayed above. A governed step before it that
     # is not itself ``after_main_effect`` is refused before it runs, whatever
     # the policy verdict would be.
-    if not after_main_effect and _resume_has_not_reached_approved_step():
+    if not cleared and not after_main_effect and _resume_has_not_reached_approved_step():
         composite_ctx = composite_dispatch_var.get()
         composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
         approved = composite_resume_var.get()
@@ -1292,6 +1293,29 @@ async def _gate_subop(
     await apply_step_policy(tenant_id=operator.tenant_id, step=descriptor)
     # Some params make a step wait for a person, as for a called operation.
     raise_descriptor_for_params(descriptor, params)
+
+    if cleared:
+        # The approved step is checked for the agent that asked, as a
+        # single call is (:mod:`.approved_run_rights`).
+        step_refusal = await approved_step_grant_refusal(
+            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+        )
+        if step_refusal is None:
+            return _GoAhead.PERSON
+        policy_token = policy_decision_var.set(PermissionVerdict.DENY.value)
+        try:
+            duration_ms = (time.monotonic() - started) * 1000.0
+            return await _audit_denied_and_return(
+                result_denied(op_id, step_refusal, duration_ms),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=duration_ms,
+            )
+        finally:
+            policy_decision_var.reset(policy_token)
 
     # #4622: the step's params reach the gate so a delete grant (sandbox
     # mode) can store the step's proposed effect on its grant-use row. No

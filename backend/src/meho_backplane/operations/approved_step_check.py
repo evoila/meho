@@ -23,10 +23,11 @@ An approved call runs in one of two ways:
 
 So the result is the same whichever path runs the call. The agent login's
 grant name and role come from the record the park stores on the approval
-card (:func:`requester_record`). A card with no record (a request made
-before MEHO stored it) cannot be checked. When the operation has
-steps to check, the run is refused, and the agent must ask again. A call
-with no steps to check runs as before.
+card (:func:`requester_record`). An agent's request whose card has no
+readable record of the agent is refused when a person runs it from an
+approvals surface
+(:func:`~meho_backplane.operations.approved_run_rights.approved_run_refusal`).
+The agent must ask again.
 
 Only ``on`` checks again. ``observe`` already logged its "would deny" lines
 when the call was made. At resume it only marks them as written, so the
@@ -66,7 +67,8 @@ def requester_record(operator: Operator) -> dict[str, Any] | None:
     Only when an agent makes the call, whatever ``AGENT_GRANT_REQUIRED`` is.
     An approvals surface rebuilds the agent from it to check the steps again
     (:func:`approved_step_refusal`) and to check the agent's rights for the
-    call (:mod:`~meho_backplane.operations.approved_run_rights`).
+    call (:mod:`~meho_backplane.operations.approved_run_rights`). The card
+    keeps it under an internal key that no caller reads.
     """
     if not agent_acts(operator):
         return None

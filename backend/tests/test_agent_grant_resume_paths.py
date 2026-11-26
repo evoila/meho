@@ -13,7 +13,8 @@ first step, on every path:
 * a hosted agent run, whether its own resume or the approvals surface
   claims the call first.
 
-People and service logins, ``off`` and ``observe`` keep the old behaviour.
+For people and service logins, and with ``off`` and ``observe``, this
+step check refuses nothing.
 ``observe`` logs its "would deny" line once per call, whoever resumes it.
 """
 
@@ -34,6 +35,7 @@ from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, ApprovalRequest
 from meho_backplane.operations import dispatch, register_typed_operation
+from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
 from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     approve_request,
@@ -43,6 +45,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.deny_reasons import AGENT_GRANT_DENIED, POLICY_DENIED
 from meho_backplane.operations.governed_subops import register_governed_subops
+from tests._composite_wait_audit_helpers import register_composite
 from tests._people_behind_helpers import give_known_person
 from tests.test_agent_grant_required import (
     _AGENT,
@@ -185,6 +188,7 @@ async def _drop_the_record(request_id: uuid.UUID) -> None:
         assert request is not None
         effect = dict(request.proposed_effect or {})
         effect.pop("permission_preflight", None)
+        effect.pop(AGENT_REQUESTER_RECORD_KEY, None)
         request.proposed_effect = effect
         await session.commit()
 
@@ -248,7 +252,7 @@ async def test_agent_login_call_run_by_a_reviewer_runs_when_the_grants_did_not_c
 async def test_agent_call_with_no_record_on_the_card_is_refused_when_on(
     monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
 ) -> None:
-    """A card without the agent's record: the agent's grants cannot be checked."""
+    """A card without the agent's record is refused; the agent must ask again."""
     await _register(stub_embedding_service)
     await _grant(_OP, "needs-approval")
     await _grant(_WRITE_STEP, "auto-execute")
@@ -264,21 +268,23 @@ async def test_agent_call_with_no_record_on_the_card_is_refused_when_on(
     assert _MULTI_RUNS == []
 
 
-async def test_single_step_call_with_no_record_on_the_card_runs_when_on(
-    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+@pytest.mark.parametrize("mode", ["off", "on"])
+async def test_single_step_call_with_no_record_on_the_card_is_refused(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, mode: str
 ) -> None:
-    """No steps to check, so a card without a record does not stop the call."""
+    """A single call too: with no record, the agent's grants cannot be read."""
     await _register(stub_embedding_service)
     await _register_single(stub_embedding_service)
     await _grant(_SINGLE_OP, "needs-approval")
     request_id = await _park(_operator(), op_id=_SINGLE_OP)
     await _drop_the_record(request_id)
-    _switch(monkeypatch, "on")
+    _switch(monkeypatch, mode)
 
     result = await _resume(request_id, _reviewer())
 
-    assert result.status == "ok", result.error
-    assert len(_MULTI_RUNS) == 1
+    assert result.status == "denied", result
+    assert "has no record of the agent. The agent must ask again." in (result.error or "")
+    assert _MULTI_RUNS == []
 
 
 # --- A hosted agent run: both orders of the race ----------------------------------
@@ -345,9 +351,11 @@ async def test_off_changes_nothing(
 
     assert result.status == "ok", result.error
     assert len(_MULTI_RUNS) == 1
-    # The card keeps the agent's record, so its rights for the call are checked again.
-    preflight = (await _request(request_id)).proposed_effect["permission_preflight"]
-    assert preflight["requester"]["principal_kind"] == "agent"
+    # The card keeps the agent's record under the internal key only, so the
+    # card a caller reads has the shape it had with the switch off.
+    effect = (await _request(request_id)).proposed_effect
+    assert effect[AGENT_REQUESTER_RECORD_KEY]["principal_kind"] == "agent"
+    assert "requester" not in (effect.get("permission_preflight") or {})
 
 
 @pytest.mark.parametrize("resumer", ["agent", "reviewer"])
@@ -376,3 +384,98 @@ async def test_observe_logs_the_would_deny_line_once_per_call(
         if c.args == ("agent_no_grant_would_deny",) and c.kwargs["op_id"] == _WRITE_STEP
     ]
     assert len(lines) == 1, lines
+
+
+# --- The approved step of a multi-step operation, and the re-run --------------------
+
+#: A multi-step operation that runs at once; its one step waits for approval.
+_STEP_PARENT = "vault.kv.step_waits"
+_WAITING_STEP = "PUT:/v1/secret/data/{path}"
+_STEP_RUNS: list[dict[str, Any]] = []
+
+
+async def _step_waits_handler(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """The parent's handler: its step waits for a person at the step gate."""
+    gated = await enforce_subop_policy(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id=_WAITING_STEP,
+        safety_level="caution",
+        requires_approval=True,
+        target=target,
+        params=params,
+    )
+    if gated is not None:
+        return gated  # type: ignore[return-value]
+    _STEP_RUNS.append(params)
+    return {"done": True}
+
+
+@pytest.mark.parametrize("mode", ["off", "on"])
+async def test_approved_step_is_checked_for_the_agent_before_it_clears(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, mode: str
+) -> None:
+    """A ``deny`` grant on the step while it waits: the step does not run."""
+    _switch(monkeypatch, mode)
+    _STEP_RUNS.clear()
+    del stub_embedding_service
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    async with get_sessionmaker()() as session:
+        await register_composite(session, _STEP_PARENT, "_step_waits_handler", module=__name__)
+    register_governed_subops(
+        composite_op_id=_STEP_PARENT, connector_id="vault-1.x", sub_op_ids=(_WAITING_STEP,)
+    )
+    await _grant(_STEP_PARENT, "auto-execute")
+    await _grant(_WAITING_STEP, "needs-approval")
+    target = await _seed_vault_target()
+    await give_known_person(_operator())
+    parked = await dispatch(
+        operator=_operator(), connector_id="vault-1.x", op_id=_STEP_PARENT, target=target, params={}
+    )
+    assert parked.status == "awaiting_approval", parked
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+    async with get_sessionmaker()() as session:
+        await session.execute(
+            update(AgentPermission)
+            .where(AgentPermission.op_pattern == _WAITING_STEP)
+            .values(verdict="deny")
+        )
+        await approve_request(session, request_id, operator=_reviewer())
+        await session.commit()
+
+    result = await _resume(request_id, _reviewer())
+
+    assert result.status == "denied", result
+    assert "deny" in (result.error or "")
+    assert _STEP_RUNS == []
+
+
+async def test_rerun_checks_the_steps_before_it_takes_the_run(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock
+) -> None:
+    """``on``: a step denied after a failed first run refuses the re-run, count unchanged."""
+    from meho_backplane.operations.approval_queue import approval_result_state
+    from meho_backplane.operations.approval_rerun import (
+        RerunRightsRefusedError,
+        rerun_failed_request,
+    )
+
+    _switch(monkeypatch, "on")
+    await _register(stub_embedding_service)
+    await _grant(_OP, "needs-approval")
+    await _grant(_WRITE_STEP, "auto-execute")
+    request_id = await _park(_operator())
+    await _deny_the_write_step()
+    first = await _resume(request_id, _reviewer())
+    assert first.status == "denied", first
+
+    with pytest.raises(RerunRightsRefusedError) as refused:
+        await rerun_failed_request(operator=_operator(), request_id=request_id)
+
+    assert "verdict=deny" in refused.value.reason
+    request = await _request(request_id)
+    assert request.rerun_count == 0
+    assert approval_result_state(request) is ApprovalResultState.FAILED
+    assert _MULTI_RUNS == []

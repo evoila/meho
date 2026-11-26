@@ -101,12 +101,11 @@ from meho_backplane.auth.approval_sign_in import (
     fresh_sign_in_required,
 )
 from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.auth.rbac import (
     require_approvals_access,
     require_fresh_approval_sign_in,
     require_human_principal,
-    require_role,
 )
 from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
@@ -176,6 +175,7 @@ from meho_backplane.operations.approval_rerun import (
     RerunNotAllowedError,
     RerunParamsRequiredError,
     RerunRightsRefusedError,
+    RerunRoleTooLowError,
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
@@ -228,9 +228,6 @@ _require_human = Depends(require_human_principal)
 #: come from a fresh approval sign-in, else ``401`` with the RFC 9470
 #: challenge. Reject keeps the human gate alone.
 _require_fresh_sign_in = Depends(require_fresh_approval_sign_in)
-
-#: The re-run needs the role of a new call (``POST /api/v1/operations/call``).
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
 
 #: Decision ``reason`` length bound, the same value the console form uses.
 _MAX_REASON_LENGTH = MAX_REASON_LENGTH
@@ -1433,7 +1430,7 @@ async def approve_approval_request(
     on a background task and the route returns HTTP 202 + a durable run
     handle (``{"run_id", "status": "pending", "async": true}``) instead of
     blocking for the resumed op's full duration. The resume runs through the
-    same exactly-one-resumer claim + policy bypass + audit path the inline
+    same exactly-one-resumer claim + approved-run checks + audit path the inline
     resume uses. Default (``async`` absent / false) is byte-identical to the
     pre-#3079 inline resume below.
 
@@ -1750,7 +1747,7 @@ class RerunResponseBody(BaseModel):
 async def rerun_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: RerunRequestBody,
-    operator: Operator = _require_operator,
+    operator: Operator = Depends(verify_jwt_and_bind),
 ) -> RerunResponseBody:
     """Run an approved request again after its run failed (#5417).
 
@@ -1760,11 +1757,13 @@ async def rerun_approval_request(
     changed: same params, same target, same preview, same work reference
     (the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not
     passed, and MEHO was not updated since the request was made. Otherwise
-    the re-run is refused and the requester asks again. The caller's role
-    and grants are checked as for a new call made now: the route needs the
-    ``operator`` role, and a call that a new call would refuse is refused.
-    Each re-run, and each refused re-run, writes an ``approval.rerun``
-    audit row.
+    the re-run is refused and the requester asks again. The re-run checks
+    what the first run checks (the grants of an agent that asked, a revoked
+    agent login, a blocked login and the risk level), and also the caller's
+    role and grants from the caller's token now, as for a new call: it
+    needs the ``operator`` role. A refused request stays approved and can
+    run again later. Each re-run, and each refused re-run, writes an
+    ``approval.rerun`` audit row.
 
     HTTP status codes:
 
@@ -1805,6 +1804,11 @@ async def rerun_approval_request(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_rerun_needs_new_approval: {exc}",
+        ) from exc
+    except RerunRoleTooLowError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_role",
         ) from exc
     except RerunRightsRefusedError as exc:
         raise HTTPException(
@@ -2039,8 +2043,9 @@ async def decide_approval_request(
     )
 
     # Every approval drives the execute (#1503, #2293): stored params
-    # re-hydrate the dispatch; the committed approval is the authorization
-    # (``_approved=True``). The exactly-one-resumer claim inside
+    # re-hydrate the dispatch; the approval is not asked for again
+    # (``_approved=True``), and the run checks again what can change. The
+    # exactly-one-resumer claim inside
     # resume_dispatch_after_approval arbitrates against the in-process
     # agent waiter for a run-bound request — this path executes only when
     # the claim is free (waiter gone), else it no-ops already_resumed —

@@ -15,8 +15,10 @@ dangerous op), the dispatcher creates an
 parks the call durably so a process restart cannot lose the pending
 request. Two REST endpoints (``/api/v1/approvals/{id}/approve`` and
 ``…/reject``) let authorized reviewers decide; approval re-dispatches the
-original call with the original params (gate bypassed via
-``dispatch(..., _approved=True)``).
+original call with the original params
+(``dispatch(..., _approved=True)``). The approval is not asked for again;
+the run checks again what can change while the call waits
+(:mod:`~meho_backplane.operations.approved_run_rights`).
 
 Audit invariant
 ---------------
@@ -713,9 +715,9 @@ class ApprovalRoleFloorError(UnauthorizedApprovalError):
 
     Raised by :func:`approve_request` when the operation needs a role from
     the person who runs it (:mod:`meho_backplane.operations.role_floors`)
-    and the approver's ``tenant_role`` is below it. The approved call runs
-    with the approval as its authorization, on whichever resume path wins,
-    so the person who approves must hold the role the operation needs.
+    and the approver's ``tenant_role`` is below it. The approver is read as
+    recorded at the decision, on whichever resume path wins, so the person
+    who approves must hold the role the operation needs.
     Checked before any state change: the request stays ``pending`` and no
     decision audit row is written. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
@@ -2678,8 +2680,8 @@ async def approve_request(
        When the operation carries a role floor
        (:mod:`meho_backplane.operations.role_floors`), the approver's role
        must meet it; else 403, :class:`ApprovalRoleFloorError`. The
-       approved call runs with the approval as its authorization, so the
-       person who approves must hold the role the operation needs.
+       approver is read as recorded at the decision, so the person who
+       approves must hold the role the operation needs.
     5. If *params* is supplied, it matches the stored ``params_hash``
        (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
@@ -2704,10 +2706,11 @@ async def approve_request(
     The **re-dispatch** (executing the approved op) happens *after* the
     caller commits this transaction. The ``POST /api/v1/approvals/{id}/
     approve`` REST route calls :func:`~meho_backplane.operations.dispatcher.dispatch`
-    with ``_approved=True`` (the gate-bypass: the approval is the
-    authorization). The MCP/CLI operator-decision path commits the
-    decision without re-dispatching — the agent picks up execution
-    separately. Separating the decision commit from the re-dispatch
+    with ``_approved=True``: the approval is not asked for again, and the
+    run checks again what can change while the call waits
+    (:mod:`~meho_backplane.operations.approved_run_rights`). The MCP/CLI
+    operator-decision path commits the decision without re-dispatching —
+    the agent picks up execution separately. Separating the decision commit from the re-dispatch
     means the approval is durable even if the re-dispatch fails.
 
     Args:
@@ -3172,8 +3175,8 @@ async def find_remote_write_approval(
     the ``remote-write`` (caution) tier mints a capability **only** against a
     committed :class:`ApprovalRequest` for the *identical*
     ``(tenant, op, target, params)`` -- the human approval decision is the
-    mint's authorization, exactly as :func:`resume_dispatch_after_approval`
-    re-dispatches an approved op with the policy gate bypassed
+    mint's authorization, as :func:`resume_dispatch_after_approval` runs an
+    approved op without asking for the approval again
     (``dispatch(..., _approved=True)``). The ``params_hash`` predicate (any of
     :func:`params_hash_candidates` for *params*) is the swap defence
     (#1503 / #3197): a mint whose params differ from the approved ones matches
@@ -3828,10 +3831,11 @@ async def _refuse_resume_params_unavailable(
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
     """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    from meho_backplane.operations._preview import stored_requester_record
+
     effect = request.proposed_effect or {}
     client = effect.get(CLIENT_PAYLOAD_KEY)
-    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
-    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
+    subject = stored_requester_record(effect)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
@@ -3854,16 +3858,26 @@ def _with_requester_record(
     (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
     A re-park on behalf of an earlier requester keeps that requester's
     record. A record the operation's own preflight stored stays.
+
+    The record is kept under an internal key that no caller reads
+    (:data:`~meho_backplane.operations._preview.AGENT_REQUESTER_RECORD_KEY`).
+    While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
+    under ``permission_preflight["requester"]``.
     """
+    from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
     from meho_backplane.operations.approved_step_check import requester_record
+    from meho_backplane.settings import get_settings
 
     record = requester_record(operator) if requester is None else requester.subject
     if record is None:
         return proposed_effect
-    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    effect = {AGENT_REQUESTER_RECORD_KEY: record, **proposed_effect}
+    if get_settings().agent_grant_required == "off":
+        return effect
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
     preflight = dict(preflight) if isinstance(preflight, dict) else {}
     preflight.setdefault(_REQUESTER_KEY, record)
-    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
+    return {**effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -4741,10 +4755,10 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
 
     A parked ``targets.register`` or ``topology.*`` write needs the
     ``tenant_admin`` role from the person who runs it
-    (:mod:`meho_backplane.operations.role_floors`). Once approved, the call
-    runs with the approval as its authorization: the agent's own resume
-    and the hosted-run resume do not look at who approved. So the role is
-    checked here, at the decision, before any state change. An operation
+    (:mod:`meho_backplane.operations.role_floors`). Once approved, the
+    approver is read as recorded at the decision: the agent's own resume
+    and the hosted-run resume do not look at who approved again. So the
+    role is checked here, at the decision, before any state change. An operation
     without a floor is not affected.
     """
     denial = role_floor_denial(request.op_id, operator.tenant_role)

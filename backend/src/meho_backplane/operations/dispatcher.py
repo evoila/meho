@@ -4251,13 +4251,15 @@ async def dispatch(
     ``_approved`` is an **internal** flag set only by the approval-queue
     resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
     operator has explicitly approved a parked ``needs-approval`` request.
-    It skips the policy gate (Step 4) because the approval decision *is*
-    the authorization — re-running the gate would re-queue the call (a
+    The policy gate (Step 4) does not ask for the approval again — running
+    the full gate would re-queue the call (a
     human/service principal now routes ``requires_approval`` to
     ``needs-approval`` per G11.7-T1 #1401; an agent re-hits the same
     floor), so the approved op would loop back into the queue and never
-    execute. It is not part of the public agent/MCP/CLI surface; the
-    gate is the only authorization path for an ordinary dispatch.
+    execute. The run still checks again what can change while the call
+    waits (:mod:`.approved_run_rights`). It is not part of the public
+    agent/MCP/CLI surface; the gate is the only authorization path for an
+    ordinary dispatch.
 
     While the pod stops (#5024, :mod:`.shutdown_drain`), a new top-level
     call is refused with ``meho_shutting_down`` before anything is sent.
@@ -4599,7 +4601,7 @@ async def _dispatch_now(
     # stamp ``audit_log.policy_decision`` off ``policy_decision_var`` without
     # threading it through every write call site. Bound to the decided
     # verdict below (or to ``needs-approval`` on the approval resume path,
-    # where the approval *was* the authorization). The token reset in the
+    # where a person approved the call). The token reset in the
     # ``finally`` restores a composite parent dispatch's verdict after a
     # child ``dispatch`` rebinds the var, and clears it for the next dispatch
     # reusing this task.
@@ -4818,8 +4820,9 @@ async def _dispatch_now(
                     result_announce_required(op_id, announce_block, duration_ms), receipt
                 )
         else:
-            # Approval-queue resume path: the gate is skipped because an
-            # operator already approved this exact call. Stamp the row with
+            # Approval-queue resume path: the gate does not ask for the
+            # approval again, because a person approved this exact call.
+            # The rights checks of the approved run follow. Stamp the row with
             # the verdict that governed it — ``needs-approval`` — so the
             # executed row honestly records it was four-eyes-gated, not
             # auto-executed.
@@ -4829,8 +4832,8 @@ async def _dispatch_now(
             # person with the role. From an approvals surface the call runs
             # under that reviewer; check the role again here as a backstop.
             # The requester's own run (an agent's resume, a hosted agent
-            # run, or a re-run of a failed call by the requester, also a
-            # service login) gets the role check of a new call in
+            # run, or a re-run of a failed call by the requester) gets the
+            # checks of a new call of its own login in
             # ``approved_run_refusal`` below.
             requester_runs = _requester_runs_approved_call(operator)
             role_denial = None if requester_runs else role_floor_denial(op_id, operator.tenant_role)
@@ -4866,7 +4869,7 @@ async def _dispatch_now(
                 policy_decision_var.set(PermissionVerdict.DENY.value)
                 duration_ms = _elapsed_ms(started)
                 return await _audit_denied_and_return(
-                    result_denied(op_id, rights_refusal.reason, duration_ms),
+                    result_denied(op_id, rights_refusal.text, duration_ms),
                     operator=operator,
                     descriptor=descriptor,
                     target=target,

@@ -76,6 +76,8 @@ _VM_ROWS = [{"Name": f"vm-{n}", "Id": f"00000000-0000-4000-8000-00000000000{n}"}
 
 #: The steps that reached the target, in order.
 sent: list[str] = []
+#: The steps that started after the block was saved. Each must be refused.
+sent_after_save: list[str] = []
 #: What happens during the first step of a test, by step op id.
 during_step: dict[str, Callable[[], Awaitable[None]]] = {}
 #: The handles of the stored inventories.
@@ -88,6 +90,8 @@ change = SimpleNamespace(step="", saved=asyncio.Event())
 
 async def _note(op_id: str) -> None:
     sent.append(op_id)
+    if change.saved.is_set():
+        sent_after_save.append(op_id)
     hook = during_step.pop(op_id, None)
     if hook is not None:
         try:
@@ -163,6 +167,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_block_cache()
     clear_registry()
     sent.clear()
+    sent_after_save.clear()
     during_step.clear()
     change.step = ""
     change.saved = asyncio.Event()
@@ -234,6 +239,27 @@ async def _run(op_id: str) -> Any:
     )
 
 
+async def _run_and_wait_for_its_tasks(op_id: str) -> Any:
+    """Run the operation, then wait until every task it started has ended.
+
+    A parallel read that is still queued when the operation returns can
+    start a step later. The wait makes such a step visible to the test.
+    """
+    before = asyncio.all_tasks()
+    result = await _run(op_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while True:
+        started = {t for t in asyncio.all_tasks() - before if not t.done()}
+        started.discard(asyncio.current_task())
+        if not started:
+            break
+        remaining = deadline - loop.time()
+        assert remaining > 0, f"tasks still running: {started}"
+        await asyncio.wait(started, timeout=remaining)
+    return result
+
+
 async def _block_person() -> None:
     admin = Operator(
         sub="admin-person",
@@ -283,7 +309,7 @@ async def test_inventory_stops_and_stores_nothing_when_a_step_is_refused(
     change.step = _FIRST_STEP[op_id]
     during_step[change.step] = _block_person if case == "blocked" else _make_unreadable(monkeypatch)
 
-    result = await _run(op_id)
+    result = await _run_and_wait_for_its_tasks(op_id)
 
     status, code = (
         ("denied", "principal_blocked")
@@ -298,3 +324,4 @@ async def test_inventory_stops_and_stores_nothing_when_a_step_is_refused(
     assert "hyperv.checkpoints.list" not in sent
     steps = _STEPS[op_id]
     assert set(sent) <= set(steps[: steps.index(_FIRST_STEP[op_id]) + 1]), sent
+    assert sent_after_save == [], sent

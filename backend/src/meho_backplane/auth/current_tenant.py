@@ -128,7 +128,7 @@ def bind_tenant_role_source(operator: Operator) -> None:
     (:mod:`meho_backplane.audit_cutover`) copies the key onto every other
     row built while it is bound (:func:`tenant_role_source_from_context`),
     so a writer that composes its own payload needs no change. Nothing is
-    bound otherwise. Called by the REST and MCP bind steps.
+    bound otherwise. Called by the REST, MCP and console bind steps.
     """
     if operator.role_from_platform_admin:
         structlog.contextvars.bind_contextvars(

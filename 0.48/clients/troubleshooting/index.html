@@ -4007,13 +4007,14 @@ agent gets no MEHO tools. The error says a schema holds <code>null</code> inside
 <code>enum</code>. Some clients check the schemas themselves. For example, LangChain's
 Gemini client (<code>langchain-google-genai</code> 4.5.2) stops with
 <code>Input should be a valid string [... input_value=None ...]</code> for an <code>enum</code>.</p>
-<p><strong>Wall.</strong> On MEHO 0.48.0 and older, the sent input schemas of some tools
-list <code>null</code> inside an <code>enum</code>. A strict gateway refuses such a schema, and
+<p><strong>Wall.</strong> On MEHO 0.48.0 and older, the sent input and output schemas of
+some tools list <code>null</code> inside an <code>enum</code>. A strict gateway refuses such a schema, and
 then refuses the whole list.</p>
 <p><strong>Fix.</strong> Update MEHO to a version newer than 0.48.0. MEHO then sends the
-tool input schemas without <code>null</code> inside an <code>enum</code>. A call that sends
-<code>null</code> still works, because the server checks every call against the full
-schema.</p>
+tool input and output schemas without <code>null</code> inside an <code>enum</code>. A call that
+sends <code>null</code> still works, because the server checks every call against the
+full schema. An answer with <code>null</code> in such a field still passes the sent
+output schema.</p>
 <h2 id="a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200">A tool call fails with "Tool execution failed" but the server logged 200<a class="headerlink" href="#a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200" title="Permanent link">&para;</a></h2>
 <p><strong>Symptom.</strong> A specific tool (e.g. <code>list_targets</code>, <code>query_topology</code>)
 fails client-side with "Tool execution failed", while the backplane logs

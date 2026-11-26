@@ -1642,9 +1642,8 @@ def _is_redirect_status(exc: BaseException) -> TypeGuard[httpx.HTTPStatusError]:
 def _redirect_status_message(exc: BaseException) -> str | None:
     """Return the text for a 3xx answer with host names only, or ``None``.
 
-    httpx's own text quotes the whole request address and the whole
-    ``Location`` header. Both can be the vendor's choice (a followed
-    redirect), so the text holds only the status code and the host names.
+    The text holds only the status code and the host names of the request
+    address and of the ``Location`` header.
     """
     if not _is_redirect_status(exc):
         return None

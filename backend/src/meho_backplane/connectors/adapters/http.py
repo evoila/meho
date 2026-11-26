@@ -867,9 +867,9 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     ) -> httpx.Request:
         # httpx builds the next request inside ``send`` and raises (closing the
         # answer) when it cannot read the Location address. Log the fixed mark
-        # for that address. httpx's error text can quote a part of the
-        # address, so raise the same error class with one fixed text, outside
-        # the ``except``, so it does not carry httpx's error as its context.
+        # for that address, then raise an error of the same class with one
+        # fixed text. The raise sits outside the ``except``, so the error
+        # MEHO raises carries no other error as its context.
         try:
             return super()._build_redirect_request(request, response)
         except UNREADABLE_LOCATION_ERRORS as exc:

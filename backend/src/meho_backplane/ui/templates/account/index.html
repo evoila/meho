@@ -61,7 +61,9 @@
           {% if session_display_name %}
           <dd class="truncate text-sm" data-field="display-name" title="{{ session_display_name }}">{{ session_display_name }}</dd>
           {% else %}
-          <dd class="text-sm text-subtle" data-field="display-name">Your login did not send a name</dd>
+          {#- True both for a session from before migration 0191 and for a
+              login token without a ``name`` claim. -#}
+          <dd class="text-sm text-subtle" data-field="display-name">No name on this session. If your login has one, it shows after your next sign-in.</dd>
           {% endif %}
         </div>
         <div>
@@ -88,7 +90,9 @@
             {% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}&mdash;{% endif %}
           </dd>
         </div>
-        <div>
+        {#- Fifth cell of the two-column grid: spans both columns so the
+            last row has no empty half. -#}
+        <div class="sm:col-span-2">
           <dt class="meho-overline mb-1">Session expires</dt>
           <dd class="text-sm" data-field="expires-at">
             {% if expires_at is not none %}

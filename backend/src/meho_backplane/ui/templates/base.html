@@ -370,15 +370,19 @@
                   >
                     {#- The signed-in person: the label and its
                         ``title`` show the name from the login token, the
-                        avatar its initials. With no name -- a token
-                        without a ``name`` claim, a session from before
-                        migration 0191, or no session at all -- the chip
-                        shows a person icon and "Your account". Never the
-                        Keycloak ``sub``, and never letters taken from it.
+                        avatar its initials. A signed-in person with no
+                        name -- a token without a ``name`` claim, or a
+                        session from before migration 0191 -- gets a
+                        person icon and "Your account"; with no session at
+                        all (``session_tenant`` is none) the label reads
+                        "Not signed in". Never the Keycloak ``sub``, and
+                        never letters taken from it.
                         The live role lives on ``/ui/account`` (a fresh
                         JWT verify) -- the chip does not pay a per-page
                         token verify to label it. -#}
-                    {%- set user_label = session_display_name if session_display_name else "Your account" %}
+                    {%- if session_display_name %}{% set user_label = session_display_name %}
+                    {%- elif session_tenant is not none %}{% set user_label = "Your account" %}
+                    {%- else %}{% set user_label = "Not signed in" %}{% endif %}
                     <span class="grid size-7 shrink-0 place-items-center rounded-full bg-base-content/8 text-[0.62rem] font-medium text-muted ring-1 ring-base-content/15" data-field="user-avatar" aria-hidden="true">{% if session_initials %}{{ session_initials }}{% else %}{{ icon("user", class="size-3.5") }}{% endif %}</span>
                     <span class="min-w-0 max-w-[7.5rem] truncate text-xs font-medium text-muted" data-field="user-label" title="{{ user_label }}">{{ user_label }}</span>
                     {{ icon("chevron-down", class="size-3 shrink-0 rotate-180 text-base-content/40") }}

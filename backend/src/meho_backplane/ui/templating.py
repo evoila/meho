@@ -189,13 +189,20 @@ def visible_marks(text: str) -> str:
     return "".join(out)
 
 
+#: ASCII digits only: ``str.isdigit`` also accepts signs such as "²".
+_DIGITS: Final = frozenset("0123456789")
+
+
 def person_initials(name: str | None) -> str | None:
     """Return the avatar initials for a person's *name*, or ``None``.
 
-    The first letter or digit of the first and the last word, upper-cased
-    ("Ada King Lovelace" -> "AL", "Ada" -> "A"). Words with no letter or
-    digit are skipped. ``None`` when *name* is ``None`` or has no letter
-    or digit at all; the user menu then shows a person icon.
+    The first letter or digit (0-9) of the first and the last word,
+    upper-cased ("Ada King Lovelace" -> "AL", "Ada" -> "A"). One character
+    per word, so at most two: a letter whose upper case is two characters
+    keeps the first ("ßiggi" -> "S"), and signs such as "²" or "½" do not
+    count. Words with no letter or digit are skipped. ``None`` when *name*
+    is ``None`` or has no letter or digit at all; the user menu then shows
+    a person icon.
 
     Only ever called with a display name. The initials are never
     taken from the Keycloak ``sub``: letters of an identifier are the
@@ -203,13 +210,16 @@ def person_initials(name: str | None) -> str | None:
     """
     if name is None:
         return None
-    firsts = [next((ch for ch in word if ch.isalnum()), "") for word in name.split()]
-    firsts = [ch for ch in firsts if ch]
+    firsts: list[str] = []
+    for word in name.split():
+        first = next((ch for ch in word if ch.isalpha() or ch in _DIGITS), None)
+        if first is not None:
+            firsts.append(first.upper()[0])
     if not firsts:
         return None
     if len(firsts) == 1:
-        return firsts[0].upper()
-    return (firsts[0] + firsts[-1]).upper()
+        return firsts[0]
+    return firsts[0] + firsts[-1]
 
 
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:

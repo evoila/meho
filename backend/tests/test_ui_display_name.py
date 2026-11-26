@@ -171,6 +171,11 @@ def _user_chip(body: str) -> tuple[str, str, str]:
         ("(Ada) Lovelace", "AL"),
         ("Ada -", "A"),
         ("Đorđe Šimić", "ĐŠ"),
+        ("ßiggi Müller", "SM"),
+        ("ß", "S"),
+        ("Ada 2nd", "A2"),
+        ("² Ada", "A"),
+        ("½", None),
         ("", None),
         ("   ", None),
         ("- --", None),
@@ -295,7 +300,7 @@ def test_no_name_account_page_shows_a_neutral_name_row() -> None:
     assert response.status_code == 200, response.text
     body = response.text
 
-    assert "Your login did not send a name" in body
+    assert "No name on this session." in body
     avatar, title, label = _user_chip(body)
     assert (title, label) == ("Your account", "Your account")
     assert _SUB_INITIALS not in avatar
@@ -321,3 +326,10 @@ def test_my_recent_label_is_the_name_or_nothing(display_name: str | None, expect
     )
     assert expected in html
     assert _SUB not in html
+
+
+def test_signed_out_user_menu_says_not_signed_in() -> None:
+    """No session at all: the chip says so instead of "Your account"."""
+    html = get_jinja_env().get_template("base.html").render(ready=True)
+    _, title, label = _user_chip(html)
+    assert (title, label) == ("Not signed in", "Not signed in")

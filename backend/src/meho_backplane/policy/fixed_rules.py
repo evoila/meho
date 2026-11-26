@@ -95,7 +95,10 @@ FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
             "console after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a "
             "platform admin) that is not destructive and writes no credential."
         ),
-        POLICY_CHANGE_WAITS: "A change of the policy waits for a person.",
+        POLICY_CHANGE_WAITS: (
+            "A change of the policy waits for a person, except an Admin's own change in the "
+            "web console after a fresh sign-in."
+        ),
         AGENT_NEVER_APPROVES: "An agent, a service login and a runner never approve.",
         DESTRUCTIVE_WAITS: "A destructive operation always waits for approval.",
         DELETE_WAITS: (

@@ -2186,6 +2186,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-model-gateway-refuses-mehos-tool-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A model gateway refuses MEHO's tool list
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3542,6 +3553,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#a-model-gateway-refuses-mehos-tool-list" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A model gateway refuses MEHO's tool list
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3950,6 +3972,20 @@ older dotted names (<code>meho.status</code>) failed.</p>
 <p><strong>Fix.</strong> Pin backplane <strong>v0.27.0 or later</strong>, where the tools were renamed
 to underscores (<code>meho_status</code>, <code>list_targets</code>, …). See
 <a href="../claude-desktop/#pin-a-build-with-underscore-tool-names-and-structured-results">Claude Desktop § pinning a build</a>.</p>
+<h2 id="a-model-gateway-refuses-mehos-tool-list">A model gateway refuses MEHO's tool list<a class="headerlink" href="#a-model-gateway-refuses-mehos-tool-list" title="Permanent link">&para;</a></h2>
+<p><strong>Symptom.</strong> A strict model gateway (one that checks tool schemas the
+way the OpenAI API does in strict mode) refuses the tool list, and the
+agent gets no MEHO tools. The error says a schema holds <code>null</code> inside an
+<code>enum</code>. Some clients check the schemas themselves. For example, LangChain's
+Gemini client (<code>langchain-google-genai</code> 4.5.2) stops with
+<code>Input should be a valid string [... input_value=None ...]</code> for an <code>enum</code>.</p>
+<p><strong>Wall.</strong> On MEHO 0.48.0 and older, the sent input schemas of some tools
+list <code>null</code> inside an <code>enum</code>. A strict gateway refuses such a schema, and
+then refuses the whole list.</p>
+<p><strong>Fix.</strong> Update MEHO to a version newer than 0.48.0. MEHO then sends the
+tool input schemas without <code>null</code> inside an <code>enum</code>. A call that sends
+<code>null</code> still works, because the server checks every call against the full
+schema.</p>
 <h2 id="a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200">A tool call fails with "Tool execution failed" but the server logged 200<a class="headerlink" href="#a-tool-call-fails-with-tool-execution-failed-but-the-server-logged-200" title="Permanent link">&para;</a></h2>
 <p><strong>Symptom.</strong> A specific tool (e.g. <code>list_targets</code>, <code>query_topology</code>)
 fails client-side with "Tool execution failed", while the backplane logs

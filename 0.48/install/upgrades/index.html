@@ -4214,6 +4214,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>On MEHO 0.48.0 and older, the sent input schemas of 11 tools hold <code>null</code> inside an <code>enum</code>, and a strict model gateway refuses the whole tool list. MEHO now sends the tool input schemas without <code>null</code> inside an <code>enum</code>. Output schemas are not changed. The server checks each call against the full schema, so MEHO accepts the same calls, and a call with <code>null</code> gives the same result as a call without the field. One client effect: a client that checks its own call against the sent schema before it sends it refuses <code>null</code> for these 16 fields itself.</td>
+<td>None for most clients. A client that checks its own calls against the sent schema: leave such a field out instead of sending <code>null</code>. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code> now always gets the tenant folder check: every Vault path that a caller or a target names for it must be in the tenant's folder. With an empty <code>VAULT_KV_TENANT_SCOPE_PREFIX</code> that folder is <code>secret/tenants/&lt;tenant id&gt;/</code>; with a non-empty setting the folder of that setting applies. With either setting, MEHO now also checks a person's read of a target's secret when a call runs on a target of such a tenant. A tenant without an entry is unchanged.</td>
 <td>For each tenant with an entry in <code>VAULT_OIDC_ROLE_BY_TENANT</code>: run <code>meho tenants use &lt;tenant&gt;</code>, then <code>meho targets list --json</code>, and look at the field <code>secret_ref</code> of each target. Move each secret whose <code>secret_ref</code> is outside the tenant's folder into the folder, and set the new <code>secret_ref</code> on the target. A call on a target that is not moved yet fails with <code>connector_error: VaultTenantScopeError</code> and the text <code>vault.kv request outside tenant namespace: requested '&lt;path&gt;' is not within tenant prefix '&lt;folder&gt;'</code>.</td>
 </tr>

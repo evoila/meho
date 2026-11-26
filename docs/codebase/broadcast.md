@@ -205,7 +205,11 @@ CSP does not allow.
     credential (for example a read inside a VM guest that logs in with
     the stored guest password). Only a connector declares it.
     Aggregate-only, and a request override never makes it full, like
-    `credential_write`.
+    `credential_write`. A `credential_use` operation does not count as a
+    write for the announce gate, the announce reminder and the target
+    activity warning. An operation that changes the target keeps a class
+    that counts as a write (`write`, `credential_write` or
+    `credential_mint`) and is not declared `credential_use`.
   - `approval` (`approval.*` lifecycle op ids) — full detail. Every
     `approval.*` op id gets this class.
   - `checks` (`checks.transition`) — full detail. Checks publish
@@ -313,7 +317,7 @@ CSP does not allow.
   `credential_read` and `audit_query` are *upgradeable*: a per-call or
   per-tenant override may surface full detail to an operator who already
   has the right to see the path/filter (G6.3 #379). `credential_mint`
-  and `credential_write` are *non-upgradeable* — they carry secret
+  and `credential_write` are *non-upgradeable*, and so is `credential_use` — they carry secret
   material, so no override path (`compute_effective_broadcast_detail` in
   `broadcast/overrides.py`) may upgrade them to full; a `full` tenant
   rule on these classes is clamped back to aggregate.

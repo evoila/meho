@@ -1420,7 +1420,7 @@ oracle.
 
 `read` is not in the sensitive op-class set
 (`credential_read` / `credential_mint` / `credential_write` /
-`audit_query`), so `redact_payload` publishes the **full** payload to
+`credential_use` / `audit_query`), so `redact_payload` publishes the **full** payload to
 the per-tenant broadcast feed. That is safe here because the bound
 payload is only the query *hash*, the binary product/version scope, the
 `collection`, `target` and `scope_source` values, and the hit count —

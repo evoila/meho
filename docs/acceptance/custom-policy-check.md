@@ -28,6 +28,10 @@ each time.
 - It never approves or decides a request. Its one approve call is the
   agent's attempt in check 6, which MEHO must refuse. Every approval is a
   person's click in the web console.
+- When MEHO answers a call with a request that waited before the run
+  (`extras.approval_request_reused: true`), that request is not the run's.
+  The check fails, nobody is asked to approve it, and the script never
+  withdraws it.
 
 ## When it stops before any call
 
@@ -53,21 +57,33 @@ version. It stops with exit code 2 when:
 
 - Check 4 runs an operation at once (the personal agent rule), and the
   approvals of checks 2, 5 and 10 run their operations.
-- Check 6 runs a delete: the service login with the delete grant deletes
-  the target of `CPC_OP_DELETE`. A person step first asks to make sure that
-  target is a disposable system.
+- Check 6 sends a destructive call (`CPC_OP_DESTRUCTIVE`), a root command
+  (`CPC_OP_ROOT_SHELL`) and a delete: the service login with the delete
+  grant deletes the target of `CPC_OP_DELETE`. A person step first asks to
+  make sure these targets are disposable systems. With no terminal, or a
+  "no", none of these calls is sent.
 - Check 11 starts a run of the sensor `CPC_SENSOR_ID`.
+- At the start it reads the login of each token (one GET with its own
+  request id, then the audit row of that GET), the overrides, the answer
+  for the operation of check 4 and the approvers of check 5.
 - Many calls wait for approval. The script keeps a list of each request it
   made and the login that made it. At the end, and when it stops early (an
   error, Ctrl-C or a stop signal), it withdraws each request that still
-  waits, with that login (`POST /api/v1/approvals/{id}/withdraw`).
-- For the checks, a person adds a personal agent rule (check 4), a custom
-  role (check 5) and two lowerings (checks 1 and 6). At the end the script
-  asks the person to remove them, and reads back that they are gone: the
-  override list has no lowering of this run, the Operator's token no longer
-  runs the operation of check 4 at once, and the approvers of check 5 do
-  not name the custom role.
-- It prints one `[left]` line for each thing it could not take back.
+  waits, with that login (`POST /api/v1/approvals/{id}/withdraw`). Then it
+  reads the waiting requests (`GET /api/v1/approvals`) and withdraws each
+  one of its own logins made since the start, so a request of a call that
+  a stop cut off is taken back too.
+- A request stays on the list until its state is read. When the state
+  cannot be read, or the withdraw does not answer 200, the script prints
+  `[left] request <id> (sent with <login>): ...`, and the run ends with
+  exit code 3.
+- The take-back asks only for what the person steps of this run added,
+  each by name: the lowering of check 1, the agent rule of check 4, the
+  custom role of check 5, the lowering of check 6, and an override of
+  `CPC_OP_WRITE` left by check 8 or 9. A step that did not run is not
+  named; with no person step done there is no question. An override that
+  was there before the run is set back to its earlier level, not removed.
+  Then the script reads back each one against the state at the start.
 - Last, a person turns the switch off. The install ends with the switch off.
 
 ## Person steps and `[skip]` lines
@@ -78,15 +94,17 @@ A step that needs a person in the web console prints what to do and asks
 - it prints `[skip] check N (...): needs a person`;
 - every later step that needs that person step prints
   `[skip] check N (...): not run: waits for the person step N`;
-- it never runs a step that a person step guards. The deletes of check 6
-  run only after the person said the target is disposable.
+- it never runs a step that a person step guards. The destructive call,
+  the root command and the deletes of check 6 run only after the person
+  said their targets are disposable.
 
 These lines are always `[skip]`, also in a run where every check passes:
 
-- `check 10 (command line approve): needs a person`. The script never runs
-  `meho approvals approve`; it prints the command for the person.
-- `check 6 root command (...): not run: waits for #7051`. The fixed rule id
-  of a root command comes with that issue.
+- `check 8 (an Admin's token, REST, a policy file preview): not run: waits
+  for #6966`, while MEHO's policy check has no mistake text of its own for
+  "a write stays at least caution". It still fails when the refusal is the
+  one for an operation that shows a secret or calls an address the caller
+  gives.
 - `check 11: not run: waits for #7073`, as long as the audit row has no
   caller kind. With it, check 11 still prints `[skip]` for the event
   intake, the findings investigator and the runner executor, because the
@@ -103,9 +121,11 @@ A `[skip]` line never counts as passed.
    bash scripts/acceptance/custom-policy-check.sh --record-baseline baseline.tsv
    ```
 
-   It saves the file only when every probe got HTTP 200, an answer `run`,
-   `wait` or `deny`, and its audit row. Else it fails and keeps an earlier
-   file as it was.
+   It saves the file only when every probe got HTTP 200, a valid answer,
+   and its audit row. Else it fails and keeps an earlier file as it was.
+   With the switch off the policy import operation is not there, so the
+   two probes of `CPC_OP_POLICY_CHANGE` save the answer
+   `unknown_connector`; any other error fails.
 
 2. Turn the switch on and restart MEHO. Sign in with `meho login` to the
    same install. Set `CPC_BASELINE=baseline.tsv` and the other settings,
@@ -136,12 +156,12 @@ Exit codes:
 | 3 | A saved "always wait" from before the switch is now `destructive`: without a preview the call is refused; with a preview it waits. |
 | 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it. |
 | 5 | A custom role approves requests on one connector. A person without the role is refused at the click. |
-| 6 | A credential read, a credential write, a change of rights, a change of the policy, a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login with a delete grant runs the delete (sandbox mode). An agent's change of the policy is refused before anything waits. An agent's approve attempt is refused. |
+| 6 | A credential read, a credential write, a change of rights, a change of the policy, a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login's root command on a host waits by the rule `default:service.root_shell`. A service login with a delete grant runs the delete (sandbox mode). An agent's change of the policy is refused before anything waits. An agent's approve attempt is refused. |
 | 8 | A write is never lowered below `caution`: in the console and with a token (a policy file preview). |
 | 9 | Every change of the policy in the console needs a fresh sign-in: a raise and the removal of an override too. |
-| 10 | A person approves their own personal agent's request in the console. The same approve from the command line is refused (a person step). |
+| 10 | A person approves their own personal agent's request in the console. The same approve from the command line is refused: the person runs the printed `meho approvals approve` command. |
 | 11 | Each login of MEHO's own code writes its caller kind: `system` for the check runner, `person` for the web console reader. |
-| 7 | With the switch off again, every answer is the same as before the switch was turned on. |
+| 7 | With the switch off again, every answer, and who may approve, is the same as before the switch was turned on. |
 
 What makes a check pass:
 
@@ -151,12 +171,27 @@ What makes a check pass:
   sit next to each check in the script, each with its row in the rule
   table of [policy-evaluator.md](../codebase/policy-evaluator.md).
 - Each `destructive` call and each delete first asks for a preview with
-  the same login, target and parameters, and sends its hash. After the
-  lowering in check 6, the script reads the new risk level and fails when
-  it did not change.
+  the same login, target and parameters, and sends its hash. When the
+  preview fails or gives no hash, the step prints `[FAIL]` and sends no
+  call. After the lowering in check 6, the risk level must be exactly one
+  level lower than before; a raise, the same level or no level fails.
+- Check 1 finds the override of this run by its own fields: connector,
+  operation, level `caution`, `set_at` after the step began, and
+  `set_by_sub` equal to the login of the Admin's edit row
+  (`meho_connector_edit_op`) of that operation. `rule_ref` of the override
+  list names a classification entry, so the script does not use it. The
+  run's audit row must carry a rule of the source `override`.
 - A click in the web console passes on the request's status and the audit
-  row of the click (`POST /ui/approvals/{id}/approve`). A refused click
-  needs the row of a click by another person than the sender.
+  row of the click (`POST /ui/approvals/{id}/approve`). Every click row
+  must have HTTP 200: a 401, a sign-in redirect or an error is a failure
+  for another reason. A refused click needs the row of a click by another
+  person than the sender, and the person confirms that MEHO showed the
+  refusal of the rule (the audit row does not hold its text). An approval
+  needs the click row of the person who approved it (`reviewed_by`).
+- Check 10 on the command line passes on the Operator's audit row of
+  `POST /api/v1/approvals/{id}/approve` with HTTP 403, a request that still
+  waits, and the person's confirmation that `meho` printed "you may
+  approve it yourself with a click in the web interface".
 - The agent's approve attempt in check 6 goes only to a request the script
   made for `CPC_OP_HARMLESS`. It passes only on HTTP 403 with a `detail`
   that starts with `human_principal_required`, the audit row of the
@@ -166,18 +201,28 @@ What makes a check pass:
   it with "Only a person can ask for a policy import". The same call with
   the Operator's token must wait.
 - Check 8 with a token passes only on HTTP 200 with `ok: false` and the
-  mistake that the write stays at least `caution`. Checks 8 and 9 in the
-  console need the audit rows of the person's changes.
-- Check 11 passes only on the audit row of the sensor's run: its
-  operation, its target and its login.
+  mistake of the write rule itself. Checks 8 and 9 in the console count
+  only the audit rows of the edit of `CPC_OP_WRITE`: check 8 needs the
+  refused console edit (`/ui/connectors/registry/<connector>/operations/<op>`
+  with a 4xx answer that is not a 401) and no saved edit; check 9 needs
+  the edit rows (`meho_connector_edit_op`) of the raise and of the
+  removal.
+- Check 11 reads the sensor from the list `GET /api/v1/sensors` (MEHO has
+  no GET of one sensor) and fails at once when it is not there. It passes
+  only on the audit row of a run after its run call (at or after the
+  `next_fire_at` of the run answer): the sensor's operation, target and
+  login.
 
 Check 7 runs last, because it turns the switch off. The script reads the
 switch again first and fails when it is still on or cannot be read. Then
 it asks `POST /api/v1/policy/explain` once for each probe, so it runs
 nothing. Each probe asks as the caller of the check it repeats, by the
 same way in (web console or token), and every operation of checks 1 to 6,
-8 and 10 has a probe. A probe passes only with HTTP 200, an answer `run`,
-`wait` or `deny`, its audit row, and the answer of the baseline.
+8 and 10 has a probe. A probe keeps the answer, who may approve (the
+`approvers` of the answer), and, for an operation with `CPC_PARAMS_*`, the
+`policy_verdict` of a REST preview with those parameters, because explain
+takes no parameters. It passes only with HTTP 200, a valid answer, its
+audit rows, and the same three values as the baseline.
 
 ## The start of a run
 
@@ -196,6 +241,9 @@ was checked by a run is in the pull request of the script.
   their own command lines. It checks that every call goes to the checked
   install, that no token or parameter value is on a command line, the
   preview hash of each delete, the clean-up, a call without a target, a run
-  with no terminal, and a stopped run.
+  with no terminal (no destructive call, root command or delete is sent,
+  and no take-back question), a stopped run (a request found in the queue
+  is withdrawn), and a request from before the run that is never
+  withdrawn.
 
 The CI workflow `linux-server-test.yml` runs both.

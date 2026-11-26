@@ -640,10 +640,11 @@ def _hard_to_undo_reason(descriptor: EndpointDescriptor) -> str | None:
     """Return a refusal reason when the switch is on and the op is hard to undo."""
     from meho_backplane.settings import get_settings
 
-    if descriptor.hard_to_undo is None or not custom_policy_on(get_settings()):
+    kind = getattr(descriptor, "hard_to_undo", None)
+    if kind is None or not custom_policy_on(get_settings()):
         return None
     return (
-        f"op {descriptor.op_id!r} is hard to undo (hard_to_undo={descriptor.hard_to_undo!r}); "
+        f"op {descriptor.op_id!r} is hard to undo (hard_to_undo={kind!r}); "
         "it counts as a delete, so no standing grant and no run approval covers it"
     )
 

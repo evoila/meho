@@ -630,11 +630,13 @@ def test_restage_hint_without_secret_ref_says_where_to_read_it() -> None:
     """Without a secret_ref the path is a placeholder and the hint names the lookup."""
     text = _auth_restage_remediation("vrli-lab", None)
 
-    assert "`meho vault kv put secret <secret_ref> --data @<file>`" in text
+    assert "`meho vault kv put secret <path> --data @<file>`" in text
     assert "`meho targets describe vrli-lab` shows its secret_ref." in text
+    assert "set one with `meho targets update vrli-lab --secret-ref <ref>`" in text
 
     unnamed = _auth_restage_remediation(None, None)
     assert "`meho targets describe <target>` shows its secret_ref." in unnamed
+    assert "`meho targets update <target> --secret-ref <ref>`" in unnamed
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +713,13 @@ _VAULT_COMMAND = "`meho vault kv put secret tenants/tid/vrli-lab --data @<file>`
             "vault:tenants/tid/vrli-lab", "gsm", _VAULT_COMMAND, id="vault-scheme-gsm-default"
         ),
         pytest.param(
-            None, "vault", "`meho vault kv put secret <secret_ref> --data @<file>`", id="no-ref"
+            " vault:tenants/tid/vrli-lab", "gsm", _VAULT_COMMAND, id="vault-scheme-leading-space"
+        ),
+        pytest.param(
+            "  tenants/tid/vrli-lab \t", "vault", _VAULT_COMMAND, id="no-scheme-spaces-around"
+        ),
+        pytest.param(
+            None, "vault", "`meho vault kv put secret <path> --data @<file>`", id="no-ref"
         ),
     ],
 )
@@ -754,6 +762,10 @@ async def test_dispatch_restage_hint_gives_the_vault_command_for_a_vault_ref(
         pytest.param("gsm:proj-x/vrli#password", "vault", "gsm", id="gsm-scheme-field"),
         pytest.param("proj-x/vrli", "gsm", "gsm", id="no-scheme-gsm-default"),
         pytest.param("proj-x/vrli#password", "gsm", "gsm", id="no-scheme-gsm-default-field"),
+        pytest.param(" gsm:proj-x/vrli", "vault", "gsm", id="gsm-scheme-leading-space"),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/latest", "vault", "gsm", id="gsm-scheme-latest-version"
+        ),
     ],
 )
 async def test_dispatch_restage_hint_names_no_vault_command_for_another_store(
@@ -779,8 +791,114 @@ async def test_dispatch_restage_hint_names_no_vault_command_for_another_store(
     for text in (error, remediation):
         assert "meho vault kv put" not in text
         assert "--data" not in text
-        assert f"(secret_ref {secret_ref!r})" in text
+        assert f"(secret_ref {secret_ref.strip()!r})" in text
         assert f"Store the corrected credential in the {store!r} store at that ref" in text
+        assert "pins one version" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store"),
+    [
+        pytest.param("gsm:proj-x/vrli/versions/5", "vault", id="gsm-scheme"),
+        pytest.param("gsm:proj-x/vrli/versions/5#password", "vault", id="gsm-scheme-field"),
+        pytest.param("proj-x/vrli/versions/3", "gsm", id="no-scheme-gsm-default"),
+        pytest.param(" gsm:proj-x/vrli/versions/2 ", "vault", id="gsm-scheme-spaces-around"),
+    ],
+)
+async def test_dispatch_restage_hint_pinned_gsm_version_says_to_point_the_ref_at_a_new_version(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str,
+    default_store: str,
+) -> None:
+    """A GSM ref that pins one version: add a new version, then set the ref to it."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert f"(secret_ref {secret_ref.strip()!r})" in text
+        assert "pins one version of the secret, so MEHO reads only that version" in text
+        assert "Add the corrected credential as a new version of that secret" in text
+        assert "`meho targets update vrli-lab --secret-ref <ref>`, then retry." in text
+        assert "store at that ref" not in text
+        assert "meho vault kv put" not in text
+
+
+_GSM_DEFAULT_RULE = (
+    "(a `vault:` ref; on this install a ref with no `<kind>:` prefix is in the 'gsm' store)"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    ("secret_ref", "default_store", "no_prefix_rule"),
+    [
+        pytest.param(
+            None,
+            "gsm",
+            _GSM_DEFAULT_RULE,
+            id="no-ref-gsm-default",
+        ),
+        pytest.param(
+            "   ",
+            "gsm",
+            _GSM_DEFAULT_RULE,
+            id="blank-ref-gsm-default",
+        ),
+        pytest.param(
+            None,
+            "vault",
+            "(a `vault:` ref, or a ref with no `<kind>:` prefix on this install)",
+            id="no-ref-vault-default",
+        ),
+    ],
+)
+async def test_dispatch_restage_hint_without_a_ref_says_how_to_set_one_and_each_store(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: PrincipalKind,
+    secret_ref: str | None,
+    default_store: str,
+    no_prefix_rule: str,
+) -> None:
+    """No ref: the hint names the lookup, how to set a ref, and the steps per store."""
+    monkeypatch.setenv("CREDENTIAL_BACKEND", default_store)
+    get_settings.cache_clear()
+
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        secret_ref=secret_ref,
+    )
+
+    for text in (error, remediation):
+        assert "(secret_ref" not in text
+        assert "backplane-side Vault copy" not in text
+        assert "while the stored copy lagged" in text
+        assert "`meho targets describe vrli-lab` shows its secret_ref." in text
+        assert (
+            "When it shows none, set one with `meho targets update vrli-lab --secret-ref <ref>`."
+        ) in text
+        assert f"For a Vault ref {no_prefix_rule}, restage it through MEHO" in text
+        assert "`meho vault kv put secret <path> --data @<file>`, where <path> is the ref" in text
+        assert (
+            "For a ref of another store, store the corrected credential in that store at that ref"
+        ) in text
+        assert _DATA_ARG_RE.findall(text) == [RESTAGE_KV_PUT_DATA_ARG]
 
 
 @pytest.mark.asyncio
@@ -873,7 +991,9 @@ async def test_dispatch_restage_hint_shows_an_unsafe_target_name_on_its_own_line
         assert f"\n{name}\n" in text
         assert f"meho targets describe {name}" not in text
         assert "`meho targets describe <target>` with that name shows its secret_ref." in text
-        assert "`meho vault kv put secret <secret_ref> --data @<file>`" in text
+        assert "`meho targets update <target> --secret-ref <ref>`" in text
+        assert f"targets update {name}" not in text
+        assert "`meho vault kv put secret <path> --data @<file>`" in text
 
 
 @pytest.mark.asyncio

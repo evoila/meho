@@ -2597,13 +2597,7 @@ def _restage_store(secret_ref: str) -> tuple[str, str]:
     to the install's default store (``credential_backend``).
     """
     scheme = parse_credential_scheme(secret_ref)
-    if scheme is not None:
-        default_backend = scheme
-    else:
-        try:
-            default_backend = get_settings().credential_backend
-        except Exception:  # the error path never raises; the settings default
-            default_backend = DEFAULT_CREDENTIAL_BACKEND
+    default_backend = scheme if scheme is not None else _restage_default_store()
     return split_credential_ref(secret_ref, default_backend=default_backend)
 
 
@@ -2615,16 +2609,24 @@ def _own_line(what: str, value: str) -> str:
     )
 
 
+def _restage_target_word(target_name: str | None) -> str:
+    """The target name as a command word, or the ``<target>`` placeholder."""
+    quoted = _shell_arg(target_name) if target_name else None
+    return quoted if quoted is not None else "<target>"
+
+
 def _restage_find_ref(target_name: str | None) -> str:
-    """The step that names how to read an unknown ``secret_ref``."""
-    if not target_name:
-        return " `meho targets describe <target>` shows its secret_ref."
-    quoted = _shell_arg(target_name)
-    if quoted is not None:
-        return f" `meho targets describe {quoted}` shows its secret_ref."
+    """The step that names how to read an unknown ``secret_ref``, and how to set one."""
+    word = _restage_target_word(target_name)
+    own_line = ""
+    if target_name and word == "<target>":
+        own_line = _own_line("target name", target_name)
+        lookup = "`meho targets describe <target>` with that name shows its secret_ref."
+    else:
+        lookup = f" `meho targets describe {word}` shows its secret_ref."
     return (
-        _own_line("target name", target_name)
-        + "`meho targets describe <target>` with that name shows its secret_ref."
+        f"{own_line}{lookup} When it shows none, set one with "
+        f"`meho targets update {word} --secret-ref <ref>`."
     )
 
 
@@ -2632,16 +2634,78 @@ def _restage_vault_put(path: str | None) -> tuple[str, str]:
     """``(own line, command)`` of the ``meho vault kv put`` step for a Vault *path*.
 
     *path* ``None`` means the ref is not known: the command shows the
-    ``<secret_ref>`` placeholder. A path outside the safe set is shown on its
-    own line, and the command shows the ``<path>`` placeholder.
+    ``<path>`` placeholder. A path outside the safe set is shown on its own
+    line, and the command shows the ``<path>`` placeholder too.
     """
     mount = _shell_arg(DEFAULT_KV_MOUNT) or DEFAULT_KV_MOUNT
-    if path is None:
-        shown, own_line = "<secret_ref>", ""
-    else:
-        quoted = _shell_arg(path)
-        shown, own_line = ("<path>", _own_line("path", path)) if quoted is None else (quoted, "")
+    quoted = _shell_arg(path) if path is not None else None
+    own_line = _own_line("path", path) if path is not None and quoted is None else ""
+    shown = quoted if quoted is not None else "<path>"
     return own_line, f"`meho vault kv put {mount} {shown} --data {RESTAGE_KV_PUT_DATA_ARG}`"
+
+
+def _restage_vault_steps(put: str, *, path_note: str = "") -> str:
+    """The file steps of a Vault restage, around the ``kv put`` command *put*."""
+    return (
+        f"write the corrected credential as a JSON object (for example "
+        f"{_RESTAGE_JSON_EXAMPLE}, with each value filled in) into a file that "
+        f"only you can read, store it with {put}{path_note} (the write waits for "
+        f"a person's approval), delete the file, then retry."
+    )
+
+
+_RESTAGE_NEVER_ON_LINE: Final = "Never put the password on the command line."
+_RESTAGE_GUIDE: Final = (
+    "The steps are in docs-site/guides/targets-and-secrets.md (Store the credential through MEHO)."
+)
+
+
+def _gsm_ref_pins_a_version(store_ref: str) -> bool:
+    """Whether a GSM *store_ref* (``<project>/<secret>/versions/<n>``) pins one version."""
+    parts = store_ref.partition("#")[0].split("/")
+    return len(parts) == 4 and parts[2] == "versions" and parts[3] not in ("", "latest")
+
+
+def _restage_other_store(kind: str, store_ref: str, target_name: str | None) -> str:
+    """The restage step for a ref of a store other than Vault."""
+    if kind == "gsm" and _gsm_ref_pins_a_version(store_ref):
+        word = _restage_target_word(target_name)
+        return (
+            f" The secret_ref pins one version of the secret, so MEHO reads only "
+            f"that version. Add the corrected credential as a new version of that "
+            f"secret, set the target's secret_ref to the new version with "
+            f"`meho targets update {word} --secret-ref <ref>`, then retry."
+        )
+    return f" Store the corrected credential in the {kind!r} store at that ref, then retry."
+
+
+def _restage_unknown_store(target_name: str | None, default_kind: str) -> str:
+    """The restage steps when the target's ``secret_ref`` is not known."""
+    _, put = _restage_vault_put(None)
+    if default_kind == "vault":
+        vault_ref = "a `vault:` ref, or a ref with no `<kind>:` prefix on this install"
+    else:
+        vault_ref = (
+            f"a `vault:` ref; on this install a ref with no `<kind>:` prefix "
+            f"is in the {default_kind!r} store"
+        )
+    return (
+        f"{_restage_find_ref(target_name)} For a Vault ref ({vault_ref}), restage "
+        f"it through MEHO: "
+        + _restage_vault_steps(
+            put, path_note=", where <path> is the ref without its `vault:` prefix"
+        )
+        + " For a ref of another store, store the corrected credential in that "
+        "store at that ref, then retry."
+    )
+
+
+def _restage_default_store() -> str:
+    """The install's default credential store; the settings default when they cannot load."""
+    try:
+        return get_settings().credential_backend
+    except Exception:  # the error path never raises
+        return DEFAULT_CREDENTIAL_BACKEND
 
 
 def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -> str:
@@ -2655,40 +2719,39 @@ def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -
     the filing (#2329) documents -- so the fix is to restage the credential,
     not to widen a policy.
 
-    The ref is read as the credential read reads it (:func:`_restage_store`).
-    A Vault ref gives ``meho vault kv put secret <path> --data @<file>``, with
-    the path without its ``vault:`` prefix: the JSON object comes from a file
-    that only the reader can read, so no credential value stands on the
-    command line. A ref of another store gives no Vault command: the hint
-    says to store the credential in that store at that ref. A stored value
-    goes into a command only through :func:`_shell_arg`.
+    The ref is read as the credential read reads it: trimmed, then split by
+    :func:`_restage_store`. A Vault ref gives
+    ``meho vault kv put secret <path> --data @<file>``, with the path without
+    its ``vault:`` prefix: the JSON object comes from a file that only the
+    reader can read, so no credential value stands on the command line. A
+    ref of another store gives no Vault command: the hint says to store the
+    credential in that store at that ref, or, for a GSM ref that pins one
+    version, to add a new version and point the ref at it. Without a ref the
+    hint names how to read and set one, and the steps for each store. A
+    stored value goes into a command only through :func:`_shell_arg`.
     """
+    ref = (secret_ref or "").strip()
     who = f"target {target_name!r}" if target_name else "this target"
-    ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
-    kind, path = _restage_store(secret_ref) if secret_ref else ("vault", None)
-    if kind != "vault":
-        return (
-            f"the credential for {who}{ref_clause} appears stale or wrong -- most "
-            f"likely the upstream service-account password was rotated while the "
-            f"copy in the {kind!r} credential store lagged. Store the corrected "
-            f"credential in the {kind!r} store at that ref, then retry. Never put "
-            f"the password on the command line."
-        )
-    find_ref = "" if secret_ref else _restage_find_ref(target_name)
-    own_line, put = _restage_vault_put(path)
-    lead = "" if (own_line or find_ref).endswith("\n") else " "
-    return (
+    ref_clause = f" (secret_ref {ref!r})" if ref else ""
+    lead = (
         f"the credential for {who}{ref_clause} appears stale or wrong -- most "
-        f"likely the upstream service-account password was rotated while the "
-        f"backplane-side Vault copy lagged.{find_ref}{own_line}"
-        f"{lead}Restage it through MEHO: write the "
-        f"corrected credential as a JSON object (for example "
-        f"{_RESTAGE_JSON_EXAMPLE}, with each value filled in) into a file that "
-        f"only you can read, "
-        f"store it with {put} (the write waits for a person's approval), "
-        f"delete the file, then retry. Never put the password on the command line. "
-        f"The steps are in docs-site/guides/targets-and-secrets.md "
-        f"(Store the credential through MEHO)."
+        f"likely the upstream service-account password was rotated while the"
+    )
+    tail = f" {_RESTAGE_NEVER_ON_LINE} {_RESTAGE_GUIDE}"
+    if not ref:
+        steps = _restage_unknown_store(target_name, _restage_default_store())
+        return f"{lead} stored copy lagged.{steps}{tail}"
+    kind, path = _restage_store(ref)
+    if kind != "vault":
+        steps = _restage_other_store(kind, path, target_name)
+        return (
+            f"{lead} copy in the {kind!r} credential store lagged.{steps} {_RESTAGE_NEVER_ON_LINE}"
+        )
+    own_line, put = _restage_vault_put(path)
+    space = "" if own_line else " "
+    return (
+        f"{lead} backplane-side Vault copy lagged.{own_line}{space}Restage it "
+        f"through MEHO: {_restage_vault_steps(put)}{tail}"
     )
 
 

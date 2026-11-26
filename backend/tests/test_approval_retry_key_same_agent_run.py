@@ -183,10 +183,13 @@ async def test_an_agent_call_and_then_a_direct_call_with_one_key_get_two_request
         ((_AGENT_A, _RUN_1), (_AGENT_A, _RUN_2)),
         ((_AGENT_A, _RUN_1), (_AGENT_B, _RUN_1)),
         ((None, _RUN_1), (None, _RUN_2)),
+        ((_AGENT_A, None), (_AGENT_B, None)),
+        ((_AGENT_A, None), (_AGENT_A, _RUN_1)),
+        ((_AGENT_A, None), (None, None)),
     ],
 )
 async def test_two_agent_runs_with_one_key_get_two_requests(
-    first: tuple[str | None, uuid.UUID], second: tuple[str | None, uuid.UUID]
+    first: tuple[str | None, uuid.UUID | None], second: tuple[str | None, uuid.UUID | None]
 ) -> None:
     one = await _call(*first)
     two = await _call(*second)
@@ -198,7 +201,9 @@ async def test_two_agent_runs_with_one_key_get_two_requests(
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("vault_ops")
 @pytest.mark.parametrize(
-    "caller", [(None, None), (_AGENT_A, _RUN_1), (None, _RUN_1)], ids=["direct", "agent", "run"]
+    "caller",
+    [(None, None), (_AGENT_A, _RUN_1), (None, _RUN_1), (_AGENT_A, None)],
+    ids=["direct", "agent", "run", "agent-no-run"],
 )
 async def test_the_same_caller_gets_its_request_back_also_after_approve(
     caller: tuple[str | None, uuid.UUID | None],

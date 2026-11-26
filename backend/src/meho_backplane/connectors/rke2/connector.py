@@ -69,6 +69,10 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
+from meho_backplane.connectors.adapters.ssh_target_form import (
+    SSH_DEFAULT_PORT,
+    ssh_credential_ways,
+)
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
 from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
 from meho_backplane.connectors.schemas import (
@@ -171,6 +175,13 @@ class Rke2SshConnector(SshConnector):
     # RKE2 follows the Kubernetes minor lines. The token-rotate version check
     # in ops_write.py is separate and stays as it is.
     supported_version_range = ">=1.32,<1.38"
+
+    default_port = SSH_DEFAULT_PORT
+    target_fields = ()
+    credential_ways = ssh_credential_ways(
+        user_help="The user to log in as. MEHO uses root when you leave it out.", sudo_password=True
+    )
+    test_operation = "rke2.node.service.status"
 
     async def fingerprint(
         self,

@@ -257,6 +257,17 @@ client); regenerate with `cd cli && make snapshot-openapi && make generate`.
   over raw T-SQL are a possible second increment, not this connector.
 - **Cert-validated TLS is deferred** — see the encryption-posture section.
 
+## What a target needs
+
+`MssqlConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 1433.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: One way, `password`: `sql_username` and `sql_password`. The names start with `sql_` on purpose, so one secret can also hold SSH fields.
+- Test read: `mssql.instance.version` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - `backend/src/meho_backplane/connectors/mssql/` — `session.py` (transport +

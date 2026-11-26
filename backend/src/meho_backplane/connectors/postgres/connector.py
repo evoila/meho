@@ -64,6 +64,7 @@ from meho_backplane.connectors.postgres.query_guard import (
     assert_not_superuser,
 )
 from meho_backplane.connectors.postgres.session import (
+    DEFAULT_PORT,
     assert_read_only_sql,
     connect_read_only,
 )
@@ -72,6 +73,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["PostgresConnector"]
 
@@ -137,6 +139,29 @@ class PostgresConnector(Connector):
     version = "16"
     impl_id = "postgres-wire"
     supported_version_range = ">=15,<19"
+    default_port = DEFAULT_PORT
+    target_fields = ()
+    credential_ways = (
+        CredentialWay(
+            key="password",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help=(
+                        "A PostgreSQL role. Leave the target without a secret for a "
+                        "server with trust login."
+                    ),
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the role."
+                ),
+            ),
+        ),
+    )
+    test_operation = "postgres.databases"
     strict_version_range = True
     priority = 1
 

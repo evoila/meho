@@ -207,6 +207,17 @@ replication lag, and treats the standalone code-76 (`NoReplicationEnabled`) as
   replica set with no recent writes it can read high because the secondary has had
   nothing new to apply — not because it is unhealthy.
 
+## What a target needs
+
+`MongoDbConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 27017.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: One way, `password`: `username` and `password`. MEHO signs in against the `admin` database. A target with no secret connects with no login.
+- Test read: `mongodb.databases` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - PyMongo async API: <https://pymongo.readthedocs.io/en/stable/api/pymongo/asynchronous/index.html>

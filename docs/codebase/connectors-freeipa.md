@@ -411,6 +411,17 @@ The other writes show the generic echo of their parameters.
 - The reads return FreeIPA's default attributes, not `--all`. An attribute
   that FreeIPA shows only with `--all` is not shown yet.
 
+## What a target needs
+
+`FreeipaConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 443.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: One way, `password`: `username` and `password`, read by `load_basic_credentials` for the JSON-RPC login. The `Referer` host comes from the target's own `tls_server_name` column, so it is not an extra setting.
+- Test read: `freeipa.about` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - FreeIPA JSON-RPC usage: `doc/api/jsonrpc_usage.md` in

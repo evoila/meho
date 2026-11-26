@@ -57,6 +57,11 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
+from meho_backplane.connectors.adapters.ssh_target_form import (
+    SSH_DEFAULT_PORT,
+    WINDOWS_USER_HELP,
+    ssh_credential_ways,
+)
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -202,6 +207,11 @@ class WindowsDnsConnector(SshConnector):
     #: The structured-log event name the shared transport emits per run,
     #: kept connector-scoped so log queries stay per-connector.
     POWERSHELL_LOG_EVENT = "windows_dns_pwsh_executed"
+
+    default_port = SSH_DEFAULT_PORT
+    target_fields = ()
+    credential_ways = ssh_credential_ways(user_help=WINDOWS_USER_HELP)
+    test_operation = "windns.zone.list"
 
     async def fingerprint(
         self,

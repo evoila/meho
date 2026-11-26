@@ -36,8 +36,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 OLD_SWITCHES = ("POLICY_CLASSIFICATION", "POLICY_ENGINE_SHADOW", "POLICY_APPROVER_ROUTING")
 
-#: The sentence each help text, answer text, console text and the profile
-#: comment says once, without backticks.
+#: The sentence each CLI help text and the profile comment says once, without
+#: backticks. The messages that show while classification is off do not say it.
 OLD_SWITCHES_ALONE = (
     "Each older switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, "
     "POLICY_APPROVER_ROUTING) still turns on its own part alone."

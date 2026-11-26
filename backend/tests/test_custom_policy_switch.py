@@ -9,8 +9,10 @@
 * ``GET /ready`` shows ``features.policy.custom_policy``.
 * ``policy.apply``, ``policy.classify`` and ``policy.classify_preview``
   register with only ``CUSTOM_POLICY`` on, and not with every switch off.
+* ``custom_policy_on`` and ``custom_policy_on_in_environment`` say off with
+  every switch off and on with only ``CUSTOM_POLICY`` on.
 * No code outside :mod:`meho_backplane.policy.switches` and the settings
-  reads the three switches directly.
+  reads the four switches directly.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from meho_backplane.mcp.tools._preview_policy_fields import (
 )
 from meho_backplane.policy import bindings, routing, shadow, store
 from meho_backplane.policy.routing import category_routing_warnings
+from meho_backplane.policy.switches import custom_policy_on, custom_policy_on_in_environment
 from meho_backplane.settings import get_settings
 
 _SWITCHES = (
@@ -110,6 +113,28 @@ def test_custom_policy_alone_turns_every_part_on(monkeypatch: pytest.MonkeyPatch
         settings.policy_approver_routing,
     ) == (False, False, False)
     assert _parts() == dict.fromkeys(_SWITCHES[1:], True)
+
+
+def test_custom_policy_functions_off_with_every_switch_off() -> None:
+    assert custom_policy_on(get_settings()) is False
+    assert custom_policy_on_in_environment() is False
+
+
+def test_custom_policy_functions_on_with_only_custom_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _turn_on(monkeypatch, "CUSTOM_POLICY")
+    assert custom_policy_on(get_settings()) is True
+    assert custom_policy_on_in_environment() is True
+
+
+@pytest.mark.parametrize("old_switch", _SWITCHES[1:])
+def test_custom_policy_functions_off_with_only_an_old_switch(
+    monkeypatch: pytest.MonkeyPatch, old_switch: str
+) -> None:
+    _turn_on(monkeypatch, old_switch)
+    assert custom_policy_on(get_settings()) is False
+    assert custom_policy_on_in_environment() is False
 
 
 @pytest.mark.parametrize("old_switch", _SWITCHES[1:])
@@ -220,14 +245,40 @@ async def test_policy_ops_not_registered_with_every_switch_off(embedding: AsyncM
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "meho_backplane"
 
-#: The only files that may read the three switches directly.
+#: The only files that may read the four switches directly.
 _ALLOWED = {_SRC / "settings.py", _SRC / "policy" / "switches.py"}
 
 _DIRECT_READ = re.compile(
-    r"settings\w*(?:\(\))?\.(policy_classification|policy_engine_shadow|policy_approver_routing)\b"
-    r"|environ(?:\.get\(|\[)\s*[\"'](POLICY_CLASSIFICATION|POLICY_ENGINE_SHADOW|"
+    r"settings\w*(?:\(\))?\.(policy_classification|policy_engine_shadow|policy_approver_routing"
+    r"|custom_policy)\b"
+    r"|(?:environ(?:\.get\(|\[)|getenv\()\s*[\"'](POLICY_CLASSIFICATION|POLICY_ENGINE_SHADOW|"
     r"POLICY_APPROVER_ROUTING|CUSTOM_POLICY)[\"']"
 )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '"custom_policy": settings.custom_policy,',
+        "if get_settings().custom_policy:",
+        'on = os.environ.get("CUSTOM_POLICY")',
+        "on = os.environ['CUSTOM_POLICY']",
+        'on = os.getenv("CUSTOM_POLICY")',
+    ],
+)
+def test_direct_read_pattern_finds_custom_policy(line: str) -> None:
+    assert _DIRECT_READ.search(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '"custom_policy": custom_policy_on(settings),',
+        "The CUSTOM_POLICY setting turns on all three policy parts.",
+    ],
+)
+def test_direct_read_pattern_skips_calls_and_texts(line: str) -> None:
+    assert _DIRECT_READ.search(line) is None
 
 
 def test_no_code_reads_the_switches_directly() -> None:

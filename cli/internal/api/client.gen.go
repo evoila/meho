@@ -5416,6 +5416,23 @@ type ConventionsDriftResponse struct {
 	OnlyInMeho []map[string]interface{} `json:"only_in_meho"`
 }
 
+// CredentialFieldModel One field of the secret.
+type CredentialFieldModel struct {
+	Help      string `json:"help"`
+	Hidden    bool   `json:"hidden"`
+	Label     string `json:"label"`
+	Multiline bool   `json:"multiline"`
+	Name      string `json:"name"`
+	Required  bool   `json:"required"`
+}
+
+// CredentialWayModel One way to log in.
+type CredentialWayModel struct {
+	Fields []CredentialFieldModel `json:"fields"`
+	Key    string                 `json:"key"`
+	Label  string                 `json:"label"`
+}
+
 // CurrentStepResponse Returned by “meho_runbook_start“ and the non-completion path of “meho_runbook_next“.
 //
 // Carries the run coordinates (“run_id“ / “template_slug“ /
@@ -12118,6 +12135,55 @@ type TargetCreate struct {
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
 type TargetCreateProduct string
 
+// TargetFieldModel One extra setting of a target.
+type TargetFieldModel struct {
+	Choices  []string                  `json:"choices"`
+	Default  *TargetFieldModel_Default `json:"default"`
+	Help     string                    `json:"help"`
+	Key      string                    `json:"key"`
+	Kind     string                    `json:"kind"`
+	Label    string                    `json:"label"`
+	Required bool                      `json:"required"`
+}
+
+// TargetFieldModelDefault0 defines model for .
+type TargetFieldModelDefault0 = string
+
+// TargetFieldModelDefault1 defines model for .
+type TargetFieldModelDefault1 = int
+
+// TargetFieldModelDefault2 defines model for .
+type TargetFieldModelDefault2 = bool
+
+// TargetFieldModel_Default defines model for TargetFieldModel.Default.
+type TargetFieldModel_Default struct {
+	union json.RawMessage
+}
+
+// TargetFormClass What one connector class declares. “None“ means "not declared".
+//
+// “test_operation“ is also “None“ while the stored row of the test read
+// has a risk level other than “safe“ or is turned off, or while an
+// override of the install or of the caller's tenant raises its risk level
+// or makes it wait for approval. Otherwise it names the test read the
+// connector declares; whether the caller may run it is decided when it is
+// called.
+type TargetFormClass struct {
+	CredentialWays        *[]CredentialWayModel `json:"credential_ways"`
+	DefaultPort           *int                  `json:"default_port"`
+	ImplId                string                `json:"impl_id"`
+	SupportedVersionRange *string               `json:"supported_version_range"`
+	TargetFields          *[]TargetFieldModel   `json:"target_fields"`
+	TestOperation         *string               `json:"test_operation"`
+	Version               string                `json:"version"`
+}
+
+// TargetFormResponse The declarations of every connector class of one product.
+type TargetFormResponse struct {
+	Classes []TargetFormClass `json:"classes"`
+	Product string            `json:"product"`
+}
+
 // TargetListResponse Unified list envelope for “GET /api/v1/targets“.
 //
 // The `{items, next_cursor}` shape codified in
@@ -13766,6 +13832,13 @@ type ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams struct {
 	// ReducedApproval Only the operations a platform admin turned approval off for.
 	ReducedApproval *bool   `form:"reduced_approval,omitempty" json:"reduced_approval,omitempty"`
 	Authorization   *string `json:"authorization,omitempty"`
+}
+
+// GetTargetFormApiV1ConnectorsTargetFormGetParams defines parameters for GetTargetFormApiV1ConnectorsTargetFormGet.
+type GetTargetFormApiV1ConnectorsTargetFormGetParams struct {
+	// Product The product slug, for example `harbor` or `linux`.
+	Product       string  `form:"product" json:"product"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams defines parameters for DeleteEndpointApiV1ConnectorsConnectorIdDelete.
@@ -17710,6 +17783,94 @@ func (t *ShowTemplateResponse_Steps_Item) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTargetFieldModelDefault0 returns the union data inside the TargetFieldModel_Default as a TargetFieldModelDefault0
+func (t TargetFieldModel_Default) AsTargetFieldModelDefault0() (TargetFieldModelDefault0, error) {
+	var body TargetFieldModelDefault0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTargetFieldModelDefault0 overwrites any union data inside the TargetFieldModel_Default as the provided TargetFieldModelDefault0
+func (t *TargetFieldModel_Default) FromTargetFieldModelDefault0(v TargetFieldModelDefault0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTargetFieldModelDefault0 performs a merge with any union data inside the TargetFieldModel_Default, using the provided TargetFieldModelDefault0
+func (t *TargetFieldModel_Default) MergeTargetFieldModelDefault0(v TargetFieldModelDefault0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTargetFieldModelDefault1 returns the union data inside the TargetFieldModel_Default as a TargetFieldModelDefault1
+func (t TargetFieldModel_Default) AsTargetFieldModelDefault1() (TargetFieldModelDefault1, error) {
+	var body TargetFieldModelDefault1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTargetFieldModelDefault1 overwrites any union data inside the TargetFieldModel_Default as the provided TargetFieldModelDefault1
+func (t *TargetFieldModel_Default) FromTargetFieldModelDefault1(v TargetFieldModelDefault1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTargetFieldModelDefault1 performs a merge with any union data inside the TargetFieldModel_Default, using the provided TargetFieldModelDefault1
+func (t *TargetFieldModel_Default) MergeTargetFieldModelDefault1(v TargetFieldModelDefault1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTargetFieldModelDefault2 returns the union data inside the TargetFieldModel_Default as a TargetFieldModelDefault2
+func (t TargetFieldModel_Default) AsTargetFieldModelDefault2() (TargetFieldModelDefault2, error) {
+	var body TargetFieldModelDefault2
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTargetFieldModelDefault2 overwrites any union data inside the TargetFieldModel_Default as the provided TargetFieldModelDefault2
+func (t *TargetFieldModel_Default) FromTargetFieldModelDefault2(v TargetFieldModelDefault2) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTargetFieldModelDefault2 performs a merge with any union data inside the TargetFieldModel_Default, using the provided TargetFieldModelDefault2
+func (t *TargetFieldModel_Default) MergeTargetFieldModelDefault2(v TargetFieldModelDefault2) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t TargetFieldModel_Default) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *TargetFieldModel_Default) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
 	var body ValidationErrorLoc0
@@ -18126,6 +18287,9 @@ type ClientInterface interface {
 
 	// ListOperationOverridesApiV1ConnectorsOperationOverridesGet request
 	ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetTargetFormApiV1ConnectorsTargetFormGet request
+	GetTargetFormApiV1ConnectorsTargetFormGet(ctx context.Context, params *GetTargetFormApiV1ConnectorsTargetFormGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteEndpointApiV1ConnectorsConnectorIdDelete request
 	DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -20960,6 +21124,18 @@ func (c *Client) GetIngestJobEndpointApiV1ConnectorsIngestJobsJobIdGet(ctx conte
 
 func (c *Client) ListOperationOverridesApiV1ConnectorsOperationOverridesGet(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetTargetFormApiV1ConnectorsTargetFormGet(ctx context.Context, params *GetTargetFormApiV1ConnectorsTargetFormGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetTargetFormApiV1ConnectorsTargetFormGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -33099,6 +33275,66 @@ func NewListOperationOverridesApiV1ConnectorsOperationOverridesGetRequest(server
 				}
 			}
 
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetTargetFormApiV1ConnectorsTargetFormGetRequest generates requests for GetTargetFormApiV1ConnectorsTargetFormGet
+func NewGetTargetFormApiV1ConnectorsTargetFormGetRequest(server string, params *GetTargetFormApiV1ConnectorsTargetFormGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/target-form")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, params.Product); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
@@ -56300,6 +56536,9 @@ type ClientWithResponsesInterface interface {
 	// ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse request
 	ListOperationOverridesApiV1ConnectorsOperationOverridesGetWithResponse(ctx context.Context, params *ListOperationOverridesApiV1ConnectorsOperationOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse, error)
 
+	// GetTargetFormApiV1ConnectorsTargetFormGetWithResponse request
+	GetTargetFormApiV1ConnectorsTargetFormGetWithResponse(ctx context.Context, params *GetTargetFormApiV1ConnectorsTargetFormGetParams, reqEditors ...RequestEditorFn) (*GetTargetFormApiV1ConnectorsTargetFormGetResponse, error)
+
 	// DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request
 	DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error)
 
@@ -59645,6 +59884,29 @@ func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) Stat
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetTargetFormApiV1ConnectorsTargetFormGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TargetFormResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetTargetFormApiV1ConnectorsTargetFormGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetTargetFormApiV1ConnectorsTargetFormGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -69716,6 +69978,15 @@ func (c *ClientWithResponses) ListOperationOverridesApiV1ConnectorsOperationOver
 	return ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp)
 }
 
+// GetTargetFormApiV1ConnectorsTargetFormGetWithResponse request returning *GetTargetFormApiV1ConnectorsTargetFormGetResponse
+func (c *ClientWithResponses) GetTargetFormApiV1ConnectorsTargetFormGetWithResponse(ctx context.Context, params *GetTargetFormApiV1ConnectorsTargetFormGetParams, reqEditors ...RequestEditorFn) (*GetTargetFormApiV1ConnectorsTargetFormGetResponse, error) {
+	rsp, err := c.GetTargetFormApiV1ConnectorsTargetFormGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetTargetFormApiV1ConnectorsTargetFormGetResponse(rsp)
+}
+
 // DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse request returning *DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse
 func (c *ClientWithResponses) DeleteEndpointApiV1ConnectorsConnectorIdDeleteWithResponse(ctx context.Context, connectorId string, params *DeleteEndpointApiV1ConnectorsConnectorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEndpointApiV1ConnectorsConnectorIdDeleteResponse, error) {
 	rsp, err := c.DeleteEndpointApiV1ConnectorsConnectorIdDelete(ctx, connectorId, params, reqEditors...)
@@ -77373,6 +77644,39 @@ func ParseListOperationOverridesApiV1ConnectorsOperationOverridesGetResponse(rsp
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest OperationOverrideList
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetTargetFormApiV1ConnectorsTargetFormGetResponse parses an HTTP response from a GetTargetFormApiV1ConnectorsTargetFormGetWithResponse call
+func ParseGetTargetFormApiV1ConnectorsTargetFormGetResponse(rsp *http.Response) (*GetTargetFormApiV1ConnectorsTargetFormGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetTargetFormApiV1ConnectorsTargetFormGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TargetFormResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

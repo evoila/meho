@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.5",
+  "kit_version": "1.6",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -19,6 +19,52 @@
     },
     "ConnectorUpstreamError": {
       "kind": "class"
+    },
+    "CredentialField": {
+      "kind": "class",
+      "parts": {
+        "help": {
+          "kind": "field",
+          "type": "str"
+        },
+        "hidden": {
+          "kind": "field",
+          "type": "bool"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        },
+        "multiline": {
+          "kind": "field",
+          "type": "bool"
+        },
+        "name": {
+          "kind": "field",
+          "type": "str"
+        },
+        "required": {
+          "kind": "field",
+          "type": "bool"
+        }
+      }
+    },
+    "CredentialWay": {
+      "kind": "class",
+      "parts": {
+        "fields": {
+          "kind": "field",
+          "type": "tuple[CredentialField, ...]"
+        },
+        "key": {
+          "kind": "field",
+          "type": "str"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        }
+      }
     },
     "CredentialsReadError": {
       "kind": "class"
@@ -169,6 +215,39 @@
           "type": "str | None"
         },
         "verify_tls": {
+          "kind": "field",
+          "type": "bool"
+        }
+      }
+    },
+    "TargetField": {
+      "kind": "class",
+      "parts": {
+        "choices": {
+          "kind": "field",
+          "type": "tuple[str, ...]"
+        },
+        "default": {
+          "kind": "field",
+          "type": "str | int | bool | None"
+        },
+        "help": {
+          "kind": "field",
+          "type": "str"
+        },
+        "key": {
+          "kind": "field",
+          "type": "str"
+        },
+        "kind": {
+          "kind": "field",
+          "type": "TargetFieldKind"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        },
+        "required": {
           "kind": "field",
           "type": "bool"
         }

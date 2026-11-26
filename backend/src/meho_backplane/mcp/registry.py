@@ -343,6 +343,22 @@ _SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
 )
 
 
+def _enum_rule_still_accepting_null(schema: dict[str, Any], members: list[Any]) -> dict[str, Any]:
+    """Return the rules that take the place of the ``enum`` *members* of an output schema.
+
+    An output schema must accept every answer the server gives, and the server
+    answers ``null`` for these fields. So ``null`` leaves the ``enum`` and an
+    ``anyOf`` takes it: the other members, or ``null``. An ``anyOf`` that
+    *schema* already has stays, inside an ``allOf``. The other keywords of
+    *schema* stay where they are.
+    """
+    kept = [member for member in members if member is not None]
+    rule = {"anyOf": [{"enum": kept}, {"type": "null"}]}
+    if "anyOf" in schema:
+        return {"allOf": [*schema.get("allOf", []), rule]}
+    return rule
+
+
 def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[str, Any]:
     """Return the rule that takes the place of the ``enum`` *members* of *schema*.
 
@@ -357,7 +373,9 @@ def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[
     return {"enum": kept}
 
 
-def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
+def _without_null_enum_members(
+    node: Any, *, names_are_keys: bool = False, accept_null: bool = False
+) -> Any:
     """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
 
     Used for the wire copy of each tool schema. It goes to any depth. Nothing else
@@ -369,27 +387,34 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
     nothing to change is returned as the same object.
 
     *names_are_keys* is true for the value of ``properties`` and the like,
-    where the keys are names, not keywords.
+    where the keys are names, not keywords. *accept_null* is true for an output
+    schema: ``null`` still passes, through an ``anyOf`` (see
+    :func:`_enum_rule_still_accepting_null`).
     """
     if isinstance(node, dict):
         changed = False
         out: dict[str, Any] = {}
         for key, value in node.items():
             if not names_are_keys and key == "enum" and isinstance(value, list) and None in value:
-                out.update(_enum_rule_without_null(node, value))
+                rule_for = (
+                    _enum_rule_still_accepting_null if accept_null else _enum_rule_without_null
+                )
+                out.update(rule_for(node, value))
                 changed = True
                 continue
             if not names_are_keys and key in _LITERAL_KEYWORDS:
                 out[key] = value
                 continue
             new_value = _without_null_enum_members(
-                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+                value,
+                names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS,
+                accept_null=accept_null,
             )
             changed = changed or new_value is not value
             out[key] = new_value
         return out if changed else node
     if isinstance(node, list):
-        items = [_without_null_enum_members(item) for item in node]
+        items = [_without_null_enum_members(item, accept_null=accept_null) for item in node]
         if any(new is not old for new, old in zip(items, node, strict=True)):
             return items
     return node
@@ -411,6 +436,17 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
             key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS
         }
     stripped: dict[str, Any] = _without_null_enum_members(schema)
+    return stripped
+
+
+def _wire_safe_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return *schema* (an output schema) with no ``null`` inside any ``enum``.
+
+    A client may check the structured content of a result against the sent
+    output schema, and MEHO answers ``null`` for some enum fields. So ``null``
+    is not dropped: ``anyOf`` accepts it instead. *schema* is not mutated.
+    """
+    stripped: dict[str, Any] = _without_null_enum_members(schema, accept_null=True)
     return stripped
 
 
@@ -628,7 +664,7 @@ class ToolDefinition(BaseModel):
         if self.title is not None:
             out["title"] = self.title
         if self.outputSchema is not None:
-            out["outputSchema"] = self.outputSchema
+            out["outputSchema"] = _wire_safe_output_schema(self.outputSchema)
         if self.annotations is not None:
             out["annotations"] = self.annotations.model_dump(exclude_none=True)
         if self.meta is not None:

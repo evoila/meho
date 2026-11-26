@@ -1214,7 +1214,7 @@ async def _gate_subop(
         resume_requester_var,
         rights_change_note,
     )
-    from meho_backplane.operations.approved_run_rights import approved_step_grant_refusal
+    from meho_backplane.operations.approved_run_rights import approved_step_refusal_now
     from meho_backplane.operations.dispatcher import (
         _audit_denied_and_return,
         _build_park_effect,
@@ -1247,7 +1247,8 @@ async def _gate_subop(
     # here — reproducing the approved step through the governed path — instead
     # of re-parking forever. Checked before ``policy_gate`` so a service /
     # agent principal whose sub-op parked resumes without a standing grant.
-    # The grants of the agent that asked are read below, before it clears.
+    # Its risk level and the grants of the agent that asked are read below,
+    # before it clears.
     cleared = _subop_resume_cleared(op_id=op_id, params=params)
 
     # Before the approved step, every step is one the first run did,
@@ -1295,9 +1296,10 @@ async def _gate_subop(
     raise_descriptor_for_params(descriptor, params)
 
     if cleared:
-        # The approved step is checked for the agent that asked, as a
-        # single call is (:mod:`.approved_run_rights`).
-        step_refusal = await approved_step_grant_refusal(
+        # The approved step is checked again, as a single call is: its risk
+        # level now against its card, and the agent that asked
+        # (:mod:`.approved_run_rights`).
+        step_refusal = await approved_step_refusal_now(
             operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
         )
         if step_refusal is None:

@@ -381,10 +381,14 @@ async def test_agent_card_with_no_readable_record_is_refused(
 
     assert response.status_code == 200, response.text
     assert response.json()["dispatch_status"] == "denied", response.text
-    assert (
-        f"the grants of the agent that asked for {_OP!r} cannot be checked: the approval "
-        "request has no record of the agent. The agent must ask again."
-    ) in response.json()["dispatch_error"]
+    error = response.json()["dispatch_error"]
+    assert error.endswith(
+        f"approval request {request_id} did not run: the grants of the agent that asked for "
+        f"{_OP!r} cannot be checked, because the approval request has no record of the agent. "
+        "The agent must ask again with a new request."
+    ), error
+    assert "would be refused" not in error
+    assert "Run it again" not in error
     assert _RUNS == []
 
 

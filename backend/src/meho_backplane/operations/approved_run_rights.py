@@ -17,7 +17,8 @@ agent's own wait) and every re-run check:
 * **The grants of an agent that asked**, and of the acting agent of a
   hosted agent run: a ``deny`` grant, or no grant while
   ``AGENT_GRANT_REQUIRED`` is ``on``, refuses the run.
-* **A revoked agent login** and a blocked login refuse the run.
+* **A revoked agent login** (the caller, or the acting agent of a hosted
+  agent run) and a blocked login refuse the run.
 
 A re-run also checks the caller's role and grants from the caller's token
 now, as for a new call. The approver is read as recorded at the decision.
@@ -34,11 +35,14 @@ Who is checked
   (:func:`~meho_backplane.operations.approved_step_check.requester_record`).
   An agent's request whose card has no readable record of the agent is
   refused when a person runs it from an approvals surface. The agent must
-  ask again.
+  ask again with a new request.
 
 A refused request stays approved and can run again later. On an approvals
 surface and in the agent's wait, the run ends as a failed run with the
-reason. The re-run checks the same rules before it takes the run
+reason. The approved step of a multi-step operation gets the risk level
+and grant checks before it clears (:func:`approved_step_refusal_now`). A
+step cannot run again on its own, so its answer says to start a new run
+of the operation. The re-run checks the same rules before it takes the run
 (:mod:`~meho_backplane.operations.approval_rerun`), so a refused re-run
 does not change the request.
 """
@@ -57,7 +61,11 @@ from sqlalchemy import select
 
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator
-from meho_backplane.operations.composite import COMPOSITE_DEPTH_TOP_LEVEL, composite_depth_var
+from meho_backplane.operations.composite import (
+    COMPOSITE_DEPTH_TOP_LEVEL,
+    composite_depth_var,
+    composite_dispatch_var,
+)
 from meho_backplane.operations.deny_reasons import POLICY_DENIED
 from meho_backplane.operations.secondary_target_policy import approved_agent_requester
 
@@ -68,7 +76,7 @@ __all__ = [
     "ApprovedRun",
     "RightsRefusal",
     "approved_run_refusal",
-    "approved_step_grant_refusal",
+    "approved_step_refusal_now",
     "bind_approved_run",
 ]
 
@@ -197,8 +205,8 @@ async def _risk_refusal(run: ApprovedRun | None, descriptor: EndpointDescriptor)
 
 def _no_record_refusal(op_id: str) -> str:
     return (
-        f"the grants of the agent that asked for {op_id!r} cannot be checked: the approval "
-        "request has no record of the agent. The agent must ask again."
+        f"the grants of the agent that asked for {op_id!r} cannot be checked, because the "
+        "approval request has no record of the agent"
     )
 
 
@@ -221,9 +229,13 @@ def _who_to_check(
     return principal, structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: act})
 
 
-def _refusal_text(run: ApprovedRun | None, why: str, *, new_approval: bool) -> str:
+def _refusal_text(
+    run: ApprovedRun | None, why: str, *, new_approval: bool, no_record: bool = False
+) -> str:
     """The answer to a refused approved run: the reason, and what to do next."""
     head = "the approved call" if run is None else f"approval request {run.request_id}"
+    if no_record:
+        return f"{head} did not run: {why}. The agent must ask again with a new request."
     if new_approval:
         return (
             f"{head} did not run: {why}, so this approval does not cover it. "
@@ -236,8 +248,11 @@ def _refusal_text(run: ApprovedRun | None, why: str, *, new_approval: bool) -> s
     )
 
 
-def _refusal(run: ApprovedRun | None, why: str, *, new_approval: bool) -> RightsRefusal:
-    return RightsRefusal(why, _refusal_text(run, why, new_approval=new_approval), new_approval)
+def _refusal(
+    run: ApprovedRun | None, why: str, *, new_approval: bool, no_record: bool = False
+) -> RightsRefusal:
+    text = _refusal_text(run, why, new_approval=new_approval, no_record=no_record)
+    return RightsRefusal(why, text, new_approval)
 
 
 async def approved_run_refusal(
@@ -254,7 +269,7 @@ async def approved_run_refusal(
 
     *requester_runs* is ``True`` when *operator* is the login that asked.
     Only the top-level call is checked; a step of a multi-step operation
-    keeps its own checks (:func:`approved_step_grant_refusal`). The check
+    keeps its own checks (:func:`approved_step_refusal_now`). The check
     only decides: it records no grant use.
     """
     from meho_backplane.db.models import PermissionVerdict
@@ -265,7 +280,7 @@ async def approved_run_refusal(
     run = _approved_run_var.get()
     who = _who_to_check(operator, descriptor.op_id, requester_runs=requester_runs)
     if isinstance(who, str):
-        return _refusal(run, who, new_approval=False)
+        return _refusal(run, who, new_approval=True, no_record=True)
     if who is not None:
         principal, binding = who
         with binding:
@@ -294,21 +309,40 @@ async def approved_run_refusal(
     return _refusal(run, risk, new_approval=True)
 
 
-async def approved_step_grant_refusal(
+def _step_refusal_text(reason: str) -> str:
+    """The answer to a refused approved step: a step cannot run again on its own."""
+    parent = composite_dispatch_var.get()
+    operation = "the multi-step operation" if parent is None else repr(parent[0])
+    return (
+        f"{reason} (the approved step did not run. A step of a multi-step operation "
+        f"cannot run again on its own: start a new run of {operation}.)"
+    )
+
+
+async def approved_step_refusal_now(
     *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
 ) -> str | None:
     """Why the approved step of a multi-step operation may not run now, or ``None``.
 
     Read when MEHO runs the parent of an approved step again, before the
-    step clears. The grants of the agent that asked count, and those of the
-    acting agent of a hosted run, as for a single call: a ``deny`` grant, or
-    no grant while ``AGENT_GRANT_REQUIRED`` is ``on``, refuses the step.
-    This check is for an agent's step only.
+    step clears. *descriptor* is the step with its level now (after the
+    override rows and the classification). Two checks, as for a single call:
+
+    * **The risk level**, for every requester: the level stamped on the
+      step's approval card is compared with the step's level now
+      (:func:`_risk_refusal`).
+    * **The grants of the agent that asked**, and of the acting agent of a
+      hosted run: a ``deny`` grant, or no grant while
+      ``AGENT_GRANT_REQUIRED`` is ``on``, refuses the step.
     """
     from meho_backplane.db.models import PermissionVerdict
     from meho_backplane.operations._preview_steps import agent_acts
     from meho_backplane.operations._validate import policy_gate
 
+    risk = await _risk_refusal(_approved_run_var.get(), descriptor)
+    if risk is not None:
+        _log.info("approved_step_needs_new_approval", op_id=descriptor.op_id, reason=risk)
+        return _step_refusal_text(f"{POLICY_DENIED}: {risk}")
     who: tuple[Operator, Any] | str | None
     if agent_acts(operator):
         who = operator, nullcontext()
@@ -317,7 +351,7 @@ async def approved_step_grant_refusal(
     if who is None:
         return None
     if isinstance(who, str):
-        return f"{POLICY_DENIED}: {who}"
+        return _step_refusal_text(f"{POLICY_DENIED}: {who}")
     principal, binding = who
     with binding:
         verdict, reason = await policy_gate(
@@ -330,7 +364,4 @@ async def approved_step_grant_refusal(
     if verdict is not PermissionVerdict.DENY:
         return None
     _log.info("approved_step_grant_refused", op_id=descriptor.op_id, requester_sub=principal.sub)
-    return (
-        f"{reason or POLICY_DENIED} (the approved step did not run. The request stays "
-        "approved. Run it again when the rights allow it, or ask again with a new request.)"
-    )
+    return _step_refusal_text(reason or POLICY_DENIED)

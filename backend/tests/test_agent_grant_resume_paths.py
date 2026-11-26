@@ -283,7 +283,9 @@ async def test_single_step_call_with_no_record_on_the_card_is_refused(
     result = await _resume(request_id, _reviewer())
 
     assert result.status == "denied", result
-    assert "has no record of the agent. The agent must ask again." in (result.error or "")
+    assert "has no record of the agent. The agent must ask again with a new request." in (
+        result.error or ""
+    )
     assert _MULTI_RUNS == []
 
 

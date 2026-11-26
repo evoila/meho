@@ -760,12 +760,16 @@ refused too: a document whose `kind` is `List`, or whose `kind` ends in
 
 The refusal names the document by its number, counted from 1 (the first
 document is document 1; an empty document between two `---` lines counts
-too). It names the field that is wrong, and shows the document's
-`apiVersion` and `kind` only when each has the shape Kubernetes allows: a
-`kind` that is a DNS-1035 label of at most 63 characters (any case), and
-an `apiVersion` that is a DNS-1035 version with an optional group that is
-a DNS-1123 subdomain of at most 253 characters. Any other value shows as
-`(not shown)`, in the refusal, the audit row and the logs. The refusal
+too). Two refusals name no document: "the text has no documents", and
+"the text has a character that YAML does not allow, for example a control
+character". The second names no document because the YAML reader checks
+the whole text for such a character (for example a vertical tab or a zero
+byte) before it reads document 1. The refusal names the field that is
+wrong, and shows the document's `apiVersion` and `kind` only when each
+has the shape Kubernetes allows: a `kind` that is a DNS-1035 label of
+at most 63 characters (any case), and an `apiVersion` that is a DNS-1035
+version with an optional group that is a DNS-1123 subdomain of at most
+253 characters. Any other value shows as `(not shown)`, in the refusal, the audit row and the logs. The refusal
 shows no YAML error text and no other value of the manifest. It is at
 most 256 characters, and a long `apiVersion` or `kind` gives way to
 `(not shown)` so the sentence about the form is never cut.

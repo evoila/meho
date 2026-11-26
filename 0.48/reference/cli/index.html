@@ -18894,7 +18894,7 @@
 <li><code>--op-id</code> — narrow to one op-id (glob with * wildcards)</li>
 <li><code>--parent-audit-id</code> — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request</li>
 <li><code>--principal</code> — narrow to one operator (part of the user id or the name; case does not matter)</li>
-<li><code>--result-status</code> — narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now</li>
+<li><code>--result-status</code> — narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now; a retry row (approval.reuse) reads by the state of the request it found, so a failed run reads error</li>
 <li><code>--session-id</code> — narrow to one agent session (UUID); the flat companion to <code>meho audit replay</code></li>
 <li><code>--since</code> — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601</li>
 <li><code>--target</code> — narrow to one target (name or alias; server-side resolution)</li>

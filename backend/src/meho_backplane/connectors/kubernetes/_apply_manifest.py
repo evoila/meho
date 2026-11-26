@@ -142,7 +142,7 @@ def _check_document(number: int, doc: object) -> None:
         if not isinstance(value, str):
             raise fail(f"has {_ARTICLE[field]} {field} that is not a text")
     if isinstance(kind, str) and _is_list_object(doc, kind):
-        raise ApplyManifestError("is a list object", number=number)
+        raise fail("is a list object")
     metadata = doc.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
         raise fail("has a metadata that is not a mapping")
@@ -150,7 +150,7 @@ def _check_document(number: int, doc: object) -> None:
     if name is None:
         raise fail("is missing metadata.name")
     if not isinstance(name, str):
-        raise fail("has a metadata.name that is not a text")
+        raise fail("has a metadata.name that is not a text (put it in quotes)")
 
 
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
@@ -175,7 +175,14 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
             doc = next(docs)
         except StopIteration:
             break
-        except yaml.YAMLError as exc:
+        except yaml.reader.ReaderError as exc:
+            # The reader checks the whole text before document 1, so no
+            # document number would be right.
+            raise ApplyManifestError(
+                "the text has a character that YAML does not allow, for example a control character"
+            ) from exc
+        except (yaml.YAMLError, ValueError) as exc:
+            # A value YAML cannot build (a date that does not exist) is a ValueError.
             raise ApplyManifestError("is not valid YAML or JSON", number=number) from exc
         if doc is None:
             continue

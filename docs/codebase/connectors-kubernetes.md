@@ -751,7 +751,10 @@ refused at once: nothing waits, no approval request is made and nothing
 goes to the cluster. Examples are a JSON array, a YAML list of documents,
 a document without `kind`, `apiVersion` or `metadata.name`, a `metadata`
 that is plain text, a `kind` or `metadata.name` that is not a text, a
-text with no documents, and text that is not valid YAML. A list object is
+text with no documents, and text that is not valid YAML. A
+`metadata.name` that YAML reads as a number, a date or true or false (for
+example `2026-11-26` or `2024` without quotes) is refused, and the refusal
+says to put the name in quotes. A list object is
 refused too: a document whose `kind` is `List`, or whose `kind` ends in
 `List` and that has an `items` field.
 

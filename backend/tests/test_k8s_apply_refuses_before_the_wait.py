@@ -32,6 +32,7 @@ from structlog.testing import capture_logs
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes._apply_manifest import (
+    NOT_SHOWN,
     ApplyManifestError,
     _parse_manifest,
 )
@@ -73,7 +74,7 @@ _REFUSED: dict[str, tuple[str, str]] = {
     "list-without-name": (
         "apiVersion: v1\nkind: List\nitems:\n  - apiVersion: v1\n    kind: Namespace\n"
         "    metadata: {name: web}\n",
-        "document 1 is a list object",
+        "document 1 (apiVersion v1, kind List) is a list object",
     ),
     "no-kind": (
         "apiVersion: v1\nmetadata:\n  name: web\n",
@@ -116,7 +117,27 @@ _REFUSED: dict[str, tuple[str, str]] = {
     ),
     "name-is-a-number": (
         "apiVersion: v1\nkind: Namespace\nmetadata: {name: 123}\n",
-        "document 1 (apiVersion v1, kind Namespace) has a metadata.name that is not a text",
+        "document 1 (apiVersion v1, kind Namespace) has a metadata.name that is not a text"
+        " (put it in quotes)",
+    ),
+    "name-is-a-date-without-quotes": (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: 2026-11-26}\n",
+        "document 1 (apiVersion v1, kind ConfigMap) has a metadata.name that is not a text"
+        " (put it in quotes)",
+    ),
+    "name-is-a-year-without-quotes": (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: 2024}\n",
+        "document 1 (apiVersion v1, kind ConfigMap) has a metadata.name that is not a text"
+        " (put it in quotes)",
+    ),
+    "date-that-does-not-exist-in-document-2": (
+        _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\n"
+        "data:\n  day: 2026-02-30\n",
+        "document 2 is not valid YAML or JSON",
+    ),
+    "control-character-in-document-2": (
+        _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: w" + chr(11) + "b}\n",
+        "the text has a character that YAML does not allow, for example a control character",
     ),
     "empty-kind": (
         "apiVersion: v1\nkind: ''\nmetadata: {name: web}\n",
@@ -124,11 +145,11 @@ _REFUSED: dict[str, tuple[str, str]] = {
     ),
     "kind-list-with-name": (
         "apiVersion: v1\nkind: List\nmetadata: {name: web}\nitems: []\n",
-        "document 1 is a list object",
+        "document 1 (apiVersion v1, kind List) is a list object",
     ),
     "namespace-list-with-items": (
         "apiVersion: v1\nkind: NamespaceList\nmetadata: {name: web}\nitems: []\n",
-        "document 1 is a list object",
+        "document 1 (apiVersion v1, kind NamespaceList) is a list object",
     ),
 }
 
@@ -246,6 +267,10 @@ async def _refusal_seen_everywhere(manifest: str) -> tuple[str, str, str, str]:
     return result.extras["reason"], preview["extras"]["reason"], audit_text, repr(logs)
 
 
+#: A group of lower-case letters and dots only, one character over the limit of 253.
+_GROUP_254 = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 62])
+
+
 def _no_metadata_name(api_version: str, kind: str) -> str:
     return f"apiVersion: {api_version}\nkind: {kind}\nmetadata: {{}}\n"
 
@@ -284,6 +309,16 @@ def _no_metadata_name(api_version: str, kind: str) -> str:
             "(apiVersion (not shown), kind Namespace) is missing metadata.name",
         ),
         (
+            _no_metadata_name("apps/Marker-Version", "Namespace"),
+            "Marker-Version",
+            "(apiVersion (not shown), kind Namespace) is missing metadata.name",
+        ),
+        (
+            _no_metadata_name(_GROUP_254 + "/v1", "Namespace"),
+            _GROUP_254,
+            "(apiVersion (not shown), kind Namespace) is missing metadata.name",
+        ),
+        (
             _no_metadata_name("v1", "Namespace") + "spec: {x: marker-other-value}\n",
             "marker-other-value",
             "(apiVersion v1, kind Namespace) is missing metadata.name",
@@ -301,6 +336,8 @@ def _no_metadata_name(api_version: str, kind: str) -> str:
         "kind-with-space",
         "api-version-with-space",
         "group-with-capitals",
+        "version-with-capitals",
+        "group-254-chars",
         "other-value",
         "metadata-text",
     ],
@@ -366,10 +403,36 @@ async def test_a_long_valid_group_and_kind_keep_the_whole_form(cluster: AsyncMoc
     assert preview_reason == reason
 
 
+def test_a_group_over_253_characters_is_not_safe() -> None:
+    # The 256-character cap of the text hides such a value too; this checks the shape rule itself.
+    with pytest.raises(ApplyManifestError) as raised:
+        _parse_manifest(_no_metadata_name(_GROUP_254 + "/v1", "Namespace"))
+    assert raised.value.api_version == NOT_SHOWN
+
+
 def test_the_run_names_the_same_document_as_the_check() -> None:
     with pytest.raises(ApplyManifestError) as raised:
         _parse_manifest(_NAMESPACE + "---\nhello\n")
     assert str(raised.value) == "The manifest cannot be applied: document 2 is not a mapping"
+
+
+async def test_a_date_that_does_not_exist_is_not_shown(cluster: AsyncMock) -> None:
+    reason, preview_reason, audit, logs = await _refusal_seen_everywhere(
+        _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\n"
+        "data:\n  day: 2026-02-30\n"
+    )
+    assert (
+        reason == f"The manifest cannot be applied: document 2 is not valid YAML or JSON. {_FORM}"
+    )
+    assert preview_reason == reason
+    for text in (reason, audit, logs):
+        assert "2026-02-30" not in text
+
+
+@pytest.mark.parametrize("name", ["'2026-11-26'", '"2024"'], ids=["date", "year"])
+def test_a_name_in_quotes_passes_the_check(name: str) -> None:
+    docs = _parse_manifest(f"apiVersion: v1\nkind: ConfigMap\nmetadata: {{name: {name}}}\n")
+    assert docs[0]["metadata"]["name"] == name.strip("'\"")
 
 
 async def test_a_kind_ending_in_list_without_items_waits_once(cluster: AsyncMock) -> None:

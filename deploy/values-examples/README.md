@@ -27,12 +27,18 @@ credential-backend variants), see
 [`../../docs/deploying.md`](../../docs/deploying.md); this README is the
 values-level deep-dive it links into.
 
-The files here ship **no real secrets, no real CIDRs**. Every
-site-specific field uses a `<REPLACE: ...>` placeholder that fails
+The files here ship **no real secrets, no real CIDRs**. Most
+site-specific fields use a `<REPLACE: ...>` placeholder that fails
 `values.schema.json` validation at install time, so an operator who
 forgets to substitute one fails-loud at `helm install` rather than
 silently connecting to the wrong system or CrashLoopBackOff'ing at first
-request.
+request. Some fields have no marker: they hold example values that the
+chart accepts, for example `ingress.host`, the Vault and PostgreSQL
+addresses, `config.forwardedAllowIps` and the private ranges a target
+may use.
+So check every value before you install, not only the marked ones.
+Replace `config.forwardedAllowIps` with your ingress controller's own
+address.
 
 ## Files
 

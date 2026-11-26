@@ -82,6 +82,7 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.ops_write_delete import (
     ALREADY_ABSENT,
     IRREVERSIBLE,
+    KeycloakDeleteVerificationError,
     _delete_and_verify,
 )
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
@@ -337,7 +338,15 @@ async def keycloak_realm_delete(
 
     async def read_again() -> Any:
         # The trace keeps the body only of an answer for the managed realm.
-        return await read_realm_or_none(self, operator, target, path)
+        again = await read_realm_or_none(self, operator, target, path)
+        if again is not None and not answer_names_managed_realm(again, target):
+            raise KeycloakDeleteVerificationError(
+                f"{REALM_DELETE_OP}: MEHO sent the DELETE for the realm {realm!r}, but "
+                "Keycloak answered the check read with another realm, so MEHO could not "
+                "verify the result. Check the realm in Keycloak and the managed realm of "
+                "the target."
+            )
+        return again
 
     return await _delete_and_verify(
         self,

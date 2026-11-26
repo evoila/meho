@@ -145,7 +145,7 @@ SUBGROUP_LIST_CAP: Final = 100
 
 
 class KeycloakDeleteVerificationError(RuntimeError):
-    """Keycloak answered the DELETE, but the object can still be read."""
+    """Keycloak answered the DELETE, but the object can still be read, or MEHO cannot verify it."""
 
 
 # ---------------------------------------------------------------------------

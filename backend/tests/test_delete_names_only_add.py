@@ -8,7 +8,7 @@
 * A service login calls an operation with a built-in delete name over MCP,
   under a standing grant, with a setting that lists other names: with the
   switch on the call waits for a person, and the audit row says so.
-* With the switch off the setting replaces the built-in names, as before.
+* With the switch off, a set value is the whole list.
 """
 
 from __future__ import annotations

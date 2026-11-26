@@ -3448,9 +3448,13 @@ MEHO-Admins approve network changes.</p>
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Off by default</p>
-<p>The policy file needs the setting <code>POLICY_CLASSIFICATION</code> (Helm
-<code>config.policy.classification</code>). While it is off, MEHO refuses an
-import with one sentence.</p>
+<p>The policy file needs the setting <code>CUSTOM_POLICY</code> (Helm
+<code>config.policy.customPolicy</code>) or the setting <code>POLICY_CLASSIFICATION</code>
+(Helm <code>config.policy.classification</code>). <code>CUSTOM_POLICY</code> turns on all
+three policy parts: the policy file, routing and the policy evaluator.
+Each older switch (<code>POLICY_CLASSIFICATION</code>, <code>POLICY_ENGINE_SHADOW</code>,
+<code>POLICY_APPROVER_ROUTING</code>) still turns on its own part alone. While
+both are off, MEHO refuses an import with one sentence.</p>
 </div>
 <p>The policy file is not part of the <a href="../settings-file/">settings file</a>. It
 has its own command, <code>meho policy</code>.</p>
@@ -3517,9 +3521,9 @@ tenant's own file cannot set <code>taxonomy.default</code>.</p>
 </ul>
 <h2 id="who-approves-routing">Who approves: routing<a class="headerlink" href="#who-approves-routing" title="Permanent link">&para;</a></h2>
 <p>The <code>routing</code> section says which login groups may approve a change that
-waits. It needs the setting <code>POLICY_APPROVER_ROUTING</code> (Helm
-<code>config.policy.approverRouting</code>), off by default. This one setting turns on
-both parts: the bindings at sign-in (next section) and the routing at the
+waits. It needs the setting <code>CUSTOM_POLICY</code> or <code>POLICY_APPROVER_ROUTING</code>
+(Helm <code>config.policy.approverRouting</code>), both off by default.
+Either setting turns on both parts: the bindings at sign-in (next section) and the routing at the
 click.</p>
 <div class="highlight"><pre><span></span><code><span class="nt">routing</span><span class="p">:</span>
 <span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">match</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">category</span><span class="p">:</span><span class="w"> </span><span class="nv">network</span><span class="p p-Indicator">}</span>
@@ -3622,10 +3626,10 @@ could fit it. This holds also when no entry names either category. Give
 the operation one category in the install's file, reject the waiting
 request, and start the call again.</p>
 <p>MEHO also does not know the install's category of a waiting change that
-started to wait while <code>POLICY_CLASSIFICATION</code> was off, once you turn that
-switch on. The same rule holds: nobody may approve it if an install entry
+started to wait while <code>CUSTOM_POLICY</code> and <code>POLICY_CLASSIFICATION</code> were
+off, once you turn one of them on. The same rule holds: nobody may approve it if an install entry
 that matches on a category could fit it. Reject it and start the call
-again. While the switch stays off, an entry that matches on a category
+again. While both stay off, an entry that matches on a category
 fits no change, so the other install entries decide.</p>
 <p>MEHO ships a starting file, "separated duties"
 (<code>deploy/policy-profiles/separated-duties.yaml</code>): identity and secret
@@ -3704,12 +3708,12 @@ and <code>Readers</code>.</p>
 </ul>
 <div class="admonition note">
 <p class="admonition-title">Off by default</p>
-<p>Bindings count only while the setting <code>POLICY_APPROVER_ROUTING</code> (Helm
-<code>config.policy.approverRouting</code>) is on. You can import a file with
-<code>bindings</code> while the setting is off: the bindings take effect when the
-setting goes on. The policy commands, and so
-the import of bindings, also need the setting <code>POLICY_CLASSIFICATION</code>
-(Helm <code>config.policy.classification</code>).</p>
+<p>Bindings count only while the setting <code>CUSTOM_POLICY</code> or
+<code>POLICY_APPROVER_ROUTING</code> (Helm <code>config.policy.approverRouting</code>) is on. You can
+import a file with <code>bindings</code> while both are off: the bindings take
+effect when one of them goes on. The policy commands, and so
+the import of bindings, also need the setting <code>CUSTOM_POLICY</code> or
+<code>POLICY_CLASSIFICATION</code> (Helm <code>config.policy.classification</code>).</p>
 </div>
 <h2 id="rules-that-no-file-can-loosen">Rules that no file can loosen<a class="headerlink" href="#rules-that-no-file-can-loosen" title="Permanent link">&para;</a></h2>
 <p>MEHO checks each file against these rules. A file that breaks one is
@@ -3782,11 +3786,12 @@ meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"
   call with <code>--me</code>. Only a tenant admin or a platform admin may ask for
   other groups.</li>
 <li><code>--file</code> asks with a policy file that is not imported. The file takes
-  the place of your stored policy. It needs <code>POLICY_CLASSIFICATION</code>.</li>
+  the place of your stored policy. It needs <code>CUSTOM_POLICY</code> or <code>POLICY_CLASSIFICATION</code>.</li>
 <li><code>--request</code> shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while <code>POLICY_APPROVER_ROUTING</code> is on. With it on, the install's routing
-  as it is now narrows them, as at the approve click. With it off, explain
+  while <code>CUSTOM_POLICY</code> or <code>POLICY_APPROVER_ROUTING</code> is on. With routing
+  on, the install's routing as it is now narrows them, as at the approve
+  click. With both off, explain
   shows today's groups, the same groups the approve check uses.</li>
 <li>With routing on, "Who may approve" names the routing entries that fit,
   the install's first. "Install's floor" names the install's entry: a
@@ -3824,7 +3829,8 @@ meho<span class="w"> </span>policy<span class="w"> </span>explain<span class="w"
 <li>Who may approve is a list of <strong>MEHO group kinds</strong> (<code>MEHO-Operators</code>,
   <code>MEHO-Admins</code>, ...). These are not the names of the login groups of
   your install. Each login group is bound to one of these kinds.</li>
-<li>explain works with <code>POLICY_ENGINE_SHADOW</code> off. It then shows today's
+<li>explain works with <code>CUSTOM_POLICY</code> and <code>POLICY_ENGINE_SHADOW</code> off. It
+  then shows today's
   answer only.</li>
 <li>Only a tenant admin or a platform admin sees the entries of the policy
   and their places in it. Everyone else gets the answer, the reason, the
@@ -3849,9 +3855,8 @@ Not checked: idempotency_key, connector_resolution
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">The policy evaluator is off by default</p>
-<p>The lines about the policy evaluator need the setting
-<code>POLICY_ENGINE_SHADOW</code> (Helm <code>config.policy.engineShadow</code>). With it
-on, the evaluator works out its own answer next to today's checks, and
+<p>The lines about the policy evaluator need the setting <code>CUSTOM_POLICY</code>
+or <code>POLICY_ENGINE_SHADOW</code> (Helm <code>config.policy.engineShadow</code>). With either on, the evaluator works out its own answer next to today's checks, and
 explain lists every rule it matched, in order. Only the <code>always_wait</code>
 step carries a place in the policy file (for example
 <code>file:classifications[1]</code>). The other classification entries that

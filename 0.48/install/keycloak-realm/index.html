@@ -5303,7 +5303,9 @@ top of one of the three groups.</p>
 <h3 id="team-groups-for-the-policy-file-optional">Team groups for the policy file (optional)<a class="headerlink" href="#team-groups-for-the-policy-file-optional" title="Permanent link">&para;</a></h3>
 <p>The policy file can say which group is which team, in <code>bindings</code>
 (<a href="../../guides/policy-file/#which-login-group-is-which-team">The policy file</a>).
-This needs the setting <code>POLICY_APPROVER_ROUTING</code>. MEHO matches a team
+This needs the setting <code>CUSTOM_POLICY</code> or <code>POLICY_APPROVER_ROUTING</code>.
+Each older switch (<code>POLICY_CLASSIFICATION</code>, <code>POLICY_ENGINE_SHADOW</code>, <code>POLICY_APPROVER_ROUTING</code>) still turns on its own part alone.
+MEHO matches a team
 group by its full path or by a group attribute, never by its short name:
 a short name can belong to more than one group. So the token must carry
 one of the two:</p>

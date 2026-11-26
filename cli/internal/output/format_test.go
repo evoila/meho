@@ -284,7 +284,7 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 		"  Readiness: not ready\n",
 		"    vault: failed (unreachable: ConnectError)\n",
 		"    ok: keycloak, db\n",
-		"  Approvals: break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; the group rules still apply; decisions on someone else's instruction are allowed; approval key missing\n",
+		"  Approvals: break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; a few operations need the Admin role, also with break-glass on; the group rules still apply; decisions on someone else's instruction are allowed; approval key missing\n",
 		"  Features: not configured: agent_runtime (needs KEYCLOAK_ADMIN_CLIENT_ID, KEYCLOAK_ADMIN_CLIENT_SECRET), approval_custody (needs APPROVAL_HANDOFF_ENCRYPTION_KEY)\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -301,15 +301,17 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 
 // TestFormatApprovals_ByRole pins the whole approvals line for each role
 // in the current tenant, with the emergency switch off and on. The texts
-// follow the table "Who may approve" in the approvals guide.
+// follow the table "Who may approve" in the approvals guide. The switch
+// RoleFloorExampleEnv is on here; the test below checks it off.
 func TestFormatApprovals_ByRole(t *testing.T) {
+	t.Setenv(RoleFloorExampleEnv, "1")
 	tenant := openapi_types.UUID{1}
 	const tail = "; decisions on someone else's instruction are refused; approval key configured"
 	withRole := func(r api.TenantRole) api.OperatorIdentity {
 		return api.OperatorIdentity{Sub: "s", TenantId: &tenant, TenantRole: r}
 	}
 	const neutral = "who may approve depends on your group in the current tenant (see Who may approve in the approvals guide)"
-	const bgOther = "break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; the group rules still apply"
+	const bgOther = "break-glass is on: a person who may run changes may approve their own `safe` or `caution` change; a change of rights is not covered; a few operations need the Admin role, also with break-glass on; the group rules still apply"
 	cases := []struct {
 		name    string
 		op      api.OperatorIdentity
@@ -317,18 +319,18 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 		want    string
 	}{
 		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced",
-			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in)"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in, which never runs alone, also not for a platform admin); MEHO refuses a change that resets or sets the password of your own login"},
 		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
-			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
+			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered; a few operations, for example registering a target, need the Admin role: you cannot run them or approve them"},
 		{"reader", withRole(api.TenantRoleReadOnly), "four_eyes_enforced",
 			"you cannot run changes"},
 		{"unknown role", withRole(api.TenantRole("auditor")), "four_eyes_enforced", neutral},
 		{"empty role", withRole(api.TenantRole("")), "four_eyes_enforced", neutral},
 		{"no current tenant", api.OperatorIdentity{Sub: "s", TenantRole: api.TenantRoleTenantAdmin}, "four_eyes_enforced", neutral},
 		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass",
-			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in); break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights"},
+			"you may approve your own changes (a change of rights only with a click in the web console; in MEHO's own login realm a change of rights needs a platform admin, one you sent with a token needs a second person who is a platform admin, and so does one that can change the approval sign-in, which never runs alone, also not for a platform admin); MEHO refuses a change that resets or sets the password of your own login; break-glass is on: anyone may approve their own `safe` or `caution` change; the switch does not cover a change of rights or an operation that needs the Admin role"},
 		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
-			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
+			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered; a few operations, for example registering a target, need the Admin role: you cannot run them or approve them, also with break-glass on"},
 		{"reader, break-glass", withRole(api.TenantRoleReadOnly), "single_operator_break_glass",
 			"you cannot run changes"},
 		{"unknown role, break-glass", withRole(api.TenantRole("auditor")), "single_operator_break_glass", bgOther},
@@ -346,6 +348,46 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 				t.Errorf("formatApprovals() = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestFormatApprovals_RoleFloorExampleOff checks that with the switch
+// RoleFloorExampleEnv off (the default) the Operator lines are the same
+// as before the switch existed, and the other roles do not depend on it.
+func TestFormatApprovals_RoleFloorExampleOff(t *testing.T) {
+	tenant := openapi_types.UUID{1}
+	const tail = "; decisions on someone else's instruction are refused; approval key configured"
+	withRole := func(r api.TenantRole) api.OperatorIdentity {
+		return api.OperatorIdentity{Sub: "s", TenantId: &tenant, TenantRole: r}
+	}
+	cases := []struct {
+		name    string
+		op      api.OperatorIdentity
+		posture string
+		want    string
+	}{
+		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
+			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
+		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
+			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
+		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced", approvalsAdmin},
+		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass", breakGlassAdmin},
+		{"no current tenant, break-glass", api.OperatorIdentity{Sub: "s"}, "single_operator_break_glass", breakGlassOther},
+	}
+	for _, value := range []string{"", "0", "true"} {
+		for _, tc := range cases {
+			t.Run(tc.name+", switch="+value, func(t *testing.T) {
+				t.Setenv(RoleFloorExampleEnv, value)
+				a := api.ApprovalsStatus{
+					Custody:                  "configured",
+					EffectivePosture:         tc.posture,
+					DelegatedDecisionPosture: "production_own_hand_only",
+				}
+				if got, want := formatApprovals(a, tc.op), tc.want+tail; got != want {
+					t.Errorf("formatApprovals() = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
 

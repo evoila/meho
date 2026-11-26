@@ -68,6 +68,18 @@ The class sets no `supported_version_range`. It sets `version_range_reason`
 instead: any systemd host fits, so a rule for the distribution applies, not a
 version range.
 
+## Target form declarations
+
+`LinuxSshConnector` declares `credential_ways` with two ways: `key`
+(`username`, `ssh_private_key` on several lines, `known_hosts` on several
+lines) and `password` (`username`, `password`, `known_hosts` on several
+lines). `known_hosts` is required in both ways: the SSH adapter refuses a host
+whose key it cannot check. `username` is optional; without it the adapter logs
+in as `root`. They are the field names `SshConnector._auth_config` reads. The
+test read is `linux.identity.show`. The declaration is on this class only,
+not on the shared `SshConnector`. See
+[connector-target-form.md](connector-target-form.md).
+
 ## Transport & auth
 
 `LinuxSshConnector` subclasses the shared `SshConnector` adapter and

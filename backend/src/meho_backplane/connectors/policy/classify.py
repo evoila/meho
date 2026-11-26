@@ -46,7 +46,6 @@ a call when the switch is off.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -73,7 +72,7 @@ from meho_backplane.policy.store import (
     classification_enabled,
     set_classification,
 )
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.policy.switches import classification_on_in_environment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -366,7 +365,7 @@ async def register_policy_classify_operation(
     :class:`~meho_backplane.settings.Settings`: a registrar runs also where
     the other settings are not set (registry checks in tests).
     """
-    if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
+    if not classification_on_in_environment():
         await remove_built_in_connector_rows(
             product="policy", version="1.x", impl_id="policy-registry"
         )

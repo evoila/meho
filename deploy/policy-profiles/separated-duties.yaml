@@ -10,8 +10,10 @@
 #   meho policy import separated-duties.yaml
 #
 # The import waits until an admin approves it in the web console. Routing works only
-# while the switches POLICY_CLASSIFICATION (categories) and
-# POLICY_APPROVER_ROUTING (routing) are on.
+# while the switch CUSTOM_POLICY is on, or while the switches
+# POLICY_CLASSIFICATION (categories) and POLICY_APPROVER_ROUTING (routing)
+# are on. Each older switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW,
+# POLICY_APPROVER_ROUTING) still turns on its own part alone.
 #
 # In this version a team is one of the three login group kinds (Readers,
 # Operators, Admins). Routing only narrows: a

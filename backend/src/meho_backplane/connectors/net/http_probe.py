@@ -66,6 +66,7 @@ import anyio
 import httpx
 import structlog
 
+from meho_backplane.connectors._shared.log_host import host_for_log
 from meho_backplane.connectors.net.allowlist import (
     ProbeNotAllowedError,
     assert_probe_allowed,
@@ -713,8 +714,8 @@ def _advance_or_halt(
         # reachable=true (the prior host did answer), but the walk halts.
         _log.info(
             "net.http_probe.blocked_redirect",
-            blocked_redirect=next_host,
-            from_url=str(request.url),
+            blocked_redirect=host_for_log(next_request.url),
+            from_url=host_for_log(request.url),
         )
         return _result(
             url=url,

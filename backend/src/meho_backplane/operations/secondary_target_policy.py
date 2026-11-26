@@ -189,14 +189,16 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
     """Bind *request*'s requester while a reviewer runs it.
 
     Who asked comes from the row (``principal_sub`` / ``principal_act``).
-    The card's ``proposed_effect["permission_preflight"]["requester"]``
-    record is kept only when its ``sub`` matches the row. Operations that
+    The card's requester record
+    (:func:`~meho_backplane.operations._preview.stored_requester_record`)
+    is kept only when its ``sub`` matches the row. Operations that
     call :func:`secondary_target_refusal` read the binding, and so does the
     step check of an agent's approved multi-step call
     (:func:`approved_agent_requester`, #6314).
     """
-    preflight = (request.proposed_effect or {}).get("permission_preflight")
-    subject = preflight.get("requester") if isinstance(preflight, dict) else None
+    from meho_backplane.operations._preview import stored_requester_record
+
+    subject = stored_requester_record(request.proposed_effect)
     if not isinstance(subject, Mapping) or subject.get("sub") != request.principal_sub:
         subject = None
     requester = _Requester(

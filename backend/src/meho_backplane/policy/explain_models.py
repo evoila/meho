@@ -162,7 +162,7 @@ class PolicyExplainResponse(_Frozen):
     )
     today: ExplainToday | None = None
     evaluator: ExplainEvaluator | None = Field(
-        default=None, description="Null while POLICY_ENGINE_SHADOW is off."
+        default=None, description="Null while CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off."
     )
     classification: ExplainClassification | None = None
     request: ExplainStoredRequest | None = None

@@ -160,7 +160,9 @@ def _seed_runner(
     return runner_id
 
 
-def _seed_assignment(*, tenant_id: uuid.UUID, runner_name: str, stale: bool) -> None:
+def _seed_assignment(
+    *, tenant_id: uuid.UUID, runner_name: str, stale: bool, set_aside_count: int = 0
+) -> None:
     """Insert the runner's ``runner_assignments`` row, optionally dead-man-flipped."""
 
     async def _do() -> None:
@@ -172,6 +174,8 @@ def _seed_assignment(*, tenant_id: uuid.UUID, runner_name: str, stale: bool) -> 
                     runner_name=runner_name,
                     items=[],
                     stale_at=datetime.now(UTC) if stale else None,
+                    set_aside_count=set_aside_count,
+                    set_aside_last_at=datetime.now(UTC) if set_aside_count else None,
                 )
             )
 
@@ -404,3 +408,42 @@ def test_list_is_tenant_isolated() -> None:
         mock.stop()
     assert response.status_code == 200, response.text
     assert "b-only-runner" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# The "Set aside" column follows RUNNER_CHECKS_ENABLED
+# ---------------------------------------------------------------------------
+
+
+def _runners_page_with_set_aside(monkeypatch: pytest.MonkeyPatch, *, switch: str) -> str:
+    monkeypatch.setenv("RUNNER_CHECKS_ENABLED", switch)
+    get_settings.cache_clear()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_runner(tenant_id=_TENANT_A, name="edge-runner")
+    _seed_assignment(tenant_id=_TENANT_A, runner_name="edge-runner", stale=False, set_aside_count=3)
+    client, mock = _client_with_role(tenant_id=_TENANT_A)
+    try:
+        response = client.get("/ui/runners")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def test_list_has_no_set_aside_column_with_runner_checks_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the switch off MEHO keeps no count, so the page shows no "Set aside" column."""
+    body = _runners_page_with_set_aside(monkeypatch, switch="false")
+    assert "edge-runner" in body
+    assert "Set aside" not in body
+    assert "set aside" not in body
+
+
+def test_list_shows_the_set_aside_count_with_runner_checks_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the switch on the page shows the "Set aside" column and the count."""
+    body = _runners_page_with_set_aside(monkeypatch, switch="true")
+    assert "<th>Set aside</th>" in body
+    assert "3 set aside" in body

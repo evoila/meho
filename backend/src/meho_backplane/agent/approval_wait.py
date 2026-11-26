@@ -617,8 +617,8 @@ async def _resume_approved_or_already_resumed(
     if preview_refusal is not None:
         return preview_refusal.model_dump(mode="json")
 
-    # The re-dispatch threads ``_approved=True`` through the policy gate, so
-    # the durable approval-decision row is the authorization.
+    # The re-dispatch threads ``_approved=True``: the approval is not asked
+    # for again, and the agent's rights are checked again for the run.
     envelope = await _redispatch_approved(
         operator=operator,
         request=request,
@@ -660,6 +660,7 @@ async def _redispatch_approved(
     from meho_backplane.auth.principal_block import checking_logins_for_steps, may_be_agent
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
+    from meho_backplane.operations.approved_run_rights import bind_approved_run
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
     parent_token = parent_audit_id_var.set(request.request_audit_id)
@@ -671,6 +672,8 @@ async def _redispatch_approved(
                 request.tenant_id,
                 maybe_agent=may_be_agent(request.principal_kind),
             ),
+            # The rights of who asked are checked again for the run.
+            bind_approved_run(request),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

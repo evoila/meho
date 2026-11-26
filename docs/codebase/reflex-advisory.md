@@ -239,8 +239,7 @@ warrants. The flag has no REST route of its own. A tenant opts in through
 the settings file: `spec.tenants[].policies.announce_gate_enabled`, applied
 by `POST /api/v1/settings/import` (see [settings.md](settings.md)).
 Turning the gate on applies with a token. Turning it off applies only for
-a person in the web console, which cannot apply a settings file yet; until
-then the gate cannot be turned off again. The
+a person in the web console, on the settings file page (`/ui/settings`). The
 write goes through `tenancy/policies.set_announce_gate_enabled`, which is
 audited and clears the 60s cache for that tenant.
 

@@ -3,8 +3,8 @@
 
 """Add ``machine_login.client_id`` and ``principal_block.login_sub``.
 
-Revision ID: 0189
-Revises: 0188
+Revision ID: 0190
+Revises: 0189
 Create Date: 2026-11-26
 
 * ``machine_login.client_id`` -- Text, nullable. The name MEHO shows for an
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0189"
-down_revision: str | None = "0188"
+revision: str = "0190"
+down_revision: str | None = "0189"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

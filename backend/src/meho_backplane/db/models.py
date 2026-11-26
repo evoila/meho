@@ -5986,6 +5986,20 @@ class RunnerAssignmentRow(Base):
         nullable=True,
         default=None,
     )
+    # How many result batches the runner has set aside (batches MEHO refuses
+    # on every try), as the runner last said, and when it set the newest one
+    # aside. 0 / NULL until a runner says so.
+    set_aside_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    set_aside_last_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         # One assignment document per runner within a tenant; the upsert

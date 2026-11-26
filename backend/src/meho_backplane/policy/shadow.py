@@ -50,6 +50,7 @@ from meho_backplane.policy.evaluate import (
     evaluate,
 )
 from meho_backplane.policy.stamp import RuleStamp, forget_rule, keep_rule
+from meho_backplane.policy.switches import engine_shadow_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -88,8 +89,8 @@ _FROM_TODAY: dict[PermissionVerdict, Verdict] = {
 
 
 def shadow_enabled() -> bool:
-    """True when the ``POLICY_ENGINE_SHADOW`` switch is on."""
-    return get_settings().policy_engine_shadow
+    """True when ``POLICY_ENGINE_SHADOW`` or ``CUSTOM_POLICY`` is on."""
+    return engine_shadow_on(get_settings())
 
 
 def asker_of(operator: Operator, *, acting_agent: str | None = None) -> Asker:

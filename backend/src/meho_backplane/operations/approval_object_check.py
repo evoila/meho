@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from meho_backplane.operations._park_check import refusal_scope
 from meho_backplane.operations._preview import BLAST_RADIUS_KEY
 
 if TYPE_CHECKING:
@@ -230,7 +231,11 @@ async def live_card(
 
     Resolves the descriptor and the connector the same way the park did,
     so the card is the one the park would store now. A builder that
-    declines or fails leaves the card without an object block.
+    declines or fails leaves the card without an object block. When a read
+    of the card refuses the call
+    (:func:`~meho_backplane.operations._park_check.note_refusal`, for
+    example a Keycloak answer for another realm), the card counts as not
+    built, so the run is refused, and the card sends no more requests.
     """
     # The two helpers of the park path, so the live card has the exact
     # shape of the stored one. Imported late: both modules import from the
@@ -244,14 +249,19 @@ async def live_card(
     if isinstance(resolved, dict):
         return None
     descriptor, resolved_connector_id = resolved
-    return await _build_proposed_effect(
-        op_id=op_id,
-        connector_id=resolved_connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    with refusal_scope() as noted:
+        card = await _build_proposed_effect(
+            op_id=op_id,
+            connector_id=resolved_connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+    if noted:
+        _log.warning("approval_resume_card_refused", op_id=op_id, connector_id=connector_id)
+        return None
+    return card
 
 
 async def object_changed_since_request(

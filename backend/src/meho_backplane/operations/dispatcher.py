@@ -2329,6 +2329,7 @@ async def transport_error_result(
     descriptor: EndpointDescriptor,
     target: Any,
     duration_ms: float,
+    reads_only: bool = False,
 ) -> OperationResult:
     """The result of a call whose request got no answer (*exc*).
 
@@ -2342,7 +2343,9 @@ async def transport_error_result(
     substring is a fallback for the case the cause chain is ever empty. Any
     other ConnectError (DNS failure, connection refused) is the generic
     ``connector_error``, never mislabelled as a TLS fault. A timeout or any
-    other transport fault is ``connector_timeout``.
+    other transport fault is ``connector_timeout``. With *reads_only* (the
+    call sent only reads, for example a check before the policy gate), a
+    timeout counts as a failed read, also for a write.
 
     The connectors' shared ``HttpConnector._retryable`` already retried the
     error on idempotent verbs, so by here the retries are exhausted.
@@ -2364,7 +2367,10 @@ async def transport_error_result(
         )
         return result_connector_tls_verify_failed(op_id, exc, target, duration_ms, presented)
     return result_connector_timeout(
-        op_id, exc, duration_ms, changes_target=changes_target(descriptor.safety_level)
+        op_id,
+        exc,
+        duration_ms,
+        changes_target=not reads_only and changes_target(descriptor.safety_level),
     )
 
 

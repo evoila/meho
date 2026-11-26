@@ -132,8 +132,14 @@ _NOTED_REFUSALS: ContextVar[list[str] | None] = ContextVar("park_noted_refusals"
 
 @contextmanager
 def refusal_scope() -> Iterator[list[str]]:
-    """Collect the refusals that the reads inside this block note (:func:`note_refusal`)."""
-    noted: list[str] = []
+    """Collect the refusals that the reads inside this block note (:func:`note_refusal`).
+
+    Inside another such block, the list is the outer block's list: a refusal
+    noted before stays the first one, and one noted inside reaches the outer
+    block too.
+    """
+    outer = _NOTED_REFUSALS.get()
+    noted: list[str] = outer if outer is not None else []
     token = _NOTED_REFUSALS.set(noted)
     try:
         yield noted
@@ -211,13 +217,18 @@ async def _run_check(
 ) -> str | None:
     """Run *check* as :func:`run_park_check` describes.
 
-    When a read inside the check noted a refusal (:func:`note_refusal`),
-    that refusal is the answer, also when the check raised or let the call
-    wait. With *raise_no_answer*, an error of a request that got no answer
+    When a read inside the check, or a read before it in the same
+    :func:`refusal_scope`, noted a refusal (:func:`note_refusal`), the first
+    refusal is the answer, also when the check raised or let the call wait.
+    A refusal noted before the check means the check does not run. With
+    *raise_no_answer*, an error of a request that got no answer
     (:func:`transport_cause`) is raised, not turned into a refusal.
     """
     if check is None:
         return None
+    if (first := refusal_noted()) is not None:
+        # A read before this check already refused the call: send nothing more.
+        return first
     with refusal_scope() as noted:
         try:
             reason = await _check_with_fresh_login(ctx, check)
@@ -299,6 +310,8 @@ async def gate_check_refusal(
     the call itself would return for it, for example
     ``connector_tls_verify_failed``
     (:func:`~meho_backplane.operations.dispatcher.transport_error_result`).
+    A timeout counts as a failed read, also for a write: the check sends only
+    reads, so the write was not sent and the call can be sent again.
     """
     if not gate_check_registered(descriptor.op_id):
         return None
@@ -334,7 +347,12 @@ async def gate_check_refusal(
         from meho_backplane.operations.dispatcher import transport_error_result
 
         return await transport_error_result(
-            op_id, cause, descriptor=descriptor, target=target, duration_ms=duration_ms
+            op_id,
+            cause,
+            descriptor=descriptor,
+            target=target,
+            duration_ms=duration_ms,
+            reads_only=True,
         )
 
 

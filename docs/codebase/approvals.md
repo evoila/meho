@@ -4265,7 +4265,10 @@ the vendor for the call.
 - **No answer at all.** When a request of the check gets no answer (a
   connection, TLS or timeout error, `_park_check.transport_cause`), the
   call stops with the error it would return for it, for example
-  `connector_tls_verify_failed` (`dispatcher.transport_error_result`). The
+  `connector_tls_verify_failed` (`dispatcher.transport_error_result`). A
+  timeout there counts as a failed read, also for a write
+  (`reads_only=True`): the check sends only reads, so the result is a plain
+  `connector_timeout` with no `execution_outcome: uncertain`. The
   dispatcher writes an `error` audit row for it, and `preview_operation`
   answers with the same error. Nothing is stored.
 - **A refusal from inside the card.** A read inside an approval card can
@@ -4275,7 +4278,12 @@ the vendor for the call.
   (`_park_check.refusal_scope`), and then refuses the call with
   `refused_before_approval` and the first reason. Nothing is stored.
   `preview_operation` does the same, and so does a check before the wait
-  for approval whose read noted a refusal. Once a refusal is noted, a
+  for approval whose read noted a refusal. A `refusal_scope` inside another
+  one shares its list, so the first refusal stays first, and a check before
+  the wait for approval does not run when a read before it already noted a
+  refusal. The run after an approval rebuilds the card
+  (`approval_object_check.live_card`) inside its own `refusal_scope`: a
+  noted refusal makes the card count as not built, so the run is refused. Once a refusal is noted, a
   connector can send no more requests for the call: the Keycloak connector
   checks `_park_check.refusal_noted()` before each request and raises
   `CallRefusedError`.

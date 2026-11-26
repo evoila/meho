@@ -74,6 +74,7 @@ from meho_backplane.operations._request_preview import (
     _validate_params_envelope,
     preview_dispatch,
 )
+from meho_backplane.operations.approval_queue import refuse_resume_if_preview_changed
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -983,3 +984,94 @@ async def test_check_login_reads_no_password_and_sends_no_login_for_a_wrong_answ
     assert vault_reads == []
     assert recorder.reads == [f"/admin/realms/{_MANAGED}"]
     assert recorder.sent == []
+
+
+# ---------------------------------------------------------------------------
+# A refusal stays the answer: nested checks and the card of an approved run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+async def test_a_service_preview_sends_nothing_after_the_first_read_of_another_realm(
+    seeded: Operator,
+) -> None:
+    """The check read passes; the next read of the realm, for the standing grant, does not."""
+    service = seeded.model_copy(update={"principal_kind": PrincipalKind.SERVICE})
+    keycloak = _RealmUpdateKeycloak(_OTHER_REALM)
+    envelope = await _preview(service, "keycloak.client.delete", keycloak)
+    dumped = json.dumps(envelope, default=str)
+    assert envelope["policy_verdict"] == "deny"
+    assert _CARD_REFUSAL in dumped
+    assert _ANSWER_MARKER not in dumped
+    assert keycloak.reads == 2
+    assert keycloak.calls[-1] == f"GET {_REALM_PATH}"
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+async def test_an_approved_run_stops_at_the_card_read_of_another_realm(seeded: Operator) -> None:
+    """The request waits with the right realm; at the run, the card's read gets another realm.
+
+    The stored card says the realm is protected, so a rebuilt card that counts the
+    wrong answer as a protected realm would match it.
+    """
+    op_id = "keycloak.client.create"
+    waiting = await _call(seeded, op_id, _Keycloak({"realm": _MANAGED}))
+    assert waiting.extras.get("error_code") == "awaiting_approval", waiting.error
+    (request,) = await _approval_rows()
+    effect = json.loads(json.dumps(request.proposed_effect))
+    grant = effect.get("preview", {}).get("grant")
+    assert isinstance(grant, dict), effect
+    grant.update({"login_realm": True, "platform_admin": True})
+    request.proposed_effect = effect
+    keycloak = _Keycloak(_OTHER_REALM)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=keycloak)
+        refusal = await refuse_resume_if_preview_changed(
+            seeded, request, await _resolved_target(seeded), dict(_PARAMS[op_id])
+        )
+    assert refusal is not None
+    assert refusal.extras["error_code"] == "object_changed_since_approval"
+    assert _ANSWER_MARKER not in json.dumps(refusal.model_dump(mode="json"), default=str)
+    # Nothing was sent after the read that answered with another realm.
+    assert keycloak.calls == [f"GET {_REALM_PATH}"]
+
+
+# ---------------------------------------------------------------------------
+# A check read that times out
+# ---------------------------------------------------------------------------
+
+
+class _TimesOut(_Keycloak):
+    """Every admin request times out while it waits for the answer."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/protocol/openid-connect/token"):
+            return super().__call__(request)
+        self.calls.append(f"{request.method} {request.url.path}")
+        raise httpx.ReadTimeout("timed out", request=request)
+
+
+@pytest.mark.parametrize("cards", [False, True], ids=["cards-off", "cards-on"], indirect=True)
+@pytest.mark.parametrize("op_id", ["keycloak.user.disable", "keycloak.realm.update"])
+async def test_a_check_read_that_times_out_is_a_failed_read_for_a_write(
+    seeded: Operator, op_id: str
+) -> None:
+    keycloak = _TimesOut()
+    result = await _call(seeded, op_id, keycloak)
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_timeout"
+    assert result.extras["phase"] == "read"
+    assert "execution_outcome" not in result.extras
+    assert "retry" not in result.extras
+    assert keycloak.calls == [f"GET {_REALM_PATH}"] * len(keycloak.calls)
+    assert await _approval_rows() == []
+    keycloak = _TimesOut()
+    envelope = await _preview(seeded, op_id, keycloak)
+    assert envelope["extras"]["error_code"] == "connector_timeout"
+    assert "execution_outcome" not in envelope["extras"]
+    assert "retry" not in envelope["extras"]
+    assert envelope["policy_verdict"] == "deny"
+    assert keycloak.calls == [f"GET {_REALM_PATH}"] * len(keycloak.calls)

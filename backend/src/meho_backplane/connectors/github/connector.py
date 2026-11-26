@@ -135,6 +135,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["GitHubRestConnector"]
 
@@ -174,6 +175,42 @@ class GitHubRestConnector(HttpConnector):
         "GitHub.com has no product version. Each call sends REST API version 2022-11-28."
     )
     priority = 1
+    # No test_operation: every safe read of this connector needs an owner or a repo.
+    credential_ways = (
+        CredentialWay(
+            key="app",
+            label="GitHub App",
+            fields=(
+                CredentialField(
+                    name="app_id",
+                    label="App ID",
+                    help="The numeric ID of the GitHub App.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="private_key",
+                    label="Private key",
+                    help="The private key of the App, as PEM text.",
+                    multiline=True,
+                ),
+                CredentialField(
+                    name="installation_id",
+                    label="Installation ID",
+                    help="The ID of the installation this target uses.",
+                    hidden=False,
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="token",
+            label="Personal access token",
+            fields=(
+                CredentialField(
+                    name="token", label="Token", help="A fine-grained personal access token."
+                ),
+            ),
+        ),
+    )
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True
 

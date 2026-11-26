@@ -80,6 +80,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 __all__ = ["LokiConnector", "LokiTenantRequiredError"]
 
@@ -136,6 +137,37 @@ class LokiConnector(HttpConnector):
     impl_id = "loki-api"
     supported_version_range = ">=2.9,<4.0"
     priority = 1
+    default_port = 3100
+    target_fields = (
+        TargetField(
+            key="scheme",
+            label="Scheme",
+            help="How MEHO reaches Loki. Loki speaks plain http by default.",
+            kind="choice",
+            choices=(
+                "http",
+                "https",
+            ),
+            default="http",
+        ),
+    )
+    # Both ways are optional: a target with no stored secret is called without a login.
+    credential_ways = (
+        CredentialWay(
+            key="token",
+            label="Bearer token",
+            fields=(CredentialField(name="token", label="Token", help="A bearer token."),),
+        ),
+        CredentialWay(
+            key="basic",
+            label="User name and password",
+            fields=(
+                CredentialField(name="username", label="User name", hidden=False),
+                CredentialField(name="password", label="Password"),
+            ),
+        ),
+    )
+    test_operation = "loki.labels"
 
     # ------------------------------------------------------------------
     # Transport plumbing

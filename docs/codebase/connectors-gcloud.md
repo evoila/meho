@@ -317,6 +317,11 @@ on a sandbox project follows in a separate Task.
 - **`_contains_sa_key_fields(record)`** (`session.py`) — pure function
   returning `True` if `record` contains any SA key field names.
 
+## What a target needs
+
+Extra settings: `gcp_project` and `gcp_impersonate_sa`, both required. No secret is stored (`credential_ways` is empty): the login is the server's own Google identity plus the impersonated service account, and a secret with key file fields is refused. Test read: `gcloud.about`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration

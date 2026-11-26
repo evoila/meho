@@ -108,6 +108,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["HetznerRobotConnector", "robot_form_fields"]
 
@@ -205,6 +206,24 @@ class HetznerRobotConnector(HttpConnector):
         "Hetzner Robot has no product version. The connector version 2026.04 is a date."
     )
     priority = 1
+    default_port = 443
+    credential_ways = (
+        CredentialWay(
+            key="basic",
+            label="Web service user",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The Robot web service user name.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the web service user."
+                ),
+            ),
+        ),
+    )
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True
 

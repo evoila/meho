@@ -23,7 +23,10 @@ the test read against the operation rows is in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.profile import AuthSpec
 
 __all__ = [
     "MAX_NAME_LENGTH",
@@ -33,6 +36,7 @@ __all__ = [
     "TargetField",
     "TargetFieldKind",
     "check_connector_declaration",
+    "credential_ways_from_auth",
 ]
 
 #: Same rule as the names in a secret field map: 1 to 200 characters.
@@ -155,3 +159,25 @@ def check_connector_declaration(cls: type) -> None:
     test_operation = getattr(cls, "test_operation", None)
     if test_operation is not None and not str(test_operation).strip():
         raise ConnectorDeclarationError(f"{who}: test_operation is blank.")
+
+
+#: Secret field names that are not secret: the form may show them as plain text.
+_PLAIN_FIELD_NAMES: frozenset[str] = frozenset({"username", "client_id"})
+
+
+def credential_ways_from_auth(auth: AuthSpec) -> tuple[CredentialWay, ...]:
+    """The one way to log in that a profile's auth block names.
+
+    The fields are exactly ``auth.secret_fields``, in the same order. The way
+    key is the name of the auth scheme. A profiled connector has no other way.
+    """
+    return (
+        CredentialWay(
+            key=auth.scheme,
+            label=f"Login ({auth.scheme})",
+            fields=tuple(
+                CredentialField(name=name, label=name, hidden=name not in _PLAIN_FIELD_NAMES)
+                for name in auth.secret_fields
+            ),
+        ),
+    )

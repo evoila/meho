@@ -80,6 +80,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["RabbitMqConnector", "RabbitMqMethodNotAllowedError"]
 
@@ -179,6 +180,22 @@ class RabbitMqConnector(HttpConnector):
     impl_id = "rabbitmq-management"
     supported_version_range = ">=3.8,<5.0"
     priority = 1
+    credential_ways = (
+        CredentialWay(
+            key="basic",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="A user with the monitoring tag.",
+                    hidden=False,
+                ),
+                CredentialField(name="password", label="Password"),
+            ),
+        ),
+    )
+    test_operation = "rabbitmq.overview"
 
     def __init__(
         self,

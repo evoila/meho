@@ -211,6 +211,11 @@ trailing newline would otherwise be sent verbatim and rejected as
 password the user-write op sets (`_read_password_from_vault`), which also
 rejects a whitespace-only secret rather than setting an empty password.
 
+## What a target needs
+
+Extra settings: `managed_realm` (required, MEHO has no default; the check in `targets/required_extras.py` is unchanged) and `admin_realm` (optional, default `master`). Two ways to log in: `client` (`client_id`, `client_secret`) and `password` (`username`, `password`). Test read: `keycloak.realm.get`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 - `auth_headers(target, operator)` — rejects any `auth_model` other than

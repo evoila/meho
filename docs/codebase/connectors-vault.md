@@ -1197,6 +1197,11 @@ produces `{sample, ...}` on `result` plus a `ResultHandle` whose
 it pages the handle. The agent never sees the
 raw >50-key list once a handle is produced.
 
+## What a target needs
+
+Extra settings: `vault_role` and `vault_mount`, both optional (the server's own role and mount are used when empty). No secret is stored (`credential_ways` is empty): MEHO forwards the caller's own login to Vault. Test read of `VaultConnector`: `vault.sys.mounts.list`. `OpenBaoConnector` declares no test read, because its operation rows are written under the Vault line.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 1. Importing `connectors.vault` (package `__init__.py`) registers

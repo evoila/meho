@@ -255,6 +255,11 @@ them as writes (their names do not end in a write word it knows).
 - No live proof yet (see the top of this page).
 - `phpipam.subnet.list` reads the usage of the first 50 subnets only.
 
+## What a target needs
+
+Extra settings: `app_id` (required, the API app id) and `base_path` (optional, for example `/phpipam`). Two ways to log in: `app_code` (`token`) and `user` (`username`, `password`). When both are in the secret, the app code wins. Test read: `phpipam.subnet.list`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - phpIPAM API reference: <https://phpipam.net/api/api_reference/>

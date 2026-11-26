@@ -40,6 +40,11 @@ Source: `backend/src/meho_backplane/connectors/loki/`.
   so the operator gets an actionable "pass a tenant" message rather than a bare
   401 passthrough.
 
+## What a target needs
+
+Default port 3100. Extra settings: `scheme` (choice `http` or `https`, default `http`). Two ways to log in, both optional because a target with no secret is called without a login: `token` (`token`) and `basic` (`username`, `password`). Test read: `loki.labels`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration (two-phase, mirrors argocd/pfsense)

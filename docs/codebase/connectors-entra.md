@@ -398,6 +398,11 @@ secret, so it reports `reachable=False`.
 - Sign-in activity and eligible role assignments are not read.
 - The cache lives in one MEHO process. Each process logs in on its own.
 
+## What a target needs
+
+Default port 443. Extra settings: `tenant_id` (optional), `cloud` (choice, default `AzureCloud`). Two ways to log in: `client_secret` (`tenant_id`, `client_id`, `client_secret`) and `certificate` (`tenant_id`, `client_id`, `private_key`, `certificate`). A secret holds one way only. Test read: `entra.about`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - List users: <https://learn.microsoft.com/en-us/graph/api/user-list?view=graph-rest-1.0>

@@ -492,3 +492,40 @@ async def test_each_approval_table_row_with_a_fixed_rule_gets_one(
     rights = [row for row in table if grant_approval.is_rights_change_op(row["op_id"])]
     assert rights
     assert all(row["never_covered"] is not None for row in rights)
+
+
+def _rights_changes_without_the_per_call_mark(op_ids: list[str]) -> list[str]:
+    return [
+        op_id
+        for op_id in op_ids
+        if grant_approval.is_rights_change_op(op_id)
+        and not op_classes.needs_per_call_approval(op_id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_each_built_in_change_of_rights_carries_the_per_call_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every built-in operation that counts as a change of rights needs a
+    person to approve each call, so no grant and no run approval covers it."""
+    from tests.test_approval_table_snapshot import _use_built_in_settings
+
+    _use_built_in_settings(monkeypatch)
+    clear_typed_op_snapshot()
+    try:
+        descriptors = [d for d in await register_all_descriptors() if d.tenant_id is None]
+    finally:
+        clear_typed_op_snapshot()
+    op_ids = sorted({descriptor.op_id for descriptor in descriptors})
+    rights = [op_id for op_id in op_ids if grant_approval.is_rights_change_op(op_id)]
+    assert "keycloak.group.member.add" in rights
+    assert _rights_changes_without_the_per_call_mark(op_ids) == []
+
+    # The scan finds an operation whose mark is missing.
+    monkeypatch.setattr(
+        op_classes,
+        "_PER_CALL_APPROVAL",
+        op_classes._PER_CALL_APPROVAL - {"keycloak.group.member.add"},
+    )
+    assert _rights_changes_without_the_per_call_mark(op_ids) == ["keycloak.group.member.add"]

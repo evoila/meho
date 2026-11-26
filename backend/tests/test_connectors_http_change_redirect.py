@@ -28,6 +28,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.connectors.adapters import http as http_adapter
 from meho_backplane.connectors.adapters.http import (
     HttpConnector,
     _SameOriginRedirectClient,
@@ -61,11 +62,27 @@ class _Server:
         return self._answer(request)  # type: ignore[no-any-return]
 
 
-async def _send(server: _Server, method: str, path: str) -> httpx.Response:
+@contextlib.contextmanager
+def _operation_request() -> Iterator[None]:
+    """Send as the operation's own request, as ``_post_json`` does."""
+    token = http_adapter._operation_request.set(True)
+    try:
+        yield
+    finally:
+        http_adapter._operation_request.reset(token)
+
+
+async def _send(
+    server: _Server, method: str, path: str, *, operation: bool = True
+) -> httpx.Response:
+    """Send one request; by default as the operation's own request."""
     async with _SameOriginRedirectClient(
         base_url=_BASE, transport=httpx.MockTransport(server)
     ) as client:
-        return await client.request(method, path, json={"name": "widget"})
+        if not operation:
+            return await client.request(method, path, json={"name": "widget"})
+        with _operation_request():
+            return await client.request(method, path, json={"name": "widget"})
 
 
 def _redirect(status: int, location: str) -> Any:
@@ -193,7 +210,8 @@ async def test_change_307_compares_the_encoded_path(sent: str, location: str) ->
     async with _SameOriginRedirectClient(
         base_url=_BASE, transport=httpx.MockTransport(answer)
     ) as client:
-        await client.request("PUT", httpx.URL(_BASE + sent), json={"name": "widget"})
+        with _operation_request():
+            await client.request("PUT", httpx.URL(_BASE + sent), json={"name": "widget"})
 
     # A slash inside a name (%2F) and a slash between two names differ: one
     # request only. A change of letter case in the escape is the same path.
@@ -246,7 +264,8 @@ async def test_log_line_of_a_change_redirect_keeps_only_the_origin(location: str
         async with _SameOriginRedirectClient(
             base_url=_BASE, transport=httpx.MockTransport(server)
         ) as client:
-            await client.request("PUT", "/keys/sent-secret-value", json={"name": "widget"})
+            with _operation_request():
+                await client.request("PUT", "/keys/sent-secret-value", json={"name": "widget"})
 
     warnings = [e for e in captured if e["event"].startswith("connector_redirect_not_followed")]
     assert len(warnings) == 1
@@ -275,19 +294,82 @@ async def test_a_repeat_after_login_sends_a_change_once_more_at_most() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_login_during_a_repeat_keeps_its_usual_redirect_rule() -> None:
-    # A fresh login before the repeat is a direct client call. Its 307 to its
-    # own path with a trailing slash is followed, as it is outside a repeat.
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_a_login_during_a_repeat_follows_a_same_origin_redirect(status: int) -> None:
+    # A fresh login before the repeat is not the operation's own request. It
+    # follows a redirect on the same origin, as a read does.
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/session":
-            return httpx.Response(307, headers={"Location": "/api/session/"})
+            return httpx.Response(status, headers={"Location": "/api/session/"})
         return httpx.Response(200, json={"token": "made-up"})
 
     server = _Server(answer)
     with change_sent_once_before():
-        resp = await _send(server, "POST", "/api/session")
+        resp = await _send(server, "POST", "/api/session", operation=False)
     assert resp.status_code == 200
-    assert server.seen == [("POST", "/api/session"), ("POST", "/api/session/")]
+    again = "POST" if status in (307, 308) else "GET"
+    assert server.seen == [("POST", "/api/session"), (again, "/api/session/")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("location", ["/api/session/", "/api/v2/session"])
+async def test_a_login_follows_a_same_origin_redirect_as_a_read_does(
+    status: int, location: str
+) -> None:
+    # A login is a request of the pooled client that is not the operation's
+    # own request: the change rule does not apply to it.
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/session":
+            return httpx.Response(status, headers={"Location": location})
+        return httpx.Response(200, json={"token": "made-up"})
+
+    server = _Server(answer)
+    resp = await _send(server, "POST", "/api/session", operation=False)
+    assert resp.status_code == 200
+    again = "POST" if status in (307, 308) else "GET"
+    assert server.seen == [("POST", "/api/session"), (again, location)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location", ["https://other.example.com/api/session", "http://svc.example.com/api/session"]
+)
+async def test_a_login_never_follows_a_redirect_to_another_origin(location: str) -> None:
+    server = _Server(_redirect(307, location))
+    resp = await _send(server, "POST", "/api/session", operation=False)
+    assert resp.status_code == 307
+    assert server.seen == [("POST", "/api/session")]
+
+
+@pytest.mark.asyncio
+async def test_the_operation_change_keeps_its_rule_for_a_301_to_the_same_path() -> None:
+    # The operation's own PUT through ``_post_json`` follows no 301, also not
+    # to its own path with a slash.
+    conn = _Conn()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        first = mock.put("/items/7").respond(301, headers={"Location": "/items/7/"})
+        second = mock.route(path="/items/7/").respond(200, json={"ok": True})
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
+    await conn.aclose()
+    assert caught.value.response.status_code == 301
+    assert (first.call_count, second.call_count) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_operation_change_follows_a_307_to_its_path_in_lower_case() -> None:
+    conn = _Conn()
+    async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+        first = mock.put("/Items/7", params={"mode": "a"}).respond(
+            307, headers={"Location": "/items/7?mode=a"}
+        )
+        second = mock.put("/items/7", params={"mode": "a"}).respond(200, json={"ok": True})
+        await conn._post_json(
+            _target(), "/Items/7", operator=_operator(), verb="PUT", params={"mode": "a"}
+        )
+    await conn.aclose()
+    assert (first.call_count, second.call_count) == (1, 1)
 
 
 @pytest.mark.asyncio
@@ -431,7 +513,7 @@ async def test_direct_client_call_puts_no_redirect_into_the_trace() -> None:
 
     recorded, (start_patch, record_patch) = _recording()
     with start_patch, record_patch:
-        await _send(_Server(answer), "POST", "/login")
+        await _send(_Server(answer), "POST", "/login", operation=False)
 
     assert recorded == []
 
@@ -626,6 +708,45 @@ def _dumped(spans: list[Any]) -> str:
 
 _SECRET_NAME = "sent-secret-value"
 _MASKED = f"{_BASE}/keys/[redacted]"
+
+
+#: A made-up realm name. ``keycloak.realm.update`` puts it into the PUT path,
+#: and the full realm it sends in the body holds it too.
+_REALM = "mrkrealm5e"
+
+
+@pytest.mark.asyncio
+async def test_trace_of_a_keycloak_realm_update_masks_the_realm_in_the_path() -> None:
+    """The handler fills the realm into the path, so the trace masks it there.
+
+    The fixed segments ``admin`` and ``realms`` stay. The realm read before
+    the write and the read back after it are masked the same way.
+    """
+    import meho_backplane.connectors.keycloak.op_classes  # noqa: F401  (declares the class)
+
+    target = _kc_target()
+    target.extras = {"managed_realm": _REALM}
+    realm_path = f"/admin/realms/{_REALM}"
+    conn = KeycloakConnector(credentials_loader=_kc_loader)
+    params = {"realm": _REALM, "representation": {"displayName": "plain"}}
+    with _real_capture("keycloak.realm.update", params=params) as spans:
+        async with respx.mock(base_url=_KC_BASE, assert_all_called=False) as mock:
+            mock.post(url__regex=r".*/openid-connect/token$").respond(
+                200, json={"access_token": "made-up-token", "expires_in": 60}
+            )
+            mock.get(realm_path).respond(200, json={"realm": _REALM, "enabled": True})
+            write = mock.put(realm_path).respond(204)
+            await conn.realm_update(_operator(), target, params)
+    await conn.aclose()
+
+    assert write.call_count == 1
+    assert write.calls.last.request.content.decode().count(_REALM) >= 1
+    urls = [span.attributes["url"] for span in spans]
+    assert f"{_KC_BASE}/admin/realms/[redacted]" in urls
+    assert all(url == f"{_KC_BASE}/admin/realms/[redacted]" for url in urls), urls
+    assert _REALM not in json.dumps([span.attributes.get("url") for span in spans])
+    assert _REALM not in json.dumps([span.name for span in spans])
+    assert _REALM not in _dumped(spans)
 
 
 def _secret_capture() -> Any:

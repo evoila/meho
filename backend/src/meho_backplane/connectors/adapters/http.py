@@ -852,11 +852,11 @@ _MAX_CHANGE_REDIRECTS = 1
 
 #: Set while :meth:`HttpConnector._request_json`,
 #: :meth:`HttpConnector._post_json` or :meth:`HttpConnector._send_traced`
-#: sends the operation's own request. Only then does the client put each
-#: followed redirect into the trace, and only then does the repeat limit of
-#: :func:`change_sent_once_before` apply. A direct client call (a login, for
-#: example) stays out of the trace, as it does without a redirect, and keeps
-#: its usual redirect rules.
+#: sends the operation's own request. Only then does the change rule of the
+#: client apply (at most two sends, only a 307 or 308 to the same path), and
+#: only then does the client put each followed redirect into the trace. Every
+#: other request (a login, for example) follows a redirect on the same
+#: origin with the rule of a read and stays out of the trace.
 _operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "meho_operation_request", default=False
 )
@@ -900,7 +900,7 @@ def change_sent_once_before() -> Iterator[None]:
     after "the login ended" only when its first send was one request. Inside
     this block the operation's own change request follows no redirect, so
     the repeat is the second and last send. The fresh login inside the block
-    and every read keep their usual redirect rules.
+    and every read follow a redirect on the same origin.
     """
     token = _change_sent_before.set(True)
     try:
@@ -916,7 +916,7 @@ def last_send_of_a_change() -> Iterator[None]:
     For a typed connector that sends a change once more itself, for example
     after a token refresh on a 401. The request inside follows no redirect,
     so the change reaches the target at most twice. Renew the token before
-    this block, so a login keeps its usual redirect rule.
+    this block, so a login follows a redirect on the same origin.
     """
     repeat = _change_sent_before.set(True)
     own = _operation_request.set(True)
@@ -925,27 +925,6 @@ def last_send_of_a_change() -> Iterator[None]:
     finally:
         _operation_request.reset(own)
         _change_sent_before.reset(repeat)
-
-
-#: Set while MEHO sends a change that must follow no redirect at all
-#: (:func:`change_follows_no_redirect`).
-_change_follows_no_redirect: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "meho_change_follows_no_redirect", default=False
-)
-
-
-@contextlib.contextmanager
-def change_follows_no_redirect() -> Iterator[None]:
-    """Make a change request sent inside follow no redirect, also not a 307 or 308.
-
-    For a login: a redirect on it ends the call, so MEHO never sends the
-    login a second time and never sends the operation after it.
-    """
-    token = _change_follows_no_redirect.set(True)
-    try:
-        yield
-    finally:
-        _change_follows_no_redirect.reset(token)
 
 
 def _sent_address(url: httpx.URL) -> tuple[str, str, int | None, str, str]:
@@ -1004,8 +983,13 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     a *bounded, same-origin-only* redirect loop in :meth:`send`. A legitimate
     same-origin canonicalisation (the vendor trailing-slash ``301`` that
     vcsim's ``/rest`` mount and some appliances emit) is still followed, so
-    no vendor flow regresses. A change (a method that is not a read) follows
-    at most one redirect: a 307 or 308 to the same path. Any cross-origin
+    no vendor flow regresses.
+
+    There are two redirect rules. The operation's own change request (a
+    method that is not a read, sent by ``_request_json``, ``_post_json`` or
+    ``_send_traced``) follows at most one redirect: a 307 or 308 to the same
+    path with the same query. Every other request, a read or a login,
+    follows redirects on the same origin up to the hop budget. Any cross-origin
     ``Location`` terminates the loop and the ``3xx`` response is returned to
     the caller unfollowed — the request is **never** replayed off-origin, so
     no header or body crosses the origin boundary.
@@ -1043,13 +1027,13 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # following; this class owns the redirect decision so the
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
-        is_change = request.method.upper() not in _IDEMPOTENT_METHODS
+        # The change rule holds only for the operation's own request. A login
+        # is not the change: it follows a redirect on the same origin, as a
+        # read does.
+        is_change = request.method.upper() not in _IDEMPOTENT_METHODS and _operation_request.get()
         if is_change:
-            # Only the repeated operation request follows no redirect; a
-            # fresh login before it keeps the usual rule.
-            repeat = _change_sent_before.get() and _operation_request.get()
-            no_redirect = repeat or _change_follows_no_redirect.get()
-            max_hops = 0 if no_redirect else _MAX_CHANGE_REDIRECTS
+            # The repeated operation request follows no redirect.
+            max_hops = 0 if _change_sent_before.get() else _MAX_CHANGE_REDIRECTS
         else:
             max_hops = _MAX_SAME_ORIGIN_REDIRECTS
         sent_urls = {_sent_address(request.url)}
@@ -1270,6 +1254,11 @@ class HttpConnector(Connector):
         -- e.g. a login as a different principal than the pooled session --
         builds it identically via :meth:`_ephemeral_http_client`. Callers own
         the SSRF pre-check.
+
+        The client follows a redirect only on the same origin. The
+        operation's own change request follows only a 307 or 308 to the same
+        path; every other request, a read or a login, follows the same-origin
+        redirects of :class:`_SameOriginRedirectClient`.
         """
         verify_tls = bool(getattr(target, "verify_tls", True))
         ca_pin = getattr(target, "tls_ca_pin", None)
@@ -1518,7 +1507,7 @@ class HttpConnector(Connector):
         # captured too. A transport fault (timeout, refused connection) has no
         # response, so it records an error span and re-raises (#3408). Each
         # retry attempt is its own vendor call and gets its own span.
-        with flight_recorder_capture.request_body_values(json):
+        with flight_recorder_capture.request_body_values(json, path):
             _fr_start = flight_recorder_capture.span_start()
             trace_hops = _operation_request.set(True)
             try:
@@ -1639,7 +1628,7 @@ class HttpConnector(Connector):
         # The request body is whichever of ``json`` / ``data`` was sent, with
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
-        with flight_recorder_capture.request_body_values(json if json is not None else data):
+        with flight_recorder_capture.request_body_values(json if json is not None else data, path):
             _fr_start = flight_recorder_capture.span_start()
             trace_hops = _operation_request.set(True)
             try:
@@ -1691,7 +1680,7 @@ class HttpConnector(Connector):
         login, so login traffic stays out of the trace. The answer is
         returned as it is; the caller checks its status.
         """
-        with flight_recorder_capture.request_body_values(json):
+        with flight_recorder_capture.request_body_values(json, path):
             _fr_start = flight_recorder_capture.span_start()
             trace_hops = _operation_request.set(True)
             try:

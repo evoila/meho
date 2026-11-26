@@ -1827,7 +1827,9 @@ def result_connector_redirect_generic(
     :func:`result_connector_redirect_on_change`: ``exception_message`` is
     httpx's status text, rebuilt from the status and the safe parts of the two
     addresses (scheme, host and path; only scheme, host and port with
-    *withhold_address*), and no text of the redirect body is kept.
+    *withhold_address*). Each value read from the redirect body
+    (``upstream_message``, and ``upstream_fault`` when the generic answer has
+    it) is empty.
     """
     result = result_connector_error(op_id, exc, duration_ms)
     status_code = exc.response.status_code
@@ -1846,8 +1848,11 @@ def result_connector_redirect_generic(
     )
     extras = dict(result.extras or {})
     extras["exception_message"] = _sanitize_free_text(text)
+    # The same keys as the generic answer; each value read from the body of
+    # the redirect answer is empty.
     extras["upstream_message"] = None
-    extras.pop("upstream_fault", None)
+    if "upstream_fault" in extras:
+        extras["upstream_fault"] = None
     return result.model_copy(update={"extras": extras})
 
 

@@ -2063,18 +2063,23 @@ async def test_unpinned_verifying_target_still_passes_no_verify_arg() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pooled_client_does_not_follow_trailing_slash_301_on_a_post() -> None:
-    """A 301 after a POST is returned unfollowed, so the POST is sent once.
+async def test_pooled_client_follows_same_origin_trailing_slash_301() -> None:
+    """A legitimate same-origin trailing-slash 301 on session-create succeeds.
 
-    A change (any method that is not a read) follows only a 307 or 308 to the
-    same path. A 301 is unclear by its meaning, so the caller gets the 3xx
-    itself and the dispatcher words the result.
+    Models the NSX/VCF ``POST /api/session`` -> ``/api/session/`` vendor
+    canonicalisation: the appliance answers the credential POST with a 301
+    to the trailing-slash form on the *same* origin. The shared client must
+    still reach the canonical endpoint (and so establish the session) — the
+    L11 fix must not break this path. httpx downgrades a 301'd POST to GET
+    per RFC, so the canonical handler answers a GET.
     """
     seen: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
-        return httpx.Response(301, headers={"Location": "/api/session/"})
+        if request.url.path == "/api/session":
+            return httpx.Response(301, headers={"Location": "/api/session/"})
+        return httpx.Response(200, headers={"X-XSRF-TOKEN": "session-tok"}, json={"ok": True})
 
     transport = httpx.MockTransport(handler)
     async with _SameOriginRedirectClient(
@@ -2086,8 +2091,10 @@ async def test_pooled_client_does_not_follow_trailing_slash_301_on_a_post() -> N
             data={"j_username": "admin", "j_password": "s3cr3t"},
         )
 
-    assert resp.status_code == 301
-    assert seen == [("POST", "/api/session")]
+    assert resp.status_code == 200
+    assert resp.headers.get("X-XSRF-TOKEN") == "session-tok"
+    # Both hops were issued: the initial POST and the followed same-origin GET.
+    assert seen == [("POST", "/api/session"), ("GET", "/api/session/")]
 
 
 @pytest.mark.asyncio

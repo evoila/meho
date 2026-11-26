@@ -1693,18 +1693,21 @@ class Settings(BaseModel):
         call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
     redirect_on_change_result:
         Off by default. It decides only the answer of a change (PUT, POST,
-        PATCH, DELETE) that ends on a redirect MEHO does not follow, and of a
-        connector login that gets a redirect. When on, the ``error`` text
-        says what the HTTP code means (307 / 308: the target did not run the
-        call; 303: the target says the change ran; 301 / 302: MEHO could not
-        find out), and an operation that may change the target also gets
-        ``execution_outcome``, ``retry`` and ``remediation``. A login that
-        gets a redirect ends with the ``SessionLoginRedirectError`` text.
-        When off, both answers have the keys and the ``error`` text of the
-        generic ``connector_error`` answer for that status. Which redirects
-        a change follows, the limit of two sends, the block check before a
-        followed redirect and the trace are the same in both modes, and so
-        are the values the answer hides. Env ``REDIRECT_ON_CHANGE_RESULT``.
+        PATCH, DELETE) that ends on a redirect MEHO does not follow. When on,
+        the ``error`` text says what the HTTP code means (307 / 308: the
+        target did not run the call; 303: the target says the change ran;
+        301 / 302: MEHO could not find out), and an operation that may change
+        the target also gets ``execution_outcome``, ``retry`` and
+        ``remediation``. When off, the answer has the keys and the ``error``
+        text of the generic ``connector_error`` answer for that status.
+        Which requests follow which redirect is the same in both modes: the
+        operation's own change request follows only a 307 or 308 to the same
+        path (at most two sends); every other request, a read or a login,
+        follows a redirect on the same origin. A login that ends on a
+        redirect MEHO did not follow gives the ``SessionLoginRedirectError``
+        text in both modes. The block check before a followed redirect, the
+        trace and the values the answer hides are the same in both modes.
+        Env ``REDIRECT_ON_CHANGE_RESULT``.
     runner_checks_enabled:
         Off by default. When on, a check bound to a runner counts like a
         central check: the result a runner posts for its own check sets the

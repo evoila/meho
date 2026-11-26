@@ -37,7 +37,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
-from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
@@ -698,101 +698,89 @@ def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
     get_settings.cache_clear()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-async def test_session_login_redirect_names_the_login_and_sends_no_operation(
-    status: int, answer_switch: Any
-) -> None:
-    """A redirect on the login POST is reported as the login's answer.
+#: A made-up value in the ``Location`` path and its query.
+_LOGIN_PATH_MARKER = "mrk-login-path-71c"
 
-    The error names the login request and says the operation was not sent,
-    so the dispatcher never takes it for the operation's own redirect. The
-    operation's request is never sent.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["/api/v2/sessions/", "/api/v3/sessions"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_profiled_login_follows_a_same_origin_redirect(
+    on: bool, status: int, location: str, answer_switch: Any
+) -> None:
+    """A login is not a change: it follows a redirect on the same origin, as a read does.
+
+    A 307 or 308 sends the login body again to the new path; a 301, 302 or
+    303 sends a GET there. The login succeeds and the operation is sent once.
     """
-    answer_switch(True)
+    answer_switch(on)
     connector = _connector("session_login", {"username": "svc", "password": "pw"})
     target = _StubTarget(name="vrli", host="vrli.invalid")
+    again = "POST" if status in (307, 308) else "GET"
 
     async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
-        login = mock.post("/api/v2/sessions").respond(
-            status, headers={"Location": "/ui/login?ticket=one-time-ticket-123"}
+        login = mock.post("/api/v2/sessions").respond(status, headers={"Location": location})
+        login_again = mock.route(method=again, path=location).respond(
+            200, json={"sessionId": "tok"}
         )
-        operation = mock.put("/api/v2/items/7").respond(200, json={})
-        with pytest.raises(SessionLoginError) as exc_info:
+        operation = mock.put("/api/v2/items/7").respond(200, json={"ok": True})
+        await connector._post_json(
+            target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+        )
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert login_again.call_count == 1
+    if again == "POST":
+        assert login_again.calls.last.request.content == login.calls.last.request.content
+    assert operation.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location_origin",
+    ["https://other.invalid", "http://vrli.invalid", "https://vrli.invalid:8443"],
+    ids=["other-host", "other-scheme", "other-port"],
+)
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_profiled_login_redirect_to_another_origin_ends_the_call(
+    on: bool, status: int, location_origin: str, answer_switch: Any
+) -> None:
+    """A login never follows a redirect to another origin, with the switch off and on.
+
+    The error says in plain words that the login got a redirect that MEHO
+    did not follow, and names the status. It holds no part of the login path,
+    the ``Location`` path or its query. The other origin gets no request and
+    the operation is not sent.
+    """
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+    location = f"{location_origin}/{_LOGIN_PATH_MARKER}/x?q={_LOGIN_PATH_MARKER}-query"
+
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post("https://vrli.invalid/api/v2/sessions").respond(
+            status, headers={"Location": location}
+        )
+        elsewhere = mock.route(url__startswith=location_origin + "/").respond(200, json={})
+        operation = mock.put("https://vrli.invalid/api/v2/items/7").respond(200, json={})
+        with pytest.raises(SessionLoginRedirectError) as exc_info:
             await connector._post_json(
                 target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
             )
+    await connector.aclose()
 
     message = str(exc_info.value)
     assert message == (
         f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
         "follow it and did not send the operation."
     )
-    assert "one-time-ticket-123" not in message
-    assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+    assert _LOGIN_PATH_MARKER not in message
+    assert "/api/v2/sessions" not in message
     assert login.call_count == 1
-    assert operation.call_count == 0
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-async def test_with_the_switch_off_a_session_login_redirect_keeps_its_status_error(
-    status: int, answer_switch: Any
-) -> None:
-    """With the switch off, a status error of the login reaches the dispatcher.
-
-    The dispatcher then gives the generic ``connector_error`` answer for that
-    status. The operation's request is never sent.
-    """
-    answer_switch(False)
-    connector = _connector("session_login", {"username": "svc", "password": "pw"})
-    target = _StubTarget(name="vrli", host="vrli.invalid")
-
-    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
-        login = mock.post("/api/v2/sessions").respond(status, headers={"Location": "/ui/login"})
-        operation = mock.put("/api/v2/items/7").respond(200, json={})
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await connector._post_json(
-                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
-            )
-
-    assert exc_info.value.response.status_code == status
-    assert login.call_count == 1
-    assert operation.call_count == 0
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [307, 308])
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
-async def test_a_login_redirect_to_the_same_path_with_a_slash_is_not_followed(
-    on: bool, status: int, answer_switch: Any
-) -> None:
-    """A 307 or 308 of the login to its own path with a slash ends the call.
-
-    The login is sent once, the slash address gets no request, and the
-    operation is never sent, with the switch off and with it on.
-    """
-    answer_switch(on)
-    connector = _connector("session_login", {"username": "svc", "password": "pw"})
-    target = _StubTarget(name="vrli", host="vrli.invalid")
-
-    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
-        login = mock.post("/api/v2/sessions").respond(
-            status, headers={"Location": "/api/v2/sessions/"}
-        )
-        login_again = mock.post("/api/v2/sessions/").respond(200, json={"sessionId": "tok"})
-        operation = mock.put("/api/v2/items/7").respond(200, json={})
-        expected = SessionLoginRedirectError if on else httpx.HTTPStatusError
-        with pytest.raises(expected):
-            await connector._post_json(
-                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
-            )
-    await connector.aclose()
-
-    assert login.call_count == 1
-    assert login_again.call_count == 0
+    assert elsewhere.call_count == 0
     assert operation.call_count == 0
 
 
@@ -801,7 +789,9 @@ _LOGIN_MARKERS = ("marker-login-location", "marker-login-body", "/api/v2/session
 
 
 def _login_redirect(status: int, with_location: bool) -> httpx.Response:
-    headers = {"Location": "/marker-login-location?t=1"} if with_location else {}
+    headers = (
+        {"Location": "https://other.invalid/marker-login-location?t=1"} if with_location else {}
+    )
     return httpx.Response(
         status, headers=headers, json={"message": "marker-login-body", "code": "marker-login-body"}
     )
@@ -814,13 +804,13 @@ def _login_redirect(status: int, with_location: bool) -> httpx.Response:
 async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
     on: bool, status: int, with_location: bool, answer_switch: Any
 ) -> None:
-    """A read whose login gets a redirect: the answer holds no part of the login's answer.
+    """A read whose login ends on a redirect: the answer holds no part of the login's answer.
 
     The login path, the ``Location`` and the body of the login's answer stay
-    out in both modes, with and without a ``Location``. The read is not sent.
+    out in both modes, with a ``Location`` on another origin and without
+    one. The read is not sent.
     """
     from meho_backplane.operations._errors import result_connector_error
-    from meho_backplane.operations.dispatcher import _classify_http_status_error
 
     answer_switch(on)
     connector = _connector("session_login", {"username": "svc", "password": "pw"})
@@ -831,32 +821,13 @@ async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
             return_value=_login_redirect(status, with_location)
         )
         operation = mock.get("/api/v2/items").respond(200, json={})
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(SessionLoginRedirectError) as exc_info:
             await connector._request_json(target, "GET", "/api/v2/items", operator=_operator())
     await connector.aclose()
 
     assert login.call_count == 1
     assert operation.call_count == 0
-    exc = exc_info.value
-    if on:
-        assert isinstance(exc, SessionLoginRedirectError)
-        answer = result_connector_error("op.read", exc, 1.0)
-    else:
-        assert isinstance(exc, httpx.HTTPStatusError)
-        answer = _classify_http_status_error(
-            http_exc=exc, op_id="op.read", connector_instance=None, target=target, duration_ms=1.0
-        )
-        assert answer.error == "connector_error: HTTPStatusError"
-        assert set(answer.extras or {}) == {
-            "error_code",
-            "exception_class",
-            "exception_message",
-            "http_status",
-            "upstream_message",
-        }
-        assert answer.extras is not None
-        assert answer.extras["http_status"] == status
-        assert answer.extras["upstream_message"] is None
+    answer = result_connector_error("op.read", exc_info.value, 1.0)
     text = answer.model_dump_json()
     for marker in _LOGIN_MARKERS:
         assert marker not in text

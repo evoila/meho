@@ -106,6 +106,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -122,12 +123,11 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_basic_credentials,
 )
 from meho_backplane.connectors._shared.vcf_auth import (
-    SessionLoginError,
     is_acceptable_auth_model,
     session_establish_auth_error,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector, change_follows_no_redirect
-from meho_backplane.connectors.base import ConnectorOwnMessage, ShimKind
+from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.base import ShimKind
 from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile, split_version
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -135,7 +135,6 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
-from meho_backplane.settings import get_settings
 
 __all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector", "SessionLoginRedirectError"]
 
@@ -171,49 +170,6 @@ def _token_headers(spec: SessionSchemeSpec, token: str) -> dict[str, str]:
     """Return the header a session-stateful scheme sends *token* in."""
     value = f"Bearer {token}" if spec.token_value_kind == "bearer" else token
     return {spec.token_header: value}
-
-
-class SessionLoginRedirectError(SessionLoginError, ConnectorOwnMessage):
-    """The login before an operation got a redirect, so the operation was not sent.
-
-    Raised for any 3xx answer to the login while the switch
-    ``redirect_on_change_result`` is on. With it off, an
-    ``httpx.HTTPStatusError`` that names only the login's origin reaches the
-    dispatcher, which gives the generic ``connector_error`` answer for that
-    status.
-
-    The message is a fixed sentence of MEHO with only the HTTP status. It
-    names no address: a login address can come from the credential (an
-    external token URL). It holds no text from the vendor and no value of
-    the call, so the dispatcher keeps it also for an operation that sends a
-    secret.
-    """
-
-    def __init__(self, status_code: int) -> None:
-        super().__init__(
-            f"The login of this connector got HTTP {status_code}, a redirect. "
-            "MEHO did not follow it and did not send the operation."
-        )
-
-
-def _login_redirect_status_error(exc: httpx.HTTPStatusError) -> httpx.HTTPStatusError:
-    """The status error of a login that got a redirect, while the switch is off.
-
-    It has httpx's text for the status, but names only the login's scheme,
-    host and port. The new error holds no ``Location`` and no body, so the
-    dispatcher gives the generic ``connector_error`` answer for the status
-    without any part of the login address or the redirect answer.
-    """
-    url = exc.request.url
-    request = httpx.Request(exc.request.method, f"{url.scheme}://{url.netloc.decode('ascii')}/")
-    status_code = exc.response.status_code
-    response = httpx.Response(status_code, request=request)
-    message = (
-        f"Redirect response '{status_code} {response.reason_phrase}' for url '{request.url}'\n"
-        f"For more information check: "
-        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status_code}"
-    )
-    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 class _CachedSessionToken:
@@ -583,36 +539,15 @@ class ProfiledRestConnector(HttpConnector):
             if auth_error is not None:
                 raise auth_error from exc
             if 300 <= exc.response.status_code < 400:
-                # The login, not the operation, got the redirect, with or
-                # without a ``Location``. Neither error holds the login path
-                # (it can come from the credential), the ``Location`` or the
-                # body. With the switch on, the error says the operation was
-                # not sent; with it off, it is the generic status error.
-                if get_settings().redirect_on_change_result:
-                    raise SessionLoginRedirectError(exc.response.status_code) from exc
-                raise _login_redirect_status_error(exc) from exc
+                # The login got a redirect that MEHO did not follow (another
+                # origin, or no ``Location``). The error
+                # holds no login path (it can come from the credential), no
+                # ``Location`` and no body, with the switch off and on.
+                raise SessionLoginRedirectError(exc.response.status_code) from exc
             raise
         return resp.json(), established_path
 
     async def _login_attempt(
-        self,
-        target: Any,
-        spec: SessionSchemeSpec,
-        auth: AuthSpec,
-        path: str,
-        body: Mapping[str, str],
-        secret: Mapping[str, str],
-    ) -> httpx.Response:
-        """POST one login attempt at *path*, following no redirect.
-
-        A redirect on the login, also a 307 or 308 to the same path with a
-        slash, comes back as it is, so the caller ends the call on it: MEHO
-        sends the login once and never sends the operation after it.
-        """
-        with change_follows_no_redirect():
-            return await self._send_login(target, spec, auth, path, body, secret)
-
-    async def _send_login(
         self,
         target: Any,
         spec: SessionSchemeSpec,

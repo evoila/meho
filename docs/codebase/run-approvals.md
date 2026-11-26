@@ -85,9 +85,17 @@ The status of that row stays `expired`.
 ## Control flow at call time
 
 The policy gate (`_validate.py::_service_grant_verdict`) runs for a
-service principal whose call would wait for approval. It first looks for
-a standing grant ([service-principal-grants.md](service-principal-grants.md)).
-When none covers the call, it calls `consult_and_record_run_approval`:
+service principal whose call would wait for approval. First it asks
+`policy/fixed_rules.py::fixed_rule_for` which fixed rule holds for the
+call ([policy-evaluator.md](policy-evaluator.md)). Outside sandbox mode,
+when it names a rule (a credential call, a change of rights or of the
+policy, a destructive operation, a delete, a caller-address field), the
+gate looks up no standing grant and no run approval. It logs
+`policy_gate_fixed_rule_no_grant` with the rule id, and the call waits.
+The wait reason the caller reads stays the same. In the other cases, and
+in sandbox mode, it looks for a standing grant
+([service-principal-grants.md](service-principal-grants.md)). When none
+covers the call, it calls `consult_and_record_run_approval`:
 
 - It reads the run reference from `work_ref_var` (bound from
   `Meho-Work-Ref`). No run reference: no cover.
@@ -205,12 +213,17 @@ Secret or cannot be read. The rule is the one of the standing grants
 (`service_grants.credential_grant_reason`,
 [service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
-- At call time `_never_covered` in `run_approval_gate.py` refuses it, and
-  logs `run_approval_refused_credential` with the reason "A standing
+- For a service login outside sandbox mode, `fixed_rule_for` names the
+  rule `credential_waits`. The gate then looks up no standing grant and no
+  run approval, and logs `policy_gate_fixed_rule_no_grant`. It does not
+  reach `_never_covered`.
+- In sandbox mode, `_never_covered` in `run_approval_gate.py` refuses it,
+  and logs `run_approval_refused_credential` with the reason "A standing
   grant, an agent grant or a run approval never covers 'OP': it reads,
-  writes or makes a credential, so a person approves each call." The call
-  gets the same answer as with no run approval. The shadow evaluator
-  (`policy/floors.py::run_approval_may_clear`) gives the same answer.
+  writes or makes a credential, so a person approves each call."
+- Either way the call gets the same answer as with no run approval. The
+  shadow evaluator (`policy/floors.py::run_approval_may_clear`) gives the
+  same answer.
 - When such a service call waits, its reason ends with "the operation
   reads, writes or makes a credential, so no standing grant, no agent
   grant and no run approval covers it; a person approves each call"

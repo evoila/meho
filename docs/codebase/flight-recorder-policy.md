@@ -101,8 +101,10 @@ Keycloak realm reads ask for this only while the off-by-default switch
 fails the check, the connector calls `spans.release_status()`: each span
 keeps only its method, address, status, time and request id (and the error
 class of a request that got no answer), with no header, no body and no other
-text of the answer. Spans that are not released are dropped. The Keycloak
-reads of a realm's settings use it.
+text of the answer. With `capture.held(asked_url)`, such a span names
+`asked_url`, the address the connector asked for, in its name and in `url`,
+and not an address that a redirect on the same server named. Spans that are
+not released are dropped. The Keycloak reads of a realm's settings use it.
 
 ## Audit
 

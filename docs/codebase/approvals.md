@@ -4349,8 +4349,11 @@ Tests: `backend/tests/test_operations_park_check.py`.
 
 An op can also register a check that runs before the policy gate:
 `_park_check.register_gate_check(op_id, check)`. It has the same shape, the
-same fail-closed run and the same `refused_before_approval` refusal as the
-check above. It is for a check that must pass before MEHO reads anything of
+same fail-closed run and the same `refused_before_approval` error code as the
+check above. Its refusal text is the check's reason only
+(`_errors.result_gate_check_refused`): it does not ask to fix the call, and
+it says nothing about a wait for approval, because the check also runs for a
+call that runs at once. It is for a check that must pass before MEHO reads anything of
 the vendor for the call.
 
 - **Where it runs.** `_park_check.gate_check_refusal` runs it in the
@@ -4363,7 +4366,8 @@ the vendor for the call.
   `POLICY_ENGINE_SHADOW` on, that preview answer still has `policy_rule`
   (`null`: no rule was matched) and `approvers` (empty).
 - **Rights first.** The check runs only when the caller's rights do not
-  refuse the call already (`_validate.rights_denial`: the requester check,
+  refuse the call already (`_validate.rights_denial`: a revoked agent
+  login, the requester check,
   the MCP profile, the role floor, an agent's grants and a service login's
   read scope). It reads nothing of the vendor. So a call the caller may not
   make reads nothing of the vendor, and the caller gets the policy gate's
@@ -4389,7 +4393,11 @@ the vendor for the call.
   the wait for approval does not run when a read before it already noted a
   refusal. The run after an approval rebuilds the card
   (`approval_object_check.live_card`) inside its own `refusal_scope`: a
-  noted refusal makes the card count as not built, so the run is refused. Once a refusal is noted, a
+  noted refusal makes the card count as not built, so the run is refused.
+  `approval_object_check.live_card_checked` returns that refusal too, and
+  the object, grant and state checks of the run give it as the reason
+  (`card_refused_reason`), so the caller learns, for example, that Keycloak
+  did not answer with the realm the target manages. Once a refusal is noted, a
   connector can send no more requests for the call: the Keycloak connector
   checks `_park_check.refusal_noted()` before each request and raises
   `CallRefusedError`.

@@ -3019,27 +3019,31 @@ second `approval.request` row:
   has `payload.request_state`, the state of the request it found, and a
   status code that fits it:
 
-  | `request_state` | Meaning | `status_code` |
-  |---|---|---|
-  | `waiting` | The request waits for approval. | 202 |
-  | `approved_not_started` | Approved, and the run has not started. | 200 |
-  | `approved_started` | Approved, and the run has started without a stored result. | 200 |
-  | `approved_executed` | Approved, and the run ended ok. | 200 |
-  | `approved_failed` | Approved, and the run failed. | 200 |
-  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 |
+  | `request_state` | Meaning | `status_code` | Shown as (`result_status`, console label) |
+  |---|---|---|---|
+  | `waiting` | The request waits for approval. | 202 | `pending`, "Awaiting approval" |
+  | `approved_not_started` | Approved, and the run has not started. | 200 | `pending`, "Approved, not run yet" |
+  | `approved_started` | Approved, and the run has started without a stored result. | 200 | `pending`, "Approved, run started, no result yet" |
+  | `approved_executed` | Approved, and the run ended ok. | 200 | `ok`, "Approved, run OK" |
+  | `approved_failed` | Approved, and the run failed. | 200 | `error`, "Approved, run failed" |
+  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 | `error`, "Approved, result unknown: check the target before you run it again" |
 
-  An audit read shows an `approval.reuse` row by its status code. A row
-  with 202 reads as `pending`, and a row with 200 reads as `ok` in the
-  audit query (REST, CLI, MCP) and as "OK" in the web console
-  (`_derive_result_status` in `audit_query/query.py`, `resolve_status` in
-  `ui/references.py`). On this row, `ok` means that the retry got a request
-  a person approved. It does not say that the run went well:
-  `payload.request_state` holds the run state (for example
-  `approved_failed` or `approved_uncertain`).
+  An audit read shows an `approval.reuse` row by its `request_state`, not by
+  its status code. The table is `REUSE_STATES` in `audit_query/query.py`. The
+  audit query (REST, CLI, MCP) and its `result_status` filter use it, and so
+  does the web console (`ui/references.py`: the label, the colour and the
+  "what happened" line). The row says the state at the time of the retry, not
+  the state now: `pending` means the request had not finished then. The
+  "what happened" line of the drawer does not say "ran": the retry ran
+  nothing.
 
   The row of a call that gets the waiting request of the same call
   (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
-  `request_state` and its status code is 202.
+  `request_state` and its status code is 202. It reads `pending`, and the
+  console shows "Awaiting approval". Its "what happened" line in the drawer
+  (`_build_what_happened`) is: "<who> asked again for <operation> on
+  <target>. At that time the same call was waiting for approval, and this
+  call got that request." It does not say "ran".
 - `payload.params_hash` is the hash of this call's params
   (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the

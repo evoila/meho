@@ -854,6 +854,79 @@ def test_drawer_shows_withdraw_row_as_withdrawn_not_as_a_run() -> None:
     assert "→ OK" not in body
 
 
+@pytest.mark.parametrize(
+    ("state", "code", "label", "tone", "words"),
+    [
+        ("waiting", 202, "Awaiting approval", "warning", "was waiting for approval"),
+        (
+            "approved_not_started",
+            200,
+            "Approved, not run yet",
+            "warning",
+            "was approved and had not run yet",
+        ),
+        (
+            "approved_started",
+            200,
+            "Approved, run started, no result yet",
+            "warning",
+            "was approved and its run had started, with no result yet",
+        ),
+        (
+            "approved_executed",
+            200,
+            "Approved, run OK",
+            "success",
+            "was approved and its run finished OK",
+        ),
+        (
+            "approved_failed",
+            200,
+            "Approved, run failed",
+            "error",
+            "was approved and its run failed",
+        ),
+        (
+            "approved_uncertain",
+            200,
+            "Approved, result unknown: check the target before you run it again",
+            "error",
+            "was approved and its result is unknown",
+        ),
+    ],
+)
+def test_drawer_shows_a_retry_row_by_the_request_state(
+    state: str, code: int, label: str, tone: str, words: str
+) -> None:
+    """A retry row shows the state of the request it found, never "ran" or a green OK."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="edge-gateway-01")
+    row_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        op_id="vsphere.vm.delete",
+        op_class="write",
+        target_id=target_id,
+        method="APPROVAL",
+        path="approval.reuse",
+        status_code=code,
+        payload_extra={"request_state": state},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert label in body
+    assert f"badge-{tone}" in body
+    assert "asked again for vsphere.vm.delete on edge-gateway-01 with the same key." in body
+    assert f"At that time the request {words}" in body
+    assert " ran vsphere.vm.delete" not in body
+    if state != "approved_executed":
+        assert "→ OK" not in body
+
+
 def test_drawer_shows_via_from_the_client_block() -> None:
     """A row with a ``client`` block shows "Via: <client> (<channel>)"."""
     _seed_tenant(_TENANT_A, "tenant-a")

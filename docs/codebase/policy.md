@@ -75,6 +75,20 @@ routing:
   [policy-bindings.md](policy-bindings.md).
 - The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
   sign-in and the routing at the click.
+- `limits` (the install's file only) is the outer limit of the tenants'
+  policies: `limits.personal_agent_up_to` is the highest risk level
+  (`safe`, `caution` or `dangerous`) that a tenant's rule for personal
+  agents may let run at once. `destructive` is not a value: it always
+  waits. Without the part the limit is `safe`, today's answer; the shipped
+  "small team" file has no such part. `personal_agent_limit` in
+  `policy/limits.py` reads it. The part needs the `CUSTOM_POLICY` switch:
+  the caller passes it to `build_plan`, `apply_policy` and
+  `check_document` as `custom_policy`, default off. No caller passes it
+  yet, so today every file with `limits` is refused.
+- Four more top-level keys are kept for parts that later versions add:
+  `agents`, `approvers`, `role_bindings` and `risk_levels`
+  (`RESERVED_KEYS` in `policy/document.py`). A file with one of them is
+  refused: "`agents` is not in this version of MEHO; remove it."
 
 ## The shipped "small team" file
 
@@ -166,6 +180,9 @@ is one sentence that names the entry:
 - **A tenant's routing wider than the install's** (`policy/routing_floor.py`,
   `tenant_floor_mistakes`, only while `POLICY_APPROVER_ROUTING` is on): see
   the next section.
+- **Limits** (`policy/limits.py`, `limits_mistakes`): a tenant's file
+  with `limits` is refused, and so is the install's file with `limits`
+  while the `CUSTOM_POLICY` switch is off.
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
@@ -356,8 +373,10 @@ it.
 
 - `build_plan` parses and checks the file and works out the diff. It
   writes nothing. The diff has the sections `description`, `taxonomy`,
-  `classifications`, `routing` and `bindings`, each with `added`, `changed`
-  (`before` and `after`) and `removed`. A routing entry is found by its
+  `classifications`, `routing`, `bindings` and `limits`, each with
+  `added`, `changed` (`before` and `after`) and `removed`. The `limits`
+  section is there only when the stored policy or the file has limits; each
+  item names its `key`. A routing entry is found by its
   `match`; it is `changed` when its approvers or its place in the list
   changed (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
@@ -473,4 +492,6 @@ install's routing as a floor: import, run, click, install diff),
 `backend/tests/test_policy_routing_step_floor.py` (a step and a direct
 call get the same approvers, warnings and export marks, the card and the
 approve audit row),
+`backend/tests/test_policy_limits.py` (the `limits` part and the kept
+keys: parser, checks, import, export, the reader),
 `cli/internal/cmd/policy/file_test.go`.

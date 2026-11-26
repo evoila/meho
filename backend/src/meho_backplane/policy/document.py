@@ -20,6 +20,13 @@ It holds:
   full path or its group attribute, gets one of the five group kinds and a
   set of categories (:mod:`meho_backplane.policy.bindings`). Only a
   tenant's file holds bindings.
+* ``limits``: in the install's file only, how far a tenant's policy may go
+  (:mod:`meho_backplane.policy.limits`). It needs the ``CUSTOM_POLICY``
+  switch.
+
+Four more keys are kept for parts that later versions add: ``agents``,
+``approvers``, ``role_bindings`` and ``risk_levels``. A file with one of
+them is refused with "not in this version".
 
 The parser uses the strict YAML loader of the settings file
 (:mod:`meho_backplane.instance_settings.schema`): a repeated key, a YAML
@@ -55,6 +62,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     render_path,
 )
+from meho_backplane.policy.limits import PolicyLimits
 from meho_backplane.policy.store import _check_labels
 
 __all__ = [
@@ -64,6 +72,7 @@ __all__ = [
     "GROUP_KINDS",
     "MAX_POLICY_BYTES",
     "POLICY_VERSION",
+    "RESERVED_KEYS",
     "ParsedPolicy",
     "PolicyFile",
     "binding_dict",
@@ -113,6 +122,9 @@ BINDING_PRINCIPALS: Final[tuple[str, ...]] = ("person", "agent", "service", "run
 
 #: The one ``categories`` value of a binding that means every category.
 ALL_CATEGORIES: Final[str] = "*"
+
+#: Top-level keys kept for parts that later versions add; a file with one is refused.
+RESERVED_KEYS: Final[tuple[str, ...]] = ("agents", "approvers", "role_bindings", "risk_levels")
 
 
 class _Strict(BaseModel):
@@ -294,6 +306,16 @@ class PolicyFile(_Strict):
     classifications: list[PolicyClassification] = Field(default_factory=list, max_length=2000)
     routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
     bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
+    limits: PolicyLimits | None = None
+    agents: Any = None
+    approvers: Any = None
+    role_bindings: Any = None
+    risk_levels: Any = None
+
+    @field_validator(*RESERVED_KEYS, mode="before")
+    @classmethod
+    def _not_in_this_version(cls, value: Any) -> Any:
+        raise ValueError("is not in this version of MEHO; remove it")
 
 
 @dataclass
@@ -413,6 +435,9 @@ def document_of(model: PolicyFile) -> dict[str, Any]:
         ]
     if model.bindings:
         document["bindings"] = [binding_dict(b) for b in model.bindings]
+    limits = model.limits.model_dump(exclude_none=True) if model.limits is not None else {}
+    if limits:
+        document["limits"] = limits
     return document
 
 

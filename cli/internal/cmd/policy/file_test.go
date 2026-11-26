@@ -126,6 +126,7 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 		`"routing":{"added":[{"entry":{"match":{"category":"network"},"approvers":["Admins"]}}],`+
 		`"changed":[],"removed":[]},`+
 		`"bindings":{"added":[],"changed":[],"removed":[{"entry":{"kind":"Operators"}}]},`+
+		`"limits":{"added":[],"changed":[{"key":"personal_agent_up_to","before":"safe","after":"caution"}],"removed":[]},`+
 		`"operations_changed":2}}`, &got)
 	stdout, stderr, err := run(t, "diff", writeFile(t), "--scope", "install", "--backplane", srv.URL)
 	if err != nil {
@@ -140,6 +141,7 @@ func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 		"+ classifications: changes=2 entry={\"match\":{\"op\":\"k8s.*\"}} matches=3",
 		"+ routing: entry={\"approvers\":[\"Admins\"],\"match\":{\"category\":\"network\"}}",
 		"- bindings: entry={\"kind\":\"Operators\"}",
+		"~ limits: after=caution before=safe key=personal_agent_up_to",
 		"Operations whose values change: 2",
 	} {
 		if !strings.Contains(stdout, want) {

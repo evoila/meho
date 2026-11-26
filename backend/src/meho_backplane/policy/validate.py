@@ -28,7 +28,9 @@ is refused by
 :func:`meho_backplane.policy.routing_floor.tenant_floor_mistakes`. The ``bindings`` are checked by
 :func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
 install's file, no runner, no agent or service with a kind that may
-approve, and no unknown category.
+approve, and no unknown category. The ``limits`` part is checked by
+:func:`~meho_backplane.policy.limits.limits_mistakes`: only in the install's
+file, and only with the ``CUSTOM_POLICY`` switch on.
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ from meho_backplane.policy.classification import (
     taxonomy_from_documents,
 )
 from meho_backplane.policy.document import read_kind
+from meho_backplane.policy.limits import limits_mistakes
 from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 from meho_backplane.policy.routing_floor import tenant_floor_mistakes
 
@@ -285,6 +288,7 @@ def check_document(
     install_document: dict[str, Any] | None,
     ops: Sequence[KnownOp],
     other_entries: Sequence[ClassificationEntry] = (),
+    custom_policy: bool = False,
 ) -> list[str]:
     """Return the mistakes of *document*, a valid file's stored form.
 
@@ -292,7 +296,8 @@ def check_document(
     its taxonomy is the base, its "always wait" entries and risk levels
     cannot be set back, and its entries take part in the conflict check).
     *other_entries* are more entries that apply next to the file (the
-    category and labels set on one operation).
+    category and labels set on one operation). *custom_policy* says whether
+    the ``CUSTOM_POLICY`` switch is on.
     """
     taxonomy = (
         taxonomy_from_documents(document, None)
@@ -306,6 +311,7 @@ def check_document(
     if scope == "tenant":
         mistakes.extend(tenant_floor_mistakes(document, install_document))
     mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
+    mistakes.extend(limits_mistakes(document, scope=scope, custom_policy=custom_policy))
     if mistakes:
         return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)

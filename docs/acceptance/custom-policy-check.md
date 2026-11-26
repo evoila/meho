@@ -246,4 +246,4 @@ was checked by a run is in the pull request of the script.
   is withdrawn), and a request from before the run that is never
   withdrawn.
 
-The CI workflow `linux-server-test.yml` runs both.
+The CI workflow `linux-server-test.yml` runs both, in its job "Run the tests of the custom policy check script".

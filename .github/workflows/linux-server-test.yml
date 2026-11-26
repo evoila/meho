@@ -140,18 +140,8 @@ jobs:
           printf 'checking %s\n' "${scripts[@]}"
           shellcheck "${scripts[@]}"
 
-      - name: Check the custom policy check script, and run its test
-        # The tests run the script in its dry mode against recorded answers,
-        # and live against stand-in curl and meho programs. The script needs
-        # jq. The tests skip without it, so install it first.
-        run: |
-          set -euo pipefail
-          shellcheck scripts/acceptance/custom-policy-check.sh
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq
-          fi
-          python -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py' -v
+      - name: Run shellcheck on the custom policy check script
+        run: shellcheck scripts/acceptance/custom-policy-check.sh
 
       - name: Check that the test fixture is the upstream local-path manifest
         run: |
@@ -251,3 +241,30 @@ jobs:
         env:
           MEHO_REQUIRE_APT_CHECK: '1'
         run: python -m unittest discover -s deploy/appliance/tests -v
+
+  custom-policy-check:
+    name: Run the tests of the custom policy check script
+    # A job of its own: the tests start the script about a hundred times and
+    # take several minutes. Same runner choice as the job above.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Run the tests
+        # The tests run the script in its dry mode against recorded answers,
+        # and live against stand-in curl and meho programs. The script needs
+        # jq. The tests skip without it, so install it first.
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq
+          fi
+          python -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py' -v

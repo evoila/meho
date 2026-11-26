@@ -422,7 +422,7 @@ spec:
         # means any change to what the pod consumes — config.*, memory.*,
         # topology.*, or the derived MCP/backplane values — forces a rollout,
         # while an unchanged render leaves the checksum stable (no churn).
-        checksum/config: 8d8d2e34fb070c3a04b08f3eed1940e4ef14649c00d7327f0bfc06a5e5ffb805
+        checksum/config: 7bfbb618d69891545c31b9821a63f5ccf95549d066d7335a9713caab5f8c2855
         # Roll the pod when the chart-made metrics token changes, so the
         # token the pod checks is the one the Secret holds. On a cluster
         # `lookup` keeps the value and the checksum stays stable.
@@ -667,7 +667,7 @@ data:
   # in the Deployment template.
   KEYCLOAK_ISSUER_URL: "https://keycloak.test/realms/meho"
   KEYCLOAK_AUDIENCE: "meho-backplane"
-  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id surfaced
+  # Public OAuth client_id surfaced
   # to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`.
   # Unconditionally emitted so the env-var contract stays stable
   # across deploys; when the operator hasn't wired the value the
@@ -748,8 +748,7 @@ data:
   # under it via `extraVolumes`, or repoint `config.kbIngestRoot` to
   # wherever the content lives.
   KB_INGEST_ROOT: "/opt/meho/kb-ingest"
-  # Issue #730 (Signal #3, RDC dogfood 2026-05-20). Restricts the
-  # connecting peers uvicorn trusts as upstream proxies when parsing
+  # Restricts the connecting peers uvicorn trusts as upstream proxies when parsing
   # `X-Forwarded-Proto` / `X-Forwarded-For`. uvicorn reads
   # `FORWARDED_ALLOW_IPS` natively — equivalent to the
   # `--forwarded-allow-ips` CLI flag (omitted from the Dockerfile CMD

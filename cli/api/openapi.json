@@ -27294,7 +27294,7 @@
           "ui-settings"
         ],
         "summary": "Ui Settings",
-        "description": "``GET /ui/settings``: the upload form.",
+        "description": "``GET /ui/settings``: the upload form.\n\nA person without the admin role gets a console page that says so (403),\nnot JSON. The preview and the apply answer such a person with JSON, as\nthey are not pages.",
         "operationId": "ui_settings_ui_settings_get",
         "responses": {
           "200": {

@@ -807,6 +807,11 @@ For three classes, the kit also promises some of their insides:
 `Target` (its six fields). The list is `_PROMISED_PARTS` in the kit module.
 For every other class the kit promises only the name.
 
+The kit also offers the file source check: `FileSource`,
+`file_sources_from_map`, `file_sources_from_hosts`, `resolve_file_source`,
+`file_source_transport` and `FileSourceError`. A package that moves a file uses them instead of
+its own list of allowed addresses. See [file-sources.md](file-sources.md).
+
 ### How a kit change is noticed
 
 1. **The list file.** `backend/connector-kit/kit-names.json` lists every

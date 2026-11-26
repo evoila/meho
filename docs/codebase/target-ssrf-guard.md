@@ -227,6 +227,16 @@ impact — action likely required") and
 `deploy/values-examples/values-rdc-example.yaml` for a populated
 private-range example.
 
+## Named file sources
+
+Named file sources use a stricter screen of their own, in
+`connectors/_shared/file_sources.py`. It uses the same address classes, but
+the allowlist does not count for it, a host name is always resolved and
+every answer is checked, and a name that does not resolve is refused.
+Private addresses pass only for a source that says
+`private_network_allowed`. `screen_and_resolve` and every caller of this
+module are unchanged. See [file-sources.md](file-sources.md).
+
 ## References
 
 - Socket-boundary pinning: binds the SSRF destination check to the

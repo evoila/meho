@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.5",
+  "kit_version": "1.6",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -29,6 +29,12 @@
     "FILE_REF_PARAMS_SWITCH": {
       "kind": "value",
       "type": "str"
+    },
+    "FileSource": {
+      "kind": "class"
+    },
+    "FileSourceError": {
+      "kind": "class"
     },
     "FingerprintResult": {
       "kind": "class"
@@ -194,6 +200,33 @@
       "kind": "function",
       "returns": "None"
     },
+    "file_source_transport": {
+      "inputs": [
+        "source: FileSource",
+        "*",
+        "verify: ssl.SSLContext | str | bool = True"
+      ],
+      "kind": "function",
+      "returns": "httpx.AsyncHTTPTransport"
+    },
+    "file_sources_from_hosts": {
+      "inputs": [
+        "entries: Sequence[str]",
+        "*",
+        "private_network_allowed: bool = False"
+      ],
+      "kind": "function",
+      "returns": "list[FileSource]"
+    },
+    "file_sources_from_map": {
+      "inputs": [
+        "mapping: Mapping[str, str]",
+        "*",
+        "private_network_allowed: bool = False"
+      ],
+      "kind": "function",
+      "returns": "list[FileSource]"
+    },
     "is_acceptable_auth_model": {
       "inputs": [
         "value: Any"
@@ -303,6 +336,14 @@
       ],
       "kind": "function",
       "returns": "None"
+    },
+    "resolve_file_source": {
+      "inputs": [
+        "url: str",
+        "sources: Sequence[FileSource]"
+      ],
+      "kind": "function",
+      "returns": "FileSource"
     },
     "strip_credential_value": {
       "inputs": [

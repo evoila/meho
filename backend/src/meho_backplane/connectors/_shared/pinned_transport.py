@@ -64,6 +64,7 @@ __all__ = [
     "build_pinned_async_transport",
     "build_pinned_sync_transport",
     "build_port_pinned_async_transport",
+    "pin_async_transport_ports",
 ]
 
 #: A destination screen for the pinning backend. Given the host httpcore
@@ -260,9 +261,16 @@ def build_port_pinned_async_transport(
     depends on the port uses the same port as the connection.
     """
     transport = httpx.AsyncHTTPTransport(verify=verify)
+    pin_async_transport_ports(transport, resolver)
+    return transport
+
+
+def pin_async_transport_ports(
+    transport: httpx.AsyncHTTPTransport, resolver: PortPinnedResolver
+) -> None:
+    """Make *transport* (or an instance of a subclass) dial only what *resolver* returns."""
     pool = transport._pool
     pool._network_backend = _PortPinnedAsyncBackend(resolver, pool._network_backend)
-    return transport
 
 
 def build_pinned_sync_transport(

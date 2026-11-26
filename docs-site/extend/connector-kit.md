@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.5**.
+The kit version this page describes: **1.6**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -111,6 +111,12 @@ part that starts with an underscore is private by its name too.
 | Approvals | `PermissionPreflight` | The type of a check that runs while a change waits: may the caller make it? |
 | Approvals | `register_permission_preflight` | Register such a check for one operation. |
 | Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
+| Files | `FileSource` | A named place a file may come from: a name, a base address, and whether private network addresses are allowed for it. |
+| Files | `file_sources_from_map` | Read a map of source name to base address into file sources. |
+| Files | `file_sources_from_hosts` | Read a list of `host` or `host:port` entries into file sources, each as `https://host:port/`. |
+| Files | `resolve_file_source` | Check a file address before any connection. It returns the source the address lies under, or raises `FileSourceError`. |
+| Files | `file_source_transport` | An httpx transport for one file source. It checks every request, also a redirect: the scheme, host and port must be the source's, and the path must be under the source's path. It connects only to the host and port of the source, and only to addresses the address guard checked. A refused connection raises `FileSourceError`. |
+| Files | `FileSourceError` | A file address or connection was refused. Its `rule` says which rule failed. It never holds the address. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
 Inside three classes, the kit also promises some parts:
@@ -168,7 +174,9 @@ More to read:
 - secrets:
   [connectors-shared-vault-creds.md](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-shared-vault-creds.md);
 - error texts:
-  [error-message-shape.md](https://github.com/evoila/meho/blob/main/docs/codebase/error-message-shape.md).
+  [error-message-shape.md](https://github.com/evoila/meho/blob/main/docs/codebase/error-message-shape.md);
+- file sources:
+  [file-sources.md](https://github.com/evoila/meho/blob/main/docs/codebase/file-sources.md).
 
 ## 5. Add operations
 

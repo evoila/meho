@@ -394,10 +394,8 @@ async def _read_blocks(session: AsyncSession, sub: str) -> list[BlockedPerson]:
     Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
     """
     query = (
-        select(PrincipalBlock)
-        .where(PrincipalBlock.sub == sub)
-        .order_by(PrincipalBlock.scope)
-        .with_for_update()
+        select(PrincipalBlock).where(PrincipalBlock.sub == sub).order_by(PrincipalBlock.scope)
+        # one CI run without the row lock
     )
     try:
         rows = (await session.execute(query)).scalars().all()

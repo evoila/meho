@@ -15,7 +15,8 @@ and [connector-packages.md](../codebase/connector-packages.md) (the start-up che
   Every other MEHO module is private. It can change in any release, without notice.
   The kit ships only with MEHO's own release files and image, never on a public package index.
 - The kit has **its own version number**, starting at 1.0. The first number goes up
-  when a change can break a package. The second number goes up when a name is added.
+  when a change can break a package. The second number goes up when a name is added,
+  or when a function gets a new input that is given by name and has a default.
 - A connector package says which kit versions it fits, in the normal Python way:
   `dependencies = ["meho-connector-kit>=1.0,<2"]`. The overlay build (the build that adds
   connector packages to the public MEHO image) refuses a package that does not fit. MEHO
@@ -148,11 +149,22 @@ How a change to the kit is noticed:
    The test also fails when one of MEHO's two kinds of target loses a field of `Target`.
 3. **The command.** `backend/scripts/write_connector_kit_names.py` writes the file again and
    raises the kit version:
-   - the first number, when a name is removed or its inputs change;
+   - the first number, when a name is removed, or when its inputs change in a way that can break
+     a package that was built against the older kit;
    - the second number, when names are only added.
 
    It writes the same version into `backend/connector-kit/pyproject.toml`. The test checks that
    both versions are the same.
+
+   Added by the owner on 26 November 2026:
+
+   - A new input that is given by name and has a default does not break such a package. It needs
+     only the second number. A package built against the older kit keeps working with no rebuild.
+   - Three cases still need the first number, even with a default, because they can break a
+     package:
+     - a new input that is not given by name, because it can shift the place of the others;
+     - a new input with no default;
+     - a change of the default or the meaning of an input that exists.
 4. **The pull request** shows the changed list file, so a person sees the kit change before the
    merge. The kit owner must approve it, through the code owners file (decision 3).
 5. **The release.** A small script in `scripts/release/` compares the list file at the last release

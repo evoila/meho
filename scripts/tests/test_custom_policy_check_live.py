@@ -39,7 +39,7 @@ MAKERS = {
     "req-5": "CPC_SERVICE_TOKEN", "req-harmless": "CPC_PERSON_TOKEN",
     "req-c6-cred-read": "CPC_AGENT_TOKEN", "req-c6-cred-write": "CPC_PERSON_TOKEN",
     "req-c6-rights": "CPC_PERSON_TOKEN", "req-c6-policy": "CPC_PERSON_TOKEN",
-    "req-c6-destructive": "CPC_SERVICE_TOKEN", "req-c6-delete-person": "CPC_PERSON_TOKEN",
+    "req-c6-destructive": "CPC_SERVICE_TOKEN", "req-c6-root": "CPC_SERVICE_TOKEN", "req-c6-delete-person": "CPC_PERSON_TOKEN",
     "req-c6-delete-agent": "CPC_AGENT_TOKEN", "req-c6-delete-service": "CPC_SERVICE_TOKEN",
     "req-c6-delete-lowered": "CPC_PERSON_TOKEN", "req-c6-address": "CPC_PERSON_TOKEN",
     "req-c10-web": "CPC_PERSON_TOKEN", "req-c10-cli": "CPC_PERSON_TOKEN",
@@ -90,7 +90,7 @@ class FullLiveRunTest(LiveTestCase):
         self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
         self.assertNotIn("[FAIL]", result.stdout)
         self.assertNotIn("[left]", result.stdout)
-        self.assertIn("passed, 0 failed, 5 not run, 0 not taken back", result.stdout)
+        self.assertIn("passed, 0 failed, 4 not run, 0 not taken back", result.stdout)
 
     def test_every_call_goes_to_the_checked_install(self) -> None:
         self.assertTrue(self.full_calls)
@@ -172,8 +172,16 @@ class NoTerminalTest(LiveTestCase):
     def test_with_no_terminal_no_delete_is_sent_and_the_run_is_not_complete(self) -> None:
         result = self.live.run(good_answers())
         self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
-        steps = self.steps(self.live.calls())
-        self.assertFalse([s for s in steps if s.startswith("c6-delete")], steps)
+        calls = self.live.calls()
+        guarded = [
+            OPS[name].split()[1]
+            for name in ("CPC_OP_DESTRUCTIVE", "CPC_OP_ROOT_SHELL", "CPC_OP_DELETE")
+        ]
+        for entry in calls:
+            for op_id in guarded:
+                self.assertNotIn(f'"{op_id}"', entry.get("body") or "", entry["step"])
+        self.assertNotIn("Take back.", result.stdout)
+        self.assertNotIn("[left]", result.stdout)
         lines = result_lines(result.stdout)
         self.assertNotIn("[FAIL]", result.stdout)
         for line in (
@@ -183,7 +191,7 @@ class NoTerminalTest(LiveTestCase):
             "[skip] check 6 delete (a service login with a delete grant, a service agent, REST): "
             "not run: waits for the person step 6",
             "[skip] check 10 (the Operator, a person, web console): needs a person",
-            "[skip] check 10 (command line approve): needs a person",
+            "[skip] check 10 (the Operator, a person, command line): needs a person",
             "[skip] check 7 (every probe, REST policy explain): not run: waits for the person step 7",
         ):
             self.assertIn(line, lines)
@@ -201,6 +209,38 @@ class NoTerminalTest(LiveTestCase):
             if (c.get("url") or "").endswith("/withdraw")
         }
         self.assertTrue({"req-3", "req-c6-cred-read", "req-c6-cred-write"} <= withdrawn, withdrawn)
+
+    def test_a_stopped_call_is_found_in_the_queue_and_withdrawn(self) -> None:
+        answers = good_answers()
+        answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {
+                    "id": "req-cut",
+                    "principal_sub": "operator-1",
+                    "created_at": "2999-01-01T00:00:00Z",
+                }
+            ],
+        }
+        answers["withdraw-req-cut-status"] = {"code": 200, "body": {"status": "pending"}}
+        answers["withdraw-req-cut"] = {"code": 200, "body": {"status": "withdrawn"}}
+        result = self.live.run(answers, CPC_STUB_STOP_AT="c6-rights")
+        self.assertEqual(result.returncode, STOPPED, result.stdout + result.stderr)
+        cut = [c for c in self.live.calls() if (c.get("url") or "").endswith("/req-cut/withdraw")]
+        self.assertEqual(len(cut), 1)
+        self.assertEqual(cut[0]["auth"], token_hash(self.live.tokens["CPC_PERSON_TOKEN"]))
+
+    def test_a_reused_request_is_never_withdrawn(self) -> None:
+        answers = good_answers()
+        answers["c2-call"]["body"]["extras"] = {
+            "approval_request_id": "req-old",
+            "approval_request_reused": True,
+        }
+        answers["withdraw-req-old-status"] = {"code": 200, "body": {"status": "pending"}}
+        result = self.live.run(answers)
+        self.assertIn("MEHO gave back request req-old", result.stdout)
+        urls = [c.get("url") or "" for c in self.live.calls()]
+        self.assertFalse([u for u in urls if "req-old" in u], urls)
 
     def test_bash_x_stops_before_any_token_is_printed(self) -> None:
         result = self.live.run(good_answers(), bash_args=("-x",))

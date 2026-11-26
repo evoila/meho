@@ -21,15 +21,21 @@ from typing import Any
 
 from custom_policy_check_fixture import (
     ALWAYS_SKIPPED,
+    FAR_FUTURE,
     OPS,
+    PARAMS,
     PROBE_KEYS,
     SCRIPT,
+    SENSOR_ID,
     audit_id,
     base_env,
     baseline_text,
     call,
+    edit_row,
+    explained,
     good_answers,
     post_row,
+    preview,
     ready,
     request,
     result_lines,
@@ -58,6 +64,8 @@ class DryRunTestCase(unittest.TestCase):
             self.baseline.write_text(baseline_text())
         env = base_env()
         env.update(OPS)
+        env.update(PARAMS)
+        env["CPC_SENSOR_ID"] = SENSOR_ID
         env["CPC_CUSTOM_ROLE"] = "Approvers-VMW"
         return subprocess.run(
             ["bash", str(SCRIPT), "--dry-run", str(self.dir), *args],
@@ -95,8 +103,8 @@ class FullRunTest(DryRunTestCase):
         self.assertEqual(self.fails(result), [])
         for line in lines:
             if line.startswith("[ok]") and "risk level" not in line:
-                self.assertRegex(line, r"(audit|click) rows? [0-9a-f-]{36}", line)
-        self.assertIn("passed, 0 failed, 5 not run, 0 not taken back", result.stdout)
+                self.assertRegex(line, r"rows? [0-9a-f-]{36}", line)
+        self.assertIn("passed, 0 failed, 4 not run, 0 not taken back", result.stdout)
 
     def test_runs_the_checks_in_order_and_ends_with_the_switch_off(self) -> None:
         result = self.run_script()
@@ -172,7 +180,7 @@ class StartTest(DryRunTestCase):
 
 
 class SwitchTest(DryRunTestCase):
-    """Point 5: the switch is read at the start, for the baseline, and in check 7."""
+    """The switch is read at the start, for the baseline, and in check 7."""
 
     STATES: tuple[tuple[str, bool | None], ...] = (("on", True), ("off", False), ("unknown", None))
 
@@ -252,13 +260,95 @@ class BaselineTest(DryRunTestCase):
         self.assertEqual(out.read_text(), "the earlier baseline\n")
 
 
+class SwitchOffBaselineTest(DryRunTestCase):
+    """With the switch off, MEHO has no policy import operation to explain."""
+
+    def unknown(self) -> dict[str, Any]:
+        return {
+            "code": 200,
+            "body": {
+                "status": "error",
+                "error": "unknown_connector: policy",
+                "extras": {"error_code": "unknown_connector"},
+            },
+        }
+
+    def policy_probes(self) -> list[int]:
+        return [i + 1 for i, key in enumerate(PROBE_KEYS) if "POLICY_CHANGE" in key]
+
+    def test_the_policy_import_probes_save_unknown_connector(self) -> None:
+        self.answers["ready"] = ready(False)
+        for i in self.policy_probes():
+            self.answers[f"baseline-{i}"] = self.unknown()
+        out = self.dir / "new-baseline.tsv"
+        result = self.run_script("--record-baseline", str(out))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = out.read_text().splitlines()
+        self.assertEqual(len(lines), len(PROBE_KEYS))
+        for i in self.policy_probes():
+            self.assertEqual(lines[i - 1].split("\t")[1], "unknown_connector")
+
+    def test_check_7_expects_unknown_connector_again(self) -> None:
+        text = self.baseline_with_unknown()
+        self.baseline.write_text(text)
+        for i in self.policy_probes():
+            self.answers[f"c7-{i}"] = self.unknown()
+        self.assertEqual(self.fails(self.run_script()), [])
+        self.answers[f"c7-{self.policy_probes()[0]}"] = {
+            "code": 200,
+            "body": {"status": "ok", "answer": "wait"},
+        }
+        self.assert_one_fail(self.run_script(), "check 7 (as check 6: AGENT_TOKEN POLICY_CHANGE")
+
+    def test_another_error_still_fails(self) -> None:
+        self.answers["ready"] = ready(False)
+        other = self.unknown()
+        other["body"]["extras"]["error_code"] = "unknown_operation"
+        self.answers["baseline-1"] = other
+        self.answers[f"baseline-{self.policy_probes()[0]}"] = self.unknown()
+        result = self.run_script("--record-baseline", str(self.dir / "x.tsv"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("[FAIL] baseline (as check 1", result.stdout)
+
+    def baseline_with_unknown(self) -> str:
+        lines = baseline_text().splitlines(keepends=True)
+        for i in self.policy_probes():
+            key, _, _, verdict = lines[i - 1].rstrip("\n").split("\t")
+            lines[i - 1] = f"{key}\tunknown_connector\tnull\t{verdict}\n"
+        return "".join(lines)
+
+
 class Check7Test(DryRunTestCase):
     def test_check_7_fails_when_an_answer_changed(self) -> None:
-        self.answers["c7-13"] = {"code": 200, "body": {"status": "ok", "answer": "run"}}
+        self.answers["c7-14"] = {"code": 200, "body": {"status": "ok", "answer": "run"}}
         self.assert_one_fail(
             self.run_script(),
             "check 7 (as check 6: PERSON_TOKEN DELETE, token",
-            "run, before wait",
+            "expected the answer of before",
+        )
+
+    def test_check_7_fails_when_only_who_may_approve_changed(self) -> None:
+        self.answers["c7-14"] = {
+            "code": 200,
+            "body": {"status": "ok", "answer": "wait", "approvers": {"groups": ["Operators"]}},
+        }
+        line = self.assert_one_fail(
+            self.run_script(),
+            "check 7 (as check 6: PERSON_TOKEN DELETE, token",
+            "approvers of before",
+        )
+        self.assertNotIn("expected the answer of before", line)
+
+    def test_check_7_compares_the_preview_with_the_params(self) -> None:
+        step = f"c7-{PROBE_KEYS.index('6 PERSON_TOKEN CREDENTIAL_WRITE token') + 1}-preview"
+        self.answers[step] = {
+            "code": 200,
+            "body": {"status": "ok", "policy_verdict": "auto-execute"},
+        }
+        self.assert_one_fail(
+            self.run_script(),
+            "check 7 (as check 6: PERSON_TOKEN CREDENTIAL_WRITE",
+            "preview verdict",
         )
 
     def test_check_7_fails_when_explain_fails_now_and_before(self) -> None:
@@ -300,7 +390,7 @@ class Check7Test(DryRunTestCase):
 
 
 class AnswerForAnotherReasonTest(DryRunTestCase):
-    """Point 4: each check fails on no answer, or an answer for another reason."""
+    """Each check fails on no answer, or on an answer for another reason."""
 
     def test_refused_clicks_need_the_click_row_of_another_person(self) -> None:
         for step, check in (
@@ -313,11 +403,47 @@ class AnswerForAnotherReasonTest(DryRunTestCase):
                 self.assert_one_fail(self.run_script(), check, "expected the audit row of a click")
                 self.answers = good_answers()
                 req = "req-2" if step == "c2-operator" else "req-5"
+                sender = "operator-1" if step == "c2-operator" else "service-1"
                 self.answers[f"{step}-rows"] = rows(
-                    post_row(step, f"/ui/approvals/{req}/approve", "operator-1"),
+                    post_row(step, f"/ui/approvals/{req}/approve", sender),
                     {"id": audit_id("lookup"), "method": "GET", "path": f"/api/v1/approvals/{req}"},
                 )
                 self.assert_one_fail(self.run_script(), check, "by another person than the sender")
+
+    def test_a_refused_click_with_an_old_sign_in_fails(self) -> None:
+        """A 401 click row, or a sign-in redirect, is a refusal for another reason."""
+        for step, req, check in (
+            ("c2-operator", "req-2", "check 2 (a second Operator"),
+            ("c5-without", "req-5", "check 5 (a person without"),
+        ):
+            for code in (401, 303, 500):
+                with self.subTest(step=step, code=code):
+                    self.answers = good_answers()
+                    self.answers[f"{step}-rows"] = rows(
+                        post_row(step, f"/ui/approvals/{req}/approve", "operator-2", code)
+                    )
+                    self.assert_one_fail(
+                        self.run_script(),
+                        check,
+                        "a click failed for another reason",
+                        f"HTTP {code}",
+                    )
+
+    def test_a_refused_click_needs_the_refusal_of_its_rule(self) -> None:
+        for step, check in (("c2-operator", "check 2"), ("c5-without", "check 5")):
+            with self.subTest(step=step):
+                self.answers = good_answers()
+                self.answers[f"{step}-refusal"] = {"code": 0, "body": "n"}
+                self.assert_one_fail(self.run_script(), check, "expected the refusal")
+
+    def test_an_approval_by_another_person_needs_their_click(self) -> None:
+        self.answers["c2-admin-request"] = request("approved", "operator-1", "admin-9")
+        self.assert_one_fail(
+            self.run_script(), "check 2 (an Admin", "expected the audit row of the approver's click"
+        )
+        self.answers = good_answers()
+        self.answers["c10-web-request"] = request("approved", "operator-1", "admin-1")
+        self.assert_one_fail(self.run_script(), "check 10 (the Operator", "approval of the sender")
 
     def test_check_6_agent_approve_passes_only_on_403_human_principal_required(self) -> None:
         broken: dict[str, tuple[dict[str, Any], str]] = {
@@ -341,14 +467,9 @@ class AnswerForAnotherReasonTest(DryRunTestCase):
             self.run_script(), "check 6 agent approve", "expected the audit row of the attempt"
         )
 
-    def test_check_8_token_needs_the_mistake_of_the_write_floor(self) -> None:
-        raise_not_lower = (
-            "`classifications[0]` would set `k8s.annotate` to safe, below its level in the code "
-            "(caution). A file can raise a risk level, not lower it."
-        )
+    def test_check_8_token_fails_on_an_answer_that_is_not_a_refusal(self) -> None:
         broken = {
             "401": {"code": 401, "body": {"detail": "invalid_token"}},
-            "raise, not lower": {"code": 200, "body": {"ok": False, "mistakes": [raise_not_lower]}},
             "ok": {"code": 200, "body": {"ok": True, "mistakes": []}},
         }
         for name, answer in broken.items():
@@ -356,6 +477,55 @@ class AnswerForAnotherReasonTest(DryRunTestCase):
                 self.answers = good_answers()
                 self.answers["c8-token"] = answer
                 self.assert_one_fail(self.run_script(), "check 8 (an Admin's token, REST")
+
+    def test_check_8_token_fails_on_the_refusal_of_another_rule(self) -> None:
+        """MEHO says "at least caution" for a secret and a caller's address too."""
+        other_rules = {
+            "secret": "`classifications[0]` would make `k8s.annotate` safe or not waiting. "
+            "`k8s.annotate` shows a secret, so it stays at least caution and always waits.",
+            "address": "`classifications[0]`: `k8s.annotate` connects to an address the caller "
+            "gives, so it stays at least caution and always waits.",
+        }
+        for name, mistake in other_rules.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c8-token"] = {
+                    "code": 200,
+                    "body": {"ok": False, "mistakes": [mistake]},
+                }
+                self.assert_one_fail(
+                    self.run_script(), "check 8 (an Admin's token, REST", "another rule"
+                )
+
+    def test_check_8_token_does_not_run_while_the_write_rule_has_no_mistake(self) -> None:
+        result = self.run_script()
+        self.assertIn(
+            "[skip] check 8 (an Admin's token, REST, a policy file preview): "
+            "not run: waits for #6966",
+            result.stdout,
+        )
+        self.assertNotRegex(result.stdout, r"\[ok\]\s+check 8 \(an Admin's token")
+
+    def test_checks_8_and_9_count_only_the_edits_of_the_named_operation(self) -> None:
+        other_pages = rows(
+            post_row("c8-x", "/ui/approvals/req-2/approve", "admin-1", 400),
+            post_row("c8-y", "/ui/connectors/registry/k8s/operations/k8s.scale", "admin-1", 400),
+        )
+        cases = {
+            "c8-console-rows": (other_pages, "check 8 (an Admin, a person, web console)"),
+            "c9-rows": (rows(edit_row("c9-a", "k8s.scale"), edit_row("c9-b", "k8s.scale", removed=True)), "check 9"),
+        }  # fmt: skip
+        for step, (answer, check) in cases.items():
+            with self.subTest(step=step):
+                self.answers = good_answers()
+                self.answers[step] = answer
+                self.assert_one_fail(self.run_script(), check, "k8s.annotate")
+
+    def test_check_8_in_the_console_fails_when_the_edit_was_saved(self) -> None:
+        self.answers["c8-edits"] = rows(edit_row("c8-edit", "k8s.annotate"))
+        self.assert_one_fail(
+            self.run_script(), "check 8 (an Admin, a person, web console)", "expected no edit"
+        )
 
     def test_checks_8_and_9_in_the_console_need_their_audit_rows(self) -> None:
         for step, check in (
@@ -365,7 +535,7 @@ class AnswerForAnotherReasonTest(DryRunTestCase):
             with self.subTest(step=step):
                 self.answers = good_answers()
                 self.answers[step] = rows()
-                self.assert_one_fail(self.run_script(), check, "audit row")
+                self.assert_one_fail(self.run_script(), check, "row")
 
     def test_check_8_in_the_console_fails_when_the_write_became_safe(self) -> None:
         self.answers["c8-level"] = {"code": 200, "body": {"safety_level": "safe"}}
@@ -405,16 +575,45 @@ class AnswerForAnotherReasonTest(DryRunTestCase):
 
 
 class RiskLevelTest(DryRunTestCase):
-    """Codex findings 6 and 10: the risk level and the override of this run."""
+    """The risk level of a preview, and the override that this run made."""
 
-    def test_check_1_needs_the_override_of_this_run(self) -> None:
-        self.answers["c1-row"] = rows(row("c1", "override:ov-9", "person", "ok")["body"])
-        self.assert_one_fail(
-            self.run_script(), "check 1", "expected the rule of the override override:ov-1"
+    def override(
+        self, op: str = "k8s.scale", set_at: str = FAR_FUTURE, **extra: Any
+    ) -> dict[str, Any]:
+        entry = {
+            "connector_id": "k8s",
+            "op_id": op,
+            "safety_level": "caution",
+            "set_at": set_at,
+            "set_by_sub": "admin-1",
+        }
+        entry.update(extra)
+        return {"code": 200, "body": {"overrides": [entry]}}
+
+    def test_check_1_finds_the_override_by_its_own_fields(self) -> None:
+        """In the override list, rule_ref names a classification entry, not the override."""
+        for rule_ref in ("", "taxonomy.default", "classifications[3]"):
+            with self.subTest(rule_ref=rule_ref):
+                self.answers["c1-overrides"] = self.override(rule_ref=rule_ref)
+                self.assertRegex(self.run_script().stdout, r"\[ok\]\s+check 1 \(the Operator")
+
+    def test_check_1_fails_on_an_override_of_another_operation_or_from_before(self) -> None:
+        cases = {
+            "another operation": self.override(op="k8s.restart"),
+            "set before the step": self.override(set_at="2025-01-01T00:00:00Z"),
+            "set by another person": self.override(set_by_sub="admin-7"),
+        }
+        for name, answer in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c1-overrides"] = answer
+                self.assert_one_fail(self.run_script(), "check 1", "no override of this run")
+
+    def test_check_1_needs_a_rule_of_the_source_override(self) -> None:
+        self.answers["c1-row"] = rows(
+            row("c1", "default:person.web.caution", "person", "ok")["body"]
         )
-        self.answers = good_answers()
-        self.answers["c1-overrides"] = {"code": 200, "body": {"overrides": []}}
-        self.assert_one_fail(self.run_script(), "check 1", "no override of this run")
+        self.assert_one_fail(self.run_script(), "check 1", "expected a rule of the source override")
 
     def test_check_2_reads_the_level_dangerous_first(self) -> None:
         self.answers["c2-level"] = {"code": 200, "body": {"safety_level": "caution"}}
@@ -422,34 +621,111 @@ class RiskLevelTest(DryRunTestCase):
             self.run_script(), "check 2 (an Operator's token, REST preview): risk level caution"
         )
 
-    def test_check_6_fails_when_the_lowering_did_not_change_the_level(self) -> None:
-        self.answers["c6-delete-lowered-preview"] = {
-            "code": 200,
-            "body": {"preview_hash": "h", "safety_level": "destructive"},
-        }
-        self.assert_one_fail(
-            self.run_script(), "check 6 delete after a lowering", "expected a lower risk level"
-        )
+    def test_check_6_the_lowering_passes_only_one_level_lower(self) -> None:
+        for level in ("destructive", "dangerous", "safe", ""):
+            with self.subTest(level=level):
+                self.answers = good_answers()
+                self.answers["c6-delete-person-preview"] = preview(
+                    "dangerous", "h-c6-delete-person"
+                )
+                self.answers["c6-delete-lowered-preview"] = {
+                    "code": 200,
+                    "body": {"preview_hash": "h", "safety_level": level},
+                }
+                self.assert_one_fail(
+                    self.run_script(), "check 6 delete after a lowering", "one risk level lower"
+                )
 
-    def test_the_root_command_waits_for_its_rule_and_never_counts(self) -> None:
+    def test_a_failed_preview_sends_no_call(self) -> None:
+        for answer in (
+            {"code": 500, "body": {"detail": "boom"}},
+            {"code": 200, "body": {"status": "ok", "safety_level": "destructive"}},
+        ):
+            with self.subTest(answer=answer):
+                self.answers = good_answers()
+                self.answers["c3-call-preview"] = answer
+                line = self.assert_one_fail(self.run_script(), "check 3 (", "no call sent")
+                self.assertIn("the preview failed", line)
+
+    def test_the_root_command_waits_by_its_own_rule(self) -> None:
+        self.assertRegex(
+            self.run_script().stdout,
+            r"\[ok\]\s+check 6 root command \(a service login without a grant.*"
+            r"rule default:service.root_shell",
+        )
+        for rule in ("default:service.caution_write", "floor:destructive_waits"):
+            with self.subTest(rule=rule):
+                self.answers["c6-root-row"] = row("c6-root", rule, "service_agent")
+                self.assert_one_fail(
+                    self.run_script(),
+                    "check 6 root command",
+                    "expected rule default:service.root_shell",
+                )
+
+
+class ReusedRequestTest(DryRunTestCase):
+    """A request that MEHO gives back from before the run is never this run's."""
+
+    def test_a_reused_request_fails_and_nobody_is_asked_to_approve_it(self) -> None:
+        self.answers["c2-call"] = call("c2", "awaiting_approval", request="req-old", reused=True)
         result = self.run_script()
+        fails = self.fails(result)
+        self.assertEqual(len(fails), 1, fails)
+        self.assertIn("MEHO gave back request req-old, which waited before this run", fails[0])
+        self.assertNotIn(
+            "req-old", "".join(line for line in result.stdout.splitlines() if "[person]" in line)
+        )
         self.assertIn(
-            "[skip] check 6 root command (a service login, a service agent, REST): "
-            "not run: waits for #7051",
+            "[skip] check 2 (a second Operator, a person, web console): not run: no request of this run",
             result.stdout,
         )
-        self.assertNotRegex(result.stdout, r"\[ok\]\s+check 6 root command")
-        self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_the_agent_never_tries_to_approve_a_reused_request(self) -> None:
+        self.answers["c6-harmless"] = call(
+            "c6-harmless", "awaiting_approval", request="req-old", reused=True
+        )
+        self.assert_one_fail(self.run_script(), "check 6 agent approve", "not tried", "req-old")
+
+
+class Check10CommandLineTest(DryRunTestCase):
+    """The command line refuses to approve the person's own agent's request."""
+
+    def test_passes_on_the_403_row_and_the_refusal(self) -> None:
+        self.assertRegex(
+            self.run_script().stdout,
+            r"\[ok\]\s+check 10 \(the Operator, a person, command line\): request req-c10-cli is pending",
+        )
+
+    def test_fails_when_the_command_line_approved_or_refused_for_another_reason(self) -> None:
+        cases = {
+            "approved": ("c10-cli-request", request("approved", "operator-1", "operator-1")),
+            "no 403 row": ("c10-cli-rows", rows(post_row("x", "/api/v1/approvals/req-c10-cli/approve", "operator-1", 200))),
+            "another refusal": ("p10-cli-refusal", {"code": 0, "body": "n"}),
+        }  # fmt: skip
+        for name, (step, answer) in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers[step] = answer
+                self.assert_one_fail(
+                    self.run_script(), "check 10 (the Operator, a person, command line)"
+                )
+
+    def test_needs_a_person(self) -> None:
+        del self.answers["p10-cli"]
+        result = self.run_script()
+        self.assertIn(
+            "[skip] check 10 (the Operator, a person, command line): needs a person", result.stdout
+        )
 
 
 class Check11Test(DryRunTestCase):
-    """Point 10: check 11 covers the logins of MEHO's own code by their caller kind."""
+    """Check 11 covers the logins of MEHO's own code by their caller kind."""
 
-    def sensor_row(self, kind: str | None) -> dict[str, Any]:
+    def sensor_row(self, kind: str | None, ts: str = "2026-01-01T00:00:06Z") -> dict[str, Any]:
         body = row("c11", "default:system", kind or "", "ok")["body"]
         if kind is None:
             del body["caller_kind"]
-        body.update(target_name="web-a", principal_sub="__sensor__")
+        body.update(target_name="web-a", principal_sub="__sensor__", ts=ts)
         return rows(body)
 
     def test_waits_for_the_caller_kind_on_the_audit_row(self) -> None:
@@ -471,6 +747,15 @@ class Check11Test(DryRunTestCase):
         other["body"]["rows"][0]["target_name"] = "web-b"
         self.answers["c11-row"] = other
         self.assert_one_fail(self.run_script(), "check 11 (the check runner", "no audit row")
+
+    def test_a_row_of_an_earlier_run_does_not_count(self) -> None:
+        self.answers["c11-row"] = self.sensor_row("system", ts="2026-01-01T00:00:04Z")
+        self.assert_one_fail(self.run_script(), "check 11 (the check runner", "no audit row")
+
+    def test_reads_the_sensor_from_the_list_and_fails_at_once_without_it(self) -> None:
+        self.answers["c11-sensors"]["body"]["items"].pop()
+        result = self.run_script()
+        self.assert_one_fail(result, "check 11 (the check runner", "could not read the sensor")
 
     def test_the_web_console_reader_needs_the_kind_person(self) -> None:
         self.assertIn("[ok]   check 11 (the web console reader", self.run_script().stdout)
@@ -502,11 +787,11 @@ class PersonStepTest(DryRunTestCase):
         self.answers["p6-delete"] = {"code": 0, "body": "n"}
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
-        self.assertEqual(result.stdout.count("not run: waits for the person step 6"), 5)
-        self.assertNotRegex(result.stdout, r"\[(ok|FAIL)\]\s+check 6 delete")
+        self.assertEqual(result.stdout.count("not run: waits for the person step 6"), 7)
+        self.assertNotRegex(result.stdout, r"\[(ok|FAIL)\]\s+check 6 (delete|destructive|root)")
 
     def test_the_console_approvals_need_a_person(self) -> None:
-        for step in ("p2-admin", "p5-with", "p10-web"):
+        for step in ("p2-admin", "p5-with", "p10-web", "p10-cli"):
             del self.answers[step]
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
@@ -514,26 +799,99 @@ class PersonStepTest(DryRunTestCase):
             "[skip] check 2 (an Admin, a person, web console): needs a person",
             "[skip] check 5 (a person with the custom role, web console): needs a person",
             "[skip] check 10 (the Operator, a person, web console): needs a person",
-            "[skip] check 10 (command line approve): needs a person",
+            "[skip] check 10 (the Operator, a person, command line): needs a person",
         ):
             self.assertIn(line, result.stdout)
+
+
+class TakeBackTest(DryRunTestCase):
+    """The run takes back only what it made, and names what it could not."""
+
+    def left_lines(self, result: subprocess.CompletedProcess[str]) -> list[str]:
+        return [line for line in result.stdout.splitlines() if line.startswith("[left]")]
 
     def test_what_could_not_be_taken_back_is_named(self) -> None:
         self.answers["withdraw-req-3"] = {"code": 403, "body": {"detail": "not_request_sender"}}
         self.answers["takeback-overrides"] = self.answers["c1-overrides"]
-        self.answers["takeback-agent-rule"] = {"code": 200, "body": {"answer": "run"}}
+        self.answers["takeback-agent-rule"] = explained("run")
         self.answers["takeback-role"] = {
             "code": 200,
             "body": {"answer": "wait", "approvers": {"groups": ["Approvers-VMW"]}},
         }
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
-        left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
+        left = self.left_lines(result)
         self.assertEqual(len(left), 4, left)
         self.assertIn("request req-3 (sent with PERSON_TOKEN): not withdrawn, HTTP 403", left[0])
-        self.assertIn("the lowering of k8s.scale: still there", left[1])
-        self.assertIn("the agent rule of check 4", left[2])
+        self.assertIn("the lowering of k8s.scale (check 1): still there", left[1])
+        self.assertIn("the personal agent rule of check 4", left[2])
         self.assertIn("the custom role Approvers-VMW of check 5", left[3])
+
+    def test_a_request_whose_state_cannot_be_read_is_named(self) -> None:
+        self.answers["withdraw-req-4-status"] = {"code": 500, "body": {"detail": "boom"}}
+        result = self.run_script()
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+        self.assertEqual(
+            self.left_lines(result),
+            [
+                "[left] request req-4 (sent with SERVICE_TOKEN): its state could not be read, HTTP 500"
+            ],
+        )
+        self.assertIn("1 not taken back", result.stdout)
+
+    def test_asks_only_for_the_person_steps_that_were_done(self) -> None:
+        for step in ("p1", "p5-role", "p6-lower", "p8", "p9"):
+            del self.answers[step]
+        result = self.run_script()
+        question = next(
+            x for x in result.stdout.splitlines() if x.startswith("[person] Take back.")
+        )
+        self.assertIn("remove the personal agent rule of check 4", question)
+        for other in ("custom role", "k8s.scale", "k8s.pod.delete", "k8s.annotate"):
+            self.assertNotIn(other, question)
+
+    def test_no_question_when_no_person_step_was_done(self) -> None:
+        for step in ("p1", "p4", "p5-role", "p6-delete", "p8", "p9"):
+            del self.answers[step]
+        result = self.run_script()
+        self.assertNotIn("Take back.", result.stdout)
+        self.assertEqual(self.left_lines(result), [])
+
+    def test_the_override_of_check_9_is_read_back(self) -> None:
+        del self.answers["p8"]
+        override = {"connector_id": "k8s", "op_id": "k8s.annotate", "safety_level": "dangerous"}
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [override]}}
+        result = self.run_script()
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the override of k8s.annotate (check 9): still there (override dangerous, "
+             "before the run none)"],
+        )  # fmt: skip
+
+    def test_an_override_from_before_the_run_is_set_back_not_removed(self) -> None:
+        before = {"connector_id": "k8s", "op_id": "k8s.scale", "safety_level": "dangerous"}
+        self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        result = self.run_script()
+        self.assertIn("set the override of k8s.scale back to dangerous", result.stdout)
+        self.assertEqual(self.left_lines(result), [])
+
+    def test_withdraws_a_request_of_its_own_logins_that_the_list_does_not_hold(self) -> None:
+        self.answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {"id": "req-cut", "principal_sub": "service-1", "created_at": "2026-01-01T00:00:01Z"},
+                {"id": "req-other", "principal_sub": "someone-else", "created_at": "2026-01-01T00:00:01Z"},
+                {"id": "req-before", "principal_sub": "service-1", "created_at": "2025-12-31T23:59:59Z"},
+            ],
+        }  # fmt: skip
+        self.answers["withdraw-req-cut-status"] = request("pending", "service-1")
+        self.answers["withdraw-req-cut"] = {"code": 403, "body": {"detail": "x"}}
+        result = self.run_script()
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] request req-cut (sent with SERVICE_TOKEN): not withdrawn, HTTP 403"],
+        )
 
 
 class NoSecretsInTheScriptTest(unittest.TestCase):

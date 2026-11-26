@@ -39,6 +39,7 @@ OPS = {
     "CPC_OP_RIGHTS_CHANGE": "kc kc.role.assign",
     "CPC_OP_POLICY_CHANGE": "policy policy.apply",
     "CPC_OP_DESTRUCTIVE": "k8s k8s.namespace.delete web-a",
+    "CPC_OP_ROOT_SHELL": "linux linux.service.control host-a",
     "CPC_OP_DELETE": "k8s k8s.pod.delete web-a",
     "CPC_OP_HARMLESS": "k8s k8s.label web-a",
     "CPC_OP_CALLER_ADDRESS": "http http.get",
@@ -59,6 +60,7 @@ PROBE_KEYS = [
     "6 AGENT_TOKEN POLICY_CHANGE token",
     "6 PERSON_TOKEN POLICY_CHANGE token",
     "6 SERVICE_TOKEN DESTRUCTIVE token",
+    "6 SERVICE_TOKEN ROOT_SHELL token",
     "6 PERSON_TOKEN DELETE token",
     "6 AGENT_TOKEN DELETE token",
     "6 SERVICE_TOKEN DELETE token",
@@ -71,21 +73,37 @@ PROBE_KEYS = [
 ]
 
 PERSON_STEPS = [
-    "p1", "p2-operator", "p2-admin", "p4", "p5-role", "p5-without", "p5-with",
-    "p6-delete", "p6-lower", "p8", "p9", "c9-fresh", "p10-web", "p-takeback", "p7",
+    "p1", "p2-operator", "p2-admin", "p4", "p5-role", "p5-without",
+    "p5-with", "p6-delete", "p6-lower", "p8", "p9", "c9-fresh",
+    "p10-web", "p10-cli", "p10-cli-refusal", "p-takeback", "p7",
 ]  # fmt: skip
 
 #: The [skip] lines of a run where every check passes: they never count as passed.
 ALWAYS_SKIPPED = [
-    "check 6 root command (a service login, a service agent, REST): not run: waits for #7051",
-    "check 10 (command line approve): needs a person",
+    "check 8 (an Admin's token, REST, a policy file preview): not run: waits for #6966",
     "check 11 (the event intake): not run: the script cannot send an event to the install",
-    "check 11 (the findings investigator): not run: it needs a sensor change and an AI model "
-    "on the install",
+    "check 11 (the findings investigator): not run: "
+    + "it needs a sensor change and an AI model on the install",
     "check 11 (the runner executor): not run: it needs a satellite runner",
 ]
 
+#: CPC_PARAMS_* of the tests: the credential write has params, so its check 7
+#: probe also previews the call with them.
+PARAMS = {"CPC_PARAMS_CREDENTIAL_WRITE": json.dumps({"path": "app/db", "value": "x"})}
+
+#: The login of each token.
+SUBS = {
+    "CPC_ADMIN_TOKEN": "admin-0",
+    "CPC_PERSON_TOKEN": "operator-1",
+    "CPC_SERVICE_TOKEN": "service-1",
+    "CPC_DELETE_GRANT_TOKEN": "service-2",
+    "CPC_AGENT_TOKEN": "agent-1",
+}
+APPROVERS = {"groups": ["Admins"], "rule": None}
+
 PERSON_SUB = "operator-1"
+SENSOR_ID = "11111111-1111-4111-8111-111111111111"
+SENSOR_DUE = "2026-01-01T00:00:05.123456Z"
 FAR_FUTURE = "2999-01-01T00:00:00Z"
 WRITE_FLOOR_MISTAKE = (
     "`classifications[0]`: `k8s.annotate` changes something, so it stays at least caution."
@@ -98,10 +116,14 @@ def audit_id(step: str) -> str:
     return f"00000000-0000-4000-8000-{number:012d}"
 
 
-def call(step: str, status: str, *, request: str = "", code: str = "") -> dict[str, Any]:
+def call(
+    step: str, status: str, *, request: str = "", code: str = "", reused: bool = False
+) -> dict[str, Any]:
     extras: dict[str, Any] = {}
     if request:
         extras["approval_request_id"] = request
+    if reused:
+        extras["approval_request_reused"] = True
     if code:
         extras["error_code"] = code
     return {"code": 200, "body": {"status": status, "audit_id": audit_id(step), "extras": extras}}
@@ -123,12 +145,39 @@ def rows(*entries: dict[str, Any]) -> dict[str, Any]:
     return {"code": 200, "body": {"rows": list(entries)}}
 
 
-def post_row(step: str, path: str, sub: str = "someone") -> dict[str, Any]:
-    return {"id": audit_id(step), "method": "POST", "path": path, "principal_sub": sub}
+def post_row(
+    step: str, path: str, sub: str = "someone", status_code: int = 200, method: str = "POST"
+) -> dict[str, Any]:
+    return {
+        "id": audit_id(step),
+        "method": method,
+        "path": path,
+        "principal_sub": sub,
+        "status_code": status_code,
+    }
 
 
-def request(status: str, sub: str = PERSON_SUB) -> dict[str, Any]:
-    return {"code": 200, "body": {"status": status, "principal_sub": sub}}
+def edit_row(step: str, op: str, sub: str = "admin-1", *, removed: bool = False) -> dict[str, Any]:
+    """The audit row of an Admin's edit of one operation's risk level."""
+    payload: dict[str, Any] = {"op_id": op}
+    if removed:
+        payload["override_removed"] = True
+    return {
+        "id": audit_id(step),
+        "method": "SERVICE",
+        "path": "meho_connector_edit_op",
+        "principal_sub": sub,
+        "status_code": 200,
+        "payload": payload,
+    }
+
+
+def request(status: str, sub: str = PERSON_SUB, reviewer: str | None = None) -> dict[str, Any]:
+    return {"code": 200, "body": {"status": status, "principal_sub": sub, "reviewed_by": reviewer}}
+
+
+def explained(answer: str = "wait") -> dict[str, Any]:
+    return {"code": 200, "body": {"status": "ok", "answer": answer, "approvers": APPROVERS}}
 
 
 def preview(level: str, hash_: str) -> dict[str, Any]:
@@ -164,6 +213,7 @@ def _calls(a: dict[str, dict[str, Any]]) -> None:
         "c6-rights": ("floor:rights_change_waits", "personal_agent"),
         "c6-policy": ("floor:policy_change_waits", "personal_agent"),
         "c6-destructive": ("floor:destructive_waits", "service_agent"),
+        "c6-root": ("default:service.root_shell", "service_agent"),
         "c6-delete-person": ("floor:delete_waits", "personal_agent"),
         "c6-delete-agent": ("floor:delete_waits", "service_agent"),
         "c6-delete-service": ("floor:delete_waits", "service_agent"),
@@ -204,6 +254,7 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     """The person steps, the clicks in the web console and their audit rows."""
     for step in PERSON_STEPS:
         a[step] = {"code": 0, "body": "y"}
+    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale"))
     a["c1-overrides"] = {
         "code": 200,
         "body": {
@@ -213,31 +264,41 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
                     "op_id": "k8s.scale",
                     "safety_level": "caution",
                     "set_at": FAR_FUTURE,
-                    "rule_ref": "override:ov-1",
+                    "set_by_sub": "admin-1",
+                    "rule_ref": "",
                 }
             ]
         },
     }
     a["c1-row"] = rows(row("c1", "override:ov-1", "person", "ok")["body"])
+    # step: (request, its state, its sender, who decided, who clicked)
     clicks = {
-        "c2-operator": ("req-2", "pending", "operator-2"),
-        "c2-admin": ("req-2", "approved", "admin-1"),
-        "c5-without": ("req-5", "pending", "person-without-role"),
-        "c5-with": ("req-5", "approved", "person-with-role"),
-        "c10-web-approve": ("req-c10-web", "approved", PERSON_SUB),
+        "c2-operator": ("req-2", "pending", PERSON_SUB, None, "operator-2"),
+        "c2-admin": ("req-2", "approved", PERSON_SUB, "admin-1", "admin-1"),
+        "c5-without": ("req-5", "pending", "service-1", None, "person-without-role"),
+        "c5-with": ("req-5", "approved", "service-1", "person-with-role", "person-with-role"),
+        "c10-web": ("req-c10-web", "approved", PERSON_SUB, PERSON_SUB, PERSON_SUB),
     }
-    for step, (req, status, sub) in clicks.items():
-        a[f"{step}-request"] = request(status)
-        a[f"{step}-rows"] = rows(post_row(step, f"/ui/approvals/{req}/approve", sub))
+    for step, (req, status, sender, reviewer, clicker) in clicks.items():
+        a[f"{step}-request"] = request(status, sender, reviewer)
+        a[f"{step}-rows"] = rows(post_row(step, f"/ui/approvals/{req}/approve", clicker))
+    for step in ("c2-operator", "c5-without"):
+        a[f"{step}-refusal"] = {"code": 0, "body": "y"}
     a["c6-agent-approve"] = {
         "code": 403,
         "body": {"detail": "human_principal_required: only a person approves."},
     }
     a["c6-agent-approve-request"] = request("pending")
     a["c6-agent-approve-rows"] = rows(
-        post_row("c6-agent-approve", "/api/v1/approvals/req-harmless/approve", "agent-1")
+        post_row("c6-agent-approve", "/api/v1/approvals/req-harmless/approve", "agent-1", 403)
     )
-    a["c8-console-rows"] = rows(post_row("c8-console", "/ui/policy/classify"))
+    a["c8-console-rows"] = rows(
+        post_row(
+            "c8-console", "/ui/connectors/registry/k8s/operations/k8s.annotate", "admin-1", 400,
+            "PATCH",
+        )
+    )  # fmt: skip
+    a["c8-edits"] = rows()
     a["c8-level"] = preview("caution", "h-c8")
     a["c8-token"] = {
         "code": 200,
@@ -245,43 +306,74 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     }
     a["c8-token-rows"] = rows(post_row("c8-token", "/api/v1/policy/import"))
     a["c9-rows"] = rows(
-        post_row("c9-raise", "/ui/policy/classify"), post_row("c9-remove", "/ui/policy/classify")
+        edit_row("c9-raise", "k8s.annotate"), edit_row("c9-remove", "k8s.annotate", removed=True)
+    )
+    a["c10-cli-request"] = request("pending")
+    a["c10-cli-rows"] = rows(
+        post_row("c10-cli-approve", "/api/v1/approvals/req-c10-cli/approve", PERSON_SUB, 403)
     )
 
 
 def _end(a: dict[str, dict[str, Any]]) -> None:
     """Check 11, the take-back, the probes of check 7 and the baseline."""
-    a["c11-sensor"] = {
+    a["c11-sensors"] = {
         "code": 200,
-        "body": {"op_id": "k8s.get", "target": {"name": "web-a"}, "identity_sub": "__sensor__"},
+        "body": {
+            "items": [
+                {"id": "00000000-0000-4000-8000-0000000000aa", "op_id": "k8s.list"},
+                {
+                    "id": SENSOR_ID,
+                    "op_id": "k8s.get",
+                    "target": {"name": "web-a"},
+                    "identity_sub": "__sensor__",
+                },
+            ],
+            "next_cursor": None,
+        },
     }
-    a["c11-run"] = {"code": 202, "body": {"sensor_id": "s"}}
+    a["c11-run"] = {"code": 202, "body": {"sensor_id": SENSOR_ID, "next_fire_at": SENSOR_DUE}}
     sensor_row = row("c11", "default:system", "system", "ok")["body"]
-    sensor_row.update(target_name="web-a", principal_sub="__sensor__")
+    sensor_row.update(target_name="web-a", principal_sub="__sensor__", ts="2026-01-01T00:00:06Z")
     a["c11-row"] = rows(sensor_row)
     approved = {"req-2", "req-5", "req-c10-web"}
     for req in waiting_requests() + sorted(approved):
         a[f"withdraw-{req}-status"] = request("approved" if req in approved else "pending")
         a[f"withdraw-{req}"] = {"code": 200, "body": {"status": "withdrawn"}}
+    a["withdraw-queue"] = {"code": 200, "body": []}
+    for name in SUBS:
+        a[f"login-{name}"] = {"code": 200, "body": []}
+    a["login-rows"] = rows(
+        *({"id": audit_id(f"login-{n}"), "request_id": f"@request-id:login-{n}", "principal_sub": s}
+          for n, s in SUBS.items())
+    )  # fmt: skip
+    a["before-overrides"] = {"code": 200, "body": {"overrides": []}}
+    a["before-agent-rule"] = explained()
+    a["before-role"] = explained()
     a["takeback-overrides"] = {"code": 200, "body": {"overrides": []}}
-    a["takeback-agent-rule"] = {"code": 200, "body": {"status": "ok", "answer": "wait"}}
-    a["takeback-role"] = {
-        "code": 200,
-        "body": {"status": "ok", "answer": "wait", "approvers": {"groups": ["Admins"]}},
-    }
+    a["takeback-agent-rule"] = explained()
+    a["takeback-role"] = explained()
     a["c7-ready"] = ready(False)
+    with_params = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
     for i in range(1, len(PROBE_KEYS) + 1):
         for prefix in ("c7", "baseline"):
-            a[f"{prefix}-{i}"] = {"code": 200, "body": {"status": "ok", "answer": "wait"}}
-            a[f"{prefix}-{i}-row"] = rows(
-                {"id": audit_id(f"{prefix}-{i}"), "request_id": "@last-request-id"}
-            )
+            step = f"{prefix}-{i}"
+            a[step] = explained()
+            probe_rows = [{"id": audit_id(step), "request_id": f"@request-id:{step}"}]
+            if i == with_params:
+                a[f"{step}-preview"] = {
+                    "code": 200,
+                    "body": {"status": "ok", "policy_verdict": "needs-approval"},
+                }
+                probe_rows.append(
+                    {"id": audit_id(f"{step}-p"), "request_id": f"@request-id:{step}-preview"}
+                )
+            a[f"{step}-row"] = rows(*probe_rows)
 
 
 def waiting_requests() -> list[str]:
     """The requests of a full run that still wait at its end."""
     steps = [
-        "c6-cred-read", "c6-cred-write", "c6-rights", "c6-policy", "c6-destructive",
+        "c6-cred-read", "c6-cred-write", "c6-rights", "c6-policy", "c6-destructive", "c6-root",
         "c6-delete-person", "c6-delete-agent", "c6-delete-service", "c6-delete-lowered",
         "c6-address", "c10-cli",
     ]  # fmt: skip
@@ -301,7 +393,12 @@ def good_answers() -> dict[str, dict[str, Any]]:
 
 
 def baseline_text(answer: str = "wait") -> str:
-    return "".join(f"{key}\t{answer}\n" for key in PROBE_KEYS)
+    approvers = json.dumps(APPROVERS, sort_keys=True, separators=(",", ":"))
+    lines = []
+    for key in PROBE_KEYS:
+        verdict = "needs-approval" if key == "6 PERSON_TOKEN CREDENTIAL_WRITE token" else "-"
+        lines.append(f"{key}\t{answer}\t{approvers}\t{verdict}\n")
+    return "".join(lines)
 
 
 def write_answers(folder: Path, answers: dict[str, dict[str, Any]]) -> None:
@@ -354,11 +451,12 @@ folder = os.environ["CPC_STUB_DIR"]
 for h in headers:
     if h.lower().startswith("authorization: bearer "):
         auth = hashlib.sha256(h.split(" ", 2)[2].encode()).hexdigest()[:12]
+step = os.environ.get("CPC_STEP", "")
+for h in headers:
     if h.lower().startswith("x-request-id: "):
         rid = h.split(" ", 1)[1]
         rid = "-".join([rid[:8], rid[8:12], rid[12:16], rid[16:20], rid[20:]])
-        open(os.path.join(folder, ".last-request-id"), "w").write(rid)
-step = os.environ.get("CPC_STEP", "")
+        open(os.path.join(folder, ".request-id-" + step), "w").write(rid)
 entry = {"prog": "curl", "argv": sys.argv[1:], "step": step, "method": values["-X"],
          "url": url, "auth": auth, "body": data}
 with open(os.environ["CPC_STUB_LOG"], "a") as log:
@@ -376,9 +474,10 @@ if not os.path.exists(path):
     sys.exit(7)
 answer = json.load(open(path))
 body = json.dumps(answer.get("body"))
-last = os.path.join(folder, ".last-request-id")
-if "@last-request-id" in body and os.path.exists(last):
-    body = body.replace("@last-request-id", open(last).read())
+def request_id(match):
+    path = os.path.join(folder, ".request-id-" + match.group(1))
+    return open(path).read() if os.path.exists(path) else match.group(0)
+body = re.sub(r"@request-id:([A-Za-z0-9_.-]+)", request_id, body)
 if values["-o"]:
     open(values["-o"], "w").write(body)
 else:
@@ -453,7 +552,7 @@ class LiveRun:
             XDG_CONFIG_HOME=str(self.config),
             CPC_BASELINE=str(self.baseline),
             CPC_CUSTOM_ROLE="Approvers-VMW",
-            CPC_SENSOR_ID="11111111-1111-4111-8111-111111111111",
+            CPC_SENSOR_ID=SENSOR_ID,
             CPC_PARAMS_CREDENTIAL_WRITE=json.dumps({"path": "app/db", "password": self.secret}),
             CPC_STUB_DIR=str(self.answers_dir),
             CPC_STUB_LOG=str(self.log),

@@ -115,6 +115,54 @@ func TestValidateListsMistakesAndFails(t *testing.T) {
 	}
 }
 
+func TestValidatePrintsTheReservedKeySentenceWordForWord(t *testing.T) {
+	sentence := "This version of MEHO does not read `agents` in a policy file; remove it."
+	var got seen
+	srv := server(t, 200,
+		`{"ok":false,"scope":"install","mistakes":["`+sentence+`"],"warnings":[]}`, &got)
+	stdout, _, err := run(t, "validate", writeFile(t), "--scope", "install", "--backplane", srv.URL)
+	if err == nil {
+		t.Fatal("expected an error for a file with mistakes")
+	}
+	var lines []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(line, "mistake: ") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || lines[0] != "mistake: "+sentence {
+		t.Errorf("mistake lines: %q\nstdout: %s", lines, stdout)
+	}
+}
+
+func TestDiffWithoutLimitsPrintsNoLimitsLine(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"install","mistakes":[],"warnings":[],`+
+		`"no_change":false,"file_sha256":"a","based_on":"b","diff":{`+
+		`"description":{"added":[],"changed":[],"removed":[]},`+
+		`"taxonomy":{"added":["team-net"],"changed":[],"removed":[]},`+
+		`"classifications":{"added":[],"changed":[],"removed":[]},`+
+		`"routing":{"added":[],"changed":[],"removed":[]},`+
+		`"bindings":{"added":[],"changed":[],"removed":[{"entry":{"kind":"Operators"}}]},`+
+		`"operations_changed":0}}`, &got)
+	stdout, stderr, err := run(t, "diff", writeFile(t), "--scope", "install", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("diff: %v; stderr=%s", err, stderr)
+	}
+	for _, want := range []string{"+ taxonomy: team-net", "- bindings: entry={\"kind\":\"Operators\"}"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		for _, prefix := range []string{"+ limits", "~ limits", "- limits"} {
+			if strings.HasPrefix(line, prefix) {
+				t.Errorf("unexpected limits line %q", line)
+			}
+		}
+	}
+}
+
 func TestDiffIsAPreviewAndPrintsCounts(t *testing.T) {
 	var got seen
 	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"install","mistakes":[],"warnings":[],`+

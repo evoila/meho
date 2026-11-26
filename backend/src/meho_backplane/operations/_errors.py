@@ -40,7 +40,7 @@ import shlex
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, TypeGuard
+from typing import TYPE_CHECKING, Any, Final, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -53,7 +53,7 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import host_for_log
+from meho_backplane.connectors._shared.log_host import redirect_status_text
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -1635,26 +1635,6 @@ def result_composite_terminal_error(
     )
 
 
-def _is_redirect_status(exc: BaseException) -> TypeGuard[httpx.HTTPStatusError]:
-    return isinstance(exc, httpx.HTTPStatusError) and 300 <= exc.response.status_code < 400
-
-
-def _redirect_status_message(exc: BaseException) -> str | None:
-    """Return the text for a 3xx answer with host names only, or ``None``.
-
-    The text holds only the status code and the host names of the request
-    address and of the ``Location`` header.
-    """
-    if not _is_redirect_status(exc):
-        return None
-    response = exc.response
-    text = f"Redirect response {response.status_code} from {host_for_log(exc.request.url)}"
-    location = response.headers.get("Location")
-    if location is None:
-        return f"{text}, with no Location header."
-    return f"{text} to {host_for_log(location)}, not followed."
-
-
 def result_connector_error(
     op_id: str,
     exc: BaseException,
@@ -1693,10 +1673,10 @@ def result_connector_error(
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
 
-    A 3xx answer gets the text of :func:`_redirect_status_message`, with
+    A 3xx answer gets the text of :func:`redirect_status_text`, with
     host names only.
     """
-    msg = _sanitize_free_text(_redirect_status_message(exc) or str(exc))
+    msg = _sanitize_free_text(redirect_status_text(exc) or str(exc))
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,

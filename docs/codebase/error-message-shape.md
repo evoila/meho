@@ -376,10 +376,14 @@ the host names, for example `Redirect response 302 from vc.example.com to
 other.example.com, not followed.` A 3xx without a `Location` header says
 `with no Location header.` A host name that cannot be read is the fixed
 mark `<unparseable-location>`. `extras.http_status` and
-`extras.upstream_message` stay as for every other status. When httpx cannot
-read the `Location` address, the HTTP client raises the httpx error class
-with one fixed text, `MEHO could not read the address in the Location
-header`. Tests: `tests/test_connectors_http_redirect_answer.py`.
+`extras.upstream_message` stay as for every other status. The text comes
+from `redirect_status_text` in `connectors/_shared/log_host.py`. The
+Proxmox fingerprint uses it too, so `proxmox.about` names only host names
+when the ticket login gets a redirect. When httpx cannot read the
+`Location` address, the HTTP client raises an error of the exact class
+httpx raised, with one fixed text, `MEHO could not read the address in the
+Location header`. Tests: `tests/test_connectors_http_redirect_answer.py`,
+`tests/test_connectors_proxmox_redirect_answer.py`.
 
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream

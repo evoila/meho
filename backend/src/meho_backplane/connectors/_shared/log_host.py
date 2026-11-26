@@ -11,6 +11,7 @@ __all__ = [
     "UNREADABLE_LOCATION_ERRORS",
     "UNREADABLE_LOCATION_MESSAGE",
     "host_for_log",
+    "redirect_status_text",
     "unreadable_location_error",
 ]
 
@@ -48,6 +49,23 @@ def host_for_log(address: str | httpx.URL) -> str:
     if not _HOST_NAME.fullmatch(url.raw_host):
         return UNPARSEABLE_ADDRESS
     return host
+
+
+def redirect_status_text(exc: BaseException) -> str | None:
+    """Return the text for a 3xx answer with host names only, or ``None``.
+
+    ``exc`` is an :exc:`httpx.HTTPStatusError` of a 3xx answer; for any other
+    error the result is ``None``. The text holds only the status code and the
+    host names of the request address and of the ``Location`` header.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError) or not 300 <= exc.response.status_code < 400:
+        return None
+    response = exc.response
+    text = f"Redirect response {response.status_code} from {host_for_log(exc.request.url)}"
+    location = response.headers.get("Location")
+    if location is None:
+        return f"{text}, with no Location header."
+    return f"{text} to {host_for_log(location)}, not followed."
 
 
 def unreadable_location_error(exc: Exception, request: httpx.Request) -> Exception:

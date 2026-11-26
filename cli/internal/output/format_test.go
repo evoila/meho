@@ -301,8 +301,10 @@ func TestRenderHumanHealth_UpgradeDetails(t *testing.T) {
 
 // TestFormatApprovals_ByRole pins the whole approvals line for each role
 // in the current tenant, with the emergency switch off and on. The texts
-// follow the table "Who may approve" in the approvals guide.
+// follow the table "Who may approve" in the approvals guide. The switch
+// RoleFloorExampleEnv is on here; the test below checks it off.
 func TestFormatApprovals_ByRole(t *testing.T) {
+	t.Setenv(RoleFloorExampleEnv, "1")
 	tenant := openapi_types.UUID{1}
 	const tail = "; decisions on someone else's instruction are refused; approval key configured"
 	withRole := func(r api.TenantRole) api.OperatorIdentity {
@@ -346,6 +348,46 @@ func TestFormatApprovals_ByRole(t *testing.T) {
 				t.Errorf("formatApprovals() = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// TestFormatApprovals_RoleFloorExampleOff checks that with the switch
+// RoleFloorExampleEnv off (the default) the Operator lines are the same
+// as before the switch existed, and the other roles do not depend on it.
+func TestFormatApprovals_RoleFloorExampleOff(t *testing.T) {
+	tenant := openapi_types.UUID{1}
+	const tail = "; decisions on someone else's instruction are refused; approval key configured"
+	withRole := func(r api.TenantRole) api.OperatorIdentity {
+		return api.OperatorIdentity{Sub: "s", TenantId: &tenant, TenantRole: r}
+	}
+	cases := []struct {
+		name    string
+		op      api.OperatorIdentity
+		posture string
+		want    string
+	}{
+		{"operator", withRole(api.TenantRoleOperator), "four_eyes_enforced",
+			"a second person approves your changes; you may approve your own `caution` change that waited because you sent it with a token, with a click in the web console; a change of rights is not covered"},
+		{"operator, break-glass", withRole(api.TenantRoleOperator), "single_operator_break_glass",
+			"break-glass is on: you may approve your own `safe` or `caution` change; `dangerous` and `destructive` changes still need a second person; a change of rights is not covered"},
+		{"admin", withRole(api.TenantRoleTenantAdmin), "four_eyes_enforced", approvalsAdmin},
+		{"admin, break-glass", withRole(api.TenantRoleTenantAdmin), "single_operator_break_glass", breakGlassAdmin},
+		{"no current tenant, break-glass", api.OperatorIdentity{Sub: "s"}, "single_operator_break_glass", breakGlassOther},
+	}
+	for _, value := range []string{"", "0", "true"} {
+		for _, tc := range cases {
+			t.Run(tc.name+", switch="+value, func(t *testing.T) {
+				t.Setenv(RoleFloorExampleEnv, value)
+				a := api.ApprovalsStatus{
+					Custody:                  "configured",
+					EffectivePosture:         tc.posture,
+					DelegatedDecisionPosture: "production_own_hand_only",
+				}
+				if got, want := formatApprovals(a, tc.op), tc.want+tail; got != want {
+					t.Errorf("formatApprovals() = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
 

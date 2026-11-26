@@ -61,7 +61,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 from typing import Any, Final
 
@@ -71,10 +70,12 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
-from meho_backplane.audit import _PREALLOCATED_AUDIT_ID_KEY, commit_with_request_audit_row
+from meho_backplane.api.v1._wait_for_approval import runs_at_once
+from meho_backplane.audit import commit_with_request_audit_row, unbind_preallocated_audit_id
 from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_raw_session, get_session
+from meho_backplane.instance_settings.attempt_audit import bind_attempt, drop_saved_change_keys
 from meho_backplane.instance_settings.console_only import CONSOLE_ONLY_POLICIES, SETTINGS_PAGE
 from meho_backplane.instance_settings.diff import SECTIONS
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
@@ -157,6 +158,10 @@ _get_session_dep = Depends(get_session)
 _raw_session_dep = Depends(get_raw_session)
 
 
+def _may_use_settings(operator: Operator) -> bool:
+    return operator.platform_admin or operator.tenant_role is TenantRole.TENANT_ADMIN
+
+
 async def require_ui_settings_admin(
     session_ctx: UISessionContext = _require_session_dep,
 ) -> Operator:
@@ -167,7 +172,7 @@ async def require_ui_settings_admin(
     """
     operator = await lift_operator_from_session(session_ctx)
     ensure_ui_human(operator)
-    if operator.platform_admin or operator.tenant_role is TenantRole.TENANT_ADMIN:
+    if _may_use_settings(operator):
         return operator
     _log.info(
         "ui_settings_insufficient_role",
@@ -312,15 +317,35 @@ def _preview_context(plan: ImportPlan, content: bytes) -> dict[str, Any]:
         "rows": rows,
         "has_changes": any(row["kind"] != "not in file" for row in rows),
         "file_b64": base64.b64encode(content).decode("ascii"),
+        "refusal": None,
     }
 
 
 async def _page_handler(
     request: Request,
     session_ctx: UISessionContext = _require_session_dep,
-    operator: Operator = _settings_admin_dep,
 ) -> HTMLResponse:
-    """``GET /ui/settings``: the upload form."""
+    """``GET /ui/settings``: the upload form.
+
+    A person without the admin role gets a console page that says so (403),
+    not JSON. The preview and the apply answer such a person with JSON, as
+    they are not pages.
+    """
+    operator = await lift_operator_from_session(session_ctx)
+    ensure_ui_human(operator)
+    if not _may_use_settings(operator):
+        _log.info(
+            "ui_settings_insufficient_role",
+            operator_sub=operator.sub,
+            tenant_role=operator.tenant_role.value,
+        )
+        return _render(
+            request,
+            session_ctx,
+            "settings/forbidden.html",
+            {"active_surface": "settings"},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
     return _render(
         request,
         session_ctx,
@@ -351,34 +376,11 @@ async def _preview_handler(
     return _render(request, session_ctx, "settings/_preview.html", _preview_context(plan, content))
 
 
-#: The audit keys that name the attempted import. A rolled back apply keeps
-#: only these: every other key the apply bound describes a saved change.
-_ATTEMPT_AUDIT_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "audit_op_id",
-        "audit_op_class",
-        "audit_settings_import",
-        "audit_settings_file_sha256",
-        "audit_settings_tenant_ids",
-    }
-)
-
-
-def _drop_saved_change_keys(before: set[str]) -> None:
-    """Unbind the keys the rolled back apply bound, except the attempt keys."""
-    added = set(structlog.contextvars.get_contextvars()) - before - _ATTEMPT_AUDIT_KEYS
-    structlog.contextvars.unbind_contextvars(*added)
-
-
 async def _undo_apply(
     db_session: AsyncSession, operator: Operator, content: bytes, before: set[str]
 ) -> None:
     """Roll a failed apply back; the failure row then names only the attempt."""
-    _drop_saved_change_keys(before)
-    structlog.contextvars.bind_contextvars(
-        audit_settings_import=True,
-        audit_settings_file_sha256=hashlib.sha256(content).hexdigest(),
-    )
+    drop_saved_change_keys(before)
     try:
         await db_session.rollback()
     except Exception:
@@ -390,6 +392,24 @@ async def _undo_apply(
         _log.exception("ui_settings_apply_tenants_unknown")
     else:
         structlog.contextvars.bind_contextvars(audit_settings_tenant_ids=tenant_ids)
+
+
+async def _preview_with_refusal(
+    db_session: AsyncSession, operator: Operator, content: bytes, refusal: str
+) -> dict[str, Any] | None:
+    """The preview context with the refusal, for a file that only lacks a reason.
+
+    A person who forgot the reason then types it and applies again, with no
+    new upload. ``None`` when the file does not need a reason, or cannot be
+    checked again; the answer is then the refusal alone.
+    """
+    try:
+        plan = await build_plan(db_session, operator, content)
+    except Exception:
+        return None
+    if plan.mistakes or not plan.console_only:
+        return None
+    return {**_preview_context(plan, content), "refusal": refusal}
 
 
 async def _apply_handler(
@@ -416,6 +436,9 @@ async def _apply_handler(
             _REASON_TOO_LONG,
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
+    # Name the attempt before MEHO checks the file, so a cancelled request
+    # leaves a row with the file hash too.
+    bind_attempt(content)
     keys_before = set(structlog.contextvars.get_contextvars())
     failure = _APPLY_FAILED
     try:
@@ -426,17 +449,27 @@ async def _apply_handler(
         else:
             failure = _AUDIT_FAILED
             # The middleware must not write a second row with this id.
-            structlog.contextvars.unbind_contextvars(_PREALLOCATED_AUDIT_ID_KEY)
+            unbind_preallocated_audit_id()
             # The key an operation policy edit writes its reason under.
             structlog.contextvars.bind_contextvars(audit_reason=reason)
             await commit_with_request_audit_row(db_session, request.scope, result.audit_id)
     except SettingsForbiddenError as exc:
-        _drop_saved_change_keys(keys_before)
+        drop_saved_change_keys(keys_before)
         await db_session.rollback()
+        if reason is None and runs_at_once(operator):
+            kept = await _preview_with_refusal(db_session, operator, content, str(exc))
+            if kept is not None:
+                return _render(
+                    request,
+                    session_ctx,
+                    "settings/_preview.html",
+                    kept,
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
         return _refused(request, session_ctx, str(exc), status_code=status.HTTP_403_FORBIDDEN)
     except asyncio.CancelledError:
         # The session rolls back when it closes; the audit row names the attempt.
-        _drop_saved_change_keys(keys_before)
+        drop_saved_change_keys(keys_before)
         raise
     except Exception:
         _log.exception("ui_settings_apply_failed")

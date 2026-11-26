@@ -295,14 +295,12 @@ def test_a_machine_login_cannot_reach_the_page(kind: str, method: str, path: str
 
 
 @pytest.mark.parametrize("role", [TenantRole.OPERATOR.value, TenantRole.READ_ONLY.value])
-@pytest.mark.parametrize("path", [_PAGE, _PREVIEW, _APPLY])
+@pytest.mark.parametrize("path", [_PREVIEW, _APPLY])
 def test_a_person_without_an_admin_role_is_refused(role: str, path: str) -> None:
     _seed_tenants()
     client, mock, csrf = _client(role=role)
     try:
-        if path == _PAGE:
-            response = client.get(path, headers=_csrf_headers(csrf))
-        elif path == _PREVIEW:
+        if path == _PREVIEW:
             response = _preview(client, csrf, _LOOSEN)
         else:
             response = _apply(client, csrf, _LOOSEN)

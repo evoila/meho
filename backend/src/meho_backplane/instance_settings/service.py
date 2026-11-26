@@ -72,7 +72,9 @@ from meho_backplane.db.models import (
     TenantConvention,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.instance_settings.attempt_audit import attempt_values
 from meho_backplane.instance_settings.console_only import (
+    SETTINGS_PAGE,
     console_only_changes,
     console_only_warnings,
     loosening_refusal,
@@ -150,8 +152,8 @@ _conventions = ConventionsService()
 #: changes targets. Only a person in the web console writes targets at once,
 #: the same rule as ``POST`` and ``PATCH /api/v1/targets``.
 TARGET_WRITES_NEED_CONSOLE: Final[str] = (
-    "A settings file that adds or changes targets is applied in the web console. "
-    "A call with a token cannot write targets at once."
+    "A settings file that adds or changes targets is applied on the settings file page "
+    f"of the web console ({SETTINGS_PAGE}). A call with a token cannot write targets at once."
 )
 
 
@@ -1001,9 +1003,7 @@ async def apply_import(
     tenant_ids = [tp.tenant_id for tp in plan.tenants]
     # Bound before the first write, so the row of an apply that stops names it.
     structlog.contextvars.bind_contextvars(
-        audit_settings_import=True,
-        audit_settings_file_sha256=plan.file_sha256,
-        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
+        **attempt_values(plan.file_sha256, [str(t) for t in tenant_ids])
     )
     broken = await _apply_tenant_rows(session, plan, result.failed)
     live = [tp for tp in plan.tenants if tp.tenant_id not in broken]

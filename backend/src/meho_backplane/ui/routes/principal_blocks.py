@@ -18,7 +18,10 @@ MEHO cannot read the block list, the page and both steps of an unblock
 answer ``503`` with ``principal_block_check_unavailable``. A
 change answers ``303`` back to the page. The unblock button of a row
 opens a confirm page first; only the form of that page (``confirm=yes``)
-removes blocks. The page never unblocks the admin's own login: that
+removes blocks. That form carries the set of blocks the page showed
+(``shown``), and the confirm removes only those blocks. When the blocks of
+the login changed in between, the confirm removes nothing and shows the
+confirm page again with the new blocks. The page never unblocks the admin's own login: that
 needs a reason and a fresh sign-in, so the admin runs
 ``meho principal unblock <sub> --reason <text>`` in the tenant of the
 block. On the own login MEHO removes only the block of the current
@@ -42,10 +45,12 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import (
     BLOCK_SCOPE_ALL,
     BlockedPerson,
+    BlockSetChangedError,
     CannotBlockSelfError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
+    block_set_digest,
     list_blocked,
     unblock_principal,
 )
@@ -76,6 +81,7 @@ _OWN_LOGIN_UNBLOCK = (
     "current tenant. A block in every tenant stays until another platform admin removes it."
 )
 _CONFIRMED = "yes"
+_SET_CHANGED = "The blocks of this login changed. Check the blocks below and confirm again."
 _FIELD_MESSAGES = {
     "sub": "Enter the login id of the person.",
     "reason": "Enter a reason (at most 500 characters).",
@@ -180,6 +186,8 @@ async def _confirm_page(
     operator: Operator,
     sub: str,
     blocks: list[BlockedPerson],
+    *,
+    changed: bool = False,
 ) -> HTMLResponse:
     token = mint_csrf_token(str(session.session_id))
     context = {
@@ -187,6 +195,8 @@ async def _confirm_page(
         "active_surface": "blocked-people",
         "sub": sub,
         "blocks": blocks,
+        "shown": block_set_digest(blocks),
+        "changed_message": _SET_CHANGED if changed else "",
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
         "confirmed": _CONFIRMED,
@@ -214,23 +224,29 @@ async def _unblock(
     request: Request,
     sub: str = Form(min_length=1, max_length=255),
     confirm: str = Form(default=""),
+    shown: str = Form(default=""),
     session: UISessionContext = _session,
     operator: Operator = _admin,
 ) -> HTMLResponse | RedirectResponse:
     if sub == operator.sub:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_LOGIN_UNBLOCK)
-    if confirm != _CONFIRMED:
-        blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
-        if not blocks:
-            raise _not_blocked()
-        return await _confirm_page(request, session, operator, sub, blocks)
-    try:
-        await unblock_principal(operator, sub)
-    except PrincipalBlockUnavailableError as exc:
-        raise _unavailable() from exc
-    except PrincipalNotBlockedError as exc:
-        raise _not_blocked() from exc
-    return _back_to_page()
+    if confirm == _CONFIRMED:
+        try:
+            await unblock_principal(operator, sub, shown=shown)
+        except PrincipalBlockUnavailableError as exc:
+            raise _unavailable() from exc
+        except PrincipalNotBlockedError as exc:
+            raise _not_blocked() from exc
+        except BlockSetChangedError:
+            pass
+        else:
+            return _back_to_page()
+    blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
+    if not blocks:
+        raise _not_blocked()
+    return await _confirm_page(
+        request, session, operator, sub, blocks, changed=confirm == _CONFIRMED
+    )
 
 
 _HTML = {"text/html": {"schema": {"type": "string"}}}
@@ -271,7 +287,10 @@ def build_principal_blocks_router() -> APIRouter:
         responses={
             **_BACK_TO_PAGE,
             200: {
-                "description": "The confirm page (the form has no confirm=yes).",
+                "description": (
+                    "The confirm page: the form has no confirm=yes, or the blocks "
+                    "of the login are not the blocks the confirm page showed."
+                ),
                 "content": _HTML,
             },
             403: {"description": "The login is the admin's own login.", "content": _JSON_DETAIL},

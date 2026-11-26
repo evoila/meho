@@ -1,4 +1,4 @@
-# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4636, #4735, #4736)
+# Form-2 install script: `deploy/linux-server/install.sh` (#4733, #4635, #4636, #4735, #4736, #6828)
 
 ## Overview
 
@@ -23,7 +23,7 @@ of the design:
    join token when the join options are given, copies the MEHO image archive and the storage
    manifest to the folders where RKE2 reads them, and writes the setting
    that makes RKE2's Traefik redirect port 80 to 443. It also
-   installs the host command `meho-host`, with the two files of `lib/` it
+   installs the host command `meho-host`, with the three files of `lib/` it
    sources ([linux-server-meho-host.md](linux-server-meho-host.md)).
 3. **Install and start RKE2.** It runs RKE2's own installer in offline
    mode. Then it runs the host steps of RKE2's CIS profile: the `etcd` user
@@ -71,7 +71,7 @@ the line that names where to read the first-start list (see
 | File | What it holds |
 | --- | --- |
 | `install.sh` | Options, `--help`, the order of the steps, `--from-disk`, the error trap. |
-| `lib/common.sh` | Machine paths, the lists of download files, the Helm release name, `ok`, `warn`, `fail` and `usage_error`. |
+| `lib/common.sh` | Machine paths, the lists of download files, the Helm release name, `ok`, `warn`, `fail` and `usage_error`, and `take_host_lock`, the lock that `meho-host target-networks` shares (see [The target networks](#the-target-networks)). |
 | `lib/net.sh` | IPv4 helpers: the format of an address or a range, and whether two ranges overlap. |
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
@@ -79,9 +79,10 @@ the line that names where to read the first-start list (see
 | `lib/cis.sh` | RKE2's CIS profile: the pod security file that `config.yaml` names, the host steps of step 3 (the `etcd` user and group with the record of the parts the install created, the kernel settings), and `cis_state`. `meho-host` sources it too. |
 | `lib/rke2.sh` | Step 3: RKE2's installer, the start, and the wait with one time limit. For the update: the restart, and the wait for the new run of `rke2-server`. |
 | `lib/update.sh` | The update: finding the install, reading `install.json`, the refused options, the version step, the backup question, the OS packages of the appliance, the result lines. |
+| `lib/targets.sh` | The rule of the target networks (`parse_target_networks`), for `--target-networks` and `meho-host target-networks`; see [The target networks](#the-target-networks). `meho-host` sources it too. |
 | `lib/core.sh` | Steps 4 to 6: the versions of the download, the place values, the Helm call, the two one-time files, the `meho` command, the console CA file, the install record, the result lines (with where to read the first-start list). |
 | `values-single-node.yaml` | The Helm values for one node. The download ships it as `chart/values-single-node.yaml`. |
-| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network`, `log-server` (only on the appliance) and `uninstall`; see [linux-server-meho-host.md](linux-server-meho-host.md). |
+| `meho-host` | The host command: `check` (with the hardening lines), `support-bundle`, `admin-network`, `target-networks`, `log-server` (only on the appliance), `uninstall` and the others; see [linux-server-meho-host.md](linux-server-meho-host.md). |
 | `storage/local-path-storage.yaml` | Rancher's local-path provisioner v0.0.37 manifest with five changes. |
 | `tests/` | Python `unittest` suites that run `install.sh` against a fake machine. |
 | `.shellcheckrc` | Lets shellcheck follow the `source` lines of `install.sh`. |
@@ -150,7 +151,7 @@ service.
 | `/var/lib/rancher/rke2/server/manifests/local-path-storage.yaml` | 0600 | the storage manifest |
 | `/var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml` | 0600 | a `HelmChartConfig` for `rke2-traefik`: port 80 redirects to 443 |
 | `/usr/local/sbin/meho-host` | 0755 | the host command, a copy of `meho-host` from the download |
-| `/usr/local/lib/meho-host/firewall.sh`, `/usr/local/lib/meho-host/cis.sh` | 0644 | copies of `lib/firewall.sh` and `lib/cis.sh`, which `meho-host` sources for its hardening lines (#4638) |
+| `/usr/local/lib/meho-host/firewall.sh`, `/usr/local/lib/meho-host/cis.sh`, `/usr/local/lib/meho-host/targets.sh` | 0644 | copies of `lib/firewall.sh` and `lib/cis.sh`, which `meho-host` sources for its hardening lines (#4638), and of `lib/targets.sh`, for the rule of `meho-host target-networks` (#6828) |
 
 The join token goes from file to file with `install`. It is never on a
 command line, in the output or in `config.yaml`.
@@ -223,6 +224,13 @@ CA the first-start list trusts only the system trust bundle, and its
 `certificate` line stays red. `meho-host certificate` writes the
 ConfigMap with the customer's CA and restarts the pod
 ([linux-server-meho-host.md](linux-server-meho-host.md), `certificate`).
+
+The last block of the file holds the target networks, when the install
+has a list: `config.targetSsrfAllowlist`, which the chart writes to
+`MEHO_TARGET_SSRF_ALLOWLIST` in the ConfigMap `meho-config`
+(`render_target_values`; see [The target networks](#the-target-networks)).
+Without a list there is no block, and the chart's default `""` keeps the
+target guard fully on.
 
 The rule comes from the answers of the install, so the update writes it
 again with the ranges in `install.json`. When no address of this machine
@@ -305,7 +313,10 @@ and RKE2 versions from `VERSION`, the date, and the options used. It holds
 no secret. A later run reads it to find the install and its answers (see
 [The update](#the-update)). The update reads the file with `awk`, one key
 per line, so the file keeps this layout. `join_address` is in the record
-because the update writes RKE2's settings again from the stored answers.
+because the update writes RKE2's settings again from the stored answers,
+and `target_networks` because it writes the values file again.
+`meho-host target-networks` changes the line of `target_networks`, or adds
+it in front of `from_disk` in a record of an older `install.sh`.
 
 ```json
 {
@@ -321,6 +332,7 @@ because the update writes RKE2's settings again from the stored answers.
     "cluster_cidr": "10.42.0.0/16",
     "service_cidr": "10.43.0.0/16",
     "join_address": "",
+    "target_networks": "",
     "from_disk": false
   }
 }
@@ -335,7 +347,9 @@ console page `/ui/first-start`, or `meho login` and then
 
 `print_result` prints the console address `https://<hostname>/ui/`, the CA
 file when it exists, the paths of the two one-time files with what to do
-with them, and where to read the first-start list:
+with them, the target networks (or, without a list, that MEHO accepts no
+target on a private address and the command that sets them), and where to
+read the first-start list:
 
 ```text
 install.sh: MEHO 0.36.0 is installed on meho.example.com.
@@ -343,6 +357,7 @@ install.sh: MEHO 0.36.0 is installed on meho.example.com.
   Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
+  Target networks:       none, so MEHO accepts no target on a private address. Name the networks of the systems it manages with: sudo meho-host target-networks <list>
   First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 ```
 
@@ -360,7 +375,11 @@ because RKE2's own files stay on the disk. Steps 4 to 6 run as above, and `insta
 `"from_disk": true`. The DNS check does not run, so `--public-address` is
 refused as wrong usage. The firewall is not touched (form-2 design,
 section 5). `--from-disk` does not look for an install, and it refuses
-`--confirm-backup` and `--os-packages` as wrong usage.
+`--confirm-backup` and `--os-packages` as wrong usage. It writes the
+target networks it is given with `--target-networks`, and without the
+option an empty list: unlike the tenant id, it does not keep a list from
+an earlier `values-place.yaml`. The appliance's first start runs it once,
+before an admin can set a list.
 
 ## The update
 
@@ -400,15 +419,18 @@ The update keeps the answers of the install. `read_install_record` reads
 `install.json` into the array `RECORD`, and `use_install_answers` puts the
 values into the same names as the options of a first install. A value that
 breaks the rule of its option stops the update: the file was changed by
-hand. A record of an older `install.sh` has no `join_address`; it then
-counts as empty.
+hand. A record of an older `install.sh` has no `join_address` and no
+`target_networks`; each then counts as empty. `target_networks` is checked
+with the rule of `lib/targets.sh` against the ranges of the record, so a
+list changed by hand to one the rule refuses stops the update too.
 
 The options of a first install stop an update with "An update keeps the
 install's answers", even with the same value: `--hostname`,
-`--public-address`, `--admin-network`, `--first-tenant-id`, `--admin-user`,
-`--cluster-cidr`, `--service-cidr`, `--join-address` and
-`--join-token-file`. The SSH range changes only with
-`meho-host admin-network`. For the same reason the DNS check of an update
+`--public-address`, `--admin-network`, `--target-networks`,
+`--first-tenant-id`, `--admin-user`, `--cluster-cidr`, `--service-cidr`,
+`--join-address` and `--join-token-file`. The SSH range changes only with
+`meho-host admin-network`, and the target networks only with
+`meho-host target-networks`; the fix line of the refusal names both. For the same reason the DNS check of an update
 names only the DNS record in its fix: when the record points elsewhere,
 the fix is to point it at this machine, or at the `--public-address` of
 the install (`check_dns <name> <public address> 1`).
@@ -598,6 +620,93 @@ console on too.
 build renders the chart with `packaging/render-values.yaml`, which holds
 the same keys with placeholder values, and then `values-single-node.yaml`;
 see [linux-server-download.md](linux-server-download.md).
+
+## The target networks
+
+MEHO's target guard (`backend/src/meho_backplane/targets/ssrf_guard.py`,
+[target-ssrf-guard.md](target-ssrf-guard.md)) refuses a target on a
+non-public address unless `MEHO_TARGET_SSRF_ALLOWLIST` lists it. It checks
+when a target is added or changed, and again before each connection. Most
+systems that MEHO manages on-prem have private addresses, so form 2 needs
+the list; the outgoing rule of the pod (#6612) alone is not enough. On
+form 2 the customer never uses Helm, so `install.sh --target-networks
+<list>` and `meho-host target-networks <list>` set it (#6828).
+
+`lib/targets.sh` holds the one rule that both use, `parse_target_networks
+<list> <pod range> <service range>`. It sets `TARGET_NETWORKS` (the list in
+lower case, without spaces and empty entries) or `TARGET_NETWORKS_PROBLEM`
+(the problem of the first wrong entry). It needs `is_ipv4`,
+`is_ipv4_network`, `cidrs_overlap` and `PREFIX_RE` from the script that
+sources it: `lib/net.sh` in `install.sh`, the own copies in `meho-host`.
+
+| Entry | Accepted | Why |
+| --- | --- | --- |
+| IPv4 range | `10.20.0.0/16`, starting at its first address | the same rule as `--admin-network` |
+| IPv4 address | `10.30.0.5` | the guard makes it a `/32` |
+| address with a port | `10.30.0.5:443`, port 1 to 65535 | the guard admits it on that port only |
+| host name, with or without a port | refused | the guard trusts a listed name as it is (below) |
+| range with a port | refused | the guard cannot read it: a token with `/` must be a CIDR, and a bad one makes every target check fail |
+| IPv6 | refused | form 2 is IPv4 only, and the outgoing rule of the pod opens only `0.0.0.0/0` |
+| overlaps the pod or the service range | refused | these are MEHO's own parts; a site system there is not reachable anyway (see the chapter, "The pod and service ranges") |
+| overlaps `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` | refused | the ports of the `meho` pod itself, and a cloud's metadata service |
+| a list with a line break | refused | `read` would keep only the first line, so the rest of the list would be lost without a message |
+| `none` | the empty list | the guard stays fully on |
+
+The guard trusts a listed host name as it is: `_screen` in
+`ssrf_guard.py` returns no addresses for it, and the connection dials the
+name without a check of its address. A short name such as `vc`, or a name
+such as `kubernetes.default`, can point to a service of the built-in
+Kubernetes, because the pod looks up names in its own cluster first, and
+a DNS record can change after the admin listed the name. So the rule
+refuses every host name until the guard checks the address of a listed
+name too (#6869). A target that the admin adds by its name needs no entry
+of its own: the guard looks the name up, checks every address against the
+listed ranges, and the connection uses the checked address.
+
+So `10.0.0.0/8` is refused with the default ranges: the admin names the
+networks where the managed systems are. The guard accepts more forms than
+this rule (IPv6, a range that does not start at its first address); the
+rule is narrower on purpose, and every list it accepts is one the guard
+reads without an error.
+
+Where the list goes:
+
+- `install.json`, key `target_networks` (`render_install_record`). The
+  update reads it back (`use_install_answers`) and checks it again with the
+  ranges of the record.
+- `values-place.yaml`, as the last block `config.targetSsrfAllowlist`
+  (`render_target_values`), only with a list. The chart writes it to the
+  ConfigMap `meho-config`, which the `meho` pod reads with `envFrom`.
+- The result line `Target networks:` of the install.
+
+`meho-host target-networks` writes the same two files, then patches the
+key in `meho-config` and restarts the `meho` Deployment, because a pod
+reads its environment from a ConfigMap only when it starts
+([linux-server-meho-host.md](linux-server-meho-host.md#target-networks)).
+Helm owns `meho-config`, and its next upgrade (an update) renders the same
+list from `install.json`, so the patched value stays. Helm 3 compares the
+old manifest, the live object and the new manifest when it upgrades; the
+new manifest holds the list.
+
+`install.sh` and `meho-host target-networks` share one lock: the folder
+`/run/meho` itself, taken with `flock -n` (`take_host_lock` in
+`lib/common.sh`, and its copy in `meho-host`). `install.sh` takes it right
+after the root check, before it looks for the install or reads the
+record, for an install, an update and `--from-disk`, and holds it until
+it ends. Without it, an update that read the list and waits for the
+backup answer would write the old list back after `meho-host` changed
+it. A second run does not wait: it stops with a `[FAIL]` line before it
+reads or changes anything. `flock` holds the lock on the open folder, so
+it ends with the process, also after a crash.
+
+`flock` takes a lock on a folder that is open only for reading, so only
+root may open the folder: `mkdir -m 0700` makes a new one private at
+once, and a folder that is a link, is not root's, or has another mode
+than 0700 stops the run with a `[FAIL]` line that says to remove it. It
+is not repaired, because a repair could race with another run. The lock
+is the folder and not a file in it, so no link or second name of a file
+can reach it, and there is nothing to clean up. The other `meho-host`
+commands that change the machine do not take the lock yet (#6870).
 
 ## The host firewall
 
@@ -1124,6 +1233,16 @@ question on a pseudo-terminal and without one, the version step, and
 `tests/update_harness.py` gives them a fake machine with MEHO 0.36.0
 installed and the download of 0.37.0. `FakeMachine.mark_installed()` makes
 the fake RKE2 run and the fake Helm list the release.
+
+`tests/test_target_networks.py` covers the target networks on the side of
+`install.sh` (#6828): the rule of `lib/targets.sh` for each kind of entry,
+each refused entry and the ranges of the install; `--target-networks` in
+the record, the values file and the result line; no block and an empty key
+without it; a wrong entry that stops before any change; `--from-disk`; the
+update that keeps the list, a record of an older `install.sh`, the refused
+option and a list changed by hand; and `helm template` with the two values
+files, which puts the list into `MEHO_TARGET_SSRF_ALLOWLIST` of
+`meho-config`.
 
 `tests/test_os_packages.py` covers `--os-packages` with a stub `apt-get`:
 the sources list, the apt settings, the order (after the backup, before

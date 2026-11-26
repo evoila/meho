@@ -92,6 +92,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
 from meho_backplane.policy.classification import Scope, Taxonomy
 from meho_backplane.policy.document import ACCEPTED_KINDS, ALL_CATEGORIES, GROUP_KINDS, read_kind
+from meho_backplane.policy.switches import approver_routing_on
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
@@ -151,8 +152,8 @@ class BoundKindConflictError(ValueError):
 
 
 def routing_enabled() -> bool:
-    """True when the ``POLICY_APPROVER_ROUTING`` switch is on."""
-    return get_settings().policy_approver_routing
+    """True when ``POLICY_APPROVER_ROUTING`` or ``CUSTOM_POLICY`` is on."""
+    return approver_routing_on(get_settings())
 
 
 @dataclass(frozen=True)

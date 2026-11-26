@@ -67,19 +67,27 @@ version. It stops with exit code 2 when:
   request id, then the audit row of that GET), the overrides
   (`GET /api/v1/connectors/operation-overrides`) and the tenant's policy
   file (`GET /api/v1/policy/export?scope=tenant`).
-- Each run makes a new work reference (`custom-policy-check-<random>`).
-  Every call of the run sends it: the `Meho-Work-Ref` header on REST and
-  MCP, and `--work-ref` for `meho`. So each request of the run carries it
-  (`work_ref`).
+- Each run makes a new work reference (`custom-policy-check-<random>`),
+  and prints it at the start. Each call sends a work reference of its own:
+  the run's reference and the step, for example
+  `custom-policy-check-<random>-c6-delete-person` (the `Meho-Work-Ref`
+  header on REST and MCP, and `--work-ref` for `meho`). So each request of
+  a run has its own work reference (`work_ref`). An approve of all the
+  requests of one work reference, in the web console or on the command
+  line, covers one request of the run at most.
 - Many calls wait for approval. The script keeps a list of each request it
   made and the login that made it. At the end, and when it stops early (an
   error, Ctrl-C or a stop signal), it withdraws each request that still
   waits, with that login (`POST /api/v1/approvals/{id}/withdraw`). Then it
   reads the waiting requests (`GET /api/v1/approvals`) and withdraws each
-  one with this run's work reference, so a request of a call that a stop
-  cut off is taken back too. A waiting request of one of its logins
-  without this run's work reference is never withdrawn: it was made in
-  another session, and the script prints one `[note]` line for it.
+  one whose work reference starts with this run's reference, so a request
+  of a call that a stop cut off is taken back too. A waiting request of one
+  of its logins without this run's reference is never withdrawn: it was
+  made in another session, and the script prints one `[note]` line for it.
+- The script reads the waiting requests only from an answer HTTP 200 whose
+  body is a list. Any other answer prints
+  `[left] the waiting requests of this run: could not read the queue (...)`,
+  and the run ends with exit code 3.
 - A request stays on the list until its state is read. When the state
   cannot be read, or the withdraw does not answer 200, the script prints
   `[left] request <id> (sent with <login>): ...`, and the run ends with
@@ -89,10 +97,14 @@ version. It stops with exit code 2 when:
   custom role of check 5, the lowering of check 6, and an override of
   `CPC_OP_WRITE` left by check 8 or 9. A step that did not run is not
   named; with no person step done there is no question. An override that
-  was there before the run is set back to how it was, not removed.
+  was there before the run is set back to how it was, not removed: the
+  question names each of its stored settings (risk level, approval setting,
+  category, labels and the "always wait" mark).
   Then the script reads back each one against the state at the start:
-  - the overrides of each operation, by scope (install or tenant), risk
-    level and approval setting. Any difference prints a `[left]` line;
+  - each override of the operation, by scope (install or tenant), with
+    every stored setting: risk level, approval setting (set or not set),
+    category, labels and the "always wait" mark. Each difference prints a
+    `[left]` line that names the scope and the setting;
   - the agent rule and the custom role, in the tenant's policy file: a file
     that is not as it was at the start prints a `[left]` line. When the file
     cannot be read at the start or at the end, the script prints
@@ -102,12 +114,18 @@ version. It stops with exit code 2 when:
   edit an override (checks 1, 6, 8 and 9) print `not run: the overrides
   could not be read at the start`, and nobody is asked to edit or remove
   an override.
+- Check 9 removes an override. When `CPC_OP_WRITE` has an override from
+  before the run, check 9 prints `[skip] check 9 (an Admin, a person, web
+  console): not run: an override from before the run`, and nobody is asked
+  to remove it.
 - Last, a person turns the switch off. The install ends with the switch off.
 
 ## Person steps and `[skip]` lines
 
 A step that needs a person in the web console prints what to do and asks
-"Is it done?". With no terminal, or when the person answers no:
+"Is it done?". A step where a person approves a request, or tries to,
+names the one request id that the person decides (checks 2, 5 and 10).
+Decide only that request. With no terminal, or when the person answers no:
 
 - it prints `[skip] check N (...): needs a person`;
 - every later step that needs that person step prints
@@ -262,7 +280,11 @@ was checked by a run is in the pull request of the script.
   with no terminal (no destructive call, root command or delete is sent,
   and no take-back question), a stopped run (a request found in the queue
   is withdrawn), a request from before the run that is never withdrawn,
-  one work reference on every call, and a request of the same Operator
-  from another session that still waits after the run.
+  a work reference of its own on every call, and a request of the same
+  Operator from another session that still waits after the run.
 
-The CI workflow `linux-server-test.yml` runs both, in its job "Run the tests of the custom policy check script".
+Run both with `jq` on the `PATH`:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py'
+```

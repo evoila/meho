@@ -35,6 +35,7 @@ What the tests deliberately do NOT do
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -910,6 +911,18 @@ async def test_poll_interval_bounds_the_gap_between_stored_reads(
     monkeypatch.setattr(approval_wait_module, "_POLL_SECONDS", poll_s)
     request = await _park_request(requester=_make_operator())
     read_times = _record_stored_read_times(monkeypatch)
+    requested_sleeps: list[float] = []
+
+    async def _recording_sleep(seconds: float) -> None:
+        requested_sleeps.append(seconds)
+        await asyncio.sleep(seconds)
+
+    # The module only uses asyncio.sleep and asyncio.CancelledError.
+    monkeypatch.setattr(
+        approval_wait_module,
+        "asyncio",
+        SimpleNamespace(sleep=_recording_sleep, CancelledError=asyncio.CancelledError),
+    )
 
     async def _expire_after_three_reads() -> None:
         # Three reads start before the change, also when each read is slow,
@@ -921,12 +934,27 @@ async def test_poll_interval_bounds_the_gap_between_stored_reads(
 
     flip = asyncio.create_task(_expire_after_three_reads())
 
-    decision = await wait_for_approval_decision(
-        tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=5.0
-    )
-    await flip
+    try:
+        decision = await wait_for_approval_decision(
+            tenant_id=_TENANT_ID, approval_request_id=request.id, timeout_seconds=5.0
+        )
+    except BaseException:
+        flip.cancel()
+        raise
+    if decision == "timeout":
+        # The polling stopped before the third read: stop the helper, so the
+        # test fails on the assert below and does not wait for a time limit.
+        flip.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await flip
+    else:
+        await flip
 
     assert decision == "expired"
+    # A plain check of the requested sleeps: it needs no real time, so it
+    # also holds when the time limits are off.
+    assert requested_sleeps, "the wait never slept between reads"
+    assert max(requested_sleeps) <= poll_s, requested_sleeps
     gaps = [later - earlier for earlier, later in itertools.pairwise(read_times)]
     assert len(gaps) >= 2
     # Each read takes a few milliseconds itself; allow for that and jitter.

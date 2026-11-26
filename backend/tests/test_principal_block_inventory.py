@@ -296,3 +296,5 @@ async def test_inventory_stops_and_stores_nothing_when_a_step_is_refused(
     assert stored == []
     assert "linux.file.read" not in sent
     assert "hyperv.checkpoints.list" not in sent
+    steps = _STEPS[op_id]
+    assert set(sent) <= set(steps[: steps.index(_FIRST_STEP[op_id]) + 1]), sent

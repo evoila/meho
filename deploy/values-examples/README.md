@@ -921,12 +921,10 @@ addresses.
 
 > First-login auth-onramp for both `meho login` (CLI device-code) and
 > the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
-> The 2026-05-21 lab test walked the realm from scratch and paid
-> ~2.5 hours hitting four sequential walls — none of them documented
-> in one place at the time; a follow-up 2026-05-22 dogfood added a
-> fifth (W7, `offline_access` for Claude Code's MCP refresh-token
-> request). This section is the consolidated 5-step recipe +
-> five-wall symptom→cause→fix matrix that closes that gap.
+> Setting up the realm from scratch hits five walls in a row (W1 to
+> W4 and W7; W7 is `offline_access` for Claude Code's MCP refresh-token
+> request). This section is the 5-step recipe and the five-wall
+> symptom→cause→fix matrix.
 > Companion to [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
 > (MCP-client-side configuration) and
 > [`docs/acceptance/install.md`](../../docs/acceptance/install.md)
@@ -944,7 +942,7 @@ addresses.
 > The deployer creates two public clients (one for the CLI, one for
 > MCP) with the right mappers + scopes; the consolidated automation
 > verb that does this in one idempotent step ships under
-> [#791](https://github.com/evoila/meho/issues/791) (G0.9.1-T11).
+> [#791](https://github.com/evoila/meho/issues/791).
 > This recipe is the manual path the verb encodes.
 
 ### 5-step realm recipe
@@ -1023,7 +1021,7 @@ the decision is
 
 > **Security baseline — no hardcoded privileged `tenant_role` on a
 > shared client.** A hardcoded-claim mapper is safe only on a
-> **single-identity** client (the dogfood lab, where one operator
+> **single-identity** client (where one operator
 > authenticates). On any **shared, multi-user** public client, do **not**
 > hardcode a privileged `tenant_role` such as `tenant_admin`: every user
 > who can authenticate through that client would inherit it, and the
@@ -1035,8 +1033,8 @@ the decision is
 > JWTs do not correct an over-privileged identity-provider mapper.
 
 Validator-side errors at the decode stage are made specific by
-[#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12) and
-[#1131](https://github.com/evoila/meho/issues/1131) (G0.13-T1):
+[#797](https://github.com/evoila/meho/issues/797) and
+[#1131](https://github.com/evoila/meho/issues/1131):
 `invalid_audience` / `missing_sub` / `token_expired` /
 `signature_verification_failed` / `invalid_issuer` /
 `token_not_yet_valid` / `malformed_jws` are distinguished in the
@@ -1072,8 +1070,7 @@ If your realm mints **per-audience tokens with different claim sets** (the
 common case once the `meho-mcp-audience` mapper from Step 3 is in play —
 the MCP token and the REST/UI token are issued for different audiences),
 the `meho-docs:*` capability can land on the MCP token but **not** the
-REST/UI token. The symptom is the [#1802](https://github.com/evoila/meho/issues/1802)
-dogfood report: `search_docs` over MCP returns cited chunks, while the same
+REST/UI token. The symptom: `search_docs` over MCP returns cited chunks, while the same
 collection over REST 403s (`{"error":"not_entitled", ...}`) and `/ui/corpus`
 shows "Not entitled to the attached docs corpus". That is a **claim-mapper
 gap, not a backplane bug** — the entitlement check is identical across
@@ -1460,7 +1457,7 @@ proceeding.
 
 #### Step C5 — Verify against a CIMD-capable MCP client
 
-For the dogfood walkthrough, install Claude Code on a host
+To check it with Claude Code, install it on a host
 that has the deployment's TLS CA in its OS trust store (Step 1
 above), point an `.mcp.json` at `https://<backplane-host>/mcp`
 **without** a `client_id` field, and run a `tools/list`. The
@@ -1557,7 +1554,11 @@ curl -sf https://meho.example.lab/api/v1/auth-config | jq .
 #   "cli_client_id": "meho-cli"
 # }
 
-# 2. CLI device-code flow completes.
+# 2. CLI device-code flow completes. The CLI prints an address and a
+#    short code. Open the address on any device with a browser, enter
+#    the code and log in. No browser opens on the CLI machine and the
+#    browser does not send you back to the CLI: the CLI waits and sees
+#    the login by itself.
 meho login https://meho.example.lab
 # Logged in to https://meho.example.lab; token stored in keyring.
 
@@ -1580,10 +1581,8 @@ curl -sf https://meho.example.lab/.well-known/oauth-protected-resource | jq .
 
 The deployer's first-login walk hits these walls in sequence; each
 surfaces with a different symptom but the cause-and-fix chain is
-bounded. W1–W4 came out of the 2026-05-21 lab test; **W7** was
-added 2026-05-22 when the same operator's MCP client (Claude Code)
-hit `invalid_scope` after the W1–W4 fixes shipped. Walls are
-numbered for cross-reference with the originating dogfood reports.
+bounded. W7 shows up once the MCP client (Claude Code) is
+the one signing in: it hits `invalid_scope` after the W1–W4 fixes.
 
 | Wall | Symptom | Cause | Fix |
 | --- | --- | --- | --- |
@@ -1603,7 +1602,7 @@ numbered for cross-reference with the originating dogfood reports.
   authoritative deployer doc for the chart values + the auth-onramp
   recipe.
 - **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
-  (G0.9.1-T11) ships `meho admin keycloak bootstrap-clients` — an
+  ships `meho admin keycloak bootstrap-clients` — an
   idempotent verb that creates the two public clients + 8 mappers +
   4 default scopes + the three role groups + `MEHO-Platform-Admins` from
   one invocation, plus (from the next release
@@ -1621,13 +1620,13 @@ numbered for cross-reference with the originating dogfood reports.
   notes it as future work.
 - **The CLI device-code client provisioning + auth-config endpoint
   completion.** [#789](https://github.com/evoila/meho/issues/789)
-  (G0.9.1-T9) — already landed in v0.3.2.
+  Already landed in v0.3.2.
 - **Token-validator error specificity at the decode stage.**
-  [#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12)
+  [#797](https://github.com/evoila/meho/issues/797)
   makes Wall #2 / Wall #3 symptoms specific (`invalid_audience` /
   `missing_sub` / …) instead of opaque `invalid_token`.
 - **The `meho login` context-deadline fix.**
-  [#798](https://github.com/evoila/meho/issues/798) (G0.9.1-T13)
+  [#798](https://github.com/evoila/meho/issues/798)
   closes Wall #4 in code.
 
 ## pgvector extension prerequisite

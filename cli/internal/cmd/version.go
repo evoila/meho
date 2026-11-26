@@ -16,6 +16,13 @@ import (
 	"github.com/evoila/meho/cli/internal/version"
 )
 
+// cliVersionLine is the CLI line that `meho version` and `meho --version`
+// both print. It reads only the build info and never contacts a backplane.
+func cliVersionLine() string {
+	info := version.Get()
+	return fmt.Sprintf("meho %s (commit %s, built %s)", info.Version, info.Commit, info.Date)
+}
+
 // newVersionCmd returns the `meho version` subcommand. It prints the
 // CLI build information. When a backplane is known (the --backplane
 // flag, or the URL the last `meho login` stored), it also reads the
@@ -35,7 +42,6 @@ func newVersionCmd() *cobra.Command {
 			"one-line warning goes to stderr and the command still succeeds.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			info := version.Get()
 			// Route the version line through cmd.OutOrStdout() with
 			// fmt.Fprintf — NOT cmd.Print/Printf/Println. In cobra
 			// v1.10.2 (command.go:1434-1446) the Print* helpers
@@ -44,11 +50,7 @@ func newVersionCmd() *cobra.Command {
 			// and smoke tests parse stdout, so the output contract
 			// for `meho version` is "version line on stdout, nothing
 			// on stderr". The unit test below pins both halves.
-			fmt.Fprintf(
-				cmd.OutOrStdout(),
-				"meho %s (commit %s, built %s)\n",
-				info.Version, info.Commit, info.Date,
-			)
+			fmt.Fprintln(cmd.OutOrStdout(), cliVersionLine())
 			backplaneURL, err := versionBackplaneURL(backplaneOverride)
 			if err != nil || backplaneURL == "" {
 				return err

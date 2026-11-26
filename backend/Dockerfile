@@ -537,8 +537,7 @@ EXPOSE 8000
 # scope. Without it, FastAPI's ``redirect_slashes`` 307 reflects the
 # on-the-wire scheme (``http://`` once TLS terminates at the cluster
 # Ingress) into the ``Location`` header, downgrading the client's
-# second hop and creating a MITM window — surfaced by the 2026-05-20
-# RDC dogfood (Signal #3, Issue #730).
+# second hop and creating a MITM window.
 #
 # ``--proxy-headers`` alone trusts *any* connecting peer's
 # ``X-Forwarded-*`` headers, which is unsafe in a cluster where pods
@@ -552,6 +551,6 @@ EXPOSE 8000
 # ``FORWARDED_ALLOW_IPS`` env var (see
 # ``deploy/charts/meho/values.yaml`` and the operator-side contract
 # at ``docs/cross-repo/reverse-proxy-contract.md``); operators pin
-# the value to their Ingress controller's pod CIDR for production
+# the value to their Ingress controller's own address for production
 # deploys.
 CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

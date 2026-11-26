@@ -20495,6 +20495,147 @@
         }
       }
     },
+    "/ui/blocked-people": {
+      "get": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Index",
+        "operationId": "_index_ui_blocked_people_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Block",
+        "operationId": "_block_ui_blocked_people_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__block_ui_blocked_people_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "422": {
+            "description": "The page again, with the error next to its field.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/blocked-people/unblock": {
+      "post": {
+        "tags": [
+          "ui-principal-blocks"
+        ],
+        "summary": " Unblock",
+        "operationId": "_unblock_ui_blocked_people_unblock_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__unblock_ui_blocked_people_unblock_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "303": {
+            "description": "Done. The answer sends the browser back to the page."
+          },
+          "200": {
+            "description": "The confirm page (the form has no confirm=yes).",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The login is the admin's own login.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The login has no block you may remove.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/runs": {
       "get": {
         "tags": [
@@ -30047,6 +30188,22 @@
         "title": "BlockRead",
         "description": "One block of the list."
       },
+      "Body__block_ui_blocked_people_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body__block_ui_blocked_people_post"
+      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -30204,6 +30361,26 @@
         },
         "type": "object",
         "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
+      },
+      "Body__unblock_ui_blocked_people_unblock_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub"
+        ],
+        "title": "Body__unblock_ui_blocked_people_unblock_post"
       },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {

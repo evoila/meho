@@ -1150,7 +1150,7 @@ login client, such as `meho-mcp`.
 | Client | Who uses it | Login | It ends |
 |---|---|---|---|
 | `meho-cli` | `meho login` (the default) | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
-| `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit (30 minutes by default). |
+| `meho-cli` | `meho login --offline=false` | Short login | At the realm's SSO Session Idle limit: 1 hour (`3600`) on a realm the MEHO chart created new. An older realm or a realm made by hand keeps its own limit (Keycloak's default is 30 minutes). |
 | `meho-mcp` | The Claude Code plugin, the Claude Desktop bundle, a plain HTTP entry in Claude Code's `.mcp.json` | Long login (`offline_access`). It renews itself. | After 48 hours without use, or after 7 days at most. |
 | `meho-mcp-code`, `meho-mcp-desktop` | The Claude Code plugin and the Claude Desktop extension, when `MCP_CLIENT_PER_TOOL_KIND` is on | Same as `meho-mcp` | Same as `meho-mcp` |
 | `meho-web` | The web console | Browser session | At the realm's SSO Session limits. |
@@ -1220,8 +1220,10 @@ token, which starts the 48 hours again. If your realm turns on **Offline
 Session Max Limited**, that maximum also applies.
 
 Without `offline_access`, the refresh token ends at the realm's **SSO
-Session Idle** limit, which is 30 minutes by default. After that, the next
-MEHO call needs a new browser login.
+Session Idle** limit. A realm the MEHO chart created new has 1 hour.
+A realm made by hand starts with Keycloak's default of 30 minutes.
+An older realm keeps the limit it already has, so check it once.
+After that, the next MEHO call needs a new login.
 
 Two more things must be true:
 
@@ -1254,8 +1256,13 @@ too. So set the realm's SSO session to the same values:
 | SSO Session Idle (`ssoSessionIdleTimeout`) | **`3600`** seconds (1 hour) | **Realm settings → Sessions** |
 | SSO Session Max (`ssoSessionMaxLifespan`) | **`36000`** seconds (10 hours) | **Realm settings → Sessions** |
 
-Keycloak's defaults are 30 minutes and 10 hours. With them, the console
-session ends after 30 minutes without use.
+A realm that the MEHO chart creates new gets these values: 1 hour and
+10 hours. An existing realm keeps the values it already has, also after
+an upgrade, because Keycloak reads the realm file only when it creates
+the realm. So check every existing realm once (see "On an existing
+realm, set the two values once" below).
+A realm made by hand starts with Keycloak's defaults: 30 minutes and 10 hours.
+In a realm made by hand, a console session ends after 30 minutes without use.
 
 When the session ends, the console shows "Your session ended. Please
 sign in again." and a **Sign in** button. After the login, the person is

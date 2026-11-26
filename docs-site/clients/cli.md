@@ -5,8 +5,10 @@ New here? Start with the [laptop guide](../install/laptop-tools.md).
 The `meho` CLI is a single static Go binary and the **starting point**
 for connecting to a backplane. It runs on a VPN-connected workstation,
 verifies TLS against your operating system's trust store, and
-authenticates with the OAuth 2.0 device-code flow — so it works on
-private networks with no browser redirect back to the client.
+authenticates with the OAuth 2.0 device-code flow. The CLI prints an
+address and a short code. You open the address on any device with a
+browser. So it works on private networks and on machines with no
+browser, because nothing comes back to the CLI.
 
 Install it and log in before wiring any MCP client. You register
 targets and secrets with the CLI, the operator console or REST. The
@@ -173,9 +175,14 @@ meho login https://meho.example.com
 
 This runs the device-code flow: the CLI discovers the realm and the
 public `meho-cli` client id from the backplane's
-`/api/v1/auth-config` endpoint, prints a verification URL and code, you
-approve it in a browser as a realm user, and the resulting token is
-stored in your OS keyring (Keychain / Secret Service / Wincred).
+`/api/v1/auth-config` endpoint, and prints an address and a short code.
+Open the address on any device with a browser, enter the code, and sign
+in as a realm user. No browser opens on the machine where the CLI runs,
+and nothing comes back to it. The CLI waits, then stores the resulting
+token in your OS keyring (Keychain / Secret Service / Wincred).
+
+`meho approvals approve` is different. It opens a browser sign-in on
+the same machine, for the approval only.
 
 The CLI also writes the backplane URL to `~/.config/meho/config.json`
 (`$XDG_CONFIG_HOME/meho/config.json` when set) so later subcommands do
@@ -215,7 +222,10 @@ MEHO's built-in login server it ends after 48 hours without use, or
 after 7 days at most. Then run `meho login` again.
 
 - `meho login --offline=false` asks for a short login instead. It ends
-  after 30 minutes without use (the realm's default).
+  at the realm's SSO Session Idle limit: 1 hour on a realm the MEHO
+  chart created new.
+  A realm made by hand starts with Keycloak's default of 30 minutes.
+  An older realm keeps the limit it already has: ask your admin.
 - If the login server does not offer the long login (an older realm),
   `meho login` logs in without it and prints one line that says so. Ask
   your admin to fix the realm: see

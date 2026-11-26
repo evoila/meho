@@ -517,10 +517,12 @@ Log in with the command line:
 meho login https://meho.example.com
 ```
 
-The command prints an address and a code. Open the address in a
-browser, enter the code and sign in as `admin` with its temporary
-password. Keycloak asks for a new password, a name and an email. Then
-you should see `Logged in to https://meho.example.com`.
+The command prints an address and a short code. Open the address on
+any device with a browser, enter the code and sign in as `admin` with
+its temporary password. Keycloak asks for a new password, a name and an
+email. No browser opens on the machine where the CLI runs, and nothing
+comes back to it from the browser: the CLI sees the login by itself.
+Then you should see `Logged in to https://meho.example.com`.
 
 !!! warning "`meho login` changes your default MEHO"
 

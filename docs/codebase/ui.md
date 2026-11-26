@@ -4043,3 +4043,35 @@ through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required
 time-bounded expiry. Service principals have no registry or stored display
 name, so their stored JWT subject intentionally remains the fail-open label.
+
+## Blocked people (`/ui/blocked-people`)
+
+`meho_backplane.ui.routes.principal_blocks` ships the console page of the
+admin block list (`docs/codebase/principal-block.md`):
+
+- `GET /ui/blocked-people` -- the blocks the admin may see, and the
+  block form.
+- `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
+  303 back to the page. Refused: 422, the page again with the typed
+  values and the message next to its field.
+- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
+  `confirm=yes`: 200, the confirm page with the login, its blocks and
+  the scope (all tenants for a platform admin). With `confirm=yes`: 303
+  back to the page. The admin's own login: 403 `own_login`. A platform
+  admin removes a block on their own login with `meho principal unblock
+  <sub> --reason <text>`, run in the tenant of that block, with a fresh
+  sign-in. On their own login, MEHO removes only the block of the
+  current tenant. A block in every tenant stays until another platform
+  admin removes it.
+  No block to remove: 404. The blocks cannot be read: 503.
+
+Every form is a plain `POST` form with the CSRF token and the page's
+tenant (`meho_tenant`) in hidden fields, so it works without JavaScript.
+A form from a page of another tenant answers 409.
+
+The three routes need a person with `tenant_admin`
+(`resolve_human_admin_or_403`, with the session of the session cookie
+only). They call `list_blocked`,
+`block_principal` and `unblock_principal`, the same functions as the REST
+routes, so a tenant admin works in their own tenant, a platform admin in
+every tenant, and nobody blocks their own login. The page adds no MCP tool.

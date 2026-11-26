@@ -580,9 +580,11 @@ Authorization Grant (RFC 8628). End-to-end shape:
    the person named in `--scope` is never dropped. `--offline=false`
    asks for the short login.
 4. **Prompt.** The CLI prints the verification URL and `user_code` to
-   stdout. The operator opens the URL on any device with a browser,
-   signs in, and approves the request. (Browser auto-launch is
-   deferred to a future Task per the v0.1 scope.) Under `--print-token`
+   stdout (`stdoutPrompter`). The operator opens the URL on any device
+   with a browser, enters the `user_code`, signs in, and approves the
+   request. The CLI opens no browser, and the browser sends nothing back
+   to the CLI: the CLI learns of the login only by polling (step 5).
+   Under `--print-token`
    this prompt is written to stderr instead, so stdout stays reserved
    for the token — see step 7.
 5. **Polling.** `auth.pollDeviceToken` (our own loop, not the oauth2

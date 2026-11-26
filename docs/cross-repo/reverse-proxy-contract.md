@@ -98,25 +98,22 @@ Most ingress controllers set these by default once TLS is configured:
   reverse-proxy convention documented by uvicorn at
   [uvicorn.org/deployment/](https://www.uvicorn.org/deployment/).
 
-### 2. The chart `forwardedAllowIps` MUST list the proxy's pod IPs
+### 2. The chart `forwardedAllowIps` MUST list the proxy's own address
 
 Override `config.forwardedAllowIps` in your `values-<env>.yaml`:
 
 ```yaml
 config:
-  # RKE2 default pod CIDR — every Ingress controller pod's IP falls
-  # inside this CIDR, so the backplane trusts X-Forwarded-* only from
-  # in-cluster proxies, never from a pod-to-pod direct request.
-  forwardedAllowIps: "10.42.0.0/16"
+  # The ingress controller's own address, never the whole pod network.
+  forwardedAllowIps: "10.0.4.11/32"
 ```
 
-Recommended values per ingress posture:
+Use the same rule on every cluster: production, shared, single-tenant
+lab or a short-lived test cluster.
 
-| Cluster shape | Recommended value | Rationale |
+| Setting | Value | Why |
 | --- | --- | --- |
-| **Production / multi-tenant** | The pod CIDR of the ingress controller's namespace (e.g. `10.42.0.0/16` for RKE2 default) — or the specific pod IPs if pinned | Restricts trust to in-cluster proxies; pod-to-pod requests from other workloads cannot spoof the scheme |
-| **Single-tenant lab** | The cluster's pod CIDR (`10.42.0.0/16` on RKE2; `10.244.0.0/16` on Kind/Calico) | Same trust restriction, broader scope acceptable when there is only one workload |
-| **Ephemeral CI cluster (`pr-smoke`)** | `"*"` — disable the allow-list | The PR-smoke cluster is single-tenant by construction; every connecting peer is the cluster's own proxy. Never use this in production |
+| **Your override** | The ingress controller's own address, as a `/32` | Only the proxy is trusted. A request from another workload in the cluster cannot set the scheme or the client address. Never use the whole pod network and never `"*"` |
 | **Default (no override)** | `"127.0.0.1"` (uvicorn's secure default) | Fails-closed: the Ingress controller's pod IP is never the loopback, so `X-Forwarded-*` is silently ignored and the bug persists. This is the intended behaviour — a misconfigured cluster fails visibly rather than silently downgrading |
 
 ### Anti-pattern: leaving the default in production
@@ -151,8 +148,8 @@ checking, in order:
    `X-Forwarded-Proto` on the request to the backplane. The value MUST
    be `https`.
 2. **Backplane env var** — `kubectl exec -n <ns> <backplane-pod> --
-   printenv FORWARDED_ALLOW_IPS`. The value MUST match the Ingress
-   controller's pod CIDR (or `*` for ephemeral clusters).
+   printenv FORWARDED_ALLOW_IPS`. The value MUST hold the Ingress
+   controller's own address.
 3. **uvicorn CMD** — `kubectl exec -n <ns> <backplane-pod> -- ps -ef
    | grep uvicorn`. The CMD MUST include `--proxy-headers`.
 

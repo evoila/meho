@@ -2456,7 +2456,7 @@
           "policy"
         ],
         "summary": "Explain",
-        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
+        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with ``CUSTOM_POLICY``\nor ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
         "operationId": "explain_api_v1_policy_explain_post",
         "parameters": [
           {
@@ -6127,7 +6127,7 @@
           "connectors"
         ],
         "summary": "List Operation Overrides",
-        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``POLICY_CLASSIFICATION`` switch on, the values include the\nclassification, and ``rule_ref`` names the entry that decided it.",
+        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``CUSTOM_POLICY`` or ``POLICY_CLASSIFICATION`` switch on, the\nvalues include the classification, and ``rule_ref`` names the entry that decided it.",
         "operationId": "list_operation_overrides_api_v1_connectors_operation_overrides_get",
         "parameters": [
           {
@@ -33405,7 +33405,7 @@
           "entries"
         ],
         "title": "ClassificationListResponse",
-        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``POLICY_CLASSIFICATION`` switch is\noff; then nothing is read and ``entries`` is empty."
+        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``CUSTOM_POLICY`` and\n``POLICY_CLASSIFICATION`` switches are off; then nothing is read and ``entries`` is empty."
       },
       "ClassificationMatch": {
         "properties": {
@@ -41232,7 +41232,7 @@
           "evaluator": {
             "$ref": "#/components/schemas/ExplainEvaluator",
             "nullable": true,
-            "description": "Null while POLICY_ENGINE_SHADOW is off."
+            "description": "Null while CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off."
           },
           "classification": {
             "$ref": "#/components/schemas/ExplainClassification",
@@ -41611,7 +41611,7 @@
             "type": "object",
             "nullable": true,
             "title": "Policy Rule",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
           },
           "approvers": {
             "items": {
@@ -41620,7 +41620,7 @@
             "type": "array",
             "nullable": true,
             "title": "Approvers",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
           },
           "proposed_effect": {
             "additionalProperties": true,

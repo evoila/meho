@@ -4609,8 +4609,8 @@ type ClassificationInForce struct {
 
 // ClassificationListResponse The taxonomy and the stored entries of the caller's tenant and of the install.
 //
-// “enabled“ is “false“ while the “POLICY_CLASSIFICATION“ switch is
-// off; then nothing is read and “entries“ is empty.
+// “enabled“ is “false“ while the “CUSTOM_POLICY“ and
+// “POLICY_CLASSIFICATION“ switches are off; then nothing is read and “entries“ is empty.
 type ClassificationListResponse struct {
 	Enabled bool                     `json:"enabled"`
 	Entries []ClassificationEntryOut `json:"entries"`
@@ -9352,7 +9352,7 @@ type PreviewOperationBody_Target struct {
 // target-resolution or rate-limit envelope adds (“duration_ms“,
 // “retry_after_seconds“, ...) on the wire unchanged.
 type PreviewOperationResponse struct {
-	// Approvers Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise.
+	// Approvers Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise.
 	Approvers *[]string `json:"approvers"`
 
 	// ConnectorId The connector the preview resolved against. May differ from the requested id when a sibling catalog serves the target.
@@ -9379,7 +9379,7 @@ type PreviewOperationResponse struct {
 	// PolicyReason The policy gate's reason for the verdict; null when it gives none (a person's call that runs at once).
 	PolicyReason *string `json:"policy_reason"`
 
-	// PolicyRule Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed.
+	// PolicyRule Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed.
 	PolicyRule *map[string]interface{} `json:"policy_rule"`
 
 	// PolicyVerdict Three-state verdict returned by the permission resolver.

@@ -2728,6 +2728,84 @@ repository secrets instead:
 - `backend/tests/test_ci_repo_secrets.py` checks all of this, and that
   no workflow reads these names from `vars`.
 
+### Test images come through the image proxy
+
+A test must not pull from Docker Hub, quay.io or another outside registry
+while it runs. Docker Hub answers "429 Too Many Requests" when too many pulls
+come from one address, and the self-hosted runners share one address. A
+required check that fails this way can throw a ready pull request out of the
+merge queue.
+
+The rule:
+
+- A CI test job pulls or builds from an image only through the CI image proxy
+  cache (the secret `CI_IMAGE_PROXY`), or from the organisation's own
+  registry where a job cannot reach the proxy.
+- Each image that a test uses has a variable `MEHO_TEST_<NAME>_IMAGE` with a
+  public default in the test file (`os.environ.get("MEHO_TEST_X_IMAGE",
+  "<default>")`). A test never names an image in plain text.
+- A Dockerfile that a test builds takes its base image from a build argument
+  (`ARG DEBIAN_IMAGE=...` and `FROM ${DEBIAN_IMAGE}`). The test passes the
+  variable as the build argument.
+- CI sets each variable with `PROXY/<image>` (or `PROXY_ONLY/<image>` for a
+  large image) in the image block of the step "Read the CI repository
+  secrets", in every job that runs the test. Official Docker Hub images
+  need the `library/` part: `PROXY/library/mongo:8`.
+- The testcontainers library starts its Ryuk clean-up helper on every
+  Docker daemon. `RYUK_CONTAINER_IMAGE` in the same block names it through
+  the proxy.
+- A test that runs several versions has one variable for each version
+  (`MEHO_TEST_POSTGRES_16_IMAGE`, `MEHO_TEST_MONGODB_8_IMAGE`). The single
+  name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand.
+- Packages that a Dockerfile installs at build time (the bind9 test images
+  run `apt-get`) come from the Debian package servers. They are a package
+  download, not an image pull, and stay outside the proxy.
+
+`backend/tests/test_ci_test_images.py` pins the rule. It fails:
+
+- when a test file that starts containers names an image in plain text, or
+  has a `FROM` line with a fixed name;
+- when a job runs a test that reads an image variable, and does not set the
+  variable with `PROXY/` or `PROXY_ONLY/`;
+- when a step of a test job in `ci.yml` or `chart.yml` pulls an image
+  (`docker pull`, `docker run`, `docker build`, `kind create cluster`) and the
+  job is not on the exception list.
+
+**The exception list** is `backend/tests/ci_test_image_exceptions.json`. Each
+entry has a reason. The test fails when an entry no longer applies, so the
+list does not grow old. Today it names:
+
+- `redaction-compare` in `ci.yml`: on a pull request it runs on a
+  GitHub-hosted runner, which cannot reach the proxy. It runs one pinned
+  Python image by digest.
+- the four kind jobs in `chart.yml` (`helm-test`, `helm-test-byo`,
+  `rollback-drill`, `upgrade-from-release`): GitHub-hosted runners. kind
+  pulls its node image, and the jobs pull the images they load into kind.
+- the single-image variables `MEHO_TEST_POSTGRES_IMAGE` and
+  `MEHO_TEST_MONGODB_IMAGE`: CI sets the per-version ones.
+
+Jobs that scan or build and are not test jobs (`security-scan.yml`,
+`secret-scan.yml`, `image.yml`, `connector-overlay.yml`) are not read by the
+check.
+
+**What the runners do** (found with a temporary diagnostic in a CI run on the
+`meho-runners-ci` pool):
+
+- The proxy project serves Docker Hub images and quay.io images (Keycloak,
+  OpenBao). The Keycloak tag has another digest in the proxy than the digest
+  the chart pins, so CI names the Keycloak image by tag, not by digest.
+- The Docker daemon of a runner has no registry mirror, and starts with no
+  image on it. So every job pulls its Ryuk helper itself.
+- A runner can edit its hosts file with `sudo`, and that blocks the Docker
+  daemon: with the outside registries pointed at `0.0.0.0`, all four
+  integration shards passed. The runner has no `iptables`, so this does not
+  block the k3s node inside a test container.
+- The k3s node inside a test container does not get its busybox image from
+  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it skip
+  ("busybox pod did not reach Running within 60s", "Job ... did not finish
+  within 180s"). The same seven skip on `main`, so the proxy did not make it
+  worse. Why the node cannot pull is not known yet.
+
 ### Why no image build job
 
 `ci.yml` deliberately does **not** build the backplane container image.

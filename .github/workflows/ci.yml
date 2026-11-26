@@ -3000,27 +3000,6 @@ jobs:
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
 
-      - name: TEMPORARY block outside registries for the test Docker daemon
-        # Temporary (pull request evoila/meho#7078). Removed before the
-        # pull request ends. It points the outside registries at 0.0.0.0 in
-        # the hosts file (the daemon) and rejects their addresses (the
-        # containers, for example the k3s node).
-        run: |
-          set +e
-          hosts="registry-1.docker.io docker.io index.docker.io auth.docker.io production.cloudflare.docker.com quay.io cdn.quay.io cdn01.quay.io cdn02.quay.io ghcr.io pkg-containers.githubusercontent.com"
-          ips="$(for h in ${hosts}; do getent ahostsv4 "${h}" | awk '{print $1}'; done | sort -u)"
-          echo "outside registry addresses: $(echo ${ips} | wc -w)"
-          printf '0.0.0.0 %s\n' "${hosts}" | sudo tee -a /etc/hosts >/dev/null
-          echo "iptables: $(command -v iptables || echo missing)"
-          for ip in ${ips}; do
-            sudo iptables -I OUTPUT -d "${ip}" -j REJECT 2>/dev/null
-            sudo iptables -I FORWARD -d "${ip}" -j REJECT 2>/dev/null
-          done
-          echo "forward rules: $(sudo iptables -S FORWARD 2>/dev/null | grep -c REJECT)"
-          if docker pull hello-world:linux >/dev/null 2>&1; then echo "CHECK: docker hub pull still works"; else echo "CHECK: docker hub pull is blocked"; fi
-          first="$(echo ${ips} | awk '{print $1}')"
-          if docker run --rm "${MEHO_TEST_BUSYBOX_IMAGE}" nc -w 4 "${first}" 443 </dev/null >/dev/null 2>&1; then echo "CHECK: a container reaches an outside registry address"; else echo "CHECK: a container cannot reach an outside registry address"; fi
-
       - name: Pytest (integration testcontainers, one shard)
         # The tests/integration/ subtree, split over the shards. No --cov
         # here: coverage is emitted
@@ -3067,16 +3046,6 @@ jobs:
           # test case.
           uv run pytest -x -rs -o junit_family=xunit1 \
             --junitxml=pytest-integration-shard.xml "${SHARD_FILES[@]}"
-
-      - name: TEMPORARY counts of this shard
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          root = ET.parse("pytest-integration-shard.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          print("shard ${{ matrix.shard }}/4 counts:", {k: suite.get(k) for k in ("tests", "failures", "errors", "skipped")})
-          PY
 
       - name: Stop memory sampling
         if: always()

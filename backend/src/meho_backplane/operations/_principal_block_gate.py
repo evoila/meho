@@ -104,16 +104,20 @@ async def refuse_if_principal_blocked(
     *,
     earlier_sent: bool = False,
     client_id: str | None = None,
+    maybe_agent: bool = False,
 ) -> OperationResult | None:
     """Return a refusal when *sub* or the login name *client_id* is blocked, else ``None``.
 
     *earlier_sent* is true when an earlier step of the same operation was
     sent, also in the run before an approval. *client_id* is
     :func:`~meho_backplane.auth.principal_block.login_name` of the operator,
-    when the caller has it.
+    when the caller has it. *maybe_agent* is as in
+    :func:`~meho_backplane.auth.principal_block.is_principal_blocked`.
     """
     try:
-        blocked = await is_principal_blocked(sub, tenant_id, client_id=client_id)
+        blocked = await is_principal_blocked(
+            sub, tenant_id, client_id=client_id, maybe_agent=maybe_agent
+        )
     except PrincipalBlockUnavailableError:
         return _unavailable(op_id, earlier_sent=earlier_sent)
     return _blocked(op_id, earlier_sent=earlier_sent) if blocked else None

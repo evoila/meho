@@ -104,7 +104,7 @@ from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
 from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
-from meho_backplane.auth.principal_block import checking_logins_for_steps
+from meho_backplane.auth.principal_block import checking_logins_for_steps, may_be_agent
 from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
@@ -3522,12 +3522,16 @@ async def refuse_resume_if_asker_blocked(
     """Refuse an approved run when the login that asked is blocked.
 
     Returns ``None`` when the asker (``request.principal_sub``) is not
-    blocked, so the caller runs the request. Otherwise the operation never
-    runs and the vendor gets no call. The refusal is recorded like the
-    release refusal (:func:`refuse_resume_if_release_changed`): the claim
-    is taken, so the request never runs later, the stored run input is
-    deleted, one audit row records it, and the refusal is the stored run
-    result. A block-list read that fails refuses the run the same way.
+    blocked, so the caller runs the request. An asker that may be an agent
+    also counts as blocked by a block of an agent name whose login id MEHO
+    could not read, unless MEHO knows the asker's agent name
+    (:func:`~meho_backplane.auth.principal_block.is_principal_blocked`).
+    Otherwise the operation never runs and the vendor gets no call. The
+    refusal is recorded like the release refusal
+    (:func:`refuse_resume_if_release_changed`): the claim is taken, so the
+    request never runs later, the stored run input is deleted, one audit
+    row records it, and the refusal is the stored run result. A block-list
+    read that fails refuses the run the same way.
 
     Shared by both resume paths: the operator surfaces
     (:func:`resume_dispatch_after_approval`) and the in-process agent
@@ -3539,6 +3543,7 @@ async def refuse_resume_if_asker_blocked(
         request.tenant_id,
         # The multi-step operation sent a step before it waited.
         earlier_sent=(request.resume_parent or {}).get("request_sent") is True,
+        maybe_agent=may_be_agent(request.principal_kind),
     )
     if refusal is None:
         return None
@@ -4088,8 +4093,12 @@ async def _dispatch_resume_with_bound_context(
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
             restored_connector_limit(request.allowed_connectors),
-            # Each step of the run also checks the person who asked.
-            checking_logins_for_steps(request.principal_sub, request.tenant_id),
+            # Each step of the run also checks the login who asked.
+            checking_logins_for_steps(
+                request.principal_sub,
+                request.tenant_id,
+                maybe_agent=may_be_agent(request.principal_kind),
+            ),
             composite_resume_binding(
                 subop_op_id=request.op_id,
                 subop_params_hash=request.params_hash,

@@ -54,9 +54,9 @@ func TestPrintBlocked(t *testing.T) {
 		}
 	}
 	out.Reset()
-	agent := "agent:probe-bot"
+	agent := "agent:sample-agent"
 	printBlocked(&out, []api.BlockRead{{
-		Sub: "agent:probe-bot", Agent: &agent, Scope: "tenant-id", Reason: "agent revoked",
+		Sub: "agent:sample-agent", Agent: &agent, Scope: "tenant-id", Reason: "agent revoked",
 		BlockedAt: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC),
 	}})
 	if !strings.Contains(out.String(), "AGENT") || strings.Count(out.String(), agent) != 2 {

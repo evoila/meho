@@ -56,12 +56,14 @@ func newBlockCmd() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{
 		Use:   "block <sub> --reason <text>",
-		Short: "Block a person in MEHO (tenant_admin)",
-		Long: "block calls POST /api/v1/principals/blocked. <sub> is the login id " +
-			"of the person, or the agent name from the agent list (agent:<name>). " +
-			"A block of an agent name stops every token of that agent. MEHO refuses " +
-			"an agent name it does not know. The reason is kept in the audit log " +
-			"and in the block list. The blocked login sees no reason.",
+		Short: "Block a login or an agent in MEHO (tenant_admin)",
+		Long: "block calls POST /api/v1/principals/blocked. A <sub> that starts with " +
+			"agent: names an agent: copy it from the agent list (agent:<name>). It " +
+			"stops every token of that agent. MEHO refuses an agent name that names " +
+			"no agent in your reach, and stores no block. Every other <sub> is a " +
+			"login id: MEHO stores its block, and it holds from the next request " +
+			"of that login. The reason is kept in the audit log and in the block " +
+			"list. The blocked login sees no reason.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -85,10 +87,11 @@ func newBlockCmd() *cobra.Command {
 				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON201)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "blocked %s (scope %s)\n", resp.JSON201.Sub, scopeText(resp.JSON201.Scope))
+			fmt.Fprintln(cmd.OutOrStdout(), resp.JSON201.Message)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "why the person is blocked (required)")
+	cmd.Flags().StringVar(&reason, "reason", "", "why the login is blocked (required)")
 	flags.add(cmd)
 	return cmd
 }

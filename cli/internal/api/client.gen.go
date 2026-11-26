@@ -1664,7 +1664,7 @@ type AgentPrincipalRead struct {
 	CreatedBySub string             `json:"created_by_sub"`
 	Id           openapi_types.UUID `json:"id"`
 
-	// KeycloakClientId The login name of the agent (agent:<name>). A block of this name (POST /api/v1/principals/blocked) stops every token of the agent.
+	// KeycloakClientId A block of this name (POST /api/v1/principals/blocked) stops every token of the agent.
 	KeycloakClientId   string             `json:"keycloak_client_id"`
 	KeycloakInternalId string             `json:"keycloak_internal_id"`
 	Name               string             `json:"name"`
@@ -2823,6 +2823,20 @@ type BlockCreate struct {
 	Sub string `json:"sub"`
 }
 
+// BlockCreated Response of “POST /api/v1/principals/blocked“.
+type BlockCreated struct {
+	// Agent The agent name (agent:<name>) of the blocked login, when it is an agent.
+	Agent        *string   `json:"agent"`
+	BlockedAt    time.Time `json:"blocked_at"`
+	BlockedBySub string    `json:"blocked_by_sub"`
+
+	// Message One sentence that says the block is stored.
+	Message string `json:"message"`
+	Reason  string `json:"reason"`
+	Scope   string `json:"scope"`
+	Sub     string `json:"sub"`
+}
+
 // BlockListResponse Response of “GET /api/v1/principals/blocked“.
 type BlockListResponse struct {
 	Blocked []BlockRead `json:"blocked"`
@@ -2841,6 +2855,7 @@ type BlockRead struct {
 
 // BodyBlockUiBlockedPeoplePost defines model for Body__block_ui_blocked_people_post.
 type BodyBlockUiBlockedPeoplePost struct {
+	Agent  *string `json:"agent,omitempty"`
 	Reason *string `json:"reason,omitempty"`
 	Sub    *string `json:"sub,omitempty"`
 }
@@ -61043,8 +61058,14 @@ func (r ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse) StatusCode() int
 type BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *BlockRead
-	JSON422      *HTTPValidationError
+	JSON201      *BlockCreated
+	JSON422      *struct {
+		union json.RawMessage
+	}
+}
+type BlockPrincipalRouteApiV1PrincipalsBlockedPost4220 struct {
+	// Detail unknown_login or cannot_block_self, a colon, and a plain sentence for the admin.
+	Detail string `json:"detail"`
 }
 
 // Status returns HTTPResponse.Status
@@ -79334,14 +79355,16 @@ func ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp *http.Respon
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest BlockRead
+		var dest BlockCreated
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON201 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

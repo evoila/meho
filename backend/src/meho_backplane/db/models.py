@@ -5352,6 +5352,11 @@ class PrincipalBlock(Base):
     of a few seconds (:mod:`meho_backplane.auth.principal_block`) and refuses
     every request of a blocked login. ``tenant_id`` has no foreign key: a
     block must still hold when the tenant row is gone.
+
+    A ``sub`` that starts with ``agent:`` is an agent name. ``login_sub`` is
+    then the login id behind the agent, read from Keycloak at block time,
+    or ``NULL`` when Keycloak could not be read. It is ``NULL`` for a block
+    of a login id.
     """
 
     __tablename__ = "principal_block"
@@ -5359,6 +5364,7 @@ class PrincipalBlock(Base):
     sub: Mapped[str] = mapped_column(Text, primary_key=True)
     scope: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    login_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     blocked_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     blocked_at: Mapped[datetime] = mapped_column(

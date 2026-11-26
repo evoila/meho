@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Add ``client_id`` to ``machine_login``.
+"""Add ``machine_login.client_id`` and ``principal_block.login_sub``.
 
 Revision ID: 0189
 Revises: 0188
@@ -12,8 +12,11 @@ Create Date: 2026-11-26
   it on the next call of the login. The block list reads it, so a block of
   that name also holds for the login id.
 * ``machine_login_client_id_idx`` -- b-tree on ``client_id``.
+* ``principal_block.login_sub`` -- Text, nullable. For a block of an agent
+  name, the login id behind the agent, read from Keycloak at block time.
 
-Existing rows start as ``NULL``. ``downgrade()`` drops the index and the column.
+Existing rows start as ``NULL``. ``downgrade()`` drops the index and both
+columns.
 """
 
 from collections.abc import Sequence
@@ -41,12 +44,14 @@ __all__ = [
 
 
 def upgrade() -> None:
-    """Add the column and its index."""
+    """Add the two columns and the index."""
     op.add_column("machine_login", sa.Column("client_id", sa.Text(), nullable=True))
     op.create_index("machine_login_client_id_idx", "machine_login", ["client_id"])
+    op.add_column("principal_block", sa.Column("login_sub", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    """Drop the index and the column."""
+    """Drop the index and the two columns."""
+    op.drop_column("principal_block", "login_sub")
     op.drop_index("machine_login_client_id_idx", table_name="machine_login")
     op.drop_column("machine_login", "client_id")

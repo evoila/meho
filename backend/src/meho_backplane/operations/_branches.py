@@ -618,7 +618,7 @@ async def dispatch_composite(
     # the dispatcher imports ``_branches`` to run the branch, and the
     # audit-tree contextvar lives in ``_audit``; deferring to call time
     # mirrors ``get_dispatch_child`` / ``enforce_subop_policy``.
-    from meho_backplane.auth.principal_block import checking_logins_for_steps
+    from meho_backplane.auth.principal_block import checking_operator_for_steps
     from meho_backplane.auth.principal_block_run import mark_request_sent
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.composite import composite_dispatch_var
@@ -653,7 +653,7 @@ async def dispatch_composite(
         # list for this operator (``auth.principal_block``).
         with (
             composite_step_journal(op_id) as journal,
-            checking_logins_for_steps(operator.sub, operator.tenant_id),
+            checking_operator_for_steps(operator),
         ):
             if journal.earlier_sent:
                 mark_request_sent()

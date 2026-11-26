@@ -1084,6 +1084,8 @@ async def _execute_and_audit(
                 is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
                 login=(operator.sub, operator.tenant_id),
                 op_id=op_id,
+                client_id=login_name(operator),
+                maybe_agent=operator.principal_kind is PrincipalKind.AGENT,
             ),
         ):
             result = await _execute_and_audit_inner(

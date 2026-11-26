@@ -10975,17 +10975,36 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BlockRead"
+                  "$ref": "#/components/schemas/BlockCreated"
                 }
               }
             }
           },
           "422": {
-            "description": "Validation Error",
+            "description": "The block is refused (detail is a sentence: unknown_login or cannot_block_self), or the body is not valid (detail is a list of field errors).",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "anyOf": [
+                    {
+                      "description": "A 422 answer of ``POST /api/v1/principals/blocked`` with a plain sentence.",
+                      "properties": {
+                        "detail": {
+                          "description": "unknown_login or cannot_block_self, a colon, and a plain sentence for the admin.",
+                          "title": "Detail",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "title": "BlockRefused",
+                      "type": "object"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HTTPValidationError"
+                    }
+                  ]
                 }
               }
             }
@@ -28124,7 +28143,7 @@
           "keycloak_client_id": {
             "type": "string",
             "title": "Keycloak Client Id",
-            "description": "The login name of the agent (agent:<name>). A block of this name (POST /api/v1/principals/blocked) stops every token of the agent."
+            "description": "A block of this name (POST /api/v1/principals/blocked) stops every token of the agent."
           },
           "keycloak_internal_id": {
             "type": "string",
@@ -30138,6 +30157,53 @@
         "title": "BlockCreate",
         "description": "Body of ``POST /api/v1/principals/blocked``."
       },
+      "BlockCreated": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "blocked_by_sub": {
+            "type": "string",
+            "title": "Blocked By Sub"
+          },
+          "blocked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Blocked At"
+          },
+          "agent": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent",
+            "description": "The agent name (agent:<name>) of the blocked login, when it is an agent."
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "One sentence that says the block is stored."
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "scope",
+          "reason",
+          "blocked_by_sub",
+          "blocked_at",
+          "message"
+        ],
+        "title": "BlockCreated",
+        "description": "Response of ``POST /api/v1/principals/blocked``."
+      },
       "BlockListResponse": {
         "properties": {
           "blocked": {
@@ -30201,6 +30267,11 @@
           "sub": {
             "type": "string",
             "title": "Sub",
+            "default": ""
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent",
             "default": ""
           },
           "reason": {

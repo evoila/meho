@@ -6,8 +6,9 @@
 An admin blocks a login by its login id (``sub``), or an agent by the
 name MEHO shows for it (``agent:<name>``, the ``keycloak_client_id`` of
 the agent list). MEHO then refuses every request of that login within a
-few seconds, on every process (:mod:`meho_backplane.auth.principal_block`).
-A block of an agent name holds for every token of that agent.
+few seconds on every process (the refresh time of the block list,
+``BLOCK_CACHE_SECONDS``; :mod:`meho_backplane.auth.principal_block`). A
+block of an agent name stops every token of that agent.
 
 Routes (REST and CLI only; there is no MCP tool):
 
@@ -15,10 +16,13 @@ Routes (REST and CLI only; there is no MCP tool):
   sees every block, a tenant admin sees the blocks of their tenant.
 * ``POST /api/v1/principals/blocked`` -- block a login, with a reason.
   A platform admin blocks in every tenant. A tenant admin blocks in their
-  own tenant only. Nobody blocks their own login (422). An agent name that
-  is no registered agent in the admin's reach, or the short name of an
-  agent, gets 422 ``unknown_login`` with a plain sentence. The answer and
-  the list name the agent (``agent``) for an agent's login.
+  own tenant only. Nobody blocks their own login (422). A text that
+  starts with ``agent:`` must name an agent registered in the admin's
+  reach, else 422 ``unknown_login`` with a plain sentence, and no block
+  is stored. Every other text is a login id, and MEHO stores its block.
+  The answer says in one sentence that the block is stored
+  (``message``). The answer and the list name the agent (``agent``) for
+  an agent's login.
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
   is no block the admin may remove. A tenant admin removes the blocks of
   their tenant; a platform admin with ``tenant_admin`` removes every block
@@ -72,6 +76,7 @@ from meho_backplane.auth.principal_block import (
     list_blocked,
     unblock_principal,
 )
+from meho_backplane.auth.principal_block_agents import stored_sentence
 from meho_backplane.auth.rbac import ensure_human_principal, require_role
 from meho_backplane.middleware import verify_jwt_and_bind_platform_admin_way_back
 from meho_backplane.settings import get_settings
@@ -190,6 +195,45 @@ class BlockRead(BaseModel):
     )
 
 
+class BlockCreated(BlockRead):
+    """Response of ``POST /api/v1/principals/blocked``."""
+
+    message: str = Field(description="One sentence that says the block is stored.")
+
+
+class BlockRefused(BaseModel):
+    """A 422 answer of ``POST /api/v1/principals/blocked`` with a plain sentence."""
+
+    detail: str = Field(
+        description=(
+            "unknown_login or cannot_block_self, a colon, and a plain sentence for the admin."
+        )
+    )
+
+
+#: Both shapes of a 422 answer of the block route: a refusal with a plain
+#: sentence, or the list of field errors of a body that is not valid.
+_BLOCK_422: Final[dict[int | str, dict[str, Any]]] = {
+    422: {
+        "description": (
+            "The block is refused (detail is a sentence: unknown_login or "
+            "cannot_block_self), or the body is not valid (detail is a list "
+            "of field errors)."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "anyOf": [
+                        BlockRefused.model_json_schema(),
+                        {"$ref": "#/components/schemas/HTTPValidationError"},
+                    ]
+                }
+            }
+        },
+    }
+}
+
+
 class BlockListResponse(BaseModel):
     """Response of ``GET /api/v1/principals/blocked``."""
 
@@ -229,15 +273,20 @@ async def list_blocked_principals(
     return BlockListResponse(blocked=[_read(p) for p in await list_blocked(operator)])
 
 
-@router.post("", response_model=BlockRead, status_code=http_status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=BlockCreated,
+    status_code=http_status.HTTP_201_CREATED,
+    responses=_BLOCK_422,
+)
 async def block_principal_route(
     body: BlockCreate,
     operator: Operator = Depends(_require_person_admin),
-) -> BlockRead:
+) -> BlockCreated:
     """Block a login. Blocking again in the same scope updates the reason."""
     structlog.contextvars.bind_contextvars(audit_op_id="principal.block", audit_op_class="write")
     try:
-        return _read(await block_principal(operator, body.sub, body.reason))
+        person = await block_principal(operator, body.sub, body.reason)
     except CannotBlockSelfError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -248,6 +297,7 @@ async def block_principal_route(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"unknown_login: {exc}",
         ) from exc
+    return BlockCreated(**_read(person).model_dump(), message=stored_sentence(person.sub))
 
 
 @router.delete("/{sub}", response_model=UnblockResponse)

@@ -992,6 +992,8 @@
   "tests/test_policy_small_team_parity.py": 119.56,
   "tests/test_preamble_doc_collections_band.py": 2.0,
   "tests/test_preview_grant_cover.py": 1.23,
+  "tests/test_principal_block_agent_name.py": 44.0,
+  "tests/test_principal_block_agent_paths.py": 42.0,
   "tests/test_principal_display_name.py": 1.35,
   "tests/test_probe_keeps_sign_ins.py": 1.21,
   "tests/test_proxy_headers.py": 0.23,

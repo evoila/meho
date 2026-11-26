@@ -15,6 +15,12 @@ What these tests prove:
   false for an admin's "approval on", a credential call, a caller address,
   a change of rights, "approve each call" and a delete sign. The cases come
   from the operations MEHO registers at start-up.
+* Each part of the delete sign counts on its own: the HTTP verb ``DELETE``,
+  and the code's own ``destructive`` level (an admin's raise to
+  ``destructive`` does not count). The built-in delete names count also
+  when the install sets its own names.
+* A caller-address field that a switch hides still counts: the check reads
+  the stored schema, as the approval floor does.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ from meho_backplane.operations.service_grants import (
     delete_grant_reason,
     descriptor_credential_reason,
 )
+from meho_backplane.operations.switch_params import FILE_REF_PARAMS_SWITCH, SWITCH_MARKER
 from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
 
@@ -73,14 +80,20 @@ async def _handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-async def _register(op_id: str, *, safety_level: Any, requires_approval: bool) -> None:
+async def _register(
+    op_id: str,
+    *,
+    safety_level: Any,
+    requires_approval: bool,
+    parameter_schema: dict[str, Any] | None = None,
+) -> None:
     await register_typed_operation(
         **_KEY,
         op_id=op_id,
         handler=_handler,
         summary="Change a pet.",
         description="Change a pet.",
-        parameter_schema={"type": "object"},
+        parameter_schema=parameter_schema or {"type": "object"},
         when_to_use=None,
         safety_level=safety_level,
         requires_approval=requires_approval,
@@ -237,3 +250,77 @@ async def test_an_admin_approval_on_is_not_the_plain_mark() -> None:
     assert looked_up.requires_approval is True
     assert looked_up.code_requires_approval is False
     assert has_plain_mark(looked_up) is False
+
+
+# ---------------------------------------------------------------------------
+# Each part of the delete sign, and the stored schema
+# ---------------------------------------------------------------------------
+
+
+def _in_memory(op_id: str, *, method: str = "POST") -> EndpointDescriptor:
+    """A row at code level ``caution`` with the code's approval mark."""
+    return EndpointDescriptor(
+        **_KEY,
+        op_id=op_id,
+        method=method,
+        path="/pets",
+        source_kind="generic",
+        safety_level="caution",
+        requires_approval=True,
+        parameter_schema={"type": "object"},
+        tags=[],
+    )
+
+
+def test_the_http_verb_delete_is_a_delete_sign() -> None:
+    assert has_plain_mark(_in_memory("fixturepets.pet.walk", method="POST")) is True
+    assert has_plain_mark(_in_memory("fixturepets.pet.walk", method="DELETE")) is False
+
+
+@pytest.mark.asyncio
+async def test_an_admin_raise_to_destructive_is_not_a_delete_sign() -> None:
+    op_id = "fixturepets.pet.groom"
+    await _register(op_id, safety_level="caution", requires_approval=True)
+    await _override(op_id, safety_level="destructive", requires_approval=None)
+
+    row = await _looked_up(op_id)
+
+    assert (row.safety_level, row.code_safety_level) == ("destructive", "caution")
+    assert has_plain_mark(row) is True
+
+
+def test_the_built_in_delete_names_count_also_with_the_install_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _in_memory("fixturepets.pet.delete")
+    assert has_plain_mark(row) is False
+
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "fixturepets.other.*")
+    get_settings.cache_clear()
+    assert get_settings().service_grant_delete_shaped_patterns == ("fixturepets.other.*",)
+
+    assert has_plain_mark(row) is False
+    assert has_plain_mark(_in_memory("fixturepets.other.walk")) is False
+    assert has_plain_mark(_in_memory("fixturepets.pet.walk")) is True
+
+
+@pytest.mark.asyncio
+async def test_a_caller_address_that_a_switch_hides_still_counts() -> None:
+    op_id = "fixturepets.pet.fetch"
+    schema = {
+        "type": "object",
+        "properties": {
+            "source_url": {
+                "type": "string",
+                "x-meho-caller-address": True,
+                SWITCH_MARKER: FILE_REF_PARAMS_SWITCH,
+            }
+        },
+    }
+    await _register(op_id, safety_level="caution", requires_approval=True, parameter_schema=schema)
+
+    row = await _looked_up(op_id)
+
+    assert "source_url" not in row.parameter_schema.get("properties", {})
+    assert has_caller_address(row.code_parameter_schema)
+    assert has_plain_mark(row) is False

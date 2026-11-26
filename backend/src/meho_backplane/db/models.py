@@ -2109,6 +2109,10 @@ class EndpointDescriptor(Base):
     #: on a row they did not return: its own columns hold the code's values.
     code_safety_level = cast("str | None", None)
     code_requires_approval = cast("bool | None", None)
+    #: Not a column. The stored parameter schema, kept by the same two steps
+    #: before a switch hides a field from ``parameter_schema``. ``None`` on a
+    #: row they did not return: ``parameter_schema`` is then the stored one.
+    code_parameter_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,

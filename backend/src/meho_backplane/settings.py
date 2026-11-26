@@ -50,6 +50,7 @@ from meho_backplane.retrieval.embedding import (
 
 __all__ = [
     "AGENT_FACING",
+    "BUILT_IN_DELETE_NAMES",
     "RESULT_COMPLETE_RESPONSE_WIRE_MIN_BYTES",
     "Settings",
     "get_settings",
@@ -148,6 +149,11 @@ _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
     *DELETE_SHAPED_OP_ID_PATTERNS,
     "POST:/vswitch/*",
 )
+
+
+#: The built-in delete names. Code that must never lose them reads this
+#: name, not the install's setting, which may replace them.
+BUILT_IN_DELETE_NAMES: tuple[str, ...] = _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
 
 
 def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:

@@ -107,7 +107,7 @@ from meho_backplane.policy.store import (
     classify_rows,
     classify_step,
 )
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import BUILT_IN_DELETE_NAMES, get_settings
 
 __all__ = [
     "CLASSIFICATION_FIELDS",
@@ -286,9 +286,13 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     call, a field with an address the caller gives, a change of rights,
     "approve each call", or a delete sign (the ``destructive`` level of
     the code, the HTTP verb ``DELETE``, the ``destructive`` tag, a delete
-    name). It reads the code's own values
-    (``code_requires_approval``, ``code_safety_level``), so an admin's
-    edit never looks like the code's mark. A pure function: no database.
+    name). It reads the code's own values (``code_requires_approval``,
+    ``code_safety_level``, ``code_parameter_schema``), so an admin's edit
+    or a switch that hides a field never looks like the code's mark.
+
+    The built-in delete names always count; the install's own delete names
+    (``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``) only add to them. No
+    database; it reads that one setting.
     """
     from meho_backplane.operations.service_grants import (
         delete_grant_reason,
@@ -299,8 +303,12 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     if code_approval is None:
         code_approval = descriptor.requires_approval
     code_safety = descriptor.code_safety_level or descriptor.safety_level
+    schema = descriptor.code_parameter_schema
+    if schema is None:
+        schema = descriptor.parameter_schema
     op_id = descriptor.op_id
-    patterns = get_settings().service_grant_delete_shaped_patterns
+    install_names = get_settings().service_grant_delete_shaped_patterns
+    patterns = tuple(dict.fromkeys((*BUILT_IN_DELETE_NAMES, *install_names)))
     delete_sign = (
         code_safety == "destructive"
         or (descriptor.method or "").upper() == "DELETE"
@@ -310,7 +318,7 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     return bool(code_approval) and not (
         delete_sign
         or descriptor_credential_reason(descriptor) is not None
-        or has_caller_address(descriptor.parameter_schema)
+        or has_caller_address(schema)
         or is_rights_change_op(op_id)
         or needs_per_call_approval(op_id)
     )
@@ -580,9 +588,10 @@ async def apply_step_policy(
 
 
 def _keep_code_values(row: EndpointDescriptor) -> None:
-    """Keep the code's own risk level and approval flag before the effective ones replace them."""
+    """Keep the code's own risk level, approval flag and stored schema before they change."""
     row.code_safety_level = row.safety_level
     row.code_requires_approval = row.requires_approval
+    row.code_parameter_schema = row.parameter_schema
 
 
 def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> None:

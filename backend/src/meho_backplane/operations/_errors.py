@@ -36,6 +36,7 @@ handling.
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -47,8 +48,16 @@ import httpx
 
 from meho_backplane.auth.tenant_admins import LOGIN_REALM_APPROVER
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.credential_backend import (
+    DEFAULT_CREDENTIAL_BACKEND,
+    parse_credential_scheme,
+    split_credential_ref,
+)
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
-from meho_backplane.connectors._shared.vault_creds import TargetSecretForbiddenError
+from meho_backplane.connectors._shared.vault_creds import (
+    DEFAULT_KV_MOUNT,
+    TargetSecretForbiddenError,
+)
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import (
     ConnectorOwnMessage,
@@ -71,6 +80,7 @@ from meho_backplane.operations.uncertain_outcome import (
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.secret_fields import scrub_secret_fields_in_text
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.connectors._shared.vault_creds import SecretRefReadError
@@ -2554,6 +2564,84 @@ def is_auth_failed_status(
 #: test there reads this constant from this file and checks that the CLI
 #: accepts it. Keep the assignment on one line.
 RESTAGE_KV_PUT_DATA_ARG: Final = "@<file>"
+#: The JSON example of the restage hint: an empty value for each field, which
+#: the reader fills in. MEHO's hide step replaces any other value of a field
+#: named like ``password`` in the text a reader gets; an empty value stays.
+_RESTAGE_JSON_EXAMPLE: Final = '{"username": "", "password": ""}'
+
+
+#: The characters a stored value may hold to stand in a ready-to-paste
+#: command of a hint: letters, digits, ``-``, ``_``, ``.`` and ``/``.
+_SHELL_SAFE_RE: Final = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _shell_arg(value: str) -> str | None:
+    """Return *value* quoted as one shell argument, or ``None``.
+
+    The one helper for a stored value (a path, a mount, a target name) that
+    a hint puts into a command line. ``None`` means the value holds a
+    character outside the safe set, or starts with ``-``: the hint then shows
+    the value on its own line and gives no ready-to-paste command. Quotes
+    alone keep a POSIX shell line safe, but not every shell, and a line break
+    inside quotes still splits the line.
+    """
+    if value.startswith("-") or _SHELL_SAFE_RE.fullmatch(value) is None:
+        return None
+    return shlex.quote(value)
+
+
+def _restage_store(secret_ref: str) -> tuple[str, str]:
+    """Split *secret_ref* into ``(store kind, store ref)`` as the credential read does.
+
+    An explicit ``<kind>:`` prefix names the store; a ref without one belongs
+    to the install's default store (``credential_backend``).
+    """
+    scheme = parse_credential_scheme(secret_ref)
+    if scheme is not None:
+        default_backend = scheme
+    else:
+        try:
+            default_backend = get_settings().credential_backend
+        except Exception:  # the error path never raises; the settings default
+            default_backend = DEFAULT_CREDENTIAL_BACKEND
+    return split_credential_ref(secret_ref, default_backend=default_backend)
+
+
+def _own_line(what: str, value: str) -> str:
+    """Show a stored *value* that is not safe in a command on its own line."""
+    return (
+        f" The {what} holds characters a shell reads in its own way, so no "
+        f"ready-to-paste command is shown. The {what} is on the next line:\n{value}\n"
+    )
+
+
+def _restage_find_ref(target_name: str | None) -> str:
+    """The step that names how to read an unknown ``secret_ref``."""
+    if not target_name:
+        return " `meho targets describe <target>` shows its secret_ref."
+    quoted = _shell_arg(target_name)
+    if quoted is not None:
+        return f" `meho targets describe {quoted}` shows its secret_ref."
+    return (
+        _own_line("target name", target_name)
+        + "`meho targets describe <target>` with that name shows its secret_ref."
+    )
+
+
+def _restage_vault_put(path: str | None) -> tuple[str, str]:
+    """``(own line, command)`` of the ``meho vault kv put`` step for a Vault *path*.
+
+    *path* ``None`` means the ref is not known: the command shows the
+    ``<secret_ref>`` placeholder. A path outside the safe set is shown on its
+    own line, and the command shows the ``<path>`` placeholder.
+    """
+    mount = _shell_arg(DEFAULT_KV_MOUNT) or DEFAULT_KV_MOUNT
+    if path is None:
+        shown, own_line = "<secret_ref>", ""
+    else:
+        quoted = _shell_arg(path)
+        shown, own_line = ("<path>", _own_line("path", path)) if quoted is None else (quoted, "")
+    return own_line, f"`meho vault kv put {mount} {shown} --data {RESTAGE_KV_PUT_DATA_ARG}`"
 
 
 def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -> str:
@@ -2563,35 +2651,43 @@ def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -
     ``connector_vault_forbidden`` remediation shape (state the likely cause,
     name the exact thing to fix, give the command). The credential is most
     likely stale because the target's service-account password was rotated
-    upstream while the backplane-side Vault copy lagged -- the routine event
+    upstream while the backplane-side copy lagged -- the routine event
     the filing (#2329) documents -- so the fix is to restage the credential,
     not to widen a policy.
 
-    The command is ``meho vault kv put secret <secret_ref> --data @<file>``:
-    a target's ``secret_ref`` is a path under the ``secret`` mount, and the
-    JSON object comes from a file that only the reader can read. The text
-    never puts a credential value on the command line, and it points to the
-    guide part "Store the credential through MEHO".
+    The ref is read as the credential read reads it (:func:`_restage_store`).
+    A Vault ref gives ``meho vault kv put secret <path> --data @<file>``, with
+    the path without its ``vault:`` prefix: the JSON object comes from a file
+    that only the reader can read, so no credential value stands on the
+    command line. A ref of another store gives no Vault command: the hint
+    says to store the credential in that store at that ref. A stored value
+    goes into a command only through :func:`_shell_arg`.
     """
     who = f"target {target_name!r}" if target_name else "this target"
     ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
-    path = secret_ref if secret_ref else "<secret_ref>"
-    find_ref = (
-        ""
-        if secret_ref
-        else f" `meho targets describe {target_name or '<target>'}` shows its secret_ref."
-    )
+    kind, path = _restage_store(secret_ref) if secret_ref else ("vault", None)
+    if kind != "vault":
+        return (
+            f"the credential for {who}{ref_clause} appears stale or wrong -- most "
+            f"likely the upstream service-account password was rotated while the "
+            f"copy in the {kind!r} credential store lagged. Store the corrected "
+            f"credential in the {kind!r} store at that ref, then retry. Never put "
+            f"the password on the command line."
+        )
+    find_ref = "" if secret_ref else _restage_find_ref(target_name)
+    own_line, put = _restage_vault_put(path)
+    lead = "" if (own_line or find_ref).endswith("\n") else " "
     return (
         f"the credential for {who}{ref_clause} appears stale or wrong -- most "
         f"likely the upstream service-account password was rotated while the "
-        f"backplane-side Vault copy lagged.{find_ref} Restage it through MEHO: write the "
-        f'corrected credential as a JSON object (for example {{"username": '
-        f'"<user>", "password": "<password>"}}) into a file that only you can '
-        f"read, store it with "
-        f"`meho vault kv put secret {path} --data {RESTAGE_KV_PUT_DATA_ARG}`"
-        f" (the write waits for a person's approval), delete the "
-        f"file, then retry. Never put the password on the command line. The steps "
-        f"are in docs-site/guides/targets-and-secrets.md "
+        f"backplane-side Vault copy lagged.{find_ref}{own_line}"
+        f"{lead}Restage it through MEHO: write the "
+        f"corrected credential as a JSON object (for example "
+        f"{_RESTAGE_JSON_EXAMPLE}, with each value filled in) into a file that "
+        f"only you can read, "
+        f"store it with {put} (the write waits for a person's approval), "
+        f"delete the file, then retry. Never put the password on the command line. "
+        f"The steps are in docs-site/guides/targets-and-secrets.md "
         f"(Store the credential through MEHO)."
     )
 

@@ -31,6 +31,7 @@ from meho_backplane.flight_recorder.store import SpanInput
 __all__ = [
     "MAX_SPAN_BODY_BYTES",
     "PATH_VALUE_MARK",
+    "FilledPath",
     "approx_bytes",
     "approx_span_bytes",
     "as_mapping",
@@ -189,6 +190,22 @@ _MIN_VALUE_INSIDE_SEGMENT: Final[int] = 8
 _PLACEHOLDER: Final = re.compile(r"\{([+#./;?&]?)[^{}]*\}")
 
 
+class FilledPath(str):
+    """A request path that a typed handler filled from a path template.
+
+    It is the filled path itself, so it goes to HTTPX as it is. It also keeps
+    the *template* (``/admin/realms/{realm}``), so the trace knows which path
+    segments the handler filled with a value and which are fixed.
+    """
+
+    template: str
+
+    def __new__(cls, path: str, template: str) -> FilledPath:
+        filled = super().__new__(cls, path)
+        filled.template = template
+        return filled
+
+
 def path_values(params: Any) -> frozenset[str]:
     """The texts of the call's top-level parameter values that can stand in a path.
 
@@ -298,33 +315,20 @@ def _value_segments(segments: list[str], values: frozenset[str]) -> set[int]:
     """The segments that hold one of *values*, compared after percent-decoding.
 
     The decoded segments are joined with ``/``, so a value that holds a ``/``
-    marks every segment it covers.
+    marks every segment it covers. The compare ignores letter case on both
+    sides: the client follows a redirect to the same path in another letter
+    case, so ``/keys/DemoKey`` can come back as ``/keys/demokey``.
     """
     decoded = [unquote(segment) for segment in segments]
     joined = "/".join(decoded)
-    folded = _fold(joined)
-    if folded != joined:
-        joined, values = folded, frozenset(_fold(value) for value in values)
     masked: set[int] = set()
     for value in values:
-        start = joined.find(value)
-        while start != -1:
-            end = start + len(value)
+        # A look-ahead finds each place, also places that overlap.
+        for found in re.finditer(f"(?=({re.escape(value)}))", joined, re.IGNORECASE):
+            start, end = found.span(1)
             if len(value) >= _MIN_VALUE_INSIDE_SEGMENT or _stands_alone(joined, start, end):
                 masked |= _segment_indexes(decoded, start, end)
-            start = joined.find(value, start + 1)
     return masked
-
-
-def _fold(text: str) -> str:
-    """*text* in lower case, when that keeps its length; else *text* itself.
-
-    The client follows a redirect to the same path in another letter case,
-    so a value is found in any case. A path whose lower case has another
-    length is compared as it is, so the segment positions stay right.
-    """
-    lowered = text.lower()
-    return lowered if len(lowered) == len(text) else text
 
 
 def _stands_alone(text: str, start: int, end: int) -> bool:

@@ -68,6 +68,7 @@ import structlog
 
 from meho_backplane.broadcast.events import classify_op, is_secret_param_name
 from meho_backplane.flight_recorder._capture_util import (
+    FilledPath,
     approx_bytes,
     approx_span_bytes,
     as_mapping,
@@ -92,6 +93,7 @@ from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 
 __all__ = [
     "CaptureHandle",
+    "FilledPath",
     "SpanStart",
     "begin_dispatch_capture",
     "end_dispatch_capture",
@@ -236,6 +238,12 @@ _op_context_var: ContextVar[_OpContext | None] = ContextVar(
 #: The body of the operation request the HTTP seam is sending now
 #: (:func:`request_body_values`). Read only to build a trace address.
 _request_body_var: ContextVar[Any] = ContextVar("flight_recorder_request_body", default=None)
+
+#: The path template of the operation request the HTTP seam is sending now,
+#: when a typed handler filled its path from one (:class:`FilledPath`).
+_request_template_var: ContextVar[str | None] = ContextVar(
+    "flight_recorder_request_template", default=None
+)
 
 _INACTIVE_HANDLE: Final[CaptureHandle] = CaptureHandle(
     owns=False, scope=None, op_token=None, cap_token=None
@@ -497,18 +505,24 @@ def _redact_vendor_call(
 
 
 @contextlib.contextmanager
-def request_body_values(body: Any) -> Iterator[None]:
-    """Name the body of the operation request sent inside, for the trace address.
+def request_body_values(body: Any, path: Any = None) -> Iterator[None]:
+    """Name the body and the path of the operation request sent inside, for the trace address.
 
     The HTTP seam wraps one request in it: the first send, each followed
-    redirect and a network error. A value that this body carries was put
-    into the body, not into the path, so the trace does not mask a path
-    segment because of it (a value under a secret key still counts).
+    redirect and a network error. When a typed handler filled *path* from a
+    template (:class:`FilledPath`), the trace masks the segments the handler
+    filled, wherever in the body the same value stands. Without a template,
+    a value that the body carries was put into the body, not into the path,
+    so the trace does not mask a path segment because of it (a value under a
+    secret key still counts).
     """
+    template = path.template if isinstance(path, FilledPath) else None
     token = _request_body_var.set(body)
+    template_token = _request_template_var.set(template)
     try:
         yield
     finally:
+        _request_template_var.reset(template_token)
         _request_body_var.reset(token)
 
 
@@ -519,14 +533,19 @@ def _span_url(url: Any) -> str:
     value of the call's parameters is replaced by a fixed mark
     (:func:`mask_path_values`); the path is then kept percent-encoded, as it
     was sent. The test is the one the error results use
-    (``operations._vendor_text.sends_secret``). Without a path template (a
-    typed operation), a value that the request body carries is not a path
-    value, so a fixed segment with the same text stays.
+    (``operations._vendor_text.sends_secret``). The path template says which
+    segments hold a value: the one of an ingested operation, or the one a
+    typed handler filled its path from (:class:`FilledPath`). Without a
+    template, a value that the request body carries is not a path value, so
+    a fixed segment with the same text stays.
     """
     op = _op_context_var.get()
     if op is not None and _op_sends_secret(op):
-        values = op.path_values - body_values(_request_body_var.get(), is_secret_param_name)
-        return mask_path_values(encoded_safe_url(url), values, op.path_template)
+        template = op.path_template or _request_template_var.get()
+        values = op.path_values
+        if template is None:
+            values = values - body_values(_request_body_var.get(), is_secret_param_name)
+        return mask_path_values(encoded_safe_url(url), values, template)
     return safe_url(url)
 
 

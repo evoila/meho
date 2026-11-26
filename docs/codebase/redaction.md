@@ -1348,15 +1348,20 @@ where its path template puts a parameter (also a value with a `/`, or a
 value inside a segment such as `{key}:rotate`); its fixed segments stay,
 also when one equals a value of the call. The template matches in any
 letter case, because a change follows a 307 or 308 to the same path in
-another letter case. A typed operation builds its path in code, so MEHO
-reads its path values by value: a segment is masked when, after
-percent-decoding and in any letter case, it holds a value of the call as a
-word of its own, or a value of eight characters or more anywhere. A value
-that the request body carries is not a path value (`request_body_values`,
-set by `_request_json`, `_post_json` and `_send_traced`), so a fixed
-segment such as `proxy` in `/v1/settings/proxy` stays when the proxy user
-name in the body is `proxy`; a value under a secret key of the body
-(`is_secret_param_name`) still counts. The same value rule holds for an
+another letter case. A typed handler that fills its path from a template
+(`FilledPath`, made by Keycloak's `fill_path`) gives the same rule: the
+segments it filled are masked, wherever in the request body the same value
+stands, and its fixed segments stay. For a typed path without a template,
+MEHO reads its path values by value: a segment is masked when, after
+percent-decoding, it holds a value of the call as a word of its own, or a
+value of eight characters or more anywhere. The compare ignores letter case
+on both sides, also when the path is all in lower case after a followed
+redirect. A value that the request body carries is not a path value there
+(`request_body_values`, set by `_request_json`, `_post_json` and
+`_send_traced`), so a fixed segment such as `proxy` in
+`/v1/settings/proxy` stays when the proxy user name in the body is
+`proxy`; a value under a secret key of the body (`is_secret_param_name`)
+still counts. The same value rule holds for an
 address that does not follow the template, such as a redirect to another
 path. This holds for the first request, each followed
 redirect and a request that ends in a network error. A URL inside a recorded body

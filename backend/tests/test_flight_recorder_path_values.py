@@ -124,6 +124,18 @@ def test_a_value_in_another_letter_case_is_masked_without_a_template() -> None:
     assert mask_path_values(url, frozenset({"k1"})) == f"{_ORIGIN}/v1/keys/[redacted]"
 
 
+@pytest.mark.parametrize("path", ["/keys/demokey", "/keys/DEMOKEY", "/keys/DemoKey"])
+def test_a_value_with_capitals_is_masked_in_a_path_of_any_case(path: str) -> None:
+    # A followed redirect can name the same path in lower case only.
+    masked = mask_path_values(f"{_ORIGIN}{path}", frozenset({"DemoKey"}))
+    assert masked == f"{_ORIGIN}/keys/[redacted]"
+
+
+def test_overlapping_places_of_a_value_are_all_found() -> None:
+    url = f"{_ORIGIN}/v1/aa-x/aaa"
+    assert mask_path_values(url, frozenset({"aa"})) == f"{_ORIGIN}/v1/[redacted]/aaa"
+
+
 @pytest.mark.parametrize(
     ("sent", "kept"),
     [

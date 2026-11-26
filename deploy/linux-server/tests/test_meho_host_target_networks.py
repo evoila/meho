@@ -17,7 +17,7 @@ import unittest
 from typing import Any
 
 from cluster_harness import ClusterTestCase
-from harness import TENANT_ID
+from harness import HOST_LOCK, LOCK_HELD_LINE, TENANT_ID, held_lock
 from test_core_install import place_values
 from test_target_networks import LIST, target_block
 
@@ -92,7 +92,7 @@ class TargetNetworksTestCase(ClusterTestCase):
 
 class TargetNetworksTests(TargetNetworksTestCase):
     def test_the_list_goes_to_the_files_and_to_meho_and_meho_restarts(self) -> None:
-        result = self.run_command("10.20.0.0/16,VCenter.Example.com:443,10.30.0.5")
+        result = self.run_command("10.20.0.0/16, 10.30.0.5:443,10.40.0.0/24")
 
         self.assertEqual(0, result.returncode, self.output(result))
         self.assertEqual("", result.stderr)
@@ -169,7 +169,8 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
             "10.0.0.0/8": "target-networks: 10.0.0.0/8 overlaps 10.42.0.0/16, the pod range",
             "10.20.0.7/24": "target-networks: 10.20.0.7/24 does not start at the first address",
             "10.20.0.0/16:443": "target-networks: 10.20.0.0/16:443 has a port",
-            "localhost": "target-networks: localhost is a name of the MEHO pod itself",
+            "vcenter.example.com:443": "target-networks: vcenter.example.com is a host name.",
+            "localhost": "target-networks: localhost is a host name.",
         }
         before = self.files()
         for value, message in cases.items():
@@ -300,6 +301,40 @@ class TargetNetworksFailureTests(TargetNetworksTestCase):
                         f"{SUPPORT_HINT}",
                     )
                     self.assert_nothing_changed(before)
+
+    def test_a_held_lock_stops_the_command_before_any_change(self) -> None:
+        self.assertEqual(0, self.run_command(LIST).returncode)
+        before = self.files()
+        for value in ("10.50.0.0/16", "none"):
+            with self.subTest(value=value):
+                with held_lock(self.host.host_path(HOST_LOCK)):
+                    result = self.run_command(value)
+
+                self.assert_one_fail_line(result, LOCK_HELD_LINE.format(command="the command"))
+                self.assertEqual(before, self.files())
+                self.assertEqual(1, self.host.deployment_restarts())
+
+    def test_the_lock_comes_before_the_record_is_read(self) -> None:
+        self.host.host_path(RECORD_PATH).unlink()
+        before = self.files()
+
+        with held_lock(self.host.host_path(HOST_LOCK)):
+            result = self.run_command(LIST)
+
+        self.assert_one_fail_line(result, LOCK_HELD_LINE.format(command="the command"))
+        self.assert_nothing_changed(before)
+
+    def test_a_command_that_only_reads_runs_while_the_lock_is_held(self) -> None:
+        without_lock = self.host.run("check")
+
+        with held_lock(self.host.host_path(HOST_LOCK)):
+            with_lock = self.host.run("check")
+
+        self.assertNotIn("host.lock", self.output(with_lock))
+        self.assertEqual(
+            (without_lock.returncode, without_lock.stdout, without_lock.stderr),
+            (with_lock.returncode, with_lock.stdout, with_lock.stderr),
+        )
 
     def test_without_the_values_file_nothing_changes(self) -> None:
         self.host.host_path(VALUES_PATH).unlink()

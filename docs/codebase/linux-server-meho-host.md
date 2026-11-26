@@ -93,12 +93,12 @@ the operating system against the CIS Linux benchmark, is not built yet
 
 | File | What it holds |
 | --- | --- |
-| `meho-host` | One bash script: the output helpers, the checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the log server (rsyslog's file and its firewall rule), the uninstall, the certificate install, the target networks, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh`, `lib/cis.sh` and `lib/targets.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh` and of the paths of `lib/common.sh` that it needs. |
+| `meho-host` | One bash script: the output helpers, the checks with the rule for the console certificate (`certificate_state`), the bundle and its scrub, the SSH rule rewrite, the log server (rsyslog's file and its firewall rule), the uninstall, the certificate install, the target networks, and the keyholder switch and the unseal of OpenBao. It sources `lib/firewall.sh`, `lib/cis.sh` and `lib/targets.sh` (see [How meho-host finds its lib files](#how-meho-host-finds-its-lib-files)). It carries its own copies of the IPv4 helpers of `lib/net.sh`, and of the paths and of `take_host_lock` of `lib/common.sh` that it needs. |
 | `lib/firewall.sh` | `firewall_state` (the firewall line) and the firewall paths `MEHO_FIREWALL_FILE`, `MEHO_FIREWALL_UNIT` and the others. |
 | `lib/cis.sh` | `cis_state` (the CIS profile line), and for the uninstall the paths of the CIS host changes and the `etcd` look-ups (`etcd_user_exists`, `etcd_group_exists`, `etcd_account_recorded`). It reads `RKE2_CONFIG_FILE`, which `meho-host` defines as `lib/common.sh` does. |
 | `lib/targets.sh` | `parse_target_networks`, the rule of the target networks that `install.sh --target-networks` uses too. It calls `is_ipv4`, `is_ipv4_network`, `cidrs_overlap` and `PREFIX_RE`, which `meho-host` defines as `lib/net.sh` does. |
 | `lib/prepare.sh` | `install_meho_host`: the copy to `/usr/local/sbin`, mode 0755, and of the three lib files to `/usr/local/lib/meho-host`, mode 0644. |
-| `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. |
+| `lib/common.sh` | `MEHO_HOST_FILE`, `MEHO_HOST_PATH`, `MEHO_HOST_LIB_DIR`, `MEHO_HOST_LIB_FILES`, and `meho-host` in `DOWNLOAD_FILES`. `MEHO_HOST_LOCK` and `take_host_lock`, which `meho-host` copies. |
 | `packaging/parts.sh`, `packaging/common.sh` | The download ships `meho-host` next to `install.sh`, executable. |
 | `tests/host_harness.py` | A fake installed machine: stub `kubectl`, `rke2`, `journalctl`, `df`, `free`, `ip`, `date`, `nft`, `systemctl`, `getent`, `rsyslogd`, `userdel`, `groupdel` and friends, the files of RKE2's CIS profile, and the real `openssl`. `console_certificate()` makes test certificates with fixed dates, and `certificate_with_key()` also gives the key of the server certificate. `make_appliance()` turns the form-2 machine into the appliance. `environment()` is the environment meho-host runs with, and `run()` takes the answers to the questions (`stdin`) and an SSH session (`ssh_client`). |
 | `tests/test_meho_host.py` | The tests of `check`, `support-bundle`, `admin-network`, `log-server` and `uninstall`, of each check line, of the install by `install.sh`, and of the `etcd` record from the install through an update to `uninstall`. |
@@ -343,18 +343,22 @@ too. Output that is not this JSON gives one red doctor line. See
 ### `target-networks`
 
 1. Take one value: a comma-separated list, or `none`. No value or more
-   than one is a usage error. Check root.
+   than one is a usage error. Check root. Take the lock of `install.sh`
+   (`take_host_lock`, a copy of the one in `lib/common.sh`), before the
+   record is read: while `install.sh` runs, for example an update that
+   waits for its backup answer, the command stops with a `[FAIL]` line and
+   changes nothing. Otherwise the update would write its old list back.
 2. Read the pod range and the service range from `install.json`
    (`install_option`). Without them, stop with a `[FAIL]` line: the rule
    needs them.
 3. Check the list with `parse_target_networks` of `lib/targets.sh`, the
    rule of `install.sh --target-networks` (see
    [linux-server-install.md](linux-server-install.md#the-target-networks)):
-   IPv4 ranges that start at their first address, addresses and host
-   names, a port only on an address or a name, nothing that overlaps the
-   two ranges, `0.0.0.0/8`, `127.0.0.0/8` or `169.254.0.0/16`, no
-   `localhost` or `cluster.local` name, and no line break in the list. A
-   wrong entry is a usage error that names it, and nothing changes.
+   IPv4 ranges that start at their first address and addresses, a port
+   only on an address, no host name, nothing that overlaps the two
+   ranges, `0.0.0.0/8`, `127.0.0.0/8` or `169.254.0.0/16`, and no line
+   break in the list. A wrong entry is a usage error that names it, and
+   nothing changes.
 4. Write the new install record and the new values file next to the old
    ones with `mktemp`. `record_with_target_networks` changes the line of
    `target_networks`, or adds it in front of `from_disk` in a record of an

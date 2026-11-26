@@ -17,19 +17,20 @@
 #
 # The rule:
 # - an entry is an IPv4 range that starts at its first address
-#   (10.20.0.0/16), one IPv4 address (10.20.0.5), or a host name
-#   (vcenter.example.com). An address or a host name may carry a port
-#   (vcenter.example.com:443); the guard then admits it only on that port.
-#   The guard cannot read a port on a range, and form 2 reaches the systems
-#   it manages only over IPv4, so neither is accepted;
+#   (10.20.0.0/16) or one IPv4 address (10.20.0.5). An address may carry a
+#   port (10.20.0.5:443); the guard then admits it only on that port. The
+#   guard cannot read a port on a range, and form 2 reaches the systems it
+#   manages only over IPv4, so neither is accepted;
+# - no host name: the guard trusts a listed host name as it is and dials
+#   it without checking the address it points to (#6869), so a name could
+#   point to MEHO itself, now or after a DNS change. A target with a host
+#   name needs no entry of its own: the guard looks the name up, checks
+#   every address against the list, and the connection uses the checked
+#   address;
 # - no entry opens MEHO itself: not the pod range or the service range of
 #   the built-in Kubernetes, not the addresses of the meho pod itself
-#   (0.0.0.0/8 and 127.0.0.0/8 reach its own ports), not the link-local
-#   range (a cloud's metadata service), and no name of the built-in
-#   Kubernetes or of the pod itself (cluster.local, localhost). The guard
-#   trusts a listed host name without checking the address it points to,
-#   so this holds for the ranges and addresses; the chapter says to list
-#   only full names of managed systems;
+#   (0.0.0.0/8 and 127.0.0.0/8 reach its own ports), and not the link-local
+#   range (a cloud's metadata service);
 # - the list is one line: a line break would make read keep only the first
 #   line, so the rest of the list would be lost without a message;
 # - "none" is the empty list: MEHO accepts no target on a private address.
@@ -39,6 +40,7 @@
 # shellcheck disable=SC2034
 
 readonly TARGET_PORT_RE='^[1-9][0-9]{0,4}$'
+# A host name, for the message that refuses one.
 readonly TARGET_HOST_RE='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
 # The ranges no entry may overlap, besides the two ranges of the install.
 readonly TARGET_CLOSED_RANGES=(0.0.0.0/8 127.0.0.0/8 169.254.0.0/16)
@@ -93,7 +95,7 @@ check_target_entry() {
     fi
     if [[ $entry == */* ]]; then
         if [[ $entry == *:* ]]; then
-            target_problem "$entry has a port, which only one address or a host name can have, for example 10.20.0.5:443."
+            target_problem "$entry has a port, which only one address can have, for example 10.20.0.5:443."
             return 1
         fi
         if ! is_ipv4 "${entry%/*}" || ! [[ ${entry#*/} =~ $PREFIX_RE ]]; then
@@ -115,17 +117,12 @@ check_target_entry() {
             fi
         fi
         if ! [[ $host =~ ^[0-9.]+$ ]]; then
-            if ! [[ $host =~ $TARGET_HOST_RE ]] || ((${#host} > 253)); then
-                target_problem "$entry is not an IPv4 range, an IPv4 address or a host name."
+            if [[ $host =~ $TARGET_HOST_RE && $host == *[a-z]* ]]; then
+                target_problem "$host is a host name. MEHO would trust a listed name without checking the address it points to, so the list takes only ranges and addresses. Give the range or the address of the system, for example 10.20.0.0/16. A target that you add with its host name then works when the name points into the list."
                 return 1
             fi
-            case $host in
-                localhost | *.localhost | cluster.local | *.cluster.local)
-                    target_problem "$host is a name of the MEHO pod itself or of the built-in Kubernetes. $others"
-                    return 1
-                    ;;
-            esac
-            return 0
+            target_problem "$entry is not an IPv4 range or an IPv4 address."
+            return 1
         fi
         if ! is_ipv4 "$host"; then
             target_problem "$host is not an IPv4 address such as 10.20.0.5."
@@ -167,7 +164,7 @@ parse_target_networks() {
         kept+=("$entry")
     done
     if ((${#kept[@]} == 0)); then
-        target_problem "the list is empty. Give at least one network, address or host name, or none."
+        target_problem "the list is empty. Give at least one range or address, or none."
         return 1
     fi
     TARGET_NETWORKS=$(

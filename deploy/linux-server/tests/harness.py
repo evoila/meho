@@ -37,6 +37,8 @@ it, with a new invocation id.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -44,6 +46,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 LINUX_SERVER = Path(__file__).resolve().parents[1]
@@ -72,6 +75,26 @@ KERNEL_DEFAULTS = {
     "kernel.panic_on_oops": "0",
 }
 
+# The lock of install.sh and meho-host target-networks (lib/common.sh).
+HOST_LOCK = "/run/meho/host.lock"
+# The line of a run that finds the lock held. meho-host says "the command"
+# where install.sh says "install.sh".
+LOCK_HELD_LINE = (
+    "[FAIL] another install.sh or meho-host command changes this machine now (lock "
+    "/run/meho/host.lock). Nothing was changed. Fix: run {command} again after the other "
+    "command ends."
+)
+
+
+@contextlib.contextmanager
+def held_lock(lock: Path) -> Iterator[None]:
+    """Hold the lock file, as another run of install.sh or meho-host does
+    (flock on the open file). The lock ends when the block ends."""
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a") as file:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
 REAL_TOOLS = (
     "bash",
     "sh",
@@ -89,6 +112,7 @@ REAL_TOOLS = (
     "grep",
     "sort",
     "tar",
+    "flock",
 )
 
 # What "nft list chain inet meho prerouting" prints for the file install.sh
@@ -552,8 +576,12 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual([], FAIL_LINE.findall(self.output(result)))
 
     def written_files(self) -> list[str]:
-        """Files the script wrote below the fake root: everything but the inputs."""
+        """Files the script wrote below the fake root: everything but the inputs
+        and the lock that every run takes first (take_host_lock in
+        lib/common.sh). The lock file is empty, and /run is emptied at each
+        boot, so it is no change of the machine."""
         inputs = {
+            HOST_LOCK.lstrip("/"),
             "etc/os-release",
             "etc/hosts",
             "etc/passwd",

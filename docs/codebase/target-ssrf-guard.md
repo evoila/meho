@@ -230,8 +230,9 @@ private-range example.
 On a Linux server (install form 2) the customer never runs Helm. There
 `install.sh --target-networks <list>` and `meho-host target-networks
 <list>` set the value, with a narrower rule than the guard's: IPv4 only,
-no port on a range, and nothing that overlaps the ranges of the built-in
-Kubernetes or the pod itself (#6828; see
+no port on a range, no host name (the guard would trust it without a
+check of its address), and nothing that overlaps the ranges of the
+built-in Kubernetes or the pod itself (#6828; see
 [linux-server-install.md](linux-server-install.md#the-target-networks)).
 
 ## References

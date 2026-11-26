@@ -110,6 +110,8 @@ readonly MEHO_ETC_DIR=/etc/meho
 readonly MEHO_CLI_PATH=/usr/local/bin/meho
 readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
 readonly MEHO_HOST_LIB_DIR=/usr/local/lib/meho-host
+# The lock that install.sh takes too (lib/common.sh), see take_host_lock.
+readonly MEHO_HOST_LOCK=/run/meho/host.lock
 # uninstall leaves the firewall in place (ADR 0009). This removes it.
 readonly FIREWALL_REMOVE_COMMAND="systemctl disable $MEHO_FIREWALL_UNIT && rm -r $MEHO_FIREWALL_UNIT_FILE $MEHO_ETC_DIR && systemctl daemon-reload && nft delete table inet meho"
 # RKE2's own uninstall script of a tarball install
@@ -287,7 +289,7 @@ Run it as root:
   sudo meho-host check
   sudo meho-host support-bundle
   sudo meho-host admin-network 10.0.50.0/24
-  sudo meho-host target-networks 10.20.0.0/16,vcenter.example.com:443
+  sudo meho-host target-networks 10.20.0.0/16,10.30.0.5:443
   sudo meho-host log-server logs.example.com
   sudo meho-host uninstall
   sudo meho-host certificate --cert chain.pem --key key.pem
@@ -324,11 +326,11 @@ Commands:
                     Set the networks of the systems that MEHO manages,
                     such as vCenter, NSX, switches and servers. MEHO
                     accepts a target on a private address only inside
-                    them. The list has IPv4 ranges such as 10.20.0.0/16,
-                    addresses and host names, with commas and no spaces
-                    between them. An address or a host name may carry a
-                    port, for example vcenter.example.com:443. No entry
-                    may hold the ranges of the built-in Kubernetes. none
+                    them. The list has IPv4 ranges such as 10.20.0.0/16
+                    and addresses, with commas and no spaces between
+                    them. An address may carry a port, for example
+                    10.30.0.5:443. No host names, and no entry may hold
+                    the ranges of the built-in Kubernetes. none
                     empties the list. When a check fails, nothing
                     changes. An update keeps the list. MEHO restarts for
                     this: the console is away for about a minute.
@@ -463,6 +465,25 @@ in_list() {
 check_root() {
     [[ $(id -u) == 0 ]] ||
         fail "meho-host does not run as root." "run it with sudo: sudo meho-host $COMMAND"
+}
+
+# take_host_lock: hold MEHO_HOST_LOCK until meho-host ends. It is a copy
+# of take_host_lock in lib/common.sh, which install.sh takes for its whole
+# run. So an update that waits for its backup answer cannot write an old
+# list of target networks back after this command changed it. A second run
+# does not wait: it stops at once, before it reads or changes anything.
+# flock holds the lock on the open file, so it ends with the process, also
+# after a crash.
+take_host_lock() {
+    local lock="${HOST_ROOT}${MEHO_HOST_LOCK}"
+    command -v flock >/dev/null ||
+        fail "the command flock is missing, so meho-host cannot make sure that install.sh does not change the machine at the same time. Nothing was changed." \
+            "install the package util-linux, then run the command again."
+    mkdir -p "${lock%/*}"
+    exec {MEHO_HOST_LOCK_FD}>>"$lock"
+    flock -n "$MEHO_HOST_LOCK_FD" ||
+        fail "another install.sh or meho-host command changes this machine now (lock $MEHO_HOST_LOCK). Nothing was changed." \
+            "run the command again after the other command ends."
 }
 
 # ask <question>: print the question and read one line. True only for "yes",
@@ -1351,13 +1372,15 @@ set_target_allowlist() {
 # keeps the list, so the update writes it again; the values file shows it;
 # the ConfigMap and a restart put it in force now. The two files are
 # checked before they take the old ones' place, so a file in another form
-# changes nothing.
+# changes nothing. The lock of install.sh comes before the first read of
+# the record, so an update never runs in between.
 command_target_networks() {
     (($# == 1)) ||
-        usage_error "target-networks takes one value: a list with commas and no spaces, such as 10.20.0.0/16,vcenter.example.com:443, or none."
+        usage_error "target-networks takes one value: a list with commas and no spaces, such as 10.20.0.0/16,10.30.0.5:443, or none."
     local record="${HOST_ROOT}${MEHO_INSTALL_RECORD}" values="${HOST_ROOT}${MEHO_PLACE_VALUES}"
     local pod_range service_range new_record new_values status=0 line count
     check_root
+    take_host_lock
     pod_range=$(install_option cluster_cidr)
     service_range=$(install_option service_cidr)
     if [[ $pod_range != */* || $service_range != */* ]] ||

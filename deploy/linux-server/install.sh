@@ -140,10 +140,10 @@ Options:
                              option is required.
   --target-networks <list>   The networks of the systems that MEHO manages,
                              such as vCenter, NSX, switches and servers:
-                             IPv4 ranges such as 10.20.0.0/16, addresses,
-                             and host names, with commas between them. An
-                             address or a host name may carry a port, for
-                             example vcenter.example.com:443. MEHO accepts a
+                             IPv4 ranges such as 10.20.0.0/16 and
+                             addresses, with commas between them. An
+                             address may carry a port, for example
+                             10.30.0.5:443. No host names. MEHO accepts a
                              target on a private address only inside them.
                              Default: none. Change them later with
                              meho-host target-networks.
@@ -299,13 +299,16 @@ on_error() {
 }
 
 # find_the_install: the checks every run needs first, then find_install of
-# lib/update.sh, which sets UPDATE.
+# lib/update.sh, which sets UPDATE. The lock comes before find_install and
+# the install record, so an update holds it from its first read of the
+# record until it wrote the record again.
 find_the_install() {
     local update_options=0
     if ((CONFIRM_BACKUP)) || [[ -n $OS_PACKAGES_FILE ]]; then
         update_options=1
     fi
     check_root
+    take_host_lock
     check_download "$DOWNLOAD_DIR" "${DOWNLOAD_FILES[@]}"
     read_download_version "$DOWNLOAD_DIR"
     find_install "$DOWNLOAD_DIR" "$update_options"
@@ -460,6 +463,7 @@ main() {
     if ((FROM_DISK)); then
         step "Step 1: check the host name and the files on the disk"
         check_root
+        take_host_lock
         check_hostname "$HOSTNAME_FQDN"
         check_download "$DOWNLOAD_DIR" "${CORE_DOWNLOAD_FILES[@]}"
         read_download_version "$DOWNLOAD_DIR"

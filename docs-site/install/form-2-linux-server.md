@@ -115,7 +115,7 @@ Use your own DNS name and your own admin range.
 |---|---|---|
 | `--hostname <fqdn>` | The full DNS name of the machine. Users open the console at this name. | The full name of the machine (`hostname -f`). |
 | `--admin-network <range>` | The IPv4 addresses that may use SSH: a range such as `192.0.2.0/24`, one address, or `none`. | Only the address of your SSH session. |
-| `--target-networks <list>` | The networks of the systems that MEHO manages: IPv4 ranges, addresses and host names, with commas between them. See [The target networks](#the-target-networks). | None: MEHO accepts no system on a private address. |
+| `--target-networks <list>` | The networks of the systems that MEHO manages: IPv4 ranges and addresses, with commas between them. See [The target networks](#the-target-networks). | None: MEHO accepts no system on a private address. |
 | `--public-address <ipv4>` | Only when address translation inside your network is in front of the machine, for example a load balancer: the address that the DNS name points to. Never an address on the internet. | None. |
 | `--first-tenant-id <uuid>` | The id of the first tenant. Give the old id when you move MEHO to another machine. | A new random id. |
 | `--admin-user <name>` | The user name of the one Admin login. | `admin` |
@@ -158,20 +158,22 @@ The list has entries with commas and no spaces between them:
 |---|---|---|
 | An IPv4 range | `10.20.0.0/16` | A system with an address in the range, on every port. |
 | One IPv4 address | `10.30.0.5` | A system with this address, on every port. |
-| A host name | `vcenter.example.com` | A system that you add with exactly this name, on every port. |
-| An address or a host name with a port | `vcenter.example.com:443` | This system on this port only. |
+| One IPv4 address with a port | `10.30.0.5:443` | The system with this address, on this port only. |
 
 For example:
 
 ```bash
 sudo ./install.sh --hostname meho.example.com --admin-network 192.0.2.0/24 \
-    --target-networks 10.20.0.0/16,vcenter.example.com:443
+    --target-networks 10.20.0.0/16,10.30.0.5:443
 ```
 
 Name narrow ranges: the networks where your managed systems are, not
-all of `10.0.0.0/8`. A system that you add by its name is accepted when
-the name is in the list, or when the name points to an address inside a
-listed range.
+all of `10.0.0.0/8`.
+
+The list takes no host names. You can still add a system by its name,
+for example `vcenter.example.com`. MEHO looks up the name each time it
+connects. It accepts the system when every private address of the name is
+inside the list, and it connects only to an address that it checked.
 
 The install refuses a list with a wrong entry, before it changes
 anything. A range must start at its first address, as for the admin
@@ -181,16 +183,7 @@ entry is refused. No entry may hold an address of MEHO itself:
 - the pod range and the service range of the built-in Kubernetes (see
   the next section). So with the default ranges, `10.0.0.0/8` is
   refused;
-- `127.0.0.0/8`, `0.0.0.0/8` and the link-local range `169.254.0.0/16`;
-- the names `localhost` and `cluster.local`, and every name that ends
-  with them.
-
-MEHO trusts a host name in the list as it is. It does not check the
-address that the name points to. So a range or an address is the safer
-entry. List a host name only when it is the full name of a managed system
-in your DNS, for example `vcenter.example.com`, not `vcenter`. A short
-name, or a name such as `kubernetes.default`, can point to a service of
-MEHO itself.
+- `127.0.0.0/8`, `0.0.0.0/8` and the link-local range `169.254.0.0/16`.
 
 Without the option, the list is empty, and MEHO accepts no system on a
 private address. The result of the install then says so.
@@ -247,7 +240,7 @@ install.sh: MEHO <version> is installed on meho.example.com.
   Console CA:            /var/lib/meho/console-ca.crt (not secret; give it to the browsers and laptops that use MEHO)
   First-login passwords: /var/lib/meho/first-login-passwords (root only; delete it after the first login)
   Unseal key:            /var/lib/meho/unseal-key (root only; copy it to your key store, then delete it)
-  Target networks:       10.20.0.0/16,vcenter.example.com:443
+  Target networks:       10.20.0.0/16,10.30.0.5:443
   First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 ```
 
@@ -532,7 +525,7 @@ the new range does not hold your own address.
 ### Change the target networks
 
 ```bash
-sudo meho-host target-networks 10.20.0.0/16,vcenter.example.com:443
+sudo meho-host target-networks 10.20.0.0/16,10.30.0.5:443
 ```
 
 The command sets the networks of the systems that MEHO manages, with the
@@ -544,6 +537,10 @@ nothing changes.
 MEHO restarts for this: the console is away for about a minute. A target
 that MEHO refused before can be added after the restart. An update keeps
 the list. `sudo cat /etc/meho/install.json` shows it (`target_networks`).
+
+The command does not run while `install.sh` runs, for example during an
+update. It then stops with a `[FAIL]` line and changes nothing. Run it
+again when the update is done.
 
 ### A person lost the one-time code app
 

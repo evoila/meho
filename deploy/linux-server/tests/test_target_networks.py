@@ -16,11 +16,11 @@ import shutil
 import subprocess
 import unittest
 
-from harness import LINUX_SERVER, InstallTestCase
+from harness import HOST_LOCK, LINUX_SERVER, LOCK_HELD_LINE, InstallTestCase, held_lock
 from test_core_install import CHART_DIR, INSTALL_RECORD, PLACE_VALUES, place_values
 from update_harness import INSTALLER, NEW_VERSION, run_update_lib
 
-LIST = "10.20.0.0/16,vcenter.example.com:443,10.30.0.5"
+LIST = "10.20.0.0/16,10.30.0.5:443,10.40.0.0/24"
 NO_LIST_LINE = (
     "  Target networks:       none, so MEHO accepts no target on a private address. Name the "
     "networks of the systems it manages with: sudo meho-host target-networks <list>"
@@ -58,10 +58,8 @@ class RuleTests(unittest.TestCase):
     def test_good_lists_are_kept_in_lower_case_without_spaces(self) -> None:
         cases = {
             "10.20.0.0/16": "10.20.0.0/16",
-            "10.20.0.0/16, VCenter.Example.com:443 ,10.30.0.5": LIST,
-            "10.30.0.6:8443,nsx,switch-01.example.org:65535": (
-                "10.30.0.6:8443,nsx,switch-01.example.org:65535"
-            ),
+            "10.20.0.0/16, 10.30.0.5:443 ,10.40.0.0/24": LIST,
+            "10.30.0.6:8443,10.30.0.7:65535,10.30.0.8:1": "10.30.0.6:8443,10.30.0.7:65535,10.30.0.8:1",
             "10.20.0.0/16,,": "10.20.0.0/16",
             "none": "",
             "NONE": "",
@@ -76,12 +74,13 @@ class RuleTests(unittest.TestCase):
             "10.20.0.0/33": "10.20.0.0/33 is not an IPv4 range such as 10.20.0.0/16.",
             "10.20.0.0/16:443": "10.20.0.0/16:443 has a port, which only one address",
             "10.1.2.300": "10.1.2.300 is not an IPv4 address such as 10.20.0.5.",
-            "vcenter:0": "vcenter:0 has a port that is not a number from 1 to 65535.",
-            "vcenter:65536": "vcenter:65536 has a port that is not a number from 1 to 65535.",
-            "vcenter:08080": "vcenter:08080 has a port that is not a number from 1 to 65535.",
+            "10.30.0.5:0": "10.30.0.5:0 has a port that is not a number from 1 to 65535.",
+            "10.30.0.5:65536": "10.30.0.5:65536 has a port that is not a number from 1 to 65535.",
+            "10.30.0.5:08080": "10.30.0.5:08080 has a port that is not a number from 1 to 65535.",
             "fd00::/64": "fd00::/64 is not an IPv4 entry.",
             "[fd00::5]:443": "[fd00::5]:443 is not an IPv4 entry.",
-            "v_center": "v_center is not an IPv4 range, an IPv4 address or a host name.",
+            "v_center": "v_center is not an IPv4 range or an IPv4 address.",
+            "-vcenter": "-vcenter is not an IPv4 range or an IPv4 address.",
             "10.20.0.0/16 10.30.0.0/16": "'10.20.0.0/16 10.30.0.0/16' holds a space. Put a comma",
             "none,10.20.0.0/16": "none stands alone: it empties the list.",
             ",": "the list is empty.",
@@ -104,8 +103,6 @@ class RuleTests(unittest.TestCase):
             "127.0.0.1:8000": "overlaps 127.0.0.0/8, the addresses of the MEHO pod itself.",
             "0.0.0.0": "overlaps 0.0.0.0/8, the addresses of the MEHO pod itself.",
             "169.254.169.254:80": "overlaps 169.254.0.0/16, the link-local range.",
-            "localhost": "localhost is a name of the MEHO pod itself or of the built-in",
-            "meho-vault.meho.svc.cluster.local": "is a name of the MEHO pod itself",
         }
         for given, problem in cases.items():
             with self.subTest(given=given):
@@ -113,6 +110,27 @@ class RuleTests(unittest.TestCase):
                 self.assertFalse(accepted, text)
                 self.assertIn(problem, text)
                 self.assertIn(others, text)
+
+    def test_a_host_name_is_refused(self) -> None:
+        # The guard would trust a listed name without checking its address,
+        # and inside the meho pod a short name can point to MEHO's own
+        # services. So the list takes no name at all.
+        for given in (
+            "vcenter.example.com",
+            "VCenter.Example.com:443",
+            "nsx",
+            "localhost",
+            "kubernetes.default",
+            "meho-postgres",
+            "meho-vault.meho.svc.cluster.local",
+            "10.20.0.0/16,vcenter.example.com",
+        ):
+            with self.subTest(given=given):
+                accepted, text = parse(given)
+                self.assertFalse(accepted, text)
+                self.assertIn(" is a host name. ", text)
+                self.assertIn("the list takes only ranges and addresses", text)
+                self.assertIn("for example 10.20.0.0/16", text)
 
     def test_the_pod_range_of_the_install_is_the_one_checked(self) -> None:
         self.assertEqual((True, "10.42.0.0/16"), parse("10.42.0.0/16", pod_range="172.30.0.0/16"))
@@ -129,7 +147,7 @@ class InstallTargetNetworksTests(InstallTestCase):
 
     def test_the_list_goes_to_the_record_and_the_values(self) -> None:
         result = self.machine.run(
-            "--target-networks", "10.20.0.0/16, VCenter.Example.com:443,10.30.0.5"
+            "--target-networks", "10.20.0.0/16, 10.30.0.5:443,10.40.0.0/24"
         )
 
         self.assert_succeeds(result)
@@ -192,6 +210,34 @@ class FromDiskTargetNetworksTests(InstallTestCase):
         record = json.loads(self.machine.host_path(INSTALL_RECORD).read_text())
         self.assertEqual(LIST, record["options"]["target_networks"])
 
+    def test_a_held_lock_stops_from_disk_before_any_change(self) -> None:
+        with held_lock(self.machine.host_path(HOST_LOCK)):
+            result = self.machine.run("--from-disk", "--target-networks", LIST)
+
+        line = self.assert_fails_once(result)
+        self.assertEqual(LOCK_HELD_LINE.format(command="install.sh"), line)
+        self.assertEqual([], self.written_files())
+
+
+class HostLockTests(InstallTestCase):
+    """install.sh holds the lock of lib/common.sh for its whole run."""
+
+    def test_a_held_lock_stops_a_first_install_before_any_change(self) -> None:
+        with held_lock(self.machine.host_path(HOST_LOCK)):
+            result = self.machine.run("--target-networks", LIST)
+
+        line = self.assert_fails_once(result)
+        self.assertEqual(LOCK_HELD_LINE.format(command="install.sh"), line)
+        self.assertEqual([], self.written_files())
+        self.assertNotIn("helm", self.machine.calls())
+
+    def test_the_lock_ends_with_the_run(self) -> None:
+        self.assert_succeeds(self.machine.run("--target-networks", LIST))
+
+        # The run ended, so the lock is free again.
+        with held_lock(self.machine.host_path(HOST_LOCK)):
+            pass
+
 
 class UpdateTargetNetworksTests(InstallTestCase):
     """An install with a list, updated to MEHO 0.37.0."""
@@ -236,6 +282,54 @@ class UpdateTargetNetworksTests(InstallTestCase):
         self.assertIn("To change the SSH range", line)
         self.assertNotIn(INSTALLER, self.machine.calls())
         self.assertEqual(LIST, self.options()["target_networks"])
+
+    def test_a_held_lock_stops_the_update_before_it_reads_the_record(self) -> None:
+        # A list that breaks the rule would stop the update with a message
+        # about the record. The lock comes first, so the update never reads it.
+        record = self.machine.host_path(INSTALL_RECORD)
+        record.write_text(record.read_text().replace(LIST, "10.0.0.0/8"))
+        before = (record.read_text(), self.machine.host_path(PLACE_VALUES).read_text())
+
+        with held_lock(self.machine.host_path(HOST_LOCK)):
+            result = self.machine.run("--confirm-backup")
+
+        line = self.assert_fails_once(result)
+        self.assertEqual(LOCK_HELD_LINE.format(command="install.sh"), line)
+        self.assertNotIn("Update step", result.stdout)
+        self.assertEqual(
+            before, (record.read_text(), self.machine.host_path(PLACE_VALUES).read_text())
+        )
+        self.assertNotIn("helm", self.machine.calls())
+
+    def test_meho_host_cannot_change_the_list_while_the_update_runs(self) -> None:
+        # While Helm updates the core, the admin empties the list with
+        # meho-host. The update read the list at its start and writes it
+        # again at its end. So meho-host must stop and say that it changed
+        # nothing, instead of a success that the update then undoes.
+        helm = self.machine.download / "bin" / "helm"
+        stub = helm.with_name("helm-stub")
+        helm.rename(stub)
+        helm.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = upgrade ]; then\n'
+            f'    "{self.machine.download}/meho-host" target-networks none '
+            '> "$MEHO_FAKE/meho-host.out" 2>&1\n'
+            '    echo "exit code $?" >> "$MEHO_FAKE/meho-host.out"\n'
+            "fi\n"
+            f'exec "{stub}" "$@"\n'
+        )
+        helm.chmod(0o755)
+
+        self.assert_succeeds(self.machine.run("--confirm-backup"))
+
+        self.assertEqual(
+            LOCK_HELD_LINE.format(command="the command") + "\nexit code 1\n",
+            (self.machine.fake / "meho-host.out").read_text(),
+        )
+        self.assertEqual(LIST, self.options()["target_networks"])
+        self.assertEqual(
+            place_values() + target_block(), self.machine.host_path(PLACE_VALUES).read_text()
+        )
 
     def test_a_list_changed_by_hand_stops_the_update(self) -> None:
         record = self.machine.host_path(INSTALL_RECORD)

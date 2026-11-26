@@ -71,7 +71,7 @@ the line that names where to read the first-start list (see
 | File | What it holds |
 | --- | --- |
 | `install.sh` | Options, `--help`, the order of the steps, `--from-disk`, the error trap. |
-| `lib/common.sh` | Machine paths, the lists of download files, the Helm release name, `ok`, `warn`, `fail` and `usage_error`. |
+| `lib/common.sh` | Machine paths, the lists of download files, the Helm release name, `ok`, `warn`, `fail` and `usage_error`, and `take_host_lock`, the lock that `meho-host target-networks` shares (see [The target networks](#the-target-networks)). |
 | `lib/net.sh` | IPv4 helpers: the format of an address or a range, and whether two ranges overlap. |
 | `lib/checks.sh` | Step 1: one function per check. |
 | `lib/firewall.sh` | The host firewall: the checks of step 1 (`nft`, the admin network), the files and the start in step 2, `firewall_state` and `firewall_port_list`. |
@@ -643,23 +643,25 @@ sources it: `lib/net.sh` in `install.sh`, the own copies in `meho-host`.
 | --- | --- | --- |
 | IPv4 range | `10.20.0.0/16`, starting at its first address | the same rule as `--admin-network` |
 | IPv4 address | `10.30.0.5` | the guard makes it a `/32` |
-| host name | `vcenter.example.com`, lower case | the guard trusts a listed name as it is |
-| address or name with a port | `vcenter.example.com:443`, port 1 to 65535 | the guard admits it on that port only |
+| address with a port | `10.30.0.5:443`, port 1 to 65535 | the guard admits it on that port only |
+| host name, with or without a port | refused | the guard trusts a listed name as it is (below) |
 | range with a port | refused | the guard cannot read it: a token with `/` must be a CIDR, and a bad one makes every target check fail |
 | IPv6 | refused | form 2 is IPv4 only, and the outgoing rule of the pod opens only `0.0.0.0/0` |
 | overlaps the pod or the service range | refused | these are MEHO's own parts; a site system there is not reachable anyway (see the chapter, "The pod and service ranges") |
 | overlaps `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16` | refused | the ports of the `meho` pod itself, and a cloud's metadata service |
-| `localhost`, `cluster.local` and names that end with them | refused | names of the pod itself and of the built-in Kubernetes |
 | a list with a line break | refused | `read` would keep only the first line, so the rest of the list would be lost without a message |
 | `none` | the empty list | the guard stays fully on |
 
-The guard trusts a listed host name as it is: it does not check the
-address that the name points to. So the overlap checks hold for the ranges
-and addresses only. A short name such as `vc`, or a name such as
-`kubernetes.default`, can point to a service of the built-in Kubernetes,
-because the pod looks up names in its own cluster first. The chapter says
-to list only full names of managed systems, and that a range or an
-address is the safer entry.
+The guard trusts a listed host name as it is: `_screen` in
+`ssrf_guard.py` returns no addresses for it, and the connection dials the
+name without a check of its address. A short name such as `vc`, or a name
+such as `kubernetes.default`, can point to a service of the built-in
+Kubernetes, because the pod looks up names in its own cluster first, and
+a DNS record can change after the admin listed the name. So the rule
+refuses every host name until the guard checks the address of a listed
+name too (#6869). A target that the admin adds by its name needs no entry
+of its own: the guard looks the name up, checks every address against the
+listed ranges, and the connection uses the checked address.
 
 So `10.0.0.0/8` is refused with the default ranges: the admin names the
 networks where the managed systems are. The guard accepts more forms than
@@ -681,6 +683,18 @@ Where the list goes:
 key in `meho-config` and restarts the `meho` Deployment, because a pod
 reads its environment from a ConfigMap only when it starts
 ([linux-server-meho-host.md](linux-server-meho-host.md#target-networks)).
+
+`install.sh` and `meho-host target-networks` share one lock,
+`/run/meho/host.lock`, taken with `flock -n` (`take_host_lock` in
+`lib/common.sh`, and its copy in `meho-host`). `install.sh` takes it right
+after the root check, before it looks for the install or reads the
+record, for an install, an update and `--from-disk`, and holds it until
+it ends. Without it, an update that read the list and waits for the
+backup answer would write the old list back after `meho-host` changed
+it. A second run does not wait: it stops with a `[FAIL]` line before it
+reads or changes anything. `flock` holds the lock on the open file
+descriptor, so it ends with the process, also after a crash. The other
+`meho-host` commands that change the machine do not take it yet (#6870).
 Helm owns `meho-config`, and its next upgrade (an update) renders the same
 list from `install.json`, so the patched value stays. Helm 3 compares the
 old manifest, the live object and the new manifest when it upgrades; the

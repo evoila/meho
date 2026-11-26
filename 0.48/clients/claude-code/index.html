@@ -3630,8 +3630,7 @@ Claude Code.</p>
 <strong>native HTTP</strong> — no shim. You point a project-scoped <code>.mcp.json</code> at the
 backplane's <code>/mcp</code> route and pin the pre-registered <code>meho-mcp</code> public
 client; Claude Code runs the OAuth 2.1 authorization-code + PKCE flow
-itself, listening on a loopback port for the callback. This is the
-pattern both MEHO dogfood repos run daily.</p>
+itself, listening on a loopback port for the callback.</p>
 <p>Add a <code>meho</code> server to the workspace <code>.mcp.json</code>. Claude Code reads it
 at session start; restart the session after edits:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>

@@ -76,13 +76,12 @@ def unreadable_location_error(exc: Exception, request: httpx.Request) -> Excepti
     place of ``exc``. A ``UnicodeEncodeError`` or ``UnicodeDecodeError``
     also names the codec.
     """
-    cls = type(exc)
     if isinstance(exc, httpx.RemoteProtocolError):
-        return cls(UNREADABLE_LOCATION_MESSAGE, request=request)
+        return type(exc)(UNREADABLE_LOCATION_MESSAGE, request=request)
     if isinstance(exc, UnicodeEncodeError):
-        return cls(exc.encoding, "", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+        return type(exc)(exc.encoding, "", 0, 1, UNREADABLE_LOCATION_MESSAGE)
     if isinstance(exc, UnicodeDecodeError):
-        return cls(exc.encoding, b"", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+        return type(exc)(exc.encoding, b"", 0, 1, UNREADABLE_LOCATION_MESSAGE)
     if isinstance(exc, UnicodeTranslateError):
-        return cls("", 0, 1, UNREADABLE_LOCATION_MESSAGE)
-    return cls(UNREADABLE_LOCATION_MESSAGE)
+        return type(exc)("", 0, 1, UNREADABLE_LOCATION_MESSAGE)
+    return type(exc)(UNREADABLE_LOCATION_MESSAGE)

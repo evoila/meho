@@ -2530,7 +2530,11 @@ run, not a broken `main`.
   makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
   so the coverage data records which test function ran each line. That
   needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
-  coverage pytest step may take 45 minutes. Each coverage shard also writes
+  coverage pytest step may take 45 minutes. Each shard runs three test
+  workers (`-n 3`, #7103): serial shards needed more than 45 minutes by
+  November 2026, so no map was made. `.coveragerc.ci` leaves out files in
+  pytest temp folders: a test that imports a package from its temp folder
+  made `coverage xml` fail with "No source for code". Each coverage shard also writes
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
   (kept 8 days). It does this only on the `schedule` run, and only when all
@@ -2540,9 +2544,9 @@ run, not a broken `main`.
   each junit file: one that reports a crashed worker, or whose tests are
   not in the coverage data, means no map that night. A pull request with
   the `ci-coverage-validate` label never makes a map.
-- **Who decides.** The `changes` job, step `map`. It runs only on a pull
-  request that is not docs-only, has a backend change and is not a
-  one-connector run. It downloads the newest `unit-test-map` artifact of a
+- **Who decides.** The `changes` job, step `map`. It runs on every pull
+  request. It uses the map only on a pull request that is not docs-only,
+  has a backend change and is not a one-connector run. It downloads the newest `unit-test-map` artifact of a
   run of this repo on `main` (the job has `actions: read` for that). It
   pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
   (standard library only). The step `upload-selection` stores the picked
@@ -2591,9 +2595,22 @@ run, not a broken `main`.
 - **Old test ids.** The map can be a few days old. A test id whose file is
   gone is dropped. A test id that its file no longer defines picks the
   whole file, so pytest never gets an id it cannot find.
-- **The log.** The step prints one line, also as a notice, for example
+- **The log.** The step prints one line, and writes it to the step
+  summary of the `changes` job, for example
   `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
   `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
+  A full run shows the line as a warning, so a missing or old map is seen
+  (#7103). A run with the map, and a pull request that needs no unit
+  shards (`no unit tests: only docs changed`) or runs one connector, shows
+  a notice. When the map is older than 2 days (`STALE_DAYS`), the step
+  shows one more warning, `Old unit test map`: the nightly run made no new
+  map. The map is still used until it is 7 days old.
+- **The alarm.** `.github/workflows/unit-test-map-check.yml` runs after
+  each nightly CI run. It is red when that run uploaded no `unit-test-map`
+  artifact, and its summary lists the coverage jobs that did not pass. It
+  is a separate workflow, not a job in `ci.yml`: a red job would turn the
+  nightly run red, and `quality-gate.yml` runs SonarCloud only after a
+  green nightly run.
 - **The required check.** The fan-in `python-unit-lane` is unchanged; the
   required check `Python (ruff + mypy + pytest)` keeps its name and its
   strict rule. A selected run does not upload its per-test times.
@@ -2607,7 +2624,8 @@ run, not a broken `main`.
 - **Tests.** `tests/test_unit_test_map.py` checks the rules on a small fake
   tree, runs the real step script from `ci.yml` with a fake `gh`, and
   checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
-  step waits for every coverage shard.
+  step waits for every coverage shard, and runs the real step of the alarm
+  with a fake `gh`.
 
 ### Runner-CPU rule
 
@@ -3020,6 +3038,7 @@ their isolation posture:
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
 | `private-names-check.yml` | yes (runs `scripts/ci/check_private_names.py` from the checkout of the pull request over its added lines) | **hosted runner** for every event, also the merge queue; a fork pull request gets no secrets, so the job prints a note and skips the checkout |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
+| `unit-test-map-check.yml` | no (`workflow_run` after a nightly CI run; checks out nothing and only reads the API) | GitHub-hosted `ubuntu-latest`; token `contents: read`, `actions: read` (#7103) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
 ### Two in-repo isolation patterns

@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# The alarm for the unit test map (#7103). After each nightly CI run, this
+# check is red when that run uploaded no `unit-test-map` artifact.
+#
+# Why: pull requests use the map to run only the unit tests that their
+# change can break (#5642, the `changes` job in ci.yml). With no map, every
+# pull request runs all six unit shards. The jobs that make the map may
+# fail without failing the CI run (whole-job continue-on-error), so from
+# 20 to 26 Nov 2026 no map was made and the nightly run still showed green.
+#
+# Why a separate workflow, and not a job in ci.yml that may not fail: a red
+# job would turn the nightly CI run red. quality-gate.yml runs SonarCloud
+# only after a green nightly run, and docs/RELEASING.md reads the nightly
+# run as the health of `main`. A missing map does not mean the code is
+# broken. So the CI run keeps its meaning, and this check is red on its own.
+#
+# It runs on a GitHub-hosted runner, checks out nothing and only reads the
+# API with a read-only token.
+
+name: Unit test map check
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: The nightly run made the unit test map
+    # Only the nightly run makes the map. A pull request or merge queue run
+    # never does.
+    if: github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Check the unit test map of the nightly run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -u -o pipefail
+          api="repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          if ! count="$(gh api "${api}/artifacts?name=unit-test-map" --jq '[.artifacts[] | select(.expired == false)] | length')"; then
+            reason="could not read the artifacts of the nightly run"
+          elif [ "${count}" -gt 0 ]; then
+            echo "The nightly run made the unit test map: ${RUN_URL}"
+            echo "The nightly run made the unit test map: ${RUN_URL}" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          else
+            reason="the nightly run made no unit test map"
+          fi
+          # Say why: the coverage jobs that did not pass. They may fail
+          # without failing the run, so only their own result shows it.
+          if ! jobs="$(gh api "${api}/jobs?filter=latest&per_page=100" --jq '.jobs[] | select(.name | startswith("Python coverage")) | select(.conclusion != "success") | "- \(.name): \(.conclusion)"')"; then
+            jobs="- could not read the jobs of the nightly run"
+          elif [ -z "${jobs}" ]; then
+            jobs="- every coverage job passed: read the step \"Make the unit test map\" of the coverage combine job"
+          fi
+          {
+            echo "## No unit test map"
+            echo
+            echo "${reason^}. Until a nightly run makes a map, every pull request runs all six unit shards."
+            echo
+            echo "Nightly run: ${RUN_URL}"
+            echo
+            echo "Coverage jobs that did not pass:"
+            echo
+            echo "${jobs}"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "::error title=No unit test map::${reason^}. Every pull request runs all six unit shards until a nightly run makes a map. Nightly run: ${RUN_URL}"
+          exit 1

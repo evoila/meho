@@ -35,3 +35,9 @@ source = meho_backplane
 # turns that into the unit test map that pull requests use to pick their
 # tests. It needs the C tracer: the faster sysmon core cannot record it.
 dynamic_context = test_function
+# Some tests write a small package into their pytest temp folder and import
+# it as part of meho_backplane (for example a connector folder). That folder
+# is gone when the combine job writes coverage.xml, and "No source for code"
+# then failed the whole report and the test map. Such files are not source.
+omit =
+    */pytest-of-*/*

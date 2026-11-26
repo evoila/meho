@@ -22,10 +22,18 @@ every push to ``main`` (#4910): on push they filled the whole heavy runner
 pool and starved the merge queue's unit shards. ``quality-gate.yml`` must
 analyze only that nightly run, because no other run uploads the Python
 coverage file. The last tests pin that trigger shape on both workflows.
+
+Each shard runs three test workers (#7103): serial shards hit their step
+limit every night, so no test map was made. The alarm workflow
+``unit-test-map-check.yml`` is red after a nightly run without a map; its
+tests run the real step script with a fake ``gh``.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,6 +45,8 @@ from tests import conftest
 _WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 _CI_YML = _WORKFLOWS / "ci.yml"
 _QUALITY_GATE_YML = _WORKFLOWS / "quality-gate.yml"
+_MAP_CHECK_YML = _WORKFLOWS / "unit-test-map-check.yml"
+_COVERAGERC = Path(__file__).resolve().parents[1] / ".coveragerc.ci"
 
 _COVERAGE_JOBS = ["python-coverage", "python-coverage-combine"]
 _VALIDATE_LABEL = "contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')"
@@ -202,3 +212,145 @@ def test_quality_gate_analyzes_only_green_nightly_runs() -> None:
     assert "github.event.workflow_run.conclusion == 'success'" in condition
     assert "github.event.workflow_run.event == 'schedule'" in condition
     assert "'push'" not in condition, "a push run has no python-coverage artifact"
+
+
+def test_coverage_shards_run_three_workers_like_the_unit_shards(ci_jobs: dict[str, Any]) -> None:
+    run = _step(ci_jobs["python-coverage"], "Pytest (unit) with offline coverage data")["run"]
+    assert "uv run pytest -n 3 --dist loadscope -p no:cov" in run
+    assert "--max-worker-restart=0" in run, "a crashed worker must not be started again"
+    unit_run = _step(ci_jobs["python-unit-shard"], "Pytest (unit shard ${{ matrix.shard }}/6)")[
+        "run"
+    ]
+    assert "pytest -n 3 " in unit_run
+
+
+def test_coverage_leaves_out_files_in_pytest_temp_folders() -> None:
+    """A test's temp package is gone at report time; it must not stop coverage.xml."""
+    text = _COVERAGERC.read_text(encoding="utf-8")
+    assert "omit =\n    */pytest-of-*/*\n" in text
+
+
+# --- the alarm: unit-test-map-check.yml ---------------------------------------
+
+
+def test_map_check_runs_after_every_nightly_ci_run() -> None:
+    workflow = _load(_MAP_CHECK_YML)
+    assert _triggers(workflow) == {"workflow_run": {"workflows": ["CI"], "types": ["completed"]}}
+    assert workflow["name"] != "CI"
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["check"]
+    assert job["if"] == "github.event.workflow_run.event == 'schedule'"
+    assert job["permissions"] == {"actions": "read"}
+    assert job["runs-on"] == "ubuntu-latest"
+    assert "continue-on-error" not in job, "the alarm must be able to turn red"
+    assert all("continue-on-error" not in step for step in job["steps"])
+    assert all("uses" not in step for step in job["steps"]), "no checkout, no other action"
+
+
+def _run_map_check(
+    tmp_path: Path, artifacts: list[dict[str, Any]] | None, jobs: list[dict[str, Any]]
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run the real step of the alarm with a fake ``gh`` (None: the API call fails)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    if artifacts is not None:
+        (tmp_path / "artifacts.json").write_text(
+            json.dumps({"artifacts": artifacts}), encoding="utf-8"
+        )
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "${2#repos/example/repo/actions/runs/77/}" in\n'
+        f'  artifacts?name=unit-test-map) f="{tmp_path}/artifacts.json" ;;\n'
+        f'  jobs?filter=latest*) f="{tmp_path}/jobs.json" ;;\n'
+        '  *) echo "unexpected: $2" >&2; exit 2 ;;\n'
+        "esac\n"
+        '[ -f "$f" ] || exit 1\n'
+        '[ "$3" = "--jq" ] && exec jq -r "$4" "$f"\n',
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    step = _load(_MAP_CHECK_YML)["jobs"]["check"]["steps"][0]
+    script = tmp_path / "step.sh"
+    script.write_text(step["run"], encoding="utf-8")
+    summary = tmp_path / "summary"
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin",
+        "GITHUB_REPOSITORY": "example/repo",
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "RUN_ID": "77",
+        "RUN_URL": "https://github.com/example/repo/actions/runs/77",
+    }
+    run = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return run, summary.read_text(encoding="utf-8") if summary.exists() else ""
+
+
+_COVERAGE_JOBS_OF_A_RUN = [
+    {"name": "Python coverage (SonarCloud, shard 1/8)", "conclusion": "success"},
+    {"name": "Python coverage (SonarCloud, shard 2/8)", "conclusion": "failure"},
+    {"name": "Python coverage combine (SonarCloud artifact)", "conclusion": "failure"},
+    {"name": "Python unit shard 1/6", "conclusion": "failure"},
+]
+
+needs_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+
+
+@needs_jq
+def test_map_check_is_green_when_the_nightly_run_made_a_map(tmp_path: Path) -> None:
+    run, summary = _run_map_check(
+        tmp_path, [{"name": "unit-test-map", "expired": False}], _COVERAGE_JOBS_OF_A_RUN
+    )
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "::error" not in run.stdout
+    assert summary.startswith("The nightly run made the unit test map: https://")
+
+
+@needs_jq
+@pytest.mark.parametrize(
+    "artifacts", [[], [{"name": "unit-test-map", "expired": True}]], ids=["none", "expired"]
+)
+def test_map_check_is_red_and_names_the_failed_coverage_jobs_without_a_map(
+    tmp_path: Path, artifacts: list[dict[str, Any]]
+) -> None:
+    run, summary = _run_map_check(tmp_path, artifacts, _COVERAGE_JOBS_OF_A_RUN)
+
+    assert run.returncode == 1
+    assert (
+        "::error title=No unit test map::The nightly run made no unit test map."
+        " Every pull request runs all six unit shards until a nightly run makes a map."
+        " Nightly run: https://github.com/example/repo/actions/runs/77"
+    ) in run.stdout
+    assert "## No unit test map" in summary
+    assert "- Python coverage (SonarCloud, shard 2/8): failure" in summary
+    assert "- Python coverage combine (SonarCloud artifact): failure" in summary
+    assert "shard 1/8" not in summary, "a passed job is not listed"
+    assert "Python unit shard" not in summary, "only the coverage jobs make the map"
+
+
+@needs_jq
+def test_map_check_with_every_coverage_job_passed_points_to_the_map_step(tmp_path: Path) -> None:
+    passed = [dict(job, conclusion="success") for job in _COVERAGE_JOBS_OF_A_RUN]
+
+    run, summary = _run_map_check(tmp_path, [], passed)
+
+    assert run.returncode == 1
+    assert 'read the step "Make the unit test map" of the coverage combine job' in summary
+
+
+@needs_jq
+def test_map_check_is_red_when_it_cannot_read_the_artifacts(tmp_path: Path) -> None:
+    run, summary = _run_map_check(tmp_path, None, _COVERAGE_JOBS_OF_A_RUN)
+
+    assert run.returncode == 1
+    assert "::error title=No unit test map::Could not read the artifacts of the nightly run." in (
+        run.stdout
+    )
+    assert "- Python coverage (SonarCloud, shard 2/8): failure" in summary

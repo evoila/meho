@@ -28,7 +28,9 @@ Two commands:
     to the repository root) on stdin. Prints one line that says what runs
     and why. When the map can pick, it writes the picked tests (test files
     and pytest test ids, relative to ``backend/``) to ``--out``; when the
-    full suite must run, it writes nothing. Needs only the Python standard
+    full suite must run, it writes nothing. When the map is older than
+    :data:`STALE_DAYS` days, it writes a warning to ``--warning-out``: the
+    nightly run did not make a new map. Needs only the Python standard
     library, because the ``changes`` job does not install the project.
 
 The rules of ``pick``. Any doubt means the full suite:
@@ -102,6 +104,8 @@ else:  # Run as a script: python3 backend/tests/_unit_test_map.py
 MAP_FORMAT = 1
 MAP_FILE = "unit-test-map.json"
 MAX_AGE_DAYS = 7
+# The nightly run makes a new map every night, so a map this old means it failed.
+STALE_DAYS = 2
 MAX_TESTS = 2000
 
 # Test folders that other jobs run, never the unit shards.
@@ -591,6 +595,7 @@ class Picked:
 
     line: str
     tests: list[str]
+    warning: str = ""
 
 
 def _full_reason(path: str) -> str:
@@ -666,13 +671,22 @@ def _count(test_map: TestMap, selected: list[str], changed: set[str], backend: P
 def pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime) -> Picked:
     """Decide what the unit test job runs for a pull request."""
     try:
-        return _pick(changed, map_path, repo_root, now)
+        test_map = TestMap.load(map_path, now)
     except FullSuiteError as reason:
         return Picked(f"full suite: {reason}", [])
+    try:
+        picked = _pick(changed, test_map, repo_root)
+    except FullSuiteError as reason:
+        picked = Picked(f"full suite: {reason}", [])
+    if now - test_map.made_at > timedelta(days=STALE_DAYS):
+        picked.warning = (
+            f"the test map is older than {STALE_DAYS} days (made {test_map.made_at:%Y-%m-%d}):"
+            " the nightly run made no new map since then"
+        )
+    return picked
 
 
-def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime) -> Picked:
-    test_map = TestMap.load(map_path, now)
+def _pick(changed: Iterable[str], test_map: TestMap, repo_root: Path) -> Picked:
     backend = repo_root / "backend"
     numbers: set[int] = set()
     files: set[str] = set()
@@ -755,6 +769,9 @@ def _main(argv: list[str] | None = None) -> int:
         "--map", type=Path, required=True, help=f"the map: {MAP_FILE}, or the artifact zip"
     )
     pick_parser.add_argument("--out", type=Path, required=True)
+    pick_parser.add_argument(
+        "--warning-out", type=Path, help="where to write a warning about an old map"
+    )
     pick_parser.add_argument("--repo-root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
 
@@ -780,6 +797,8 @@ def _main(argv: list[str] | None = None) -> int:
         picked = Picked(f"full suite: the test map tool failed ({type(exc).__name__}: {exc})", [])
     if picked.tests:
         args.out.write_text("".join(f"{entry}\n" for entry in picked.tests), encoding="utf-8")
+    if picked.warning and args.warning_out:
+        args.warning_out.write_text(f"{picked.warning}\n", encoding="utf-8")
     print(picked.line)
     return 0
 

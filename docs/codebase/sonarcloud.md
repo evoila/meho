@@ -52,7 +52,7 @@ health. #2865 is why in-process is primary: on the v0.28.0 cut a pytest hang
 outlived the step `timeout-minutes` because the runner itself was wedged (step 9
 still `in_progress` at the ~60-min job kill, run 31199593016 cancelled 2×), so a
 runner-enforced timeout is not a reliable backstop for a pytest hang. `signal`
-(not `thread`) is deliberate under `-n 1` xdist: thread's `os._exit()` reads as a
+(not `thread`) is deliberate under xdist: thread's `os._exit()` reads as a
 worker crash that xdist re-runs up to `--max-worker-restart` times (~5×, one 300 s
 hang ballooning into a job-cap cancel) and whose stack dump xdist swallows;
 `--max-worker-restart=0` caps any *other* worker death (segfault / OOM-kill) at
@@ -187,9 +187,9 @@ the `python-coverage` artifact **is** there, every shard job is green, and the
 Quality Gate run shows no error annotation.
 
 **What it means.** One or more coverage shards uploaded data without the
-file of their test worker. Each shard's pytest runs with `-n 1`: the pytest
-main process only starts a worker and prints results; the worker runs the
-tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
+file of a test worker. Each shard's pytest runs with `-n 3` (`-n 1` until
+#7103): the pytest main process only starts the workers and prints results;
+the workers run the tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
 writes a process's data file when that process exits. If the worker never
 exits normally, its file is never written, and the shard only contributes
 the code that runs at start-up (about 400 source files instead of about
@@ -215,6 +215,12 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    as 8 shards (about 2,700 tests each). Raise the shard count again before
    any shard gets near the limit; the matrix, `TOTAL`, and the combine job's
    download steps must move together, and the same test pins that lockstep.
+   **Again in November 2026 (#7103):** with the C tracer of the test map
+   (#5642) a serial shard ran 35 to more than 45 minutes, and from 20 to
+   26 Nov nearly every shard hit the limit. **Fix:** each shard runs three
+   test workers (`-n 3`), like the unit shards. A serial shard used only
+   about 2 GiB of program memory of the 14 GiB limit, on a runner with
+   6 CPUs.
 
 **Where to look.**
 

@@ -781,6 +781,50 @@ def test_old_map_means_the_full_suite(repo: Path) -> None:
     assert picked.line == "full suite: the test map is older than 7 days (made 2026-11-02)"
 
 
+def test_map_older_than_two_days_gives_a_warning(repo: Path) -> None:
+    fresh = _pick(repo, [f"{SRC}/core.py"], NOW + timedelta(days=2))
+    assert fresh.tests
+    assert fresh.warning == ""
+
+    old = _pick(repo, [f"{SRC}/core.py"], NOW + timedelta(days=2, minutes=1))
+    assert old.tests, "the map is still used"
+    assert old.warning == (
+        "the test map is older than 2 days (made 2026-11-02):"
+        " the nightly run made no new map since then"
+    )
+    full = _pick(repo, ["backend/alembic/versions/0002_y.py"], NOW + timedelta(days=3))
+    assert full.line.startswith("full suite: a migration changed")
+    assert full.warning == old.warning, "also a full run says that the map is old"
+
+
+def test_too_old_map_gives_only_the_full_suite_line(repo: Path) -> None:
+    picked = _pick(repo, [f"{SRC}/core.py"], NOW + timedelta(days=8))
+
+    assert picked.line.startswith("full suite: the test map is older than 7 days")
+    assert picked.warning == ""
+
+
+def test_pick_command_writes_the_warning_of_an_old_map(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(test_map, "datetime", _FrozenDatetime)
+    warning = repo / "warning.txt"
+    args = [
+        "pick", "--map", str(repo / "map.json"), "--out", str(repo / "selection.txt"),
+        "--warning-out", str(warning), "--repo-root", str(repo),
+    ]  # fmt: skip
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{SRC}/core.py\n"))
+    assert test_map._main(args) == 0
+    assert not warning.exists(), "the map of the frozen day is one hour old"
+
+    (repo / "map.json").write_text(json.dumps(_map(NOW - timedelta(days=3))), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{SRC}/core.py\n"))
+    assert test_map._main(args) == 0
+    assert warning.read_text(encoding="utf-8").startswith("the test map is older than 2 days")
+    assert capfd.readouterr().out.count("\n") == 2, "stdout keeps one line per run"
+
+
 def test_no_map_or_another_format_means_the_full_suite(repo: Path) -> None:
     assert test_map.pick([f"{SRC}/core.py"], repo / "missing.json", repo, NOW).line == (
         "full suite: no test map"
@@ -883,14 +927,19 @@ def _run_map_step(
     event: str,
     changed: dict[str, str],
     artifacts: list[dict[str, Any]] | None = None,
+    *,
+    map_age: timedelta = timedelta(0),
+    detect: dict[str, str] | None = None,
 ) -> tuple[str, str, Path, list[str]]:
     """Run the real step ``map`` of the ``changes`` job.
 
     A fake ``gh`` lists ``artifacts`` (default: one from a run of this repo
     on main) and applies the step's own ``--jq`` filter with the real ``jq``.
-    Any download gives the zip of the fake map. Returns the step's stdout,
+    Any download gives the zip of the fake map, made ``map_age`` ago.
+    ``detect`` overrides the outputs of the step ``detect`` (default: a
+    backend change that needs the unit shards). Returns the step's stdout,
     the value of ``test_map``, the folder of the picked list and the ``gh``
-    calls.
+    calls. The step summary is in ``tmp_path / "step_summary"``.
     """
     repo = tmp_path / "repo"
     _write_tree(repo, TREE)
@@ -907,7 +956,7 @@ def _run_map_step(
 
     archive = tmp_path / "map.zip"
     with zipfile.ZipFile(archive, "w") as zipped:
-        zipped.writestr(test_map.MAP_FILE, json.dumps(_map(datetime.now(UTC))))
+        zipped.writestr(test_map.MAP_FILE, json.dumps(_map(datetime.now(UTC) - map_age)))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "gh-calls"
@@ -937,9 +986,14 @@ def _run_map_step(
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin",
         "GITHUB_OUTPUT": str(output),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary"),
         "GITHUB_REPOSITORY": "example/repo",
         "RUNNER_TEMP": str(runner_temp),
         "EVENT_NAME": event,
+        "DOCS_ONLY": "false",
+        "BACKEND_PYTHON": "true",
+        "SINGLE_CONNECTOR": "",
+        **(detect or {}),
     }
     run = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
@@ -952,8 +1006,8 @@ def _run_map_step(
     assert run.returncode == 0, run.stdout + run.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     gh_calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
-    if event != "pull_request":
-        assert not gh_calls, "no artifact lookup outside a pull request"
+    if event != "pull_request" or detect:
+        assert not gh_calls, "no artifact lookup when the map is not needed"
     return run.stdout, outputs["test_map"], runner_temp / "unit-test-map", gh_calls
 
 
@@ -975,6 +1029,10 @@ def test_ci_pull_request_with_a_schema_change_runs_the_picked_tests(tmp_path: Pa
     assert set(connector_select.CONTRACT_TESTS) <= set(picked)
     assert "test map from " in stdout
     assert stdout.count("\n") == 2, "one line, plus the same line as a notice"
+    assert "::notice title=Unit tests::test map from " in stdout
+    summary = (tmp_path / "step_summary").read_text(encoding="utf-8")
+    assert summary.startswith("Unit tests: test map from ")
+    assert "Old unit test map" not in summary
 
 
 @needs_git
@@ -984,7 +1042,9 @@ def test_ci_pull_request_with_a_migration_runs_the_full_suite(tmp_path: Path) ->
     )
 
     assert selected == "false"
-    assert "full suite: a migration changed (backend/alembic/versions/0002_y.py)" in stdout
+    line = "full suite: a migration changed (backend/alembic/versions/0002_y.py)"
+    assert f"::warning title=Unit tests::{line}\n" in stdout, "a full run is a warning"
+    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
 
 
 @needs_git
@@ -1023,16 +1083,76 @@ def test_ci_no_map_from_a_run_of_this_repo_on_main_means_the_full_suite(tmp_path
     )
 
     assert selected == "false"
-    assert "full suite: no test map from a nightly run of this repo on main" in stdout
+    line = "full suite: no test map from a nightly run of this repo on main"
+    assert f"::warning title=Unit tests::{line}\n" in stdout
+    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
     assert not any(call.endswith("/zip") for call in calls)
 
 
-def test_ci_map_step_runs_only_on_a_pull_request_that_needs_the_shards() -> None:
-    condition = _step("changes", step_id="map")["if"]
-    assert "github.event_name == 'pull_request'" in condition
-    assert "steps.detect.outputs.docs_only == 'false'" in condition
-    assert "steps.detect.outputs.backend_python == 'true'" in condition
-    assert "steps.detect.outputs.single_connector == ''" in condition
+@needs_git
+def test_ci_map_older_than_two_days_is_used_with_a_warning(tmp_path: Path) -> None:
+    stdout, selected, _folder, _calls = _run_map_step(
+        tmp_path,
+        "pull_request",
+        {f"{SRC}/schemas.py": "class S:\n    x = 1\n"},
+        map_age=timedelta(days=3),
+    )
+
+    assert selected == "true", "the map is still used until it is 7 days old"
+    assert "::notice title=Unit tests::test map from " in stdout
+    warning = "::warning title=Old unit test map::the test map is older than 2 days (made "
+    assert warning in stdout
+    summary = (tmp_path / "step_summary").read_text(encoding="utf-8").splitlines()
+    assert summary[0].startswith("Unit tests: test map from ")
+    assert summary[1].startswith("Old unit test map: the test map is older than 2 days")
+    assert summary[1].endswith("the nightly run made no new map since then")
+
+
+@needs_git
+def test_ci_old_map_and_a_full_run_give_two_warnings(tmp_path: Path) -> None:
+    stdout, selected, _folder, _calls = _run_map_step(
+        tmp_path,
+        "pull_request",
+        {"backend/alembic/versions/0002_y.py": "x = 1\n"},
+        map_age=timedelta(days=3),
+    )
+
+    assert selected == "false"
+    assert "::warning title=Unit tests::full suite: a migration changed" in stdout
+    assert "::warning title=Old unit test map::" in stdout
+
+
+@needs_git
+@pytest.mark.parametrize(
+    ("detect", "line"),
+    [
+        ({"DOCS_ONLY": "true"}, "no unit tests: only docs changed"),
+        ({"BACKEND_PYTHON": "false"}, "no unit tests: no backend Python change"),
+        (
+            {"SINGLE_CONNECTOR": "acme"},
+            "no test map needed: the tests of connector acme run",
+        ),
+    ],
+)
+def test_ci_pull_request_that_needs_no_full_run_says_why_as_a_notice(
+    tmp_path: Path, detect: dict[str, str], line: str
+) -> None:
+    stdout, selected, _folder, _calls = _run_map_step(
+        tmp_path, "pull_request", {"docs/x.md": "x\n"}, detect=detect
+    )
+
+    assert selected == "false"
+    assert f"::notice title=Unit tests::{line}\n" in stdout
+    assert "::warning" not in stdout
+    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
+
+
+def test_ci_map_step_runs_on_every_pull_request_and_reads_the_detect_outputs() -> None:
+    step = _step("changes", step_id="map")
+    assert step["if"] == "github.event_name == 'pull_request'"
+    assert step["env"]["DOCS_ONLY"] == "${{ steps.detect.outputs.docs_only }}"
+    assert step["env"]["BACKEND_PYTHON"] == "${{ steps.detect.outputs.backend_python }}"
+    assert step["env"]["SINGLE_CONNECTOR"] == "${{ steps.detect.outputs.single_connector }}"
 
     changes = _jobs()["changes"]
     assert changes["permissions"] == {"contents": "read", "actions": "read"}

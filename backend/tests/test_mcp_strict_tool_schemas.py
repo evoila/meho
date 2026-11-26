@@ -179,7 +179,9 @@ def test_an_enum_member_is_a_value_and_stays_as_it_is() -> None:
     assert not _accepts(out, {"enum": ["x"], "properties": {"a": {}}})
 
 
-_UNDER_NOT_IF_THEN_ELSE: list[dict[str, Any]] = [
+_D = {"d": {"enum": ["x", None]}}
+
+_ORDER_SENSITIVE: list[dict[str, Any]] = [
     {"not": {"enum": ["x", None]}},
     {"not": {"enum": [None]}},
     {"not": {"not": {"enum": ["x", None]}}},
@@ -187,26 +189,72 @@ _UNDER_NOT_IF_THEN_ELSE: list[dict[str, Any]] = [
     {"if": {"type": "string"}, "then": {"enum": ["x", None]}},
     {"if": {"type": "null"}, "else": {"enum": ["x", None]}},
     {"properties": {"a": {"not": {"enum": ["x", None]}}}},
+    # A ``$ref`` from ``not`` or ``if`` to an enum in ``$defs``.
+    {"properties": {"a": {"not": {"$ref": "#/$defs/d"}}}, "$defs": _D},
+    {"properties": {"a": {"not": {"$ref": "#/definitions/d"}}}, "definitions": _D},
+    {
+        "if": {"$ref": "#/$defs/d"},
+        "then": {"type": "string"},
+        "else": {"type": "null"},
+        "$defs": _D,
+    },
+    # A ``$ref`` that reaches the enum through a second definition.
+    {
+        "properties": {"a": {"not": {"$ref": "#/$defs/e"}}},
+        "$defs": {"e": {"$ref": "#/$defs/d"}, **_D},
+    },
+    # A ``$ref`` form whose target is not a plain path.
+    {"not": {"$ref": "#here"}, "$defs": {"d": {"$anchor": "here", "enum": ["x", None]}}},
+    # ``null`` matches both branches, so ``oneOf`` refuses it.
+    {"properties": {"a": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}}},
+    {"then": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}},
+    {"properties": {"a": {"oneOf": [{"$ref": "#/$defs/d"}, {"type": "null"}]}}, "$defs": _D},
+    # Two matches are too many, one is not.
+    {"contains": {"enum": ["x", None]}, "maxContains": 1},
 ]
 
 
-@pytest.mark.parametrize("schema", _UNDER_NOT_IF_THEN_ELSE)
+@pytest.mark.parametrize("schema", _ORDER_SENSITIVE)
 def test_the_sent_copy_never_accepts_what_the_full_schema_refuses(schema: dict[str, Any]) -> None:
     sent = _without_null_enum_members(schema)
-    for value in (None, "x", "other", 3):
+    for value in (None, "x", "other", 3, [None, "x"]):
         for candidate in (value, {"a": value}):
             if _accepts(sent, candidate):
                 assert _accepts(schema, candidate), (schema, candidate)
 
 
-def test_an_enum_under_not_and_if_is_left_as_it_is() -> None:
-    for schema in (
-        {"not": {"enum": ["x", None]}},
-        {"if": {"enum": ["x", None]}, "then": {"type": "string"}},
-    ):
-        assert _without_null_enum_members(schema) is schema
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"properties": {"a": {"not": {"$ref": "#/$defs/d"}}}, "$defs": _D},
+        {"properties": {"a": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}}},
+        {"if": {"type": "null"}, "then": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}},
+    ],
+)
+def test_null_is_still_refused_through_a_ref_or_a_one_of(schema: dict[str, Any]) -> None:
+    candidate = None if "if" in schema else {"a": None}
+    assert not _accepts(schema, candidate)
+    assert not _accepts(_without_null_enum_members(schema), candidate)
+
+
+def test_an_enum_under_not_if_and_one_of_is_left_as_it_is() -> None:
+    for schema in _ORDER_SENSITIVE:
+        if "if" not in schema or "$defs" in schema:
+            assert _without_null_enum_members(schema) is schema, schema
     narrowed = _without_null_enum_members({"if": {"type": "string"}, "then": {"enum": ["x", None]}})
     assert narrowed == {"if": {"type": "string"}, "then": {"enum": ["x"]}}
+
+
+def test_a_definition_used_only_outside_not_and_if_still_loses_null() -> None:
+    schema = {
+        "properties": {"a": {"$ref": "#/$defs/d"}, "b": {"not": {"$ref": "#/$defs/k"}}},
+        "$defs": {**_D, "k": {"enum": ["y", None]}},
+    }
+    out = _without_null_enum_members(schema)
+    assert out["$defs"] == {"d": {"enum": ["x"]}, "k": {"enum": ["y", None]}}
+    assert _without_null_enum_members({"contains": {"enum": ["x", None]}}) == {
+        "contains": {"enum": ["x"]}
+    }
 
 
 def test_a_schema_that_keeps_null_in_an_enum_is_found_by_the_check() -> None:

@@ -67,9 +67,10 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from enum import StrEnum
 from typing import Any, Final
+from urllib.parse import unquote
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -336,11 +337,13 @@ _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 #: a value is not a rule of the schema, so it stays as it is.
 _LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "enum", "examples", "example"})
 
-#: Keywords whose schema is read the other way round: ``not`` refuses what its
-#: schema accepts, and ``if`` picks the branch. Dropping ``null`` from an
-#: ``enum`` there would make the sent copy accept more than the server does.
-#: So the rewrite leaves these schemas as they are.
-_NEGATED_KEYWORDS: frozenset[str] = frozenset({"not", "if"})
+#: Keywords where a narrower schema can make the whole schema accept more.
+#: ``not`` refuses what its schema accepts, and ``if`` picks the branch.
+#: ``oneOf`` needs exactly one branch to match: a value that matched two
+#: branches may match only one after a change, and then it passes. The rewrite
+#: leaves these schemas as they are, and also each schema they point to with
+#: ``$ref``. ``contains`` is the same when ``maxContains`` is next to it.
+_KEPT_KEYWORDS: frozenset[str] = frozenset({"not", "if", "oneOf"})
 
 #: Keywords whose value maps a name to a schema. The names are free text (a
 #: property may be called ``default``), so they are never read as keywords.
@@ -363,22 +366,129 @@ def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[
     return {"enum": kept}
 
 
-def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
-    """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
+def _is_kept(schema: dict[str, Any], key: str) -> bool:
+    """True when the rewrite must leave the value of *key* in *schema* as it is."""
+    return key in _KEPT_KEYWORDS or (key == "contains" and "maxContains" in schema)
+
+
+def _kept_subschemas(node: Any, *, names_are_keys: bool = False) -> Iterator[Any]:
+    """Yield each schema under *node* that the rewrite leaves as it is."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _kept_subschemas(item)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if not names_are_keys and key in _LITERAL_KEYWORDS:
+                continue
+            if not names_are_keys and _is_kept(node, key):
+                yield value
+                continue
+            yield from _kept_subschemas(
+                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+            )
+
+
+def _values_of(node: Any, wanted: frozenset[str]) -> Iterator[Any]:
+    """Yield the value of every key in *wanted*, at any depth under *node*."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in wanted:
+                yield value
+            yield from _values_of(value, wanted)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _values_of(item, wanted)
+
+
+_REFERENCE_KEYWORDS: frozenset[str] = frozenset({"$ref", "$dynamicRef", "$recursiveRef"})
+
+
+def _ref_path(ref: Any) -> tuple[str, ...] | None:
+    """The path of a local ``$ref`` such as ``#/$defs/name``, or ``None`` for any other form."""
+    if not isinstance(ref, str) or not ref.startswith("#"):
+        return None
+    pointer = unquote(ref[1:])
+    if pointer == "":
+        return ()
+    if not pointer.startswith("/"):
+        return None
+    return tuple(part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:])
+
+
+def _at_path(node: Any, path: tuple[str, ...]) -> Any:
+    """The part of *node* at *path*, or ``None`` when there is no such part."""
+    for part in path:
+        if isinstance(node, dict):
+            node = node.get(part)
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return None
+    return node
+
+
+def _kept_paths(schema: Any) -> set[tuple[str, ...]]:
+    """The path of each schema a kept schema points to, also through other ``$ref``.
+
+    A ``$ref`` that is not a plain local path (``#name``, another file,
+    ``$dynamicRef``), or any ``$id`` below the top, makes the whole schema kept:
+    the path it points to is then not known for sure.
+    """
+    refs = [
+        ref for kept in _kept_subschemas(schema) for ref in _values_of(kept, _REFERENCE_KEYWORDS)
+    ]
+    if refs and isinstance(schema, dict):
+        nested_ids = [_values_of(value, frozenset({"$id"})) for value in schema.values()]
+        if any(next(ids, None) is not None for ids in nested_ids):
+            return {()}
+    paths: set[tuple[str, ...]] = set()
+    while refs:
+        path = _ref_path(refs.pop())
+        if path is None:
+            return {()}
+        if path not in paths:
+            paths.add(path)
+            refs.extend(_values_of(_at_path(schema, path), _REFERENCE_KEYWORDS))
+    return paths
+
+
+def _without_null_enum_members(schema: Any) -> Any:
+    """Return *schema* with ``None`` removed from every ``enum`` list.
 
     Used for the wire copy of each tool schema. It goes to any depth. Nothing else
     changes: a ``type`` list such as ``["string", "null"]`` stays, and so do
     the values under ``default``, ``const`` and ``examples``. The members of an
     ``enum`` are values too, so an object among them stays as it is. An
-    ``enum`` of only ``null`` becomes ``const: null``. An ``enum`` without
-    ``null``, also an empty one, stays. The schema under ``not`` and ``if`` is
-    left as it is, because there the rewrite would change what the sent copy
-    accepts. *node* is not mutated. A node with nothing to change is returned
-    as the same object.
+    ``enum`` of only ``null`` becomes ``const: null``. One exception: when the
+    schema also has a ``const`` that is not ``null``, that ``const`` stays and
+    the ``enum`` becomes empty, so no value passes, as before. An ``enum``
+    without ``null``, also an empty one, stays.
+
+    Some schemas are left as they are, because there the rewrite could make
+    the sent copy accept a value that the full schema refuses: the schema
+    under ``not``, ``if`` and ``oneOf``, under ``contains`` next to
+    ``maxContains``, and each schema these point to with ``$ref``.
+
+    *schema* is not mutated. A node with nothing to change is returned as the
+    same object.
+    """
+    return _drop_null_members(schema, (), _kept_paths(schema))
+
+
+def _drop_null_members(
+    node: Any,
+    path: tuple[str, ...],
+    kept: set[tuple[str, ...]],
+    *,
+    names_are_keys: bool = False,
+) -> Any:
+    """The walk of :func:`_without_null_enum_members`; *path* is where *node* is.
 
     *names_are_keys* is true for the value of ``properties`` and the like,
     where the keys are names, not keywords.
     """
+    if path in kept:
+        return node
     if isinstance(node, dict):
         changed = False
         out: dict[str, Any] = {}
@@ -387,17 +497,20 @@ def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> An
                 out.update(_enum_rule_without_null(node, value))
                 changed = True
                 continue
-            if not names_are_keys and (key in _LITERAL_KEYWORDS or key in _NEGATED_KEYWORDS):
+            if not names_are_keys and (key in _LITERAL_KEYWORDS or _is_kept(node, key)):
                 out[key] = value
                 continue
-            new_value = _without_null_enum_members(
-                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+            new_value = _drop_null_members(
+                value,
+                (*path, key),
+                kept,
+                names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS,
             )
             changed = changed or new_value is not value
             out[key] = new_value
         return out if changed else node
     if isinstance(node, list):
-        items = [_without_null_enum_members(item) for item in node]
+        items = [_drop_null_members(item, (*path, str(i)), kept) for i, item in enumerate(node)]
         if any(new is not old for new, old in zip(items, node, strict=True)):
             return items
     return node
@@ -409,11 +522,13 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     Two rewrites. The top-level ``oneOf``, ``allOf`` and ``anyOf`` go (see
     :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why). A direct ``null`` member of
     an ``enum`` goes at any depth, and an ``enum`` of only ``null`` becomes
-    ``const: null`` (see :func:`_without_null_enum_members`). Nested
-    combinators stay, and so does an ``enum`` under ``not`` or ``if``: the
-    restriction is top-level only, and a change there would let the sent copy
-    accept a value that the full schema refuses. A tool whose sent schema still
-    holds ``null`` in an ``enum`` is caught by the test of the registry.
+    ``const: null``, except next to a ``const`` that is not ``null`` (see
+    :func:`_without_null_enum_members`). Nested combinators stay: the
+    restriction is top-level only. An ``enum`` under ``not``, ``if`` or
+    ``oneOf``, and in each schema these point to with ``$ref``, stays too,
+    because a change there could let the sent copy accept a value that the full
+    schema refuses. A tool whose sent schema still holds ``null`` in an
+    ``enum`` is caught by the test of the registry.
 
     *schema* is not mutated. When there is nothing to change (no top-level
     combinator and no ``null`` in an ``enum`` the rewrite touches), the same

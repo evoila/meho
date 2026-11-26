@@ -2342,8 +2342,17 @@ in an `enum`. Output schemas are sent as they are.
   they are. The members of an `enum` are data too: only a direct `null` member
   goes, and an object among the members stays as it is. An `enum` of only
   `null` becomes `const: null`, so the sent schema does not accept more than
-  the server does. An `enum` without `null`, also an empty one, stays. No
-  registered tool has these special forms.
+  the server does. When it sits next to a `const` that is not `null`, that
+  `const` stays and the `enum` becomes empty, so no value passes, as before.
+  An `enum` without `null`, also an empty one, stays. No registered tool has
+  these special forms.
+- Some parts stay as they are, because there a smaller `enum` could make the
+  sent schema accept a value that the server refuses: the schema under
+  `not`, `if` and `oneOf`, under `contains` next to `maxContains`, and each
+  schema these point to with `$ref` (also through another `$ref`). When such
+  a `$ref` is not a plain local path, or the schema has an `$id` below the
+  top, the whole schema stays as it is. The registry test then shows any
+  tool whose sent schema still has `null` in an `enum`.
 - The server checks each call against `inputSchema`, not the wire copy. A
   call that sends `null` for such a field still passes, and the handler
   treats it like a missing field.

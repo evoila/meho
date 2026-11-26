@@ -537,8 +537,7 @@ EXPOSE 8000
 # scope. Without it, FastAPI's ``redirect_slashes`` 307 reflects the
 # on-the-wire scheme (``http://`` once TLS terminates at the cluster
 # Ingress) into the ``Location`` header, downgrading the client's
-# second hop and creating a MITM window — surfaced by the 2026-05-20
-# RDC dogfood (Signal #3, Issue #730).
+# second hop and creating a MITM window.
 #
 # ``--proxy-headers`` alone trusts *any* connecting peer's
 # ``X-Forwarded-*`` headers, which is unsafe in a cluster where pods

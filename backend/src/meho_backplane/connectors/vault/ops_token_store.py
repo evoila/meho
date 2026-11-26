@@ -296,7 +296,11 @@ def _minted_from(payload: Any) -> _Minted:
 
 
 async def _revoke(minted: _Minted) -> bool:
-    """Revoke the new token with the token itself (``revoke-self``); never raises."""
+    """Revoke the new token with the token itself (``revoke-self``); never raises.
+
+    A clean-up: it runs without the block check, so the token is revoked
+    also when the caller was blocked while the operation ran.
+    """
     from meho_backplane.settings import get_settings
 
     def _do() -> None:
@@ -304,7 +308,7 @@ async def _revoke(minted: _Minted) -> bool:
         client.auth.token.revoke_self()
 
     try:
-        await to_thread_checked(_do)
+        await asyncio.to_thread(_do)
     except Exception as exc:
         _log.warning(
             "vault_token_store_revoke_failed",

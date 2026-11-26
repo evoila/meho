@@ -941,9 +941,9 @@ async def test_poll_interval_bounds_the_gap_between_stored_reads(
     except BaseException:
         flip.cancel()
         raise
-    if decision == "timeout":
-        # The polling stopped before the third read: stop the helper, so the
-        # test fails on the assert below and does not wait for a time limit.
+    if decision != "expired":
+        # The wait ended without the change: stop the helper, so the test
+        # fails on the assert below and does not wait for a time limit.
         flip.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await flip

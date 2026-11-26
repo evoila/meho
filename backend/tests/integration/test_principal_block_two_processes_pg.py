@@ -39,10 +39,11 @@ from tests._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from tests._time_limits import check_time_limit
 
 from .conftest import pg_engine  # noqa: F401 — pytest-discovered fixture
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.slow_runner_tolerant]
 
 #: One of the two tenants ``pg_engine`` seeds on entry.
 _TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -50,6 +51,9 @@ _AGENT = "agent:two-process-sample"
 _AGENT_SUB = "9a4c0e52-0000-4000-8000-0000000b10c2"
 #: A read that was already on its way when the list changed may take this long.
 _ONE_READ = 1.0
+#: How long the test waits for a line of process 2. Long enough for a busy
+#: runner: only :func:`check_time_limit` checks the refresh time.
+_WAIT_FOR_LINE = 180.0
 _BACKEND = Path(__file__).resolve().parents[2]
 
 
@@ -114,7 +118,7 @@ async def test_block_and_unblock_by_name_reach_a_second_process_within_the_refre
         **os.environ,
         "SECOND_PROCESS_TOKEN": agent,
         "SECOND_PROCESS_JWKS": json.dumps(public_jwks(key)),
-        "SECOND_PROCESS_SECONDS": "90",
+        "SECOND_PROCESS_SECONDS": "600",
         "PYTHONPATH": str(_BACKEND),
     }
     process = await asyncio.create_subprocess_exec(
@@ -127,7 +131,7 @@ async def test_block_and_unblock_by_name_reach_a_second_process_within_the_refre
     )
     headers = {"Authorization": f"Bearer {admin}"}
     try:
-        assert (await _next_line(process, 60))[0] == 200
+        assert (await _next_line(process, _WAIT_FOR_LINE))[0] == 200
         with respx.mock(assert_all_called=False) as router:
             mock_discovery_and_jwks(router, public_jwks(key))
             async with httpx.AsyncClient(
@@ -141,9 +145,13 @@ async def test_block_and_unblock_by_name_reach_a_second_process_within_the_refre
                 blocked_at = time.time()
                 assert blocked.status_code == 201, blocked.text
 
-                status, refused_at = await _next_line(process, BLOCK_CACHE_SECONDS + 10)
+                status, refused_at = await _next_line(process, _WAIT_FOR_LINE)
                 assert status == 403
-                assert refused_at - blocked_at <= BLOCK_CACHE_SECONDS + _ONE_READ
+                check_time_limit(
+                    refused_at - blocked_at,
+                    BLOCK_CACHE_SECONDS + _ONE_READ,
+                    "process 2 refused the agent later than the refresh time",
+                )
                 with pytest.raises(TimeoutError):
                     await _next_line(process, BLOCK_CACHE_SECONDS + 1)
 
@@ -151,9 +159,13 @@ async def test_block_and_unblock_by_name_reach_a_second_process_within_the_refre
                 removed_at = time.time()
                 assert removed.status_code == 200, removed.text
 
-                status, works_at = await _next_line(process, BLOCK_CACHE_SECONDS + 10)
+                status, works_at = await _next_line(process, _WAIT_FOR_LINE)
                 assert status == 200
-                assert works_at - removed_at <= BLOCK_CACHE_SECONDS + _ONE_READ
+                check_time_limit(
+                    works_at - removed_at,
+                    BLOCK_CACHE_SECONDS + _ONE_READ,
+                    "process 2 took the agent again later than the refresh time",
+                )
     finally:
         process.kill()
         await process.wait()

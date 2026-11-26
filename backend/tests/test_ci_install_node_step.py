@@ -93,8 +93,3 @@ def test_check_fails_without_the_switch() -> None:
     assert changed != text
     with pytest.raises(AssertionError, match="MEHO_REQUIRE_NODE"):
         _check(changed, "python-unit-shard")
-
-
-@pytest.mark.skip(reason="a test with a skip mark, to show the skip limit check in CI")
-def test_skip_mark_for_the_skip_limit_check() -> None:
-    raise AssertionError

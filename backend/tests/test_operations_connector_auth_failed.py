@@ -766,6 +766,21 @@ async def test_dispatch_restage_hint_gives_the_vault_command_for_a_vault_ref(
         pytest.param(
             "gsm:proj-x/vrli/versions/latest", "vault", "gsm", id="gsm-scheme-latest-version"
         ),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/stable", "vault", "gsm", id="gsm-scheme-version-alias"
+        ),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/latest #password",
+            "vault",
+            "gsm",
+            id="gsm-scheme-latest-space-before-field",
+        ),
+        pytest.param(
+            "proj-x/vrli/versions/stable#password",
+            "gsm",
+            "gsm",
+            id="no-scheme-gsm-default-version-alias-field",
+        ),
     ],
 )
 async def test_dispatch_restage_hint_names_no_vault_command_for_another_store(
@@ -805,6 +820,9 @@ async def test_dispatch_restage_hint_names_no_vault_command_for_another_store(
         pytest.param("gsm:proj-x/vrli/versions/5#password", "vault", id="gsm-scheme-field"),
         pytest.param("proj-x/vrli/versions/3", "gsm", id="no-scheme-gsm-default"),
         pytest.param(" gsm:proj-x/vrli/versions/2 ", "vault", id="gsm-scheme-spaces-around"),
+        pytest.param(
+            "gsm:proj-x/vrli/versions/7 #password", "vault", id="gsm-scheme-space-before-field"
+        ),
     ],
 )
 async def test_dispatch_restage_hint_pinned_gsm_version_says_to_point_the_ref_at_a_new_version(
@@ -994,6 +1012,36 @@ async def test_dispatch_restage_hint_shows_an_unsafe_target_name_on_its_own_line
         assert "`meho targets update <target> --secret-ref <ref>`" in text
         assert f"targets update {name}" not in text
         assert "`meho vault kv put secret <path> --data @<file>`" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", _CALLERS)
+@pytest.mark.parametrize(
+    "name", [pytest.param("a'b", id="single-quote"), pytest.param("a;b", id="semicolon")]
+)
+async def test_dispatch_restage_hint_pinned_gsm_version_shows_an_unsafe_target_name_on_its_own_line(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    caller: PrincipalKind,
+    name: str,
+) -> None:
+    """A pinned GSM version with a target name outside the safe set shows the name alone."""
+    error, remediation = await _restage_hint_via_dispatch(
+        session=session,
+        embedding=stub_embedding_service.encode_one.return_value,
+        caller=caller,
+        target_name=name,
+        secret_ref="gsm:proj-x/vrli/versions/5",
+    )
+
+    for text in (error, remediation):
+        assert f"\n{name}\n" in text
+        assert "The target name holds characters a shell reads in its own way" in text
+        assert (
+            "`meho targets update <target> --secret-ref <ref>` with that name, then retry." in text
+        )
+        assert f"targets update {name}" not in text
+        assert "pins one version of the secret" in text
 
 
 @pytest.mark.asyncio

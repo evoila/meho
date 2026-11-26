@@ -2615,12 +2615,22 @@ def _restage_target_word(target_name: str | None) -> str:
     return quoted if quoted is not None else "<target>"
 
 
+def _restage_target_own_line(target_name: str | None) -> tuple[str, str]:
+    """``(own line, command word)`` for the target name in a hint command.
+
+    A name outside the safe set is shown on its own line, and the command
+    shows the ``<target>`` placeholder in its place.
+    """
+    word = _restage_target_word(target_name)
+    if target_name and word == "<target>":
+        return _own_line("target name", target_name), word
+    return "", word
+
+
 def _restage_find_ref(target_name: str | None) -> str:
     """The step that names how to read an unknown ``secret_ref``, and how to set one."""
-    word = _restage_target_word(target_name)
-    own_line = ""
-    if target_name and word == "<target>":
-        own_line = _own_line("target name", target_name)
+    own_line, word = _restage_target_own_line(target_name)
+    if own_line:
         lookup = "`meho targets describe <target>` with that name shows its secret_ref."
     else:
         lookup = f" `meho targets describe {word}` shows its secret_ref."
@@ -2660,21 +2670,37 @@ _RESTAGE_GUIDE: Final = (
 )
 
 
+#: A GSM version number. Any other version segment (``latest``, or an alias
+#: such as ``stable``) follows the secret, so a new version needs no ref change.
+_GSM_VERSION_NUMBER_RE: Final = re.compile(r"[0-9]+")
+
+
 def _gsm_ref_pins_a_version(store_ref: str) -> bool:
-    """Whether a GSM *store_ref* (``<project>/<secret>/versions/<n>``) pins one version."""
-    parts = store_ref.partition("#")[0].split("/")
-    return len(parts) == 4 and parts[2] == "versions" and parts[3] not in ("", "latest")
+    """Whether a GSM *store_ref* (``<project>/<secret>/versions/<n>``) pins a numbered version.
+
+    Parsed as the GSM credential read does: the ``#<field>`` part is cut at
+    the last ``#``, and the path is trimmed.
+    """
+    body, sep, _field = store_ref.rpartition("#")
+    parts = (body if sep else store_ref).strip().split("/")
+    return (
+        len(parts) == 4
+        and parts[2] == "versions"
+        and _GSM_VERSION_NUMBER_RE.fullmatch(parts[3]) is not None
+    )
 
 
 def _restage_other_store(kind: str, store_ref: str, target_name: str | None) -> str:
     """The restage step for a ref of a store other than Vault."""
     if kind == "gsm" and _gsm_ref_pins_a_version(store_ref):
-        word = _restage_target_word(target_name)
+        own_line, word = _restage_target_own_line(target_name)
+        with_name = " with that name" if own_line else ""
+        space = "" if own_line else " "
         return (
-            f" The secret_ref pins one version of the secret, so MEHO reads only "
-            f"that version. Add the corrected credential as a new version of that "
-            f"secret, set the target's secret_ref to the new version with "
-            f"`meho targets update {word} --secret-ref <ref>`, then retry."
+            f"{own_line}{space}The secret_ref pins one version of the secret, so MEHO "
+            f"reads only that version. Add the corrected credential as a new version "
+            f"of that secret, set the target's secret_ref to the new version with "
+            f"`meho targets update {word} --secret-ref <ref>`{with_name}, then retry."
         )
     return f" Store the corrected credential in the {kind!r} store at that ref, then retry."
 

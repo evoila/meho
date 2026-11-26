@@ -702,6 +702,25 @@ with a token becomes a call of this op.
   approval request always holds `changes`. The agent's own
   `preview_operation` holds it only with the `PREVIEW_TYPED_WRITES`
   switch on (off by default).
+- **Change one extra.** `extras_changes` is the merge form of `extras`: a
+  map from a key to a value. A value sets or replaces that key and keeps
+  its JSON type (text, number, `true` or `false`, list, map). `null`
+  removes the key. A key that is not named keeps its value and its type.
+  `extras` still replaces the whole map, and a body with both is refused
+  (`TargetUpdate`). The merge (`targets/extras_changes.py`) runs when the
+  change runs, on the map stored then, so a key added while the call
+  waited stays. The merged map goes through the checks of a full `extras`:
+  the size limit, the platform-admin check of the Vault login keys and the
+  Keycloak realm check. The approval card shows, for each named key, its
+  stored and its new value (secret-shaped values hidden); the audit row
+  carries the key names that were set and removed (`audit_extras_keys_set`,
+  `audit_extras_keys_removed`), never the values. The answer of the
+  operation holds `extras` (the map after the change) when the call sent
+  `extras_changes`; REST `PATCH` always returns it. CLI:
+  `meho targets update <target> --set-extra key=value` (text),
+  `--set-extra-json key=<json>` (typed) and `--unset-extra key`, each
+  repeatable. To correct the realm of a Keycloak target:
+  `meho targets update <target> --set-extra managed_realm=<realm>`.
 - **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
   fields change; an explicit `null` clears a nullable field. A call with
   no field besides `target_id` is refused, and nothing changes.

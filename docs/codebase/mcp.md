@@ -2021,7 +2021,9 @@ with `tenant_admin` approves it. People who change a target at once use
 `tenant_admin`, so a person with the `operator` role is refused on every
 path, also through `call_operation`. The target is named by `target_id`,
 never by name, so an approved call changes the target the approver saw;
-the preview names that target and the fields the call sends. Only the
+the preview names that target and the fields the call sends. The input
+`extras_changes` sets or removes single keys of `extras` and keeps the
+others (see `docs/codebase/targets.md`). Only the
 sent fields change, and an explicit `null` clears a nullable field. Its
 `inputSchema` is the operation's `parameter_schema` (one object), and its
 `outputSchema` is the parked-shape union, like `meho_targets_register`.

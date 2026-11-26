@@ -506,7 +506,10 @@ meho targets update lab-prom --clear secret-ref --extra scheme=http
 ```
 
 `--extra` on `update` replaces the whole `extras` map, so pass every key
-you want to keep. `--clear extra` removes every extra, and `--clear alias`
+you want to keep. To change one key and keep the others, use
+`--set-extra key=value` (a text value), `--set-extra-json key=<json>` (a
+number, `true` or `false`, a list or a map) and `--unset-extra key`. Each
+can be repeated. `--clear extra` removes every extra, and `--clear alias`
 removes every alias. In YAML, write `secret_ref: null`.
 
 ### Keycloak targets need a managed realm
@@ -520,6 +523,12 @@ is refused.
 ```bash
 meho targets add lab-sso --product keycloak --host sso.example.com \
   --extra managed_realm=example
+```
+
+To correct it later, change that one key; every other extra stays:
+
+```bash
+meho targets update lab-sso --set-extra managed_realm=example
 ```
 
 In YAML, put it under `extras:` (`managed_realm: example`). The optional

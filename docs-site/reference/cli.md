@@ -5462,8 +5462,11 @@ meho targets update <name, alias or id> [flags]
 - `--product` — new connector product slug
 - `--secret-field` — connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)
 - `--secret-ref` — Vault path of the target's credential
+- `--set-extra` — key=value to set in the extras map as text; the other keys stay (repeatable)
+- `--set-extra-json` — key=<json> to set in the extras map with its JSON type, e.g. retries=3 or tags=["a"] (repeatable)
 - `--tls-ca-pin` — PEM CA bundle to pin for this target
 - `--tls-server-name` — TLS SNI / certificate-verification hostname, decoupled from --host
+- `--unset-extra` — key to remove from the extras map; the other keys stay (repeatable)
 - `--verify-tls` — verify the target's TLS certificate; pass --verify-tls=false to opt out
 - `--version` — operator-asserted product version
 - `--vpn-required` — mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it

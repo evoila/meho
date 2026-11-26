@@ -63,6 +63,7 @@ from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.extras_changes import merge_extras_changes
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
@@ -178,6 +179,18 @@ TARGETS_UPDATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "New connector-specific metadata. Replaces the stored map.",
         },
+        "extras_changes": {
+            "type": "object",
+            "minProperties": 1,
+            "description": (
+                "Changes single keys of the stored `extras`. A value sets or "
+                "replaces that key and keeps its type (text, number, `true` or "
+                "`false`, list, map). A `null` value removes that key. Keys you "
+                "do not name keep their value. MEHO merges when the change runs, "
+                "so a key added while the call waited stays. Not together with "
+                "`extras`. The answer shows the `extras` after the change."
+            ),
+        },
         "notes": {
             "type": _NULLABLE_STRING,
             "description": "New free-text notes. `null` clears them.",
@@ -219,6 +232,12 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Names of the fields the call changed.",
         },
+        "extras": {
+            "type": "object",
+            "description": (
+                "Only present when the call sent `extras_changes`: the `extras` after the change."
+            ),
+        },
         "warnings": {
             "type": "array",
             "items": {"type": "string"},
@@ -255,6 +274,11 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "target_id": "Required. The target's UUID from list_targets.",
         "secret_ref": "Optional. A Vault path inside your tenant's secret path.",
         "host": "Optional. The new host or IP.",
+        "extras_changes": (
+            "Optional. To change one key of `extras` and keep the others, send "
+            "this map: a value sets the key, `null` removes it. Not together "
+            "with `extras`, which replaces the whole map."
+        ),
     },
     "output_shape": "{'target_id', 'name', 'product', 'version', 'host', 'updated_fields'}",
     "next_step": (
@@ -332,6 +356,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
         "version": updated.version,
         "host": updated.host,
         "updated_fields": sorted(body.model_fields_set),
+        **({"extras": updated.extras} if "extras_changes" in body.model_fields_set else {}),
         **({"warnings": warnings} if warnings else {}),
     }
 
@@ -345,8 +370,15 @@ def _preview_changes(row: Any, params: dict[str, Any], ctx: PreviewContext) -> d
     changes = {
         field: {"from": _stored_value(getattr(row, field, None)), "to": value}
         for field, value in params.items()
-        if field != "target_id"
+        if field not in ("target_id", "extras_changes")
     }
+    if isinstance(params.get("extras_changes"), dict):
+        # Only the named keys: their stored value, and the new value (`null` = removed).
+        stored = row.extras or {}
+        changes["extras_changes"] = {
+            key: {"from": stored.get(key), "to": value}
+            for key, value in params["extras_changes"].items()
+        }
     return _redact_echoed_params(
         changes,
         connector_id=ctx.connector_id,
@@ -403,7 +435,8 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
 async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
     """The realm warnings for the target as it will be after ``targets.update``.
 
-    A sent ``product`` or ``extras`` replaces the stored one; a field that is
+    A sent ``product`` or ``extras`` replaces the stored one; ``extras_changes``
+    is merged into it; a field that is
     not sent keeps its stored value. No live target gives no warning: the
     call would fail.
     """
@@ -413,9 +446,13 @@ async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
         row = await resolve_target_by_id(session, ctx.operator.tenant_id, target_id)
     if row is None:
         return []
-    return keycloak_realm_warnings(
-        ctx.params.get("product", row.product), ctx.params.get("extras", row.extras)
-    )
+    extras = ctx.params.get("extras", row.extras)
+    if isinstance(ctx.params.get("extras_changes"), dict):
+        try:
+            extras = merge_extras_changes(row.extras, ctx.params["extras_changes"])
+        except HTTPException:
+            return []
+    return keycloak_realm_warnings(ctx.params.get("product", row.product), extras)
 
 
 async def register_targets_update_operation(

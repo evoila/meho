@@ -97,8 +97,8 @@ namespace. The chart reads it by name and never prints it.
 
 ```bash
 read -rs CLIENT_SECRET     # paste the client secret; it is not shown
-kubectl create secret generic meho-company-login -n meho \
-  --from-literal=client_secret="$CLIENT_SECRET"
+printf '%s' "$CLIENT_SECRET" \
+  | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
 unset CLIENT_SECRET
 ```
 

@@ -35,6 +35,11 @@
       <p class="font-mono text-sm text-subtle" data-field="error-status">{{ status }}</p>
       <h1 class="text-xl font-semibold" data-field="error-heading">{{ heading }}</h1>
       <p class="text-sm" data-field="error-message">{{ message }}</p>
+      {#- The route's own explanation, when it gave one: which role is
+          required, which account to use. Escaped like any other value. -#}
+      {% if reason %}
+        <p class="font-mono text-sm text-subtle" data-field="error-reason">{{ reason }}</p>
+      {% endif %}
       {#- A literal, not a variable: the only link on the page is the console
          root, and nothing the caller sent may reach an href. -#}
       <p><a class="link text-sm" href="/ui">Back to the console</a></p>

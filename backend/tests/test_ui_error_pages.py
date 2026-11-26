@@ -198,6 +198,30 @@ def _real_ui_app() -> FastAPI:
     return app
 
 
+def _signed_in_client() -> TestClient:
+    """A client carrying a console session, as the pages are really used."""
+    tenant_id = uuid.uuid4()
+    _seed_tenant_row(tenant_id)
+
+    async def _mint() -> uuid.UUID:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            decrypted = await create_session(
+                session,
+                operator_sub="operator-error-page",
+                tenant_id=tenant_id,
+                access_token="unused-on-the-read-path",
+                refresh_token="refresh-token-plaintext",
+                lifetime=timedelta(hours=1),
+            )
+            return decrypted.id
+
+    session_id = asyncio.run(_mint())
+    client = TestClient(_real_ui_app(), follow_redirects=False)
+    client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+    return client
+
+
 def test_a_wrong_ui_address_renders_the_page_for_a_signed_in_operator() -> None:
     """The page is reached with a session, which is the only way to reach it.
 
@@ -372,3 +396,82 @@ def test_an_explicitly_raised_500_also_gets_the_page() -> None:
 
     assert response.status_code == 500
     assert 'data-error-page="500"' in response.text
+
+
+def test_a_navigated_403_keeps_the_route_s_own_explanation() -> None:
+    """A 403 is rarely just "no" -- the page must carry the reason.
+
+    The routes say which role is required, or which account to use.
+    A generic "Not allowed" page throws that away, which is worse than
+    the JSON it replaced.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/keycloak/thing")
+    async def thing() -> None:
+        raise HTTPException(status_code=403, detail="keycloak authoring requires tenant_admin")
+
+    with TestClient(app) as client:
+        response = client.get("/ui/keycloak/thing", headers=_NAVIGATION)
+
+    assert response.status_code == 403
+    assert 'data-error-page="403"' in response.text
+    assert "keycloak authoring requires tenant_admin" in response.text
+
+
+def test_the_page_does_not_repeat_the_status_as_a_reason() -> None:
+    """Starlette fills ``detail`` with the status phrase when none was given.
+
+    Showing "Forbidden" under "Not allowed" tells the reader nothing, so
+    the default is dropped rather than rendered.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/plain")
+    async def plain() -> None:
+        raise HTTPException(status_code=403)
+
+    with TestClient(app) as client:
+        response = client.get("/ui/plain", headers=_NAVIGATION)
+
+    assert response.status_code == 403
+    assert 'data-field="error-reason"' not in response.text
+
+
+def test_the_reason_is_escaped_on_the_page() -> None:
+    """The reason is server-authored, but it is still escaped."""
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/escaped")
+    async def escaped() -> None:
+        raise HTTPException(status_code=403, detail="<script>alert(1)</script>")
+
+    with TestClient(app) as client:
+        response = client.get("/ui/escaped", headers=_NAVIGATION)
+
+    assert "<script>alert(1)</script>" not in response.text
+    assert "&lt;script&gt;" in response.text
+
+
+def test_the_real_cancel_route_keeps_its_json_with_the_handler_installed() -> None:
+    """The production route, not a stand-in, with the production handler.
+
+    The run console's Stop button POSTs here and reads the JSON ``detail``
+    to say who may stop another person's run. The earlier test for this
+    used a stand-in GET route, so it could not have caught a regression
+    in how the real route's 403 is answered.
+    """
+    client = _signed_in_client()
+    with client:
+        response = client.post(
+            "/ui/agents/runs/does-not-exist/cancel",
+            headers={**_BROWSER, "HX-Request": "true"},
+        )
+
+    # Whatever the route decides, it must not become an HTML page: an
+    # htmx caller parses this body.
+    assert response.status_code != 302, "the session did not take"
+    assert not response.headers.get("content-type", "").startswith("text/html")

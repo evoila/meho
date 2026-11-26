@@ -64,6 +64,7 @@ References
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import Final
 
 import structlog
@@ -125,7 +126,30 @@ def is_web_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in WEB_PREFIXES)
 
 
-def _render(request: Request, code: int) -> Response:
+def _reason(exc: Exception, code: int) -> str | None:
+    """The route's own explanation, when it added one worth showing.
+
+    A 403 is rarely just "no". The routes say which role is required
+    -- ``keycloak authoring requires tenant_admin`` -- or which account
+    to use, and a generic page throws that away. The ``detail``
+    is server-authored at every one of these sites, and Jinja escapes it
+    on the way out, so it is shown as given.
+
+    Starlette fills ``detail`` with the status phrase when the raiser
+    passed none, so "Forbidden" and "Not Found" are dropped: repeating
+    the status as a reason tells the reader nothing.
+    """
+    if not isinstance(exc, StarletteHTTPException):
+        return None
+    detail = exc.detail
+    if not isinstance(detail, str) or not detail.strip():
+        return None
+    if detail.strip().casefold() == HTTPStatus(code).phrase.casefold():
+        return None
+    return detail.strip()
+
+
+def _render(request: Request, code: int, reason: str | None = None) -> Response:
     """Render the branded page for *code*, anti-framing headers included.
 
     The headers are stamped here rather than left to
@@ -145,6 +169,7 @@ def _render(request: Request, code: int) -> Response:
             "status": code,
             "heading": heading,
             "message": message,
+            "reason": reason,
         },
         status_code=code,
     )
@@ -200,7 +225,7 @@ async def web_http_exception_handler(request: Request, exc: Exception) -> Respon
         and is_web_path(request.url.path)
         and _wants_a_page(request)
     ):
-        return _render(request, exc.status_code)
+        return _render(request, exc.status_code, _reason(exc, exc.status_code))
     return await ui_session_expired_exception_handler(request, exc)
 
 

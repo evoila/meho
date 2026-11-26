@@ -442,10 +442,18 @@ is about its *format*, which is a separate decision and is made in
 `meho_backplane/ui/error_pages.py`.
 
 A browser that reaches a wrong console address gets a branded page. A
-client that reaches a wrong API address gets JSON — because something is
-parsing that answer: an agent, a script, a retry loop. Handing HTML to an
-API caller turns a clean 404 into a parse error, and the caller then
-reports something unrelated to what actually happened.
+client that reaches a wrong API address keeps whatever that address
+already answered — because something is parsing it: an agent, a script,
+a retry loop. Handing HTML to an API caller turns a clean 404 into a
+parse error, and the caller then reports something unrelated to what
+actually happened.
+
+"Whatever it already answered" is not uniformly JSON, and the difference
+matters when writing a test. A raised `HTTPException` is rendered by
+FastAPI as a JSON `detail` object. An **unhandled** exception has always
+come back as `PlainTextResponse("Internal Server Error")` from
+`ServerErrorMiddleware`, and that is left exactly as it was. Asserting
+JSON for a 500 pins a change to that contract rather than the contract.
 
 **The split cannot be made on the `Accept` header.** A browser sends
 `Accept: text/html` to every address it is pointed at, including an API
@@ -465,6 +473,20 @@ deny-list.
 
 Three statuses get a page — 404, 403 and 500. Every other status, and
 every path outside the list, keeps the behaviour it had.
+
+**A console address is not by itself a page.** Many `/ui` routes answer
+htmx and `fetch` callers that read the JSON body: the run console's Stop
+button shows a 403's `detail` to say who may stop another person's run.
+So the page is rendered only for a *document navigation*, decided by
+`fragment_guard.is_document_navigation` — htmx is never a navigation,
+`Sec-Fetch-Dest` answers directly where it is sent, `Accept` is the
+fallback. Every other caller keeps its response untouched.
+
+**The page carries the route's own explanation.** A 403 is rarely just
+"no": the routes name the role required, or which account to sign in
+with. The page renders `detail` under the heading when the raiser set
+one, and drops it when Starlette filled it with the status phrase —
+repeating "Forbidden" under "Not allowed" tells the reader nothing.
 
 ### Two things that are easy to get wrong here
 

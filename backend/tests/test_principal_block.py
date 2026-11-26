@@ -34,10 +34,11 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from httpx import ASGITransport
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
@@ -495,6 +496,37 @@ async def test_block_again_updates_the_reason_and_unblock_of_nobody_is_404(
 
     (row,) = await _rows(_BLOCKED)
     assert row.reason == "second"
+
+
+@pytest.mark.asyncio
+async def test_unblock_removes_nothing_when_a_block_is_set_again_while_it_runs(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second database session sets the block again after the unblock read it."""
+    ac, key = _client
+    await _seed_tenants()
+    admin = _admin(key)
+    await _block(ac, admin, reason="first")
+    read_blocks = principal_block._read_blocks
+
+    async def _read_then_set_again(session: AsyncSession, sub: str) -> Any:
+        blocks = await read_blocks(session, sub)
+        async with get_sessionmaker()() as other, other.begin():
+            await other.execute(
+                update(PrincipalBlock).where(PrincipalBlock.sub == sub).values(reason="again")
+            )
+        return blocks
+
+    monkeypatch.setattr(principal_block, "_read_blocks", _read_then_set_again)
+    changed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin))
+
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"].startswith("principal_block_changed")
+    (row,) = await _rows(_BLOCKED)
+    assert row.reason == "again"
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    assert [r for r in rows if r.payload.get("unblocked_sub") == _BLOCKED] == []
 
 
 def test_there_is_no_mcp_tool_to_block_or_unblock() -> None:

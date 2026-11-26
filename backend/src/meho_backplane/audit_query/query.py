@@ -43,7 +43,9 @@ Filter coverage
   :func:`~meho_backplane.audit._classify_http_status` (``"pending"`` is
   the G11.2-T3/T4 202 "awaiting approval" synthetic code). ``"withdrawn"``
   is the ``approval.withdraw`` row: the sender took its request back
-  (#5717). It is never ``"ok"``, because the operation never ran.
+  (#5717). It is never ``"ok"``, because the operation never ran. A retry row
+  (``approval.reuse``) reads by its ``payload.request_state``
+  (:data:`REUSE_STATES`), not by its status code.
 * ``agent_session_id`` is a real column (G8.2-T1 #1009, migration ``0014``).
   The filter narrows to ``audit_log.agent_session_id = :agent_session_id``;
   the column is also surfaced on every returned ``AuditEntry`` and drives the
@@ -86,7 +88,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -428,7 +430,101 @@ def is_withdraw_row(row: AuditLog) -> bool:
     return row.method == _WITHDRAW_METHOD and row.path == _WITHDRAW_PATH
 
 
+#: ``path`` of the row of a retry with the same ``idempotency_key`` that got
+#: an existing approval request (written with ``APPROVAL_RETRY_OWN_AUDIT_ROW``
+#: on; its method is ``APPROVAL`` too).
+_REUSE_METHOD: Final[str] = "APPROVAL"
+_REUSE_PATH: Final[str] = "approval.reuse"
+
+
+class ReuseState(NamedTuple):
+    """How an ``approval.reuse`` row reads for one ``payload.request_state``."""
+
+    #: The ``result_status`` the audit query shows and filters by.
+    result_status: str
+    #: The console label.
+    label: str
+    #: The words of the console's "what happened" line: "the request <words>".
+    words: str
+
+
+#: The one table of the retry row: ``payload.request_state`` to how the row
+#: reads. The six keys are all the values ``approval_queue._found_request_state``
+#: writes. The row says the state at the time of the retry, not the state now.
+REUSE_STATES: Final[dict[str, ReuseState]] = {
+    "waiting": ReuseState("pending", "Awaiting approval", "was waiting for approval"),
+    "approved_not_started": ReuseState(
+        "pending", "Approved, not run yet", "was approved and had not run yet"
+    ),
+    "approved_started": ReuseState(
+        "pending",
+        "Approved, run started, no result yet",
+        "was approved and its run had started, with no result yet",
+    ),
+    "approved_executed": ReuseState(
+        "ok", "Approved, run OK", "was approved and its run finished OK"
+    ),
+    "approved_failed": ReuseState(
+        "error", "Approved, run failed", "was approved and its run failed"
+    ),
+    "approved_uncertain": ReuseState(
+        "error",
+        "Approved, result unknown: check the target before you run it again",
+        "was approved and its result is unknown",
+    ),
+}
+
+
+def _request_state_of(row: AuditLog) -> str | None:
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    state = payload.get("request_state")
+    return state if isinstance(state, str) else None
+
+
+def reuse_state(row: AuditLog) -> ReuseState | None:
+    """How a retry row (``approval.reuse``) reads, or ``None`` for any other row.
+
+    ``None`` also for a reuse row with no known ``request_state`` (the row of a
+    call that got the waiting request of the same call): it reads by its status
+    code, as before. The console drawer uses this too, so the list and the
+    drawer follow one table.
+    """
+    if row.method != _REUSE_METHOD or row.path != _REUSE_PATH:
+        return None
+    state = _request_state_of(row)
+    return REUSE_STATES.get(state) if state is not None else None
+
+
+def _reads_by_state_predicate() -> sa.ColumnElement[bool]:
+    """``TRUE`` for a reuse row whose ``request_state`` is in the table.
+
+    The SQL twin of :func:`reuse_state`. ``coalesce`` keeps a missing key from
+    turning the test into ``NULL``.
+    """
+    state = sa.func.coalesce(AuditLog.payload["request_state"].as_string(), "")
+    return sa.and_(
+        AuditLog.method == _REUSE_METHOD,
+        AuditLog.path == _REUSE_PATH,
+        state.in_(list(REUSE_STATES)),
+    )
+
+
 def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
+    """Translate the broadcast-shape result_status to a row predicate.
+
+    A retry row (``approval.reuse``) with a known ``request_state`` reads by
+    that state (:data:`REUSE_STATES`); every other row reads by its status
+    code (:func:`_status_code_predicate`).
+    """
+    states = [k for k, v in REUSE_STATES.items() if v.result_status == result_status]
+    by_state = sa.func.coalesce(AuditLog.payload["request_state"].as_string(), "").in_(states)
+    return sa.or_(
+        sa.and_(_reads_by_state_predicate(), by_state),
+        sa.and_(sa.not_(_reads_by_state_predicate()), _status_code_predicate(result_status)),
+    )
+
+
+def _status_code_predicate(result_status: str) -> sa.ColumnElement[bool]:
     """Translate the broadcast-shape result_status to a status_code predicate.
 
     Mirrors :func:`~meho_backplane.audit._classify_http_status` without the
@@ -555,7 +651,8 @@ def _derive_result_status(row: AuditLog) -> str:
 
     An ``approval.withdraw`` row is ``withdrawn`` (#5717): the sender took
     its request back and the operation never ran. Every other row maps by
-    its ``status_code``.
+    its ``status_code``, except a retry row (``approval.reuse``) with a known
+    ``request_state``: it reads by that state (:data:`REUSE_STATES`).
 
     Audit rows do not carry the handler-exception bit, so the post-fact
     derivation collapses to: 401/403 → denied, 202 → pending (the
@@ -568,6 +665,9 @@ def _derive_result_status(row: AuditLog) -> str:
     """
     if is_withdraw_row(row):
         return "withdrawn"
+    reuse = reuse_state(row)
+    if reuse is not None:
+        return reuse.result_status
     status_code = row.status_code
     if status_code in (401, 403):
         return "denied"

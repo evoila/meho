@@ -163,6 +163,8 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 '"pending" after the request is approved, rejected or '
                 "expired. To see what waits now, use the approval queue "
                 "(`meho approvals list`, or the console's approvals page). "
+                "A retry row (`approval.reuse`) reads by the state of the request it "
+                "found, not by its status code: a failed run reads \"error\". "
                 "Add `event_class` to pick one kind of row."
             ),
             "maxLength": 16,

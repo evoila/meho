@@ -44,6 +44,8 @@ import meho_backplane.operations.approval_queue as approval_queue_module
 import meho_backplane.operations.meta_tools as meta_tools_module
 from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 from meho_backplane.api.v1.approvals import _view
+from meho_backplane.audit_query import AuditQueryFilters
+from meho_backplane.audit_query.query import query_audit
 from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -1826,3 +1828,25 @@ async def test_with_both_reuse_switches_off_a_retry_writes_no_row_and_keeps_the_
     assert retry["audit_id"] == first["audit_id"] == str(rows[0].id)
     assert rows[0].status_code == 202
     assert "request_state" not in rows[0].payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("retry_own_row_on")
+async def test_the_audit_query_reads_a_retry_of_a_failed_run_as_error(
+    embedding: list[float],
+) -> None:
+    run_result = {"status": "error", "op_id": _OP_ID, "error": "upstream 500"}
+    _, retry = await _approved_request_after_a_call(embedding, run_result)
+
+    async with get_sessionmaker()() as s:
+        found = {
+            status: await query_audit(
+                AuditQueryFilters(result_status=status), tenant_id=_TENANT, session=s
+            )
+            for status in ("ok", "error")
+        }
+    assert [r.id for r in found["error"].rows if r.path == "approval.reuse"] == [
+        uuid.UUID(retry["audit_id"])
+    ]
+    assert found["error"].rows[0].status_code == 200
+    assert all(r.path != "approval.reuse" for r in found["ok"].rows)

@@ -128,6 +128,14 @@ or `write` tool with a dry-run branch calls `note_preview()` on that
 branch instead, so the dry run is routine and the real run still gets its
 record.
 
+A route that owns its transaction and must commit its change together
+with the request's row calls `audit.commit_with_request_audit_row`. It
+adds the row the middleware would write (same class, columns and
+payload) to the route's session, commits, and then calls
+`note_request_record()`. The middleware then writes no row, with the
+cutover on or off, and names that row in `Meho-Audit-Id`. The settings
+file page of the console uses it for its apply.
+
 The cutover is fail closed:
 
 - The setting needs `REQUEST_USAGE_RETENTION_DAYS`. Without it, routine

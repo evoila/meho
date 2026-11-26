@@ -1,0 +1,82 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The settings file page: upload a file, read the preview, apply it.
+
+  * The upload form posts the file (multipart) to ``/ui/settings/preview``
+    and swaps the preview into ``#settings-result``.
+  * The preview fragment carries the apply form; it posts the same file
+    bytes to ``/ui/settings/apply`` and swaps the result into the same slot.
+
+  Errors: ``settings-file.js`` swaps an error answer of either form into
+  ``#settings-result`` (htmx does not swap one on its own): a refusal
+  fragment as it is, any other answer as a fixed error text.
+
+  CSRF: the section's ``hx-headers`` echoes ``X-CSRF-Token``; the forms
+  inside it, also the swapped-in apply form, inherit it.
+
+  Context: ``csrf_token``, ``active_surface``, ``is_platform_admin``.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Settings file &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  data-surface="settings"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header>
+    <h1 class="flex items-center gap-2 text-2xl font-semibold">Settings file{% include "_maturity_badge.html" %}</h1>
+    <p class="text-sm text-muted">
+      Upload a <code class="font-mono">meho-settings.yaml</code> file. MEHO shows
+      what the file changes, and what it refuses and why. Nothing is saved until
+      you click Apply.
+      {% if is_platform_admin %}
+        As a platform admin, you can apply a file for any tenant.
+      {% else %}
+        You can apply a file for your own tenant only.
+      {% endif %}
+    </p>
+  </header>
+
+  <form
+    id="settings-upload-form"
+    data-settings-form
+    hx-post="/ui/settings/preview"
+    hx-encoding="multipart/form-data"
+    hx-target="#settings-result"
+    hx-swap="innerHTML"
+    hx-disabled-elt="find button[type=submit]"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-label="Upload a settings file"
+  >
+    <div class="card-body space-y-3">
+      <label class="form-control">
+        <span class="label-text">Settings file</span>
+        <input
+          type="file"
+          name="file"
+          accept=".yaml,.yml,.json,text/yaml,application/x-yaml,application/json"
+          class="file-input file-input-bordered file-input-sm"
+          aria-label="Settings file"
+          required
+        />
+      </label>
+      <div class="flex justify-end">
+        <button type="submit" class="btn btn-sm btn-primary" data-action="settings-preview">
+          Show preview
+        </button>
+      </div>
+    </div>
+  </form>
+
+  <div id="settings-result" aria-live="polite"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/ui/static/src/app/settings-file.js" defer></script>
+{% endblock %}

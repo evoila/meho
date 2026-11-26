@@ -14,23 +14,29 @@ The page shows two lists:
 
 The page changes nothing. It has no form and no save.
 
-With the switch ``CUSTOM_POLICY`` off
-(:func:`~meho_backplane.policy.switches.custom_policy_on`) the page is not
-there: ``404``, the same answer as an address that does not exist. With
-the switch on, the page needs the check of the override report
-(:func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`,
-``tenant_admin``); anyone else gets ``403``.
+The checks, in this order:
+
+1. the read floor of every console page
+   (:func:`~meho_backplane.ui.auth.middleware.require_ui_operator`): a
+   ``read_only`` session gets ``403 operator_required``;
+2. the switch ``CUSTOM_POLICY``
+   (:func:`~meho_backplane.policy.switches.custom_policy_on`): off, the page
+   is not there: ``404``, the same answer as an address that does not exist;
+3. the check of the override report
+   (:func:`~meho_backplane.ui.routes.connectors.operator.resolve_operator_or_403`,
+   ``tenant_admin``): anyone else gets ``403``.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.api.v1.operation_overrides import load_override_rows
 from meho_backplane.policy import fixed_rules
 from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
 from meho_backplane.ui.routes.connectors.operator import resolve_operator_or_403
 from meho_backplane.ui.templating import get_templates
 
@@ -39,13 +45,18 @@ __all__ = ["POLICY_NEEDS_ADMIN", "build_policy_router"]
 #: The 403 text of the page for a person who may not read the overrides.
 POLICY_NEEDS_ADMIN = "The policy page needs the tenant_admin role."
 
+_require_operator_dep = Depends(require_ui_operator)
 
-async def _policy_page(request: Request) -> HTMLResponse:
-    """Render the page. The switch is checked first, then the role."""
+
+async def _policy_page(
+    request: Request,
+    session_ctx: UISessionContext = _require_operator_dep,
+) -> HTMLResponse:
+    """Render the page, after the three checks of the module docstring."""
     if not custom_policy_on(get_settings()):
         raise HTTPException(status_code=404, detail="Not Found")
     try:
-        operator = await resolve_operator_or_403(request)
+        operator = await resolve_operator_or_403(request, session_ctx)
     except HTTPException as exc:
         if exc.status_code != 403:
             raise

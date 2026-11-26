@@ -172,9 +172,12 @@ def test_switch_on_shows_the_menu_entry(monkeypatch: pytest.MonkeyPatch) -> None
     assert _MENU_LINK in str(text)
 
 
-@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+@pytest.mark.parametrize(
+    ("role", "refusal"),
+    [(TenantRole.OPERATOR, POLICY_NEEDS_ADMIN), (TenantRole.READ_ONLY, "operator_required")],
+)
 def test_page_is_refused_to_a_person_who_may_not_read_the_overrides(
-    monkeypatch: pytest.MonkeyPatch, role: TenantRole
+    monkeypatch: pytest.MonkeyPatch, role: TenantRole, refusal: str
 ) -> None:
     """The same check as the override report: an Operator or a Reader gets 403 on both."""
     _switch_on(monkeypatch)
@@ -186,14 +189,22 @@ def test_page_is_refused_to_a_person_who_may_not_read_the_overrides(
     assert report_status == 403
     assert status == 403
     assert isinstance(text, str)
-    assert POLICY_NEEDS_ADMIN in text
+    assert refusal in text
     assert "data-policy-fixed-rules" not in text
     assert "data-policy-risk-edits" not in text
     assert "floor:" not in text
 
 
-def test_switch_off_answers_404_before_the_role_check() -> None:
-    """With the switch off, a person without the role gets the same 404, not a 403."""
+def test_switch_off_answers_404_before_the_admin_check() -> None:
+    """With the switch off, an Operator gets the same 404, not the 403 of the admin check."""
     _seed_tenant(_TENANT_A, "tenant-a")
     status, _text = _get_as(TenantRole.OPERATOR, "/ui/policy", sub=_OP_OPERATOR)
     assert status == 404
+
+
+def test_switch_off_still_refuses_a_read_only_session() -> None:
+    """The read floor of every console page comes first: a Reader gets 403, as on every page."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    status, text = _get_as(TenantRole.READ_ONLY, "/ui/policy", sub=_OP_OPERATOR)
+    assert status == 403
+    assert "operator_required" in str(text)

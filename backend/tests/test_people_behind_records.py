@@ -240,7 +240,8 @@ async def test_an_mcp_call_notes_a_machine_login_and_not_a_person() -> None:
     machine = _machine("agent-on-mcp")
 
     for operator in (person, machine, machine):
-        assert await verify_mcp_jwt_and_bind(operator) is operator
+        bound = await verify_mcp_jwt_and_bind(operator)
+        assert bound == operator.model_copy(update={"token_checked": True})
 
     async with get_sessionmaker()() as session:
         assert await machine_subs(session, _TENANT, ["person-on-mcp", "agent-on-mcp"]) == {

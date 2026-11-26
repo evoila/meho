@@ -78,12 +78,18 @@ There is a fifth kind in the code: a **runner**. A runner is a program that runs
    - **(b) Who must approve.** Example: every operation above `safe` on the NSX connector needs approval from the role `network_admin`.
 5. **The fixed rules.** No policy can lower these rules:
    - A credential read or write always waits for a person.
-   - A change of rights always waits for a person.
+   - A change of rights always waits for a person, except an Admin's own change of rights in the web console, after a fresh sign-in.
    - A change of the policy itself always waits for a person.
    - An agent never approves.
    - A `destructive` operation always waits for approval.
-   - A delete always waits for approval. MEHO knows a delete by its delete sign (see below). This holds on every install that is not in sandbox mode. An install in sandbox mode keeps its exception: there a delete grant lets a service account delete with no person ([sandbox-mode.md](sandbox-mode.md)).
+   - A delete always waits for approval, except an Admin's own change of rights in the web console, after a fresh sign-in. MEHO knows a delete by its delete sign (see below). This holds on every install that is not in sandbox mode. An install in sandbox mode keeps its exception: there a delete grant lets a service account delete with no person ([sandbox-mode.md](sandbox-mode.md)).
    - A call to an address that the caller gives always waits for approval.
+
+   Added by the owner on 26 November 2026:
+
+   - A change of rights in a target system waits for a person by default. A tenant admin can allow it for one connector on purpose. The audit row names the rule.
+   - With the switch on, three more rules hold. A standing grant does not cover an operation that deletes, stops or overwrites something for good. An install's own list of delete names only adds to the built-in list. A `dangerous` operation of a connector package that nobody has checked yet still waits when a personal agent calls it.
+
 6. **Two layers.**
    - The platform admin sets the baseline and the outer limit.
    - Each tenant admin sets the tenant's own policy, inside the outer limit.

@@ -500,11 +500,14 @@ class Operator(BaseModel):
     #: with ``?results=structured`` (#4716). Only the MCP route sets it, from
     #: the URL; see :mod:`meho_backplane.mcp.structured_results`.
     mcp_structured_results: bool = False
-    #: A person's token was checked for this call. Only the REST bind step
-    #: (:func:`~meho_backplane.middleware.verify_jwt_and_bind`) and the MCP
-    #: bind step (:func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind`)
-    #: set it. The shared token check does not: it also serves the status
-    #: route and the scheduled agent run.
+    #: The token of this call was checked by the REST or MCP token check,
+    #: for every kind of login, also on the status route. Only the four
+    #: token checks set it: :func:`~meho_backplane.auth.jwt.verify_jwt`,
+    #: :func:`~meho_backplane.auth.jwt.verify_jwt_allow_unchosen`,
+    #: :func:`~meho_backplane.auth.jwt.verify_jwt_platform_admin_way_back`
+    #: and :func:`~meho_backplane.mcp.auth.verify_mcp_jwt`. The web console
+    #: session, the scheduled agent run and every login that code builds
+    #: keep it ``False``.
     token_checked: bool = False
     #: The kind of caller of a login that MEHO's own code builds, with no
     #: sign-in and no token check. Every such place sets it; a test scans

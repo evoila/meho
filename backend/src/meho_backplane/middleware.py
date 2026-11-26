@@ -571,8 +571,8 @@ async def verify_jwt_and_bind(
     so such a login never counts as a person behind another login.
 
     Returns:
-        The same :class:`Operator` that ``verify_jwt`` produced — the
-        wrapper is transparent to the route handler.
+        The same :class:`Operator` object that ``verify_jwt`` produced,
+        not a copy -- the wrapper is transparent to the route handler.
     """
     return await _bind_operator(request, operator)
 
@@ -592,7 +592,7 @@ async def verify_jwt_and_bind_platform_admin_way_back(
 async def _bind_operator(request: Request, operator: Operator) -> Operator:
     """Bind the log context, apply the login cages and seed the tenant.
 
-    Returns *operator* with :attr:`~Operator.token_checked` set.
+    Returns the same *operator* it gets, not a copy.
     """
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
@@ -610,6 +610,4 @@ async def _bind_operator(request: Request, operator: Operator) -> Operator:
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
         await note_machine_login(session, operator)
-    # Only this step and the MCP bind step mark a checked token. The shared
-    # token check also serves the status route and the scheduled agent run.
-    return operator.model_copy(update={"token_checked": True})
+    return operator

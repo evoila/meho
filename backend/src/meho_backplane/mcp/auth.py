@@ -54,7 +54,7 @@ from meho_backplane.auth.conventions_drift_login import (
     SCOPE_VIOLATION as CONVENTIONS_DRIFT_SCOPE_VIOLATION,
 )
 from meho_backplane.auth.current_tenant import TENANT_HEADER, bind_tenant_role_source
-from meho_backplane.auth.jwt import header_value, verify_jwt_for_audience
+from meho_backplane.auth.jwt import header_value, mark_token_checked, verify_jwt_for_audience
 from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
@@ -177,7 +177,7 @@ async def verify_mcp_jwt(
     settings = get_settings()
     expected_audience = mcp_resource_uri(settings)
     try:
-        return await verify_jwt_for_audience(
+        operator = await verify_jwt_for_audience(
             authorization,
             expected_audience=expected_audience,
             requested_tenant=header_value(meho_tenant),
@@ -186,6 +186,7 @@ async def verify_mcp_jwt(
             # takes it only at ``?profile=`` with the same name.
             allow_mcp_profile=True,
         )
+        return mark_token_checked(operator)
     except HTTPException as exc:
         if exc.status_code != 401:
             raise
@@ -274,7 +275,7 @@ async def verify_mcp_jwt_and_bind(
         # #5239: a session with no current tenant binds nothing, as the
         # REST status route does. The tenant fields hold a placeholder,
         # so no audit row, usage event or log line may name it.
-        return operator.model_copy(update={"token_checked": True})
+        return operator
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
@@ -284,5 +285,4 @@ async def verify_mcp_jwt_and_bind(
         # A machine login never counts as a person behind another login.
         async with get_sessionmaker()() as session, session.begin():
             await note_machine_login(session, operator)
-    # Only this step and the REST bind step mark a checked token.
-    return operator.model_copy(update={"token_checked": True})
+    return operator

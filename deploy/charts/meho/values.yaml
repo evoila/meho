@@ -207,7 +207,7 @@ netdiag:
   # `probeAllowlist` (`TENANT_PROBE_ALLOWLIST_ENV`). Format: semicolon-
   # separated `<tenant-uuid>=<comma-separated CIDRs/IPs/hostnames>`
   # entries (each value uses the same grammar as `probeAllowlist`), e.g.
-  # `11111111-1111-1111-1111-111111111111=10.3.0.0/20,10.3.5.5;22222222-2222-2222-2222-222222222222=`.
+  # `11111111-1111-1111-1111-111111111111=192.0.2.0/24,192.0.2.5;22222222-2222-2222-2222-222222222222=`.
   #   * a tenant ABSENT from the map inherits `probeAllowlist` (the
   #     default — existing deployments unchanged);
   #   * a tenant PRESENT with a populated scope is bounded to exactly that
@@ -1416,7 +1416,8 @@ uiConsole:
 # must wait for approval. While this block is off, the pod gets no
 # APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
 # instead of letting it wait for approval. `GET /ready` shows the state under
-# `features.approval_custody`.
+# `features.approval_custody`. With `metricsAuth` on (the default), `/ready`
+# shows it only to a caller that sends the metrics token (see `metricsAuth`).
 #
 # With a built-in core part on, it is on by default (#4047): the install
 # makes the key in `<release>-core-approval-handoff`. Without one, create a

@@ -109,6 +109,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 __all__ = ["KubernetesConnector", "product_from_git_version"]
@@ -483,6 +484,21 @@ class KubernetesConnector(Connector):
     # Kubernetes lines that are supported upstream (1.35 to 1.37) plus the
     # 1.32 line that CI tests today. Older targets get a clear fit warning.
     supported_version_range = ">=1.32,<1.38"
+    credential_ways = (
+        CredentialWay(
+            key="kubeconfig",
+            label="Kubeconfig",
+            fields=(
+                CredentialField(
+                    name="kubeconfig",
+                    label="Kubeconfig",
+                    help="The kubeconfig file of a service account, as text.",
+                    multiline=True,
+                ),
+            ),
+        ),
+    )
+    test_operation = "k8s.namespace.list"
 
     def __init__(
         self,

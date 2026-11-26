@@ -27,7 +27,9 @@ Routes (REST and CLI only; there is no MCP tool):
   The route then removes only the block of this tenant, and it reads the
   table first. A block that a platform admin made (every tenant) stays
   until another platform admin removes it. A tenant admin who is blocked
-  cannot remove a block.
+  cannot remove a block. When a block of the login is changed while the
+  route removes it, the route removes nothing and answers 409
+  ``principal_block_changed``.
 
 Block and list need ``tenant_admin``. Unblock needs ``tenant_admin``, or a
 platform admin who removes their own block. Every route needs a person's
@@ -57,6 +59,7 @@ from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     REASON_MAX_LENGTH,
     BlockedPerson,
+    BlockSetChangedError,
     CannotBlockSelfError,
     OwnBlockStaysError,
     PrincipalBlockUnavailableError,
@@ -271,6 +274,11 @@ async def unblock_principal_route(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="principal_not_blocked",
+        ) from exc
+    except BlockSetChangedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="principal_block_changed: a block of this login changed. Read the list again.",
         ) from exc
     return UnblockResponse(sub=sub, removed=removed)
 

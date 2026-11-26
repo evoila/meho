@@ -114,6 +114,7 @@ __all__ = [
     "close_classified_record_scope",
     "mcp_tool_is_routine",
     "note_preview",
+    "note_request_record",
     "open_classified_record_scope",
     "request_is_preview",
     "rest_request_is_routine",
@@ -174,7 +175,7 @@ _DENIED_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 class _ClassifiedRecords:
     """Mutable marker for one request: which classified rows were built and committed?"""
 
-    __slots__ = ("built", "committed_ids", "committed_subs", "preview")
+    __slots__ = ("built", "committed_ids", "committed_subs", "preview", "request_record")
 
     def __init__(self) -> None:
         #: Rows built in this scope that have not committed yet, with the
@@ -187,6 +188,9 @@ class _ClassifiedRecords:
         self.committed_ids: dict[str, tuple[uuid.UUID, bool]] = {}
         #: The request ran a dry-run branch and changed nothing.
         self.preview = False
+        #: The id of the request's own row, committed by the route
+        #: (:func:`note_request_record`).
+        self.request_record: uuid.UUID | None = None
 
 
 _current_scope: ContextVar[_ClassifiedRecords | None] = ContextVar(
@@ -243,6 +247,8 @@ def classified_record_id(operator_sub: str) -> uuid.UUID | None:
     scope = _current_scope.get()
     if scope is None:
         return None
+    if scope.request_record is not None:
+        return scope.request_record
     receipt = scope.committed_ids.get(operator_sub)
     return None if receipt is None else receipt[0]
 
@@ -257,6 +263,19 @@ def note_preview() -> None:
     scope = _current_scope.get()
     if scope is not None:
         scope.preview = True
+
+
+def note_request_record(audit_id: uuid.UUID) -> None:
+    """Note that the route committed the request's own row with *audit_id*.
+
+    A route that commits its change and the request's row in one
+    transaction calls this after the commit. The wrapper then writes no
+    row, with the cutover on or off, and names *audit_id* as the receipt.
+    Outside a scope this does nothing.
+    """
+    scope = _current_scope.get()
+    if scope is not None:
+        scope.request_record = audit_id
 
 
 def request_is_preview() -> bool:
@@ -410,8 +429,12 @@ def wrapper_row_class(
     the wrapper row would name; only a committed classified row in that
     name counts as the record. A request that ran a dry-run branch
     (:func:`note_preview`) counts as routine. With the cutover off this
-    is always ``legacy_request``.
+    is always ``legacy_request``. A route that committed the request's own
+    row (:func:`note_request_record`) gets no wrapper row in either mode.
     """
+    scope = _current_scope.get()
+    if scope is not None and scope.request_record is not None:
+        return None
     if not wrapper_rows_retired():
         return AuditEventClass.LEGACY_REQUEST
     if classified_record_seen(operator_sub):

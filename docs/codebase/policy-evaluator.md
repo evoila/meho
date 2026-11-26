@@ -95,11 +95,11 @@ id and one sentence (`FIXED_RULES`):
 | Id | The rule |
 |---|---|
 | `credential_waits` | A call that reads, writes or makes a credential waits for a person. |
-| `rights_change_waits` | A change of rights waits for a person; an Admin's own change in the web console runs at once. |
+| `rights_change_waits` | A change of rights waits for a person, except an Admin's own change in the web console after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a platform admin) that is not destructive and writes no credential. |
 | `policy_change_waits` | A change of the policy (`policy.apply`, `policy.classify`) waits for a person. |
 | `agent_never_approves` | An agent, a service login and a runner never approve. |
 | `destructive_waits` | A `destructive` operation always waits for approval. |
-| `delete_waits` | A delete always waits for approval; in sandbox mode a delete grant may cover it. |
+| `delete_waits` | A delete waits for approval, except an Admin's own change of rights in the web console that is not destructive, after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a platform admin); in sandbox mode a delete grant may cover a delete. |
 | `caller_address_waits` | A call to an address that the caller gives always waits for approval. |
 
 `fixed_rule_for(descriptor, caller)` names the rule that holds for one

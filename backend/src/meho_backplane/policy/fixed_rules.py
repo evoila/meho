@@ -91,14 +91,18 @@ FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
     {
         CREDENTIAL_WAITS: "A call that reads, writes or makes a credential waits for a person.",
         RIGHTS_CHANGE_WAITS: (
-            "A change of rights waits for a person; an Admin's own change in the web "
-            "console runs at once."
+            "A change of rights waits for a person, except an Admin's own change in the web "
+            "console after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a "
+            "platform admin) that is not destructive and writes no credential."
         ),
         POLICY_CHANGE_WAITS: "A change of the policy waits for a person.",
         AGENT_NEVER_APPROVES: "An agent, a service login and a runner never approve.",
         DESTRUCTIVE_WAITS: "A destructive operation always waits for approval.",
         DELETE_WAITS: (
-            "A delete always waits for approval; in sandbox mode a delete grant may cover it."
+            "A delete waits for approval, except an Admin's own change of rights in the web "
+            "console that is not destructive, after a fresh sign-in (a tenant Admin outside "
+            "MEHO's own login realm, or a platform admin); in sandbox mode a delete grant may "
+            "cover a delete."
         ),
         CALLER_ADDRESS_WAITS: (
             "A call to an address that the caller gives always waits for approval."

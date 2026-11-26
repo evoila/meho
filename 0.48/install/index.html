@@ -1452,6 +1452,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-approval-hand-off-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The approval hand-off key
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#your-own-postgresql" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3608,6 +3619,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#the-approval-hand-off-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The approval hand-off key
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#your-own-postgresql" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4163,6 +4185,51 @@ instead of the standard one.</p>
 </tr>
 </tbody>
 </table>
+<h3 id="the-approval-hand-off-key">The approval hand-off key<a class="headerlink" href="#the-approval-hand-off-key" title="Permanent link">&para;</a></h3>
+<p>MEHO needs a key for a credential write that waits for approval, for
+example <code>meho vault kv put</code>. The key is
+<code>APPROVAL_HANDOFF_ENCRYPTION_KEY</code>. MEHO uses it to keep the value safe
+while the write waits for a person to approve it. With no key, MEHO
+refuses such a write at once.</p>
+<ul>
+<li><strong>A built-in part is on (the default install):</strong> the install makes the
+  key in the Secret <code>&lt;release&gt;-core-approval-handoff</code>. You have nothing
+  to do.</li>
+<li>
+<p><strong>No built-in part is on:</strong> make the key yourself.</p>
+<ol>
+<li>
+<p>Make a Fernet key:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-c<span class="w"> </span><span class="s2">"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"</span>
+</code></pre></div>
+</li>
+<li>
+<p>Store it in a Kubernetes Secret in the namespace of the release.
+   The key name in the Secret is <code>approval_handoff_encryption_key</code>.</p>
+</li>
+<li>Set <code>approvalHandoff.enabled: true</code> and
+   <code>approvalHandoff.secretName: &lt;your Secret&gt;</code> in your values file.
+   Then install or upgrade.</li>
+</ol>
+</li>
+</ul>
+<p>To check the state, read <code>features.approval_custody</code> on <code>GET /ready</code>.
+With the metrics token on (<code>metricsAuth.enabled: true</code>, the default),
+<code>/ready</code> shows the <code>features</code> block only to a caller that sends the
+token as a bearer token. The chart keeps the token in the Secret
+<code>&lt;release&gt;-metrics-auth</code>, under the key <code>token</code>. This command reads the
+token and gives the header to curl on standard input (<code>-H @-</code>, curl
+7.55.0 or newer), so the token is on no command line and in no shell
+history:</p>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span>&lt;release&gt;-metrics-auth<span class="w"> </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">'{.data.token}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>base64<span class="w"> </span>-d<span class="w"> </span><span class="p">|</span><span class="w"> </span>sed<span class="w"> </span><span class="s1">'s/^/Authorization: Bearer /'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span>@-<span class="w"> </span>https://&lt;your-backplane&gt;/ready<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>.features.approval_custody
+</code></pre></div>
+<p>With <code>metricsAuth.enabled: false</code>, <code>/ready</code> shows the block to every
+caller: <code>curl -s https://&lt;your-backplane&gt;/ready | jq .features.approval_custody</code>.
+With your own Secret in <code>metricsAuth.existingSecret</code>, put that Secret's
+name in the command, and the key in <code>metricsAuth.secretKey</code> in place of
+<code>token</code>.</p>
 <h3 id="your-own-postgresql">Your own PostgreSQL<a class="headerlink" href="#your-own-postgresql" title="Permanent link">&para;</a></h3>
 <p>Set <code>corePostgres.enabled: false</code>. Do both steps below. The built-in
 PostgreSQL does them itself.</p>

@@ -4050,7 +4050,9 @@ that the path is the <code>secret_ref</code> from step 1.</p>
 <li><strong>On your own Vault:</strong> the Vault policies of both people must allow
   a write on the exact path. MEHO's own rules on who may approve
   still hold: see
-  <a href="../approvals-and-break-glass/#who-may-approve">Who may approve</a>.</li>
+  <a href="../approvals-and-break-glass/#who-may-approve">Who may approve</a>.
+  The write also needs the approval hand-off key. See
+  <a href="../../install/#the-approval-hand-off-key">The approval hand-off key</a>.</li>
 </ul>
 <p>On the command line, use the approval id from step 3:</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>4b1c…

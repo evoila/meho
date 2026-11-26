@@ -156,6 +156,11 @@ from meho_backplane.operations.catalog_release import record_catalog_release
 from meho_backplane.operations.composite_invariant import (
     assert_registered_composites_have_no_ingested_dispatch,
 )
+from meho_backplane.operations.connector_declaration_check import (
+    assert_connector_declarations_valid,
+    collect_code_safety_levels,
+    note_code_safety_level,
+)
 from meho_backplane.operations.dead_handler_sweep import retire_dead_handler_rows
 from meho_backplane.operations.embed import (
     build_embedding_text,
@@ -517,9 +522,15 @@ async def operation_catalog_write(
     try:
         async with get_sessionmaker()() as session:
             async with _bind_catalog_session(session):
-                await _populate_catalog(session, embedding_service=embedding_service)
+                with collect_code_safety_levels() as code_levels:
+                    await _populate_catalog(session, embedding_service=embedding_service)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
+                await assert_connector_declarations_valid(
+                    session,
+                    code_levels=code_levels,
+                    allow_missing_rows=get_settings().test_amortize_typed_op_registrars,
+                )
                 await record_catalog_release(session)
                 await _fail_start_for_test(session)
             yield
@@ -1717,6 +1728,9 @@ async def _register_in_session(
     # least ``caution`` with approval, whatever the registrar declared.
     safety_level, requires_approval = raise_for_caller_address(
         parameter_schema, safety_level=safety_level, requires_approval=requires_approval
+    )
+    note_code_safety_level(
+        product=product, version=version, impl_id=impl_id, op_id=op_id, safety_level=safety_level
     )
 
     # A parameter switch name that MEHO does not know stops the op from

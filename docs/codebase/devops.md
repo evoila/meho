@@ -2751,60 +2751,82 @@ The rule:
   large image) in the image block of the step "Read the CI repository
   secrets", in every job that runs the test. Official Docker Hub images
   need the `library/` part: `PROXY/library/mongo:8`.
-- The testcontainers library starts its Ryuk clean-up helper on every
-  Docker daemon. `RYUK_CONTAINER_IMAGE` in the same block names it through
-  the proxy.
+- The proxy serves Docker Hub images and quay.io images (Keycloak,
+  OpenBao).
+- The Docker daemon of a runner has no registry mirror. So the testcontainers
+  library would pull its Ryuk clean-up helper from Docker Hub.
+  `RYUK_CONTAINER_IMAGE` in the same block names it through the proxy.
+- The core Keycloak and OpenBao images (`MEHO_TEST_CORE_KEYCLOAK_IMAGE`,
+  `MEHO_TEST_CORE_OPENBAO_IMAGE`) name the digest that the chart pins in the
+  subchart's `values.yaml`, not the tag: a tag can move to another build. With
+  an empty variable the core tests use the chart's own image.
 - A test that runs several versions has one variable for each version
   (`MEHO_TEST_POSTGRES_16_IMAGE`, `MEHO_TEST_MONGODB_8_IMAGE`). The single
-  name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand.
+  name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand. Each version run
+  has a fixed test id (`postgres-16`, `mongo-8`), so the test report that CI
+  uploads holds no proxy name.
+- The k3s node inside a test container does not pull its busybox image from
+  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it
+  skip.
 - Packages that a Dockerfile installs at build time (the bind9 test images
   run `apt-get`) come from the Debian package servers. They are a package
   download, not an image pull, and stay outside the proxy.
 
-`backend/tests/test_ci_test_images.py` pins the rule. It fails:
+`backend/tests/test_ci_test_images.py` pins the rule, with the reader in
+`backend/tests/_ci_image_check.py`. It finds the test jobs in `ci.yml` itself:
+each job with a pytest step, and the test files that step runs (its `find`
+and `grep -rl` lists, the list of `tests/_outside_backend_tests.py`, and the
+paths on the pytest command line). It fails:
 
-- when a test file that starts containers names an image in plain text, or
-  has a `FROM` line with a fixed name;
+- when a test file names an image in plain text, or has a `FROM` line with a
+  fixed name. It reads every file under `tests/integration` and
+  `tests/migrations`, and every other file that imports testcontainers or
+  the Docker SDK. In the image place of a container start (the first
+  argument or `image=` of a testcontainers class), of a pod spec (the
+  `image` key) or of a client model (`image=`), any fixed text counts: a
+  bare name, a name without a tag, an f-string, a joined string, or a
+  constant with `DEFAULT` in its name. A testcontainers class with no image
+  argument fails too, because it starts its own default image;
 - when a job runs a test that reads an image variable, and does not set the
-  variable with `PROXY/` or `PROXY_ONLY/`;
-- when a step of a test job in `ci.yml` or `chart.yml` pulls an image
-  (`docker pull`, `docker run`, `docker build`, `kind create cluster`) and the
-  job is not on the exception list.
+  variable with `PROXY/` or `PROXY_ONLY/`. A test counts with its
+  `conftest.py` files and every helper module under `tests/` that it
+  imports (for example `tests/_pgvector_image.py`);
+- when a command of a test job in `ci.yml` or `chart.yml` pulls or builds
+  from an image, and names no image variable that the job sets through the
+  proxy. Each command counts on its own: `docker pull`, `docker run`,
+  `docker create`, `docker build`, `docker buildx build`, `docker compose`,
+  `docker-compose`, `kind create cluster`, and the actions `docker://...`,
+  `setup-kind` and `docker/build-push-action`. Comment lines do not count.
+  The check reads pull request runs and merge-queue runs.
 
 **The exception list** is `backend/tests/ci_test_image_exceptions.json`. Each
 entry has a reason. The test fails when an entry no longer applies, so the
-list does not grow old. Today it names:
+list does not grow old. It holds:
 
-- `redaction-compare` in `ci.yml`: on a pull request it runs on a
-  GitHub-hosted runner, which cannot reach the proxy. It runs one pinned
-  Python image by digest.
+- `redaction-compare` in `ci.yml`, for its pull request runs only. They run
+  on a GitHub-hosted runner, which cannot reach the proxy, and pull one
+  pinned Python image by digest. A merge-queue run of the job runs on the
+  self-hosted pool and takes the same image, by the same digest, through the
+  proxy (`MEHO_TEST_PYTHON_IMAGE`). The check fails when a merge-queue run
+  of a job on the list pulls from outside.
+- `python-outside-backend` in `ci.yml`: a GitHub-hosted runner on pull
+  requests. The merge queue runs the same tests in the unit shards, through
+  the proxy.
 - the four kind jobs in `chart.yml` (`helm-test`, `helm-test-byo`,
   `rollback-drill`, `upgrade-from-release`): GitHub-hosted runners. kind
   pulls its node image, and the jobs pull the images they load into kind.
-- the single-image variables `MEHO_TEST_POSTGRES_IMAGE` and
-  `MEHO_TEST_MONGODB_IMAGE`: CI sets the per-version ones.
+- variables that a job may leave unset, each with the jobs it holds for:
+  the single-image variables `MEHO_TEST_POSTGRES_IMAGE` and
+  `MEHO_TEST_MONGODB_IMAGE` in the integration shards (CI sets the
+  per-version ones), and `MEHO_TEST_KEYCLOAK_IMAGE` in the unit shards and
+  the coverage job (the acceptance tests import a helper from
+  `tests/integration/conftest.py` and never start Keycloak). Such an entry
+  fails when no listed job still runs a test that reads the variable, or
+  when the job sets it.
 
-Jobs that scan or build and are not test jobs (`security-scan.yml`,
-`secret-scan.yml`, `image.yml`, `connector-overlay.yml`) are not read by the
-check.
-
-**What the runners do** (found with a temporary diagnostic in a CI run on the
-`meho-runners-ci` pool):
-
-- The proxy project serves Docker Hub images and quay.io images (Keycloak,
-  OpenBao). The Keycloak tag has another digest in the proxy than the digest
-  the chart pins, so CI names the Keycloak image by tag, not by digest.
-- The Docker daemon of a runner has no registry mirror, and starts with no
-  image on it. So every job pulls its Ryuk helper itself.
-- A runner can edit its hosts file with `sudo`, and that blocks the Docker
-  daemon: with the outside registries pointed at `0.0.0.0`, all four
-  integration shards passed. The runner has no `iptables`, so this does not
-  block the k3s node inside a test container.
-- The k3s node inside a test container does not get its busybox image from
-  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it skip
-  ("busybox pod did not reach Running within 60s", "Job ... did not finish
-  within 180s"). The same seven skip on `main`, so the proxy did not make it
-  worse. Why the node cannot pull is not known yet.
+The jobs that set test images are `python-unit-shard`, `python-coverage`,
+`python-integration-shard`, `python-migration-tests`, `python-timing-tests`
+and, in merge-queue runs, `redaction-compare`.
 
 ### Why no image build job
 

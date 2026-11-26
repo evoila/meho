@@ -1414,6 +1414,8 @@ _FILE_WRITE_OP = LinuxOp(
     tags=("write", "config", "linux"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_use": (
             "Call to write or repair a config file on a Linux host -- the "
@@ -1637,6 +1639,8 @@ _SCRIPT_RUN_OP = LinuxOp(
     tags=("write", "exec", "linux"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="deletes",
+    changes_rights=True,
     llm_instructions={
         "when_to_use": (
             "Call to run an operator-declared remediation script on a Linux host "
@@ -1797,6 +1801,7 @@ _FIREWALL_LOAD_OP = LinuxOp(
     tags=("write", "firewall", "linux"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
     llm_instructions={
         "when_to_use": (
             "Call to load the default-deny firewall ruleset the first-boot "

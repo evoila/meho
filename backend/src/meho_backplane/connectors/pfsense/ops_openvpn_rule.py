@@ -687,6 +687,7 @@ OPENVPN_RULE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "vpn", "firewall", "pfsense"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": _WHEN_TO_CALL,
             "when_to_use": _WHEN_TO_CALL,

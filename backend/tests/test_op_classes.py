@@ -28,6 +28,8 @@ from meho_backplane.op_classes import (
     declared_op_ids,
 )
 
+from ._op_class_state import kept_op_class_state
+
 #: The connectors the backplane itself imports, or MEHO's own planes. Only
 #: their op ids may stay in ``broadcast/events.py``
 #: (``docs/decisions/2026-10-28-own-connectors-leave-the-public-tree.md``).
@@ -37,31 +39,8 @@ _CORE_OP_PREFIXES = ("vault.", "keycloak.", "secret.", "targets.", "topology.", 
 @pytest.fixture
 def fresh_registry() -> Iterator[None]:
     """Empty the registry for one test and put the real declarations back after."""
-    saved = dict(op_classes._DECLARED)
-    saved_safe_writes = set(op_classes._SAFE_WRITES)
-    saved_root_shell = set(op_classes._ROOT_SHELL)
-    saved_per_call = set(op_classes._PER_CALL_APPROVAL)
-    saved_no_secret_value = set(op_classes._NO_SECRET_VALUE)
-    saved_wait_when_set = dict(op_classes._WAIT_WHEN_SET)
-    saved_credential_capable = set(op_classes._CREDENTIAL_CAPABLE)
-    saved_capable_matches = list(op_classes._CREDENTIAL_CAPABLE_MATCHES)
-    saved_credential_checks = dict(op_classes._CREDENTIAL_CHECKS)
-    saved_hidden_stored_params = dict(op_classes._HIDDEN_STORED_PARAMS)
-    op_classes._reset_declared_op_classes_for_testing()
-    try:
+    with kept_op_class_state(start_empty=True):
         yield
-    finally:
-        op_classes._reset_declared_op_classes_for_testing()
-        op_classes._DECLARED.update(saved)
-        op_classes._SAFE_WRITES.update(saved_safe_writes)
-        op_classes._ROOT_SHELL.update(saved_root_shell)
-        op_classes._PER_CALL_APPROVAL.update(saved_per_call)
-        op_classes._NO_SECRET_VALUE.update(saved_no_secret_value)
-        op_classes._WAIT_WHEN_SET.update(saved_wait_when_set)
-        op_classes._CREDENTIAL_CAPABLE.update(saved_credential_capable)
-        op_classes._CREDENTIAL_CAPABLE_MATCHES.extend(saved_capable_matches)
-        op_classes._CREDENTIAL_CHECKS.update(saved_credential_checks)
-        op_classes._HIDDEN_STORED_PARAMS.update(saved_hidden_stored_params)
 
 
 def test_declared_class_wins_over_the_pattern_rules(fresh_registry: None) -> None:

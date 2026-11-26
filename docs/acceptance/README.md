@@ -22,6 +22,7 @@ Copyright (c) 2026 evoila Group
 | [`smoke.md`](./smoke.md) | 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) |
 | [`rollback.md`](./rollback.md) | 3 — `helm rollback meho` verified end-to-end with a non-trivial schema diff |
 | [`green-counter.md`](./green-counter.md) | 4 + 5 — 5-consecutive-merged-PR green-smoke counter + a `targets.yaml` entry for the lab's MEHO |
+| [`custom-policy-check.md`](./custom-policy-check.md) | The custom policy checks on a sandbox install (`scripts/acceptance/custom-policy-check.sh`) |
 
 The `green-counter.md` contract is the producer-side spec; the
 counter implementation and the `targets.yaml` entry land on the

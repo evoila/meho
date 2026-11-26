@@ -167,8 +167,9 @@ where the write path answers it (this is the empty-JWT gap).
 `operations/approval_queue.py`: a `NEEDS_APPROVAL` verdict parks the dispatch as
 a durable `ApprovalRequest` row instead of executing; two REST endpoints
 (`/api/v1/approvals/{id}/approve|reject`) let authorised humans decide; approval
-re-dispatches the original call with the gate bypassed (`dispatch(...,
-_approved=True)`) because the committed decision *is* the authorization. Key
+re-dispatches the original call without asking for the approval again
+(`dispatch(..., _approved=True)`), and the run checks again what can
+change while the call waits. Key
 properties the write path reuses:
 
 - **Params swap defence** — approve re-hashes caller params against the stored
@@ -259,7 +260,7 @@ re-dispatch as the authorization). Two new pieces:
 1. **Approval-bound minting.** For the write tier, `mint_gateway_command` mints
    **only** after a committed `ApprovalRequest` for the same `(op, target,
    params_hash)` — the mint's authorization becomes the committed approval
-   decision, exactly as `approve_request` re-dispatches with the gate bypassed.
+   decision, as `approve_request` re-dispatches without asking for the approval again.
    (Contrast today: mint requires a *live* `AUTO_EXECUTE`,
    `gateway_commands.py:389`.)
 2. **A real signature over the canonical work item.** The centre signs the

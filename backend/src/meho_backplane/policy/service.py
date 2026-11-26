@@ -63,6 +63,7 @@ from meho_backplane.policy.document import (
     normalise_document,
     parse_policy_file,
 )
+from meho_backplane.policy.limits import limits_diff
 from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.routing_floor import (
     floor_warnings,
@@ -359,6 +360,7 @@ def _build_diff(
     ops: Sequence[KnownOp],
     old_side: _Side,
     new_side: _Side,
+    custom_policy: bool,
 ) -> dict[str, Any]:
     changed = {
         i
@@ -381,6 +383,7 @@ def _build_diff(
         "bindings": _bindings_diff(
             list(old.get("bindings") or []), list(after.get("bindings") or [])
         ),
+        **limits_diff(old, after, custom_policy=custom_policy),
         "operations_changed": len(changed),
     }
 
@@ -391,8 +394,16 @@ async def build_plan(
     scope: Scope,
     tenant_id: uuid.UUID | None,
     content: bytes,
+    custom_policy: bool = False,
 ) -> PolicyPlan:
-    """Check *content* for *scope* and work out what it would change. Writes nothing."""
+    """Check *content* for *scope* and work out what it would change. Writes nothing.
+
+    *custom_policy* says whether the ``CUSTOM_POLICY`` switch is on. With
+    it off, a file that holds ``limits`` is refused, and the stored
+    ``limits`` part is ignored: the diff has no ``limits`` section, a file
+    that equals the stored policy apart from that part is "No change.",
+    and the planned document keeps the stored part as it is.
+    """
     before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
         scope=scope,
@@ -420,6 +431,7 @@ async def build_plan(
             install_document=install_document,
             ops=ops,
             other_entries=other,
+            custom_policy=custom_policy,
         )
     except ValueError as exc:
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
@@ -436,10 +448,18 @@ async def build_plan(
         notes=plan.warnings,
         name=_stored_name(scope, tenant_id),
     )
+    if not custom_policy and before is not None and "limits" in before:
+        document["limits"] = before["limits"]
     plan.document = document
     plan.no_change = canonical_sha256(document) == plan.based_on
     plan.diff = _build_diff(
-        before, document, scope=scope, ops=ops, old_side=old_side, new_side=new_side
+        before,
+        document,
+        scope=scope,
+        ops=ops,
+        old_side=old_side,
+        new_side=new_side,
+        custom_policy=custom_policy,
     )
     if scope == "install" and routing_enabled():
         plan.diff["routing_floor"] = await tenants_wider(session, document)
@@ -450,7 +470,15 @@ async def build_plan(
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
     return {
         f"{section}_{kind}": len(diff[section][kind])
-        for section in ("description", "taxonomy", "classifications", "routing", "bindings")
+        for section in (
+            "description",
+            "taxonomy",
+            "classifications",
+            "routing",
+            "bindings",
+            "limits",
+        )
+        if section in diff
         for kind in ("added", "changed", "removed")
     }
 
@@ -484,6 +512,7 @@ async def apply_policy(
     based_on: str,
     imported_by: str,
     approved_by: str,
+    custom_policy: bool = False,
 ) -> dict[str, Any]:
     """Store the file after the approval; return what happened.
 
@@ -495,7 +524,9 @@ async def apply_policy(
         raise PolicyApplyError("The file does not match its SHA-256. Run the import again.")
     lock_id = tenant_id if scope == "tenant" and tenant_id is not None else _INSTALL_LOCK_ID
     await _lock_tenant_policy(session, lock_id)
-    plan = await build_plan(session, scope=scope, tenant_id=tenant_id, content=content)
+    plan = await build_plan(
+        session, scope=scope, tenant_id=tenant_id, content=content, custom_policy=custom_policy
+    )
     if plan.based_on != based_on:
         raise PolicyApplyError(POLICY_CHANGED)
     if plan.mistakes or plan.document is None or plan.diff is None:
@@ -585,8 +616,18 @@ async def _no_effect_notes(
     return notes
 
 
-async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
+async def export_policy(
+    session: AsyncSession,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID | None,
+    custom_policy: bool = False,
+) -> str:
     """The stored policy of *scope* as a ``policy: v1`` file (see :func:`_stored_document`).
+
+    The file holds the stored ``limits`` part only when *custom_policy*
+    says the ``CUSTOM_POLICY`` switch is on; with it off, the exported file
+    imports again.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
@@ -602,7 +643,7 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
     """
     document = normalise_document(await _stored_document(session, scope, tenant_id))
     head: dict[str, Any] = {"policy": POLICY_VERSION}
-    for key in ("description", "taxonomy"):
+    for key in ("description", "taxonomy", *(("limits",) if custom_policy else ())):
         if key in document:
             head[key] = document[key]
     routes = list(document.get("routing") or [])

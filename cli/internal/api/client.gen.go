@@ -161,6 +161,24 @@ const (
 	CapabilityKindMetaToolFamily CapabilityKind = "meta_tool_family"
 )
 
+// Defines values for CarryOverDryRunScope.
+const (
+	CarryOverDryRunScopeInstall CarryOverDryRunScope = "install"
+	CarryOverDryRunScopeTenant  CarryOverDryRunScope = "tenant"
+)
+
+// Defines values for CarryOverSettingScope.
+const (
+	CarryOverSettingScopeInstall CarryOverSettingScope = "install"
+	CarryOverSettingScopeTenant  CarryOverSettingScope = "tenant"
+)
+
+// Defines values for CarryOverSettingSource.
+const (
+	CarryOverSettingSourceOverride   CarryOverSettingSource = "override"
+	CarryOverSettingSourcePolicyFile CarryOverSettingSource = "policy_file"
+)
+
 // Defines values for CheckSourceKind.
 const (
 	CheckSourceKindDashboard CheckSourceKind = "dashboard"
@@ -1081,6 +1099,12 @@ const (
 const (
 	ListKbApiV1KbGetParamsOrderNewest ListKbApiV1KbGetParamsOrder = "newest"
 	ListKbApiV1KbGetParamsOrderSlug   ListKbApiV1KbGetParamsOrder = "slug"
+)
+
+// Defines values for CarryOverApiV1PolicyCarryOverDryRunGetParamsScope.
+const (
+	CarryOverApiV1PolicyCarryOverDryRunGetParamsScopeInstall CarryOverApiV1PolicyCarryOverDryRunGetParamsScope = "install"
+	CarryOverApiV1PolicyCarryOverDryRunGetParamsScopeTenant  CarryOverApiV1PolicyCarryOverDryRunGetParamsScope = "tenant"
 )
 
 // Defines values for ExportApiV1PolicyExportGetParamsScope.
@@ -4545,6 +4569,49 @@ type CapabilityRead struct {
 	Kind CapabilityKind `json:"kind"`
 	Name string         `json:"name"`
 }
+
+// CarryOverDryRun The answer of the dry run: every saved "always wait" of “scope“. Nothing is changed.
+type CarryOverDryRun struct {
+	Message     *string              `json:"message,omitempty"`
+	SandboxMode bool                 `json:"sandbox_mode"`
+	Scope       CarryOverDryRunScope `json:"scope"`
+	Settings    []CarryOverSetting   `json:"settings"`
+}
+
+// CarryOverDryRunScope defines model for CarryOverDryRun.Scope.
+type CarryOverDryRunScope string
+
+// CarryOverOperation One operation a saved setting makes wait today.
+//
+// “step_of“ lists the multi-step operations that use it as a step
+// (empty when none does).
+type CarryOverOperation struct {
+	ConnectorId string   `json:"connector_id"`
+	OpId        string   `json:"op_id"`
+	StepOf      []string `json:"step_of"`
+}
+
+// CarryOverSetting One saved "always wait" and what the carry-over to “destructive“ means for it.
+//
+// “source“ is “override“ (an admin's approval on one operation) or
+// “policy_file“ (an entry with “always_wait: true“). “ref“ names
+// the place: “<scope>:override“ or “<scope>:classifications[<index>]“.
+// “match“ is what the setting matches (“connector“, “group“,
+// “op“). “warnings“ say what changes with the carry-over.
+type CarryOverSetting struct {
+	Match      map[string]string      `json:"match"`
+	Operations []CarryOverOperation   `json:"operations"`
+	Ref        string                 `json:"ref"`
+	Scope      CarryOverSettingScope  `json:"scope"`
+	Source     CarryOverSettingSource `json:"source"`
+	Warnings   []string               `json:"warnings"`
+}
+
+// CarryOverSettingScope defines model for CarryOverSetting.Scope.
+type CarryOverSettingScope string
+
+// CarryOverSettingSource defines model for CarryOverSetting.Source.
+type CarryOverSettingSource string
 
 // CatalogListResponse Wire envelope for “GET /api/v1/connectors/catalog“.
 //
@@ -14255,6 +14322,15 @@ type GetDescriptorApiV1OperationsDescriptorIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// CarryOverApiV1PolicyCarryOverDryRunGetParams defines parameters for CarryOverApiV1PolicyCarryOverDryRunGet.
+type CarryOverApiV1PolicyCarryOverDryRunGetParams struct {
+	Scope         *CarryOverApiV1PolicyCarryOverDryRunGetParamsScope `form:"scope,omitempty" json:"scope,omitempty"`
+	Authorization *string                                            `json:"authorization,omitempty"`
+}
+
+// CarryOverApiV1PolicyCarryOverDryRunGetParamsScope defines parameters for CarryOverApiV1PolicyCarryOverDryRunGet.
+type CarryOverApiV1PolicyCarryOverDryRunGetParamsScope string
+
 // ListClassificationApiV1PolicyClassificationGetParams defines parameters for ListClassificationApiV1PolicyClassificationGet.
 type ListClassificationApiV1PolicyClassificationGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -18513,6 +18589,9 @@ type ClientInterface interface {
 	// GetDescriptorApiV1OperationsDescriptorIdGet request
 	GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// CarryOverApiV1PolicyCarryOverDryRunGet request
+	CarryOverApiV1PolicyCarryOverDryRunGet(ctx context.Context, params *CarryOverApiV1PolicyCarryOverDryRunGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListClassificationApiV1PolicyClassificationGet request
 	ListClassificationApiV1PolicyClassificationGet(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -22108,6 +22187,18 @@ func (c *Client) GetSearchApiV1OperationsSearchGet(ctx context.Context, params *
 
 func (c *Client) GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(c.Server, descriptorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CarryOverApiV1PolicyCarryOverDryRunGet(ctx context.Context, params *CarryOverApiV1PolicyCarryOverDryRunGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCarryOverApiV1PolicyCarryOverDryRunGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -37385,6 +37476,70 @@ func NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(server string, descri
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCarryOverApiV1PolicyCarryOverDryRunGetRequest generates requests for CarryOverApiV1PolicyCarryOverDryRunGet
+func NewCarryOverApiV1PolicyCarryOverDryRunGetRequest(server string, params *CarryOverApiV1PolicyCarryOverDryRunGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/policy/carry-over/dry-run")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -56761,6 +56916,9 @@ type ClientWithResponsesInterface interface {
 	// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request
 	GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error)
 
+	// CarryOverApiV1PolicyCarryOverDryRunGetWithResponse request
+	CarryOverApiV1PolicyCarryOverDryRunGetWithResponse(ctx context.Context, params *CarryOverApiV1PolicyCarryOverDryRunGetParams, reqEditors ...RequestEditorFn) (*CarryOverApiV1PolicyCarryOverDryRunGetResponse, error)
+
 	// ListClassificationApiV1PolicyClassificationGetWithResponse request
 	ListClassificationApiV1PolicyClassificationGetWithResponse(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*ListClassificationApiV1PolicyClassificationGetResponse, error)
 
@@ -61279,6 +61437,29 @@ func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CarryOverApiV1PolicyCarryOverDryRunGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *CarryOverDryRun
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CarryOverApiV1PolicyCarryOverDryRunGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CarryOverApiV1PolicyCarryOverDryRunGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -70695,6 +70876,15 @@ func (c *ClientWithResponses) GetDescriptorApiV1OperationsDescriptorIdGetWithRes
 	return ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp)
 }
 
+// CarryOverApiV1PolicyCarryOverDryRunGetWithResponse request returning *CarryOverApiV1PolicyCarryOverDryRunGetResponse
+func (c *ClientWithResponses) CarryOverApiV1PolicyCarryOverDryRunGetWithResponse(ctx context.Context, params *CarryOverApiV1PolicyCarryOverDryRunGetParams, reqEditors ...RequestEditorFn) (*CarryOverApiV1PolicyCarryOverDryRunGetResponse, error) {
+	rsp, err := c.CarryOverApiV1PolicyCarryOverDryRunGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCarryOverApiV1PolicyCarryOverDryRunGetResponse(rsp)
+}
+
 // ListClassificationApiV1PolicyClassificationGetWithResponse request returning *ListClassificationApiV1PolicyClassificationGetResponse
 func (c *ClientWithResponses) ListClassificationApiV1PolicyClassificationGetWithResponse(ctx context.Context, params *ListClassificationApiV1PolicyClassificationGetParams, reqEditors ...RequestEditorFn) (*ListClassificationApiV1PolicyClassificationGetResponse, error) {
 	rsp, err := c.ListClassificationApiV1PolicyClassificationGet(ctx, params, reqEditors...)
@@ -79589,6 +79779,39 @@ func ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest OperationDescriptor
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCarryOverApiV1PolicyCarryOverDryRunGetResponse parses an HTTP response from a CarryOverApiV1PolicyCarryOverDryRunGetWithResponse call
+func ParseCarryOverApiV1PolicyCarryOverDryRunGetResponse(rsp *http.Response) (*CarryOverApiV1PolicyCarryOverDryRunGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CarryOverApiV1PolicyCarryOverDryRunGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CarryOverDryRun
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

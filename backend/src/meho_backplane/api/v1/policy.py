@@ -18,6 +18,9 @@ see ``docs/codebase/policy.md``. The work is in
   switch is off.
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
+* ``GET /api/v1/policy/carry-over/dry-run`` -- every saved "always wait"
+  and what reading it as ``destructive`` will mean for it
+  (:mod:`meho_backplane.policy.carry_over`). Writes nothing.
 * ``POST /api/v1/policy/explain`` -- why a call runs, waits or is denied,
   and who may approve it (:mod:`meho_backplane.policy.explain`). Runs
   nothing and writes nothing. Asking for yourself (``me``) needs the
@@ -56,6 +59,7 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import ApprovalNotFoundError
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.policy.carry_over import CarryOverDryRun, carry_over_dry_run
 from meho_backplane.policy.document import MAX_POLICY_BYTES
 from meho_backplane.policy.explain import (
     FILE_NEEDS_CLASSIFICATION,
@@ -330,6 +334,25 @@ async def history(
     _check_scope(operator, scope)
     rows = await list_history(session, scope=scope, tenant_id=operator.tenant_id, limit=limit)
     return [PolicyRevisionView.model_validate(row) for row in rows]
+
+
+@router.get("/carry-over/dry-run", response_model=CarryOverDryRun)
+async def carry_over(
+    operator: Annotated[Operator, _policy_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    scope: Annotated[PolicyScope, Query()] = "tenant",
+) -> CarryOverDryRun:
+    """Every saved "always wait" of *scope*, and what reading it as ``destructive`` will mean.
+
+    Who may read it is the rule of the export. Writes nothing and reads no
+    switch: the answer is the same with ``CUSTOM_POLICY`` on or off.
+    """
+    _bind_audit("policy.carry_over.dry_run", "read")
+    _check_scope(operator, scope)
+    try:
+        return await carry_over_dry_run(session, scope=scope, tenant_id=operator.tenant_id)
+    except InvalidStoredPolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

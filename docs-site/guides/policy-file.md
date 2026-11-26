@@ -471,6 +471,37 @@ Not checked: idempotency_key, connector_resolution
     Today's checks still decide. With the setting off, explain shows
     today's answer only.
 
+## Before "always wait" becomes `destructive`: `meho policy carry-over --dry-run`
+
+"Always wait" makes an operation wait for approval on every call. It is
+saved in two places: an admin's override with approval on, or a policy
+file entry with `always_wait: true`. With the `CUSTOM_POLICY` setting on,
+MEHO will read each saved one as a raise to `destructive`.
+
+The dry run lists every saved "always wait" and what that will mean for
+it. It only reads: it changes no setting and no answer, with the setting
+on or off.
+
+```bash
+meho policy carry-over --dry-run                   # your tenant's settings
+meho policy carry-over --dry-run --scope install   # the install's (platform admin)
+```
+
+For each setting it shows:
+
+- where it comes from: `override` or `policy_file`, the scope, and the
+  place (for example `tenant:classifications[2]`);
+- the operations it makes wait today;
+- a warning when an operation is a step of a multi-step operation. A
+  `destructive` step is refused, not held for approval, so such a run
+  stops at that step;
+- a warning when the install is in sandbox mode. There a delete grant can
+  cover a `destructive` operation for a service login;
+- that a `destructive` call needs a matching preview first. A call
+  without one is refused.
+
+Who may run it: the same people who may export the policy.
+
 ## What an import does
 
 1. MEHO checks the file and works out the diff.
@@ -507,6 +538,7 @@ Not checked: idempotency_key, connector_resolution
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
 | `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
+| `GET /api/v1/policy/carry-over/dry-run` | every saved "always wait" and what reading it as `destructive` will mean; writes nothing |
 
 Send the file as the request body with `Content-Type: application/yaml`.
 Every file route takes `?scope=tenant` (the default) or `?scope=install`.

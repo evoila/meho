@@ -2450,6 +2450,64 @@
         }
       }
     },
+    "/api/v1/policy/carry-over/dry-run": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Carry Over",
+        "description": "Every saved \"always wait\" of *scope*, and what reading it as ``destructive`` will mean.\n\nWho may read it is the rule of the export. Writes nothing and reads no\nswitch: the answer is the same with ``CUSTOM_POLICY`` on or off.",
+        "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarryOverDryRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policy/explain": {
       "post": {
         "tags": [
@@ -33212,6 +33270,125 @@
         ],
         "title": "CapabilityRead",
         "description": "One persisted capability row, built from the ORM via ``model_validate``."
+      },
+      "CarryOverDryRun": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverSetting"
+            },
+            "type": "array",
+            "title": "Settings"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Dry run: nothing was changed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "sandbox_mode",
+          "settings"
+        ],
+        "title": "CarryOverDryRun",
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+      },
+      "CarryOverOperation": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "step_of": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "step_of"
+        ],
+        "title": "CarryOverOperation",
+        "description": "One operation a saved setting makes wait today.\n\n``step_of`` lists the multi-step operations that use it as a step\n(empty when none does)."
+      },
+      "CarryOverSetting": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "policy_file"
+            ],
+            "title": "Source"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Match"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverOperation"
+            },
+            "type": "array",
+            "title": "Operations"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "scope",
+          "ref",
+          "match",
+          "operations",
+          "warnings"
+        ],
+        "title": "CarryOverSetting",
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes with the carry-over."
       },
       "CatalogListResponse": {
         "properties": {

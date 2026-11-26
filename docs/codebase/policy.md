@@ -454,6 +454,7 @@ import is human-only.
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
 | `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+| `GET /api/v1/policy/carry-over/dry-run` | `meho policy carry-over --dry-run` | every saved "always wait" and what reading it as `destructive` will mean; writes nothing (`policy/carry_over.py`) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `cli/internal/cmd/policy/`.
@@ -473,4 +474,6 @@ install's routing as a floor: import, run, click, install diff),
 `backend/tests/test_policy_routing_step_floor.py` (a step and a direct
 call get the same approvers, warnings and export marks, the card and the
 approve audit row),
-`cli/internal/cmd/policy/file_test.go`.
+`backend/tests/test_policy_carry_over_dry_run.py` (the dry run of the
+"always wait" carry-over: the list, who may read it, no row changes),
+`cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

@@ -423,7 +423,21 @@ refuses such a write at once.
        `approvalHandoff.secretName: <your Secret>` in your values file.
        Then install or upgrade.
 
-To check the state, call `GET /ready`. Read `features.approval_custody`.
+To check the state, read `features.approval_custody` on `GET /ready`.
+With the metrics token on (`metricsAuth.enabled: true`, the default),
+`/ready` shows the `features` block only to a caller that sends the
+token as a bearer token. The chart keeps the token in the Secret
+`<release>-metrics-auth`, under the key `token`:
+
+```bash
+TOKEN=$(kubectl -n <namespace> get secret <release>-metrics-auth -o jsonpath='{.data.token}' | base64 -d)
+curl -s -H "Authorization: Bearer $TOKEN" https://<your-backplane>/ready | jq .features.approval_custody
+```
+
+With `metricsAuth.enabled: false`, `/ready` shows the block to every
+caller: leave out the header. With your own Secret in
+`metricsAuth.existingSecret`, read the token from that Secret, under
+the key in `metricsAuth.secretKey`.
 
 ### Your own PostgreSQL
 

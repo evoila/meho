@@ -75,6 +75,9 @@ token lines up with the cookie.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from urllib.parse import quote
+
 import structlog
 from fastapi import Request, status
 from fastapi.responses import HTMLResponse
@@ -295,6 +298,32 @@ def _redirect_to_list() -> HTMLResponse:
     )
 
 
+def target_page_path(name: str) -> str:
+    """The web address of one target's own page; the name is one path segment."""
+    return f"/ui/connectors/{quote(name, safe='')}"
+
+
+def _redirect_to_target(path: str) -> HTMLResponse:
+    """Return a 204 + ``HX-Redirect`` so HTMX opens the new target's own page.
+
+    A new target opens on its page, where the credential card is, instead of
+    the list. Only the create form uses it; edit still returns to the list.
+    """
+    return HTMLResponse(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"HX-Redirect": path},
+    )
+
+
+def _after_create(request: Request, name: str, warnings: Sequence[str]) -> HTMLResponse:
+    """Open the new target's page, or show the saved-with-warning modal that leads there."""
+    page = target_page_path(name)
+    modal = saved_with_warnings(
+        request, name, warnings, continue_href=page, continue_label="Open target"
+    )
+    return modal or _redirect_to_target(page)
+
+
 async def submit_create(
     request: Request,
     session_ctx: UISessionContext,
@@ -388,7 +417,7 @@ async def submit_create(
         operator_sub=session_ctx.operator_sub,
         name=body.name,
     )
-    return saved_with_warnings(request, body.name, created.warnings) or _redirect_to_list()
+    return _after_create(request, body.name, created.warnings)
 
 
 async def submit_edit(

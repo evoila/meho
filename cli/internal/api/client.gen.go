@@ -19308,6 +19308,12 @@ type ClientInterface interface {
 
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiConnectorsCredentialCardUiConnectorsNameCredentialGet request
+	UiConnectorsCredentialCardUiConnectorsNameCredentialGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiConnectorsCredentialStoreUiConnectorsNameCredentialPost request
+	UiConnectorsCredentialStoreUiConnectorsNameCredentialPost(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody request with any body
 	UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBody(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -25673,6 +25679,30 @@ func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithBody(ctx context
 
 func (c *Client) UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBody(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithFormdataBody(c.Server, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsCredentialCardUiConnectorsNameCredentialGet(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCredentialCardUiConnectorsNameCredentialGetRequest(c.Server, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiConnectorsCredentialStoreUiConnectorsNameCredentialPost(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiConnectorsCredentialStoreUiConnectorsNameCredentialPostRequest(c.Server, name)
 	if err != nil {
 		return nil, err
 	}
@@ -49294,6 +49324,74 @@ func NewUiConnectorsEditSubmitUiConnectorsNamePatchRequestWithBody(server string
 	return req, nil
 }
 
+// NewUiConnectorsCredentialCardUiConnectorsNameCredentialGetRequest generates requests for UiConnectorsCredentialCardUiConnectorsNameCredentialGet
+func NewUiConnectorsCredentialCardUiConnectorsNameCredentialGetRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/credential", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiConnectorsCredentialStoreUiConnectorsNameCredentialPostRequest generates requests for UiConnectorsCredentialStoreUiConnectorsNameCredentialPost
+func NewUiConnectorsCredentialStoreUiConnectorsNameCredentialPostRequest(server string, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors/%s/credential", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequest calls the generic UiConnectorsDeleteModalUiConnectorsNameDeleteGet builder with application/json body
 func NewUiConnectorsDeleteModalUiConnectorsNameDeleteGetRequest(server string, name string, body UiConnectorsDeleteModalUiConnectorsNameDeleteGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -57555,6 +57653,12 @@ type ClientWithResponsesInterface interface {
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
 
 	UiConnectorsEditSubmitUiConnectorsNamePatchWithFormdataBodyWithResponse(ctx context.Context, name string, body UiConnectorsEditSubmitUiConnectorsNamePatchFormdataRequestBody, reqEditors ...RequestEditorFn) (*UiConnectorsEditSubmitUiConnectorsNamePatchResponse, error)
+
+	// UiConnectorsCredentialCardUiConnectorsNameCredentialGetWithResponse request
+	UiConnectorsCredentialCardUiConnectorsNameCredentialGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse, error)
+
+	// UiConnectorsCredentialStoreUiConnectorsNameCredentialPostWithResponse request
+	UiConnectorsCredentialStoreUiConnectorsNameCredentialPostWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse, error)
 
 	// UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse request with any body
 	UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse(ctx context.Context, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse, error)
@@ -65886,6 +65990,50 @@ func (r UiConnectorsEditSubmitUiConnectorsNamePatchResponse) StatusCode() int {
 	return 0
 }
 
+type UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -73270,6 +73418,24 @@ func (c *ClientWithResponses) UiConnectorsEditSubmitUiConnectorsNamePatchWithFor
 		return nil, err
 	}
 	return ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp)
+}
+
+// UiConnectorsCredentialCardUiConnectorsNameCredentialGetWithResponse request returning *UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse
+func (c *ClientWithResponses) UiConnectorsCredentialCardUiConnectorsNameCredentialGetWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse, error) {
+	rsp, err := c.UiConnectorsCredentialCardUiConnectorsNameCredentialGet(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse(rsp)
+}
+
+// UiConnectorsCredentialStoreUiConnectorsNameCredentialPostWithResponse request returning *UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse
+func (c *ClientWithResponses) UiConnectorsCredentialStoreUiConnectorsNameCredentialPostWithResponse(ctx context.Context, name string, reqEditors ...RequestEditorFn) (*UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse, error) {
+	rsp, err := c.UiConnectorsCredentialStoreUiConnectorsNameCredentialPost(ctx, name, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse(rsp)
 }
 
 // UiConnectorsDeleteModalUiConnectorsNameDeleteGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsDeleteModalUiConnectorsNameDeleteGetResponse
@@ -85515,6 +85681,58 @@ func ParseUiConnectorsEditSubmitUiConnectorsNamePatchResponse(rsp *http.Response
 	}
 
 	response := &UiConnectorsEditSubmitUiConnectorsNamePatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse parses an HTTP response from a UiConnectorsCredentialCardUiConnectorsNameCredentialGetWithResponse call
+func ParseUiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse(rsp *http.Response) (*UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsCredentialCardUiConnectorsNameCredentialGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse parses an HTTP response from a UiConnectorsCredentialStoreUiConnectorsNameCredentialPostWithResponse call
+func ParseUiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse(rsp *http.Response) (*UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiConnectorsCredentialStoreUiConnectorsNameCredentialPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

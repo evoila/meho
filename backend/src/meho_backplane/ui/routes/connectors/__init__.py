@@ -68,6 +68,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from meho_backplane.ui.routes.connectors.classify_view import build_classify_router
+from meho_backplane.ui.routes.connectors.credential import build_credential_router
 from meho_backplane.ui.routes.connectors.detail import build_detail_router
 from meho_backplane.ui.routes.connectors.forms_router import build_forms_router
 from meho_backplane.ui.routes.connectors.import_router import build_import_router
@@ -151,6 +152,8 @@ def build_router() -> APIRouter:
     router.include_router(build_ingest_router())
     router.include_router(build_registry_actions_router())
     router.include_router(build_review_router())
+    # The credential card sits before the detail route, as the issue says.
+    router.include_router(build_credential_router())
     router.include_router(build_detail_router())
     router.include_router(build_probe_router())
     return router

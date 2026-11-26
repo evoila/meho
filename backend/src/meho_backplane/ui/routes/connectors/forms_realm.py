@@ -53,17 +53,28 @@ def realm_extras(current: Mapping[str, Any] | None, managed_realm: str) -> dict[
 
 
 def saved_with_warnings(
-    request: Request, target_name: str, warnings: Sequence[str]
+    request: Request,
+    target_name: str,
+    warnings: Sequence[str],
+    *,
+    continue_href: str = "/ui/connectors",
+    continue_label: str = "View targets",
 ) -> HTMLResponse | None:
     """The "saved, with a warning" modal; ``None`` when there is no warning.
 
     The target is already saved. The modal swaps into the same container
-    as the form and links back to the targets list.
+    as the form and links back to the targets list, or to *continue_href*
+    (the create form sends the new target's own page).
     """
     if not warnings:
         return None
     return get_templates().TemplateResponse(
         request,
         "connectors/_saved_warning_modal.html",
-        {"target_name": target_name, "warnings": list(warnings)},
+        {
+            "target_name": target_name,
+            "warnings": list(warnings),
+            "continue_href": continue_href,
+            "continue_label": continue_label,
+        },
     )

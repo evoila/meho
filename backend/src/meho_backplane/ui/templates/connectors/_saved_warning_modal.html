@@ -9,7 +9,8 @@
   shared modal controller opens it. The lines are the same ones REST, the
   CLI and the approval card show.
 
-  Context: ``target_name``, ``warnings`` (list of plain lines).
+  Context: ``target_name``, ``warnings`` (list of plain lines),
+  ``continue_href`` and ``continue_label`` (where the button goes).
 -#}
 <dialog id="connectors-saved-warning-modal" class="modal">
   <div class="modal-box max-w-2xl">
@@ -24,8 +25,8 @@
       </ul>
     </div>
     <div class="modal-action">
-      <a href="/ui/connectors" class="btn btn-sm btn-primary" data-action="saved-warning-continue">
-        View targets
+      <a href="{{ continue_href }}" class="btn btn-sm btn-primary" data-action="saved-warning-continue">
+        {{ continue_label }}
       </a>
     </div>
   </div>

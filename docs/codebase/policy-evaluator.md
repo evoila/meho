@@ -70,13 +70,20 @@ and `override` yet.
 `apply_effective_policy` and `apply_step_policy` set the effective risk
 level and approval flag on the row (after admin edits, classification and
 floors). Before that they keep the code's own values in
-`row.code_safety_level` and `row.code_requires_approval` (not columns).
+`row.code_safety_level` and `row.code_requires_approval`, and the stored
+parameter schema in `row.code_parameter_schema` (not columns). The shown
+schema then leaves out a field that a switch hides.
 
 `has_plain_mark(descriptor)` is true when the code (or the import) turns
 approval on and the operation has no other reason to wait: no credential
 call, no caller address, no change of rights, no "approve each call" and
 no delete sign. It reads the code's own values, so an admin's edit never
-looks like the code's mark. Nothing decides on it yet.
+looks like the code's mark. The caller-address check reads the stored
+schema, as the approval floor does, so a field that a switch hides still
+counts. A delete sign is the code's `destructive` level, the HTTP verb
+`DELETE`, the `destructive` tag or a delete name. The built-in delete names
+always count; the install's own names (`SERVICE_GRANT_DELETE_SHAPED_PATTERNS`)
+only add to them. It reads no database. Nothing decides on it yet.
 
 The op class marks of `Asked` come from the code: `root_shell`,
 `credential_read`, `per_call_approval`, `delete_shaped`,

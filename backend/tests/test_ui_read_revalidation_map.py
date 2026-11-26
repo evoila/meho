@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +22,7 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.ui.auth import revalidation
 from meho_backplane.ui.auth import session_ref as session_ref_module
 from meho_backplane.ui.auth.session_store import DecryptedSession
@@ -262,3 +263,77 @@ def test_full_map_drops_only_the_oldest_anchors(clock: _FakeClock) -> None:
     assert ids[1] not in revalidation._last_validated
     assert all(session_id in revalidation._last_validated for session_id in ids[2:])
     revalidation.reset_read_revalidation_cache_for_testing()
+
+
+def test_the_stored_role_answers_only_for_the_tenant_it_was_stored_for() -> None:
+    revalidation.reset_read_revalidation_cache_for_testing()
+    session_id, tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    revalidation.mark_session_validated(session_id, tenant_id=tenant_a, tenant_admin=True)
+    try:
+        assert revalidation.session_is_tenant_admin(session_id, tenant_a) is True
+        assert revalidation.session_is_tenant_admin(session_id, tenant_b) is False
+    finally:
+        revalidation.reset_read_revalidation_cache_for_testing()
+
+
+class _RefreshMovesTenant:
+    """A token check during which another tab switched the session's tenant.
+
+    The check refreshes the token and reads the row again: the row is in
+    the tenant of *moves_to*, and the token's role is the role there.
+    """
+
+    def __init__(self, roles: dict[uuid.UUID, TenantRole], moves_to: uuid.UUID) -> None:
+        self.roles = roles
+        self.moves_to = moves_to
+
+    async def __call__(
+        self, decrypted: DecryptedSession, *, expected_audience: str
+    ) -> tuple[DecryptedSession, Any]:
+        refreshed = replace(decrypted, tenant_id=self.moves_to)
+        operator = SimpleNamespace(
+            tenant_role=self.roles[self.moves_to], principal_kind=PrincipalKind.USER
+        )
+        return refreshed, operator
+
+
+@pytest.mark.parametrize("admin_in_first", [True, False], ids=["admin-in-a", "admin-in-b"])
+def test_a_refresh_that_finds_the_session_in_the_other_tenant_keeps_each_tenants_role(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _FakeClock,
+    window: Callable[[int], None],
+    admin_in_first: bool,
+) -> None:
+    revalidation.reset_read_revalidation_cache_for_testing()
+    tenant_a, tenant_b = uuid.uuid4(), uuid.uuid4()
+    admin, operator = TenantRole.TENANT_ADMIN, TenantRole.OPERATOR
+    roles = {
+        tenant_a: admin if admin_in_first else operator,
+        tenant_b: operator if admin_in_first else admin,
+    }
+    in_a = replace(_session(), tenant_id=tenant_a)
+    try:
+        # The read starts in tenant A; the refresh finds the row in tenant B.
+        monkeypatch.setattr(
+            revalidation, "verify_access_token_with_refresh", _RefreshMovesTenant(roles, tenant_b)
+        )
+        assert _run(revalidation.revalidate_read_session(in_a)) is not None
+        assert revalidation.session_is_tenant_admin(in_a.id, tenant_b) is not admin_in_first
+        assert revalidation.session_is_tenant_admin(in_a.id, tenant_a) is False
+        # Back in tenant A: the role of tenant B is not the role of A, so it is checked again.
+        monkeypatch.setattr(
+            revalidation, "verify_access_token_with_refresh", _RefreshMovesTenant(roles, tenant_a)
+        )
+        assert _run(revalidation.revalidate_read_session(in_a)) is not None
+        assert revalidation.session_is_tenant_admin(in_a.id, tenant_a) is admin_in_first
+        assert revalidation.session_is_tenant_admin(in_a.id, tenant_b) is False
+    finally:
+        revalidation.reset_read_revalidation_cache_for_testing()
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.SERVICE, PrincipalKind.RUNNER, PrincipalKind.AGENT])
+def test_a_machine_login_with_tenant_admin_is_not_a_menu_admin(kind: PrincipalKind) -> None:
+    machine = SimpleNamespace(tenant_role=TenantRole.TENANT_ADMIN, principal_kind=kind)
+    person = SimpleNamespace(tenant_role=TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.USER)
+    assert revalidation.is_menu_admin(machine) is False  # type: ignore[arg-type]
+    assert revalidation.is_menu_admin(person) is True  # type: ignore[arg-type]

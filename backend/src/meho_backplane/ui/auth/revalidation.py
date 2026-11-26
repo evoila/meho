@@ -87,7 +87,7 @@ import structlog
 from fastapi import HTTPException
 
 from meho_backplane.auth.client_identity import build_client_block
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
 from meho_backplane.ui.auth.session_ref import session_ref
@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     from meho_backplane.ui.auth.session_store import DecryptedSession
 
 __all__ = [
+    "is_menu_admin",
     "mark_session_validated",
     "reset_read_revalidation_cache_for_testing",
     "revalidate_read_session",
@@ -126,7 +127,8 @@ _last_validated: dict[uuid.UUID, float] = {}
 _client_blocks: dict[uuid.UUID, dict[str, Any]] = {}
 
 #: session id -> (tenant id, whether the last token check of the session
-#: in this process showed the ``tenant_admin`` role in that tenant). The
+#: in this process showed a person with the ``tenant_admin`` role in that
+#: tenant). The
 #: console menu reads it to show the entries that only an admin can open.
 #: The tenant id is part of the entry, so a switch to another tenant
 #: never shows the role of the old one. Kept and dropped together with
@@ -145,6 +147,15 @@ def session_is_tenant_admin(session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool
     """Whether the last token check showed ``tenant_admin`` in *tenant_id*; ``False`` if unknown."""
     known = _tenant_admins.get(session_id)
     return known is not None and known[0] == tenant_id and known[1]
+
+
+def is_menu_admin(operator: Operator) -> bool:
+    """Whether the menu shows the admin-only entries: a person with ``tenant_admin``.
+
+    The same check as the pages: a service, runner or agent login with
+    ``tenant_admin`` gets 403 there, so it does not see the entries.
+    """
+    return operator.tenant_role is TenantRole.TENANT_ADMIN and is_human_principal(operator)
 
 
 def session_client_block(session_id: uuid.UUID) -> dict[str, Any] | None:
@@ -261,10 +272,9 @@ async def revalidate_read_session(
         )
         return None
     _mark_validated(decrypted.id, now_mono)
-    _tenant_admins[decrypted.id] = (
-        decrypted.tenant_id,
-        operator.tenant_role is TenantRole.TENANT_ADMIN,
-    )
+    # The tenant the check ran in: a refresh reads the row again, and
+    # another tab may have switched its tenant in the meantime.
+    _tenant_admins[decrypted.id] = (refreshed.tenant_id, is_menu_admin(operator))
     if keep_client:
         _client_blocks[decrypted.id] = build_client_block(operator)
     return refreshed

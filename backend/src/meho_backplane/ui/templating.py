@@ -187,6 +187,18 @@ def visible_marks(text: str) -> str:
     return "".join(out)
 
 
+def _session_is_menu_admin(session_ctx: Any) -> bool:
+    """Whether the last token check showed a person with ``tenant_admin`` here.
+
+    The menu shows the admin-only entries from it. It is read from the
+    server-side map, never from the request. The pages keep their own 403.
+    """
+    # Imported here: the auth package imports this module.
+    from meho_backplane.ui.auth.revalidation import session_is_tenant_admin
+
+    return session_is_tenant_admin(session_ctx.session_id, session_ctx.tenant_id)
+
+
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     """Surface the BFF session tenant + live readiness into every template.
 
@@ -276,9 +288,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         # where the **live** role (a fresh JWT verify) is shown -- the chip
         # itself does not pay a per-render token verify just to label a role.
         "session_operator_sub": session_ctx.operator_sub,
-        # Whether the person is a tenant admin here; the menu shows the
-        # admin-only entries from it. The pages keep their own 403.
-        "session_is_tenant_admin": session_ctx.is_tenant_admin,
+        "session_is_tenant_admin": _session_is_menu_admin(session_ctx),
         "ready": ready,
     }
 

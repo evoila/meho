@@ -118,11 +118,7 @@ from meho_backplane.sandbox_mode import (
     sandbox_mode_active,
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
-from meho_backplane.ui.auth.revalidation import (
-    revalidate_read_session,
-    session_client_block,
-    session_is_tenant_admin,
-)
+from meho_backplane.ui.auth.revalidation import revalidate_read_session, session_client_block
 from meho_backplane.ui.auth.routes import (
     login_location,
     page_from_htmx_current_url,
@@ -219,9 +215,6 @@ class UISessionContext:
     #: The ``client`` block of the session's last token check
     #: (AUDIT_CLIENT_IDENTITY), or ``None``.
     client: dict[str, Any] | None = None
-    #: Whether the last token check showed ``tenant_admin`` in the session's
-    #: tenant. Only the console menu reads it; each page keeps its own 403.
-    is_tenant_admin: bool = False
 
 
 def _select_path(scope: Scope) -> str:
@@ -491,7 +484,6 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         tenant_chosen=revalidated.tenant_chosen,
         can_switch_tenant=revalidated.can_switch_tenant,
         client=session_client_block(revalidated.id),
-        is_tenant_admin=session_is_tenant_admin(revalidated.id, revalidated.tenant_id),
     )
 
 

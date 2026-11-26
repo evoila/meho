@@ -1885,6 +1885,8 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
 async def refuse_blocked_principal(operator: Operator, *, check_tenant: bool = True) -> None:
     """Raise 403 ``principal_blocked`` when an admin blocked this login.
 
+    The login counts as blocked when its ``sub`` or, for an agent, its
+    login name (``agent:<name>``, the token's client id) is on the list.
     A block in every tenant always counts. A block in one tenant counts
     only when the login works in that tenant: the tenant is chosen
     (``tenant_chosen``) and *check_tenant* is set. So a person with
@@ -1898,11 +1900,14 @@ async def refuse_blocked_principal(operator: Operator, *, check_tenant: bool = T
         PRINCIPAL_BLOCKED_MESSAGE,
         PrincipalBlockUnavailableError,
         is_principal_blocked,
+        login_name,
     )
 
     try:
         tenant_id = operator.tenant_id if check_tenant and operator.tenant_chosen else None
-        blocked = await is_principal_blocked(operator.sub, tenant_id)
+        blocked = await is_principal_blocked(
+            operator.sub, tenant_id, client_id=login_name(operator)
+        )
     except PrincipalBlockUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

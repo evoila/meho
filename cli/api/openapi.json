@@ -28123,7 +28123,8 @@
           },
           "keycloak_client_id": {
             "type": "string",
-            "title": "Keycloak Client Id"
+            "title": "Keycloak Client Id",
+            "description": "The login name of the agent (agent:<name>). A block of this name (POST /api/v1/principals/blocked) stops every token of the agent."
           },
           "keycloak_internal_id": {
             "type": "string",
@@ -30118,7 +30119,8 @@
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
-            "title": "Sub"
+            "title": "Sub",
+            "description": "The login id (sub), or the agent name agent:<name> from the agent list."
           },
           "reason": {
             "type": "string",
@@ -30175,6 +30177,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Blocked At"
+          },
+          "agent": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent",
+            "description": "The agent name (agent:<name>) of the blocked login, when it is an agent."
           }
         },
         "type": "object",

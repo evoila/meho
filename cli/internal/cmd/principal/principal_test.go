@@ -53,6 +53,15 @@ func TestPrintBlocked(t *testing.T) {
 			t.Errorf("table lacks %q: %q", want, out.String())
 		}
 	}
+	out.Reset()
+	agent := "agent:probe-bot"
+	printBlocked(&out, []api.BlockRead{{
+		Sub: "agent:probe-bot", Agent: &agent, Scope: "tenant-id", Reason: "agent revoked",
+		BlockedAt: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC),
+	}})
+	if !strings.Contains(out.String(), "AGENT") || strings.Count(out.String(), agent) != 2 {
+		t.Errorf("table does not name the agent: %q", out.String())
+	}
 }
 
 func TestDecodeDetailString(t *testing.T) {

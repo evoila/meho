@@ -4,7 +4,9 @@
 """Console page of the admin block list: ``/ui/blocked-people``.
 
 An admin sees the blocked logins, blocks a login with a reason, and
-unblocks a login. The page calls the same functions as the REST routes
+unblocks a login. The block field takes a login id or an agent name
+(``agent:<name>``), and the list names the agent of an agent's login.
+The page calls the same functions as the REST routes
 (:mod:`meho_backplane.auth.principal_block`), so the rules are the same:
 a platform admin blocks and unblocks in every tenant, a tenant admin in
 their own tenant, and nobody blocks their own login. Only a person with
@@ -45,6 +47,7 @@ from meho_backplane.auth.principal_block import (
     CannotBlockSelfError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
+    UnknownLoginError,
     block_principal,
     list_blocked,
     unblock_principal,
@@ -77,7 +80,7 @@ _OWN_LOGIN_UNBLOCK = (
 )
 _CONFIRMED = "yes"
 _FIELD_MESSAGES = {
-    "sub": "Enter the login id of the person.",
+    "sub": "Enter the login id, or the agent name (agent:<name>).",
     "reason": "Enter a reason (at most 500 characters).",
 }
 
@@ -167,6 +170,8 @@ async def _block(
         errors = _errors_of(exc)
     except CannotBlockSelfError:
         errors = {"sub": _SELF_BLOCK_MESSAGE}
+    except UnknownLoginError as exc:
+        errors = {"sub": str(exc)}
     else:
         return _back_to_page()
     return await _page(

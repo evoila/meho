@@ -3,9 +3,11 @@
 
 """``/api/v1/principals/blocked*`` -- the admin block list.
 
-An admin blocks a person by their login id (``sub``). MEHO then refuses
-every request of that login within a few seconds, on every process
-(:mod:`meho_backplane.auth.principal_block`).
+An admin blocks a login by its login id (``sub``), or an agent by the
+name MEHO shows for it (``agent:<name>``, the ``keycloak_client_id`` of
+the agent list). MEHO then refuses every request of that login within a
+few seconds, on every process (:mod:`meho_backplane.auth.principal_block`).
+A block of an agent name holds for every token of that agent.
 
 Routes (REST and CLI only; there is no MCP tool):
 
@@ -13,7 +15,10 @@ Routes (REST and CLI only; there is no MCP tool):
   sees every block, a tenant admin sees the blocks of their tenant.
 * ``POST /api/v1/principals/blocked`` -- block a login, with a reason.
   A platform admin blocks in every tenant. A tenant admin blocks in their
-  own tenant only. Nobody blocks their own login (422).
+  own tenant only. Nobody blocks their own login (422). An agent name that
+  is no registered agent in the admin's reach, or the short name of an
+  agent, gets 422 ``unknown_login`` with a plain sentence. The answer and
+  the list name the agent (``agent``) for an agent's login.
 * ``DELETE /api/v1/principals/blocked/{sub}`` -- unblock. 404 when there
   is no block the admin may remove. A tenant admin removes the blocks of
   their tenant; a platform admin with ``tenant_admin`` removes every block
@@ -61,6 +66,7 @@ from meho_backplane.auth.principal_block import (
     OwnBlockStaysError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
+    UnknownLoginError,
     block_principal,
     is_principal_blocked,
     list_blocked,
@@ -148,7 +154,11 @@ class BlockCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    sub: str = Field(min_length=1, max_length=_SUB_MAX_LENGTH)
+    sub: str = Field(
+        min_length=1,
+        max_length=_SUB_MAX_LENGTH,
+        description="The login id (sub), or the agent name agent:<name> from the agent list.",
+    )
     reason: str = Field(min_length=1, max_length=REASON_MAX_LENGTH)
 
 
@@ -174,6 +184,10 @@ class BlockRead(BaseModel):
     reason: str
     blocked_by_sub: str
     blocked_at: datetime
+    agent: str | None = Field(
+        default=None,
+        description="The agent name (agent:<name>) of the blocked login, when it is an agent.",
+    )
 
 
 class BlockListResponse(BaseModel):
@@ -200,6 +214,7 @@ def _read(person: BlockedPerson) -> BlockRead:
         reason=person.reason,
         blocked_by_sub=person.blocked_by_sub,
         blocked_at=person.blocked_at,
+        agent=person.agent,
     )
 
 
@@ -227,6 +242,11 @@ async def block_principal_route(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="cannot_block_self: you cannot block your own login.",
+        ) from exc
+    except UnknownLoginError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"unknown_login: {exc}",
         ) from exc
 
 

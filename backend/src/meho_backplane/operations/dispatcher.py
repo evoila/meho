@@ -308,7 +308,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
-from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
+from meho_backplane.auth.principal_block import (
+    PrincipalBlockedStepError,
+    login_name,
+    raise_if_send_refused,
+)
 from meho_backplane.auth.principal_block_run import (
     mark_request_sent,
     raise_if_step_was_refused,
@@ -4308,6 +4312,7 @@ async def dispatch(
                 operator.tenant_id,
                 # After an approval: what the run that waited had sent.
                 earlier_sent=earlier_run_sent_a_request(op_id),
+                client_id=login_name(operator),
             )
             if blocked_result is not None:
                 _log.info(

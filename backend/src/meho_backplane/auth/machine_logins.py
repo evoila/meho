@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 
-from sqlalchemy import CompoundSelect, select, union
+from sqlalchemy import ColumnElement, CompoundSelect, select, union
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +41,9 @@ __all__ = ["is_machine_login", "machine_subs", "note_machine_login"]
 async def note_machine_login(session: AsyncSession, operator: Operator) -> None:
     """Keep the login id of *operator* when it is an agent, service or runner login.
 
-    Safe to run twice: a login id that MEHO knows already is left as it is.
+    The row also keeps the client id of the token (``agent:<name>`` for an
+    agent), the name MEHO shows for the login. A known login id gets the
+    client id when its row has another one or none. Safe to run twice.
     The caller owns the transaction.
     """
     if is_human_principal(operator):
@@ -50,14 +52,29 @@ async def note_machine_login(session: AsyncSession, operator: Operator) -> None:
         "tenant_id": operator.tenant_id,
         "sub": operator.sub,
         "kind": operator.principal_kind.value,
+        "client_id": operator.client_id,
     }
     conn = await session.connection()
     stmt: Insert
     if conn.dialect.name == "postgresql":
-        stmt = pg_insert(MachineLogin).values(**values).on_conflict_do_nothing()
+        pg_stmt = pg_insert(MachineLogin).values(**values)
+        stmt = pg_stmt.on_conflict_do_update(
+            index_elements=[MachineLogin.tenant_id, MachineLogin.sub],
+            set_={"client_id": pg_stmt.excluded.client_id},
+            where=_client_id_changed(pg_stmt.excluded.client_id),
+        )
     else:
-        stmt = sqlite_insert(MachineLogin).values(**values).on_conflict_do_nothing()
+        lite_stmt = sqlite_insert(MachineLogin).values(**values)
+        stmt = lite_stmt.on_conflict_do_update(
+            index_elements=[MachineLogin.tenant_id, MachineLogin.sub],
+            set_={"client_id": lite_stmt.excluded.client_id},
+            where=_client_id_changed(lite_stmt.excluded.client_id),
+        )
     await session.execute(stmt)
+
+
+def _client_id_changed(new: ColumnElement[str | None]) -> ColumnElement[bool]:
+    return new.is_not(None) & MachineLogin.client_id.is_distinct_from(new)
 
 
 async def machine_subs(

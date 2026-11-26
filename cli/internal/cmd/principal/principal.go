@@ -58,8 +58,10 @@ func newBlockCmd() *cobra.Command {
 		Use:   "block <sub> --reason <text>",
 		Short: "Block a person in MEHO (tenant_admin)",
 		Long: "block calls POST /api/v1/principals/blocked. <sub> is the login id " +
-			"of the person. The reason is kept in the audit log and in the " +
-			"block list. The person sees no reason.",
+			"of the person, or the agent name from the agent list (agent:<name>). " +
+			"A block of an agent name stops every token of that agent. MEHO refuses " +
+			"an agent name it does not know. The reason is kept in the audit log " +
+			"and in the block list. The blocked login sees no reason.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -206,13 +208,17 @@ func printBlocked(w io.Writer, rows []api.BlockRead) {
 		fmt.Fprintln(w, "nobody is blocked")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-14s %-20s %s\n", "SUB", "SCOPE", "BLOCKED AT", "REASON")
+	fmt.Fprintf(w, "%-40s %-24s %-14s %-20s %s\n", "SUB", "AGENT", "SCOPE", "BLOCKED AT", "REASON")
 	for _, r := range rows {
 		scope := "all"
 		if r.Scope != "*" {
 			scope = "tenant"
 		}
-		fmt.Fprintf(w, "%-40s %-14s %-20s %s\n", r.Sub, scope,
+		agent := "-"
+		if r.Agent != nil && *r.Agent != "" {
+			agent = *r.Agent
+		}
+		fmt.Fprintf(w, "%-40s %-24s %-14s %-20s %s\n", r.Sub, agent, scope,
 			r.BlockedAt.UTC().Format("2006-01-02T15:04:05Z"), r.Reason)
 	}
 }

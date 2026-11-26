@@ -5321,6 +5321,11 @@ class MachineLogin(Base):
     replace the person who last changed an agent definition or handed over
     a runbook run. ``tenant_id`` has no foreign key: an MCP call notes the
     login before any other write of the tenant.
+
+    ``client_id`` is the name MEHO shows for the login, for example
+    ``agent:<name>`` for an agent. The block list reads it: a block of that
+    name also holds for the login id (:mod:`meho_backplane.auth.principal_block`).
+    It is ``NULL`` for a login whose token carries no client id.
     """
 
     __tablename__ = "machine_login"
@@ -5328,11 +5333,14 @@ class MachineLogin(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True)
     sub: Mapped[str] = mapped_column(Text, primary_key=True)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
+    client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+
+    __table_args__ = (Index("machine_login_client_id_idx", "client_id"),)
 
 
 class PrincipalBlock(Base):

@@ -4,10 +4,10 @@
 <form class="space-y-4 max-w-xl" method="post" action="/ui/blocked-people" aria-label="Block a person">
   {% include "principal_blocks/_hidden.html" %}
   <label class="block space-y-1">
-    <span class="text-sm font-medium">Login id</span>
+    <span class="text-sm font-medium">Login id or agent name</span>
     <input type="text" name="sub" value="{{ values.get('sub', '') }}" required maxlength="255" class="input w-full font-mono{% if errors.get('sub') %} input-error{% endif %}" />
     {% if errors.get('sub') %}<span class="block text-error text-xs" role="alert" data-error-for="sub">{{ errors['sub'] }}</span>{% endif %}
-    <span class="block text-xs text-subtle">The exact login id (the <span class="font-mono">sub</span>) of the person.</span>
+    <span class="block text-xs text-subtle">The exact login id (the <span class="font-mono">sub</span>) of the person, or the agent name from the agent list (<span class="font-mono">agent:&lt;name&gt;</span>). A block of an agent name stops every token of that agent.</span>
   </label>
   <label class="block space-y-1">
     <span class="text-sm font-medium">Reason</span>

@@ -2,8 +2,29 @@
 
 ## Overview
 
-An admin can block a person in MEHO. MEHO then refuses every request of
-that login within 5 seconds, on every MEHO process.
+An admin can block a person or an agent in MEHO. MEHO then refuses every
+request of that login within 5 seconds, on every MEHO process.
+
+What a block names:
+
+- A login id (the token's `sub`), of a person or of a machine login.
+- The name MEHO shows for an agent: `agent:<name>`, the
+  `keycloak_client_id` of the agent list (REST and console). The block
+  holds for every token of that agent, the one in use and every new one.
+  The token check compares the token's client id too (`login_name` in
+  `auth/principal_block.py`). The list that each process keeps also holds
+  every login id that MEHO saw with that client id
+  (`machine_login.client_id`), so a check that knows only the login id
+  refuses the agent too: an approved call it asked for, a running call,
+  a step of a multi-step operation.
+- An agent name must name an agent registered in the admin's reach (the
+  own tenant, or every tenant for a platform admin), also a revoked one.
+  Else MEHO answers 422 `unknown_login` with a plain sentence and stores
+  no block. The short name of an agent (`probe-bot` instead of
+  `agent:probe-bot`) gets the same answer, and the sentence names the
+  login name to use.
+- The block answer and the list name the agent (`agent`) for a block of
+  an agent name, and for a block of a login id that MEHO saw as an agent.
 
 MEHO checks sign-in tokens itself, with no question to the login server
 for each request. A person who is disabled in the login server keeps
@@ -59,14 +80,19 @@ To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
 end the person's sessions and long logins.
 
-A blocked person reads: "This person is blocked in MEHO. Ask an admin."
+A blocked login reads: "This login is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
 
 ## Key types
 
 - Table `principal_block` (`PrincipalBlock`, migration `0186`): one row
-  for each `(sub, scope)`. `scope` is `*` or the tenant id. It holds the
-  reason, the admin's `sub` and the time.
+  for each `(sub, scope)`. `sub` is a login id or an agent name. `scope`
+  is `*` or the tenant id. It holds the reason, the admin's `sub` and the
+  time.
+- Column `machine_login.client_id` (migration `0189`): the client id that
+  MEHO saw with a machine login id. `note_machine_login`
+  (`auth/machine_logins.py`) writes it on each REST and MCP call of the
+  login, and on the start of a hosted agent run.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,
   and `block_principal`, `unblock_principal`, `list_blocked`.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
@@ -176,8 +202,9 @@ REST routes (`/api/v1/principals/blocked`):
 
 - `GET`: the list. A platform admin sees every block, a tenant admin sees
   the blocks of their tenant.
-- `POST` with `{"sub", "reason"}`: block. A second block in the same
-  scope updates the reason.
+- `POST` with `{"sub", "reason"}`: block. `sub` is a login id or an agent
+  name. A second block in the same scope updates the reason. 422
+  `unknown_login` for an agent name MEHO does not know.
 - `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
   every block of the login, but on their own login only the block of the
   current tenant. A tenant admin removes the block of their tenant. 404
@@ -200,8 +227,8 @@ On a 401 with the challenge, `unblock` opens the browser approval sign-in
 that token; the token stays in memory for this one run.
 
 Console: the page `/ui/blocked-people` lists the blocks the admin may see
-(login id, tenant, reason, who blocked, when), blocks a login with a
-reason, and unblocks a login after a confirm step. It calls the same
+(login id, agent, tenant, reason, who blocked, when), blocks a login id
+or an agent name with a reason, and unblocks a login after a confirm step. It calls the same
 functions as the REST routes, so the rules are the same: only a person
 with `tenant_admin` may open the page or send a form (403 for anyone
 else), a tenant admin works in their own tenant, a platform admin in

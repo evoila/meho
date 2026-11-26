@@ -23,7 +23,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.auth.principal_block import PrincipalBlockUnavailableError, reset_block_cache
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, PrincipalBlock
+from meho_backplane.db.models import AgentPrincipal, AuditLog, PrincipalBlock
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth.tenant import save_session_tenant
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRFMiddleware, mint_csrf_token
@@ -575,4 +575,66 @@ def test_a_form_without_the_csrf_token_is_refused() -> None:
     finally:
         mock.stop()
     assert response.status_code == 403
+    assert _block_rows() == []
+
+
+_AGENT = "agent:page-bot"
+
+
+def _seed_agent() -> None:
+    async def _do() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                AgentPrincipal(
+                    tenant_id=_TENANT_A,
+                    name="page-bot",
+                    keycloak_client_id=_AGENT,
+                    keycloak_internal_id="client-internal-id",
+                    owner_sub="owner-person",
+                    created_by_sub="owner-person",
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def test_page_blocks_an_agent_by_its_name_lists_the_name_and_unblocks_it() -> None:
+    _tenants()
+    _seed_agent()
+    client, mock, csrf = _client()
+    try:
+        blocked = client.post(
+            _PAGE, data={"sub": _AGENT, "reason": "agent revoked"}, headers=_csrf_headers(csrf)
+        )
+        refused_now = asyncio.run(
+            principal_block.is_principal_blocked("agent-login-id", _TENANT_A, client_id=_AGENT)
+        )
+        listed = client.get(_PAGE)
+        confirm = client.post(_UNBLOCK, data={"sub": _AGENT}, headers=_csrf_headers(csrf))
+        unblocked = client.post(_UNBLOCK, data=_confirmed(_AGENT), headers=_csrf_headers(csrf))
+        works_again = not asyncio.run(
+            principal_block.is_principal_blocked("agent-login-id", _TENANT_A, client_id=_AGENT)
+        )
+    finally:
+        mock.stop()
+    assert blocked.status_code == 303, blocked.text
+    assert refused_now
+    assert f"data-blocked-agent>{_AGENT}</td>" in listed.text
+    assert confirm.status_code == 200
+    assert unblocked.status_code == 303
+    assert works_again
+    assert _block_rows() == []
+
+
+def test_page_refuses_an_unknown_agent_name_with_a_plain_sentence() -> None:
+    _tenants()
+    client, mock, csrf = _client()
+    try:
+        response = client.post(
+            _PAGE, data={"sub": "agent:nobody", "reason": "typo"}, headers=_csrf_headers(csrf)
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 422
+    assert "MEHO knows no agent with the login name agent:nobody." in response.text
     assert _block_rows() == []

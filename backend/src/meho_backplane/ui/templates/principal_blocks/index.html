@@ -8,7 +8,7 @@
   <header class="max-w-3xl space-y-1">
     <h1 class="text-2xl font-semibold">Blocked people</h1>
     <p class="text-sm text-muted">
-      MEHO refuses every request of a blocked person within a few seconds. A platform admin blocks and unblocks a person in every tenant. A tenant admin blocks and unblocks a person in their own tenant.
+      MEHO refuses every request of a blocked person within a few seconds. To stop an agent, block the agent name from the agent list. A platform admin blocks and unblocks a person in every tenant. A tenant admin blocks and unblocks a person in their own tenant.
     </p>
   </header>
 
@@ -24,12 +24,13 @@
     <div class="overflow-x-auto rounded-box border border-base-300">
       <table class="table table-sm">
         <thead><tr>
-          <th>Login id</th><th>Tenant</th><th>Reason</th><th>Blocked by</th><th>Blocked at</th><th><span class="sr-only">Actions</span></th>
+          <th>Login id</th><th>Agent</th><th>Tenant</th><th>Reason</th><th>Blocked by</th><th>Blocked at</th><th><span class="sr-only">Actions</span></th>
         </tr></thead>
         <tbody>
           {% for person in blocked %}
             <tr data-blocked-sub="{{ person.sub }}">
               <td class="max-w-xs break-all font-mono text-xs">{{ person.sub }}</td>
+              <td class="max-w-xs break-all font-mono text-xs" data-blocked-agent>{{ person.agent or "" }}</td>
               <td class="max-w-xs break-all text-xs">{% if person.scope == scope_all %}All tenants{% else %}<span class="font-mono">{{ person.scope }}</span>{% endif %}</td>
               <td class="max-w-md break-words text-xs">{{ person.reason }}</td>
               <td class="max-w-xs break-all font-mono text-xs">{{ person.blocked_by_sub }}</td>
@@ -51,7 +52,7 @@
               </td>
             </tr>
           {% else %}
-            <tr><td colspan="6" class="py-8 text-center text-muted">Nobody is blocked.</td></tr>
+            <tr><td colspan="7" class="py-8 text-center text-muted">Nobody is blocked.</td></tr>
           {% endfor %}
         </tbody>
       </table>

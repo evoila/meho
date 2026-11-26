@@ -1184,6 +1184,13 @@ person (the console's live stream and `GET /api/v1/feed`) ends within
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks.
 
+**To stop an agent at once:** a revoked agent's token keeps working until
+it ends. Block the agent in MEHO by the name the agent list shows:
+`meho principal block agent:<name> --reason "<why>"`. MEHO then refuses
+every token of that agent, the one in use and every new one. MEHO refuses
+a block of an agent name it does not know. `meho principal unblock
+agent:<name>` removes the block.
+
 Who blocks whom:
 
 - A tenant admin blocks a person in their own tenant.

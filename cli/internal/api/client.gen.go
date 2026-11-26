@@ -1660,9 +1660,11 @@ type AgentPrincipalListResponse struct {
 
 // AgentPrincipalRead Row representation returned by every accessor.
 type AgentPrincipalRead struct {
-	CreatedAt          time.Time          `json:"created_at"`
-	CreatedBySub       string             `json:"created_by_sub"`
-	Id                 openapi_types.UUID `json:"id"`
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	Id           openapi_types.UUID `json:"id"`
+
+	// KeycloakClientId The login name of the agent (agent:<name>). A block of this name (POST /api/v1/principals/blocked) stops every token of the agent.
 	KeycloakClientId   string             `json:"keycloak_client_id"`
 	KeycloakInternalId string             `json:"keycloak_internal_id"`
 	Name               string             `json:"name"`
@@ -2816,7 +2818,9 @@ type BackendReadiness struct {
 // BlockCreate Body of “POST /api/v1/principals/blocked“.
 type BlockCreate struct {
 	Reason string `json:"reason"`
-	Sub    string `json:"sub"`
+
+	// Sub The login id (sub), or the agent name agent:<name> from the agent list.
+	Sub string `json:"sub"`
 }
 
 // BlockListResponse Response of “GET /api/v1/principals/blocked“.
@@ -2826,6 +2830,8 @@ type BlockListResponse struct {
 
 // BlockRead One block of the list.
 type BlockRead struct {
+	// Agent The agent name (agent:<name>) of the blocked login, when it is an agent.
+	Agent        *string   `json:"agent"`
 	BlockedAt    time.Time `json:"blocked_at"`
 	BlockedBySub string    `json:"blocked_by_sub"`
 	Reason       string    `json:"reason"`

@@ -64,15 +64,22 @@ version. It stops with exit code 2 when:
   "no", none of these calls is sent.
 - Check 11 starts a run of the sensor `CPC_SENSOR_ID`.
 - At the start it reads the login of each token (one GET with its own
-  request id, then the audit row of that GET), the overrides, the answer
-  for the operation of check 4 and the approvers of check 5.
+  request id, then the audit row of that GET), the overrides
+  (`GET /api/v1/connectors/operation-overrides`) and the tenant's policy
+  file (`GET /api/v1/policy/export?scope=tenant`).
+- Each run makes a new work reference (`custom-policy-check-<random>`).
+  Every call of the run sends it: the `Meho-Work-Ref` header on REST and
+  MCP, and `--work-ref` for `meho`. So each request of the run carries it
+  (`work_ref`).
 - Many calls wait for approval. The script keeps a list of each request it
   made and the login that made it. At the end, and when it stops early (an
   error, Ctrl-C or a stop signal), it withdraws each request that still
   waits, with that login (`POST /api/v1/approvals/{id}/withdraw`). Then it
   reads the waiting requests (`GET /api/v1/approvals`) and withdraws each
-  one of its own logins made since the start, so a request of a call that
-  a stop cut off is taken back too.
+  one with this run's work reference, so a request of a call that a stop
+  cut off is taken back too. A waiting request of one of its logins
+  without this run's work reference is never withdrawn: it was made in
+  another session, and the script prints one `[note]` line for it.
 - A request stays on the list until its state is read. When the state
   cannot be read, or the withdraw does not answer 200, the script prints
   `[left] request <id> (sent with <login>): ...`, and the run ends with
@@ -82,8 +89,19 @@ version. It stops with exit code 2 when:
   custom role of check 5, the lowering of check 6, and an override of
   `CPC_OP_WRITE` left by check 8 or 9. A step that did not run is not
   named; with no person step done there is no question. An override that
-  was there before the run is set back to its earlier level, not removed.
-  Then the script reads back each one against the state at the start.
+  was there before the run is set back to how it was, not removed.
+  Then the script reads back each one against the state at the start:
+  - the overrides of each operation, by scope (install or tenant), risk
+    level and approval setting. Any difference prints a `[left]` line;
+  - the agent rule and the custom role, in the tenant's policy file: a file
+    that is not as it was at the start prints a `[left]` line. When the file
+    cannot be read at the start or at the end, the script prints
+    `[left] <name>: removal not confirmed`. It never takes an explain
+    answer as proof that they are gone.
+- When the overrides cannot be read at the start, the person steps that
+  edit an override (checks 1, 6, 8 and 9) print `not run: the overrides
+  could not be read at the start`, and nobody is asked to edit or remove
+  an override.
 - Last, a person turns the switch off. The install ends with the switch off.
 
 ## Person steps and `[skip]` lines
@@ -243,7 +261,8 @@ was checked by a run is in the pull request of the script.
   preview hash of each delete, the clean-up, a call without a target, a run
   with no terminal (no destructive call, root command or delete is sent,
   and no take-back question), a stopped run (a request found in the queue
-  is withdrawn), and a request from before the run that is never
-  withdrawn.
+  is withdrawn), a request from before the run that is never withdrawn,
+  one work reference on every call, and a request of the same Operator
+  from another session that still waits after the run.
 
 The CI workflow `linux-server-test.yml` runs both, in its job "Run the tests of the custom policy check script".

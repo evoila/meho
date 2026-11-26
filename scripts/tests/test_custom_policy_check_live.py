@@ -21,7 +21,9 @@ from typing import Any, ClassVar
 
 from custom_policy_check_fixture import (
     BACKPLANE,
+    FAR_FUTURE,
     OPS,
+    WORK_REF,
     LiveRun,
     good_answers,
     ready,
@@ -157,6 +159,22 @@ class FullLiveRunTest(LiveTestCase):
             if entry["prog"] == "meho":
                 self.assertNotIn("approvals", entry["argv"])
 
+    def test_every_call_carries_one_new_work_reference(self) -> None:
+        refs = set()
+        for entry in self.full_calls:
+            argv = entry["argv"]
+            if entry["prog"] == "curl":
+                headers = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-H"]
+                found = [h.split(" ", 1)[1] for h in headers if h.startswith("Meho-Work-Ref: ")]
+            else:
+                found = [argv[argv.index("--work-ref") + 1]] if "--work-ref" in argv else []
+            self.assertEqual(len(found), 1, entry)
+            refs.add(found[0])
+        self.assertEqual(len(refs), 1, refs)
+        ref = refs.pop()
+        self.assertRegex(ref, r"^custom-policy-check-[0-9a-f]{16}$")
+        self.assertIn(f"[note] this run's work reference: {ref}", self.full_run.stdout)
+
     def test_withdraws_each_waiting_request_with_the_login_that_made_it(self) -> None:
         withdrawn = {}
         for entry in self.full_calls:
@@ -219,6 +237,7 @@ class NoTerminalTest(LiveTestCase):
                     "id": "req-cut",
                     "principal_sub": "operator-1",
                     "created_at": "2999-01-01T00:00:00Z",
+                    "work_ref": WORK_REF,
                 }
             ],
         }
@@ -229,6 +248,27 @@ class NoTerminalTest(LiveTestCase):
         cut = [c for c in self.live.calls() if (c.get("url") or "").endswith("/req-cut/withdraw")]
         self.assertEqual(len(cut), 1)
         self.assertEqual(cut[0]["auth"], token_hash(self.live.tokens["CPC_PERSON_TOKEN"]))
+
+    def test_a_request_of_the_same_operator_in_another_session_still_waits(self) -> None:
+        answers = good_answers()
+        answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {"id": "req-session", "principal_sub": "operator-1", "created_at": FAR_FUTURE},
+                {"id": "req-cut", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
+                 "work_ref": WORK_REF},
+            ],
+        }  # fmt: skip
+        answers["withdraw-req-cut-status"] = {"code": 200, "body": {"status": "pending"}}
+        answers["withdraw-req-cut"] = {"code": 200, "body": {"status": "withdrawn"}}
+        result = self.live.run(answers)
+        urls = [c.get("url") or "" for c in self.live.calls()]
+        self.assertFalse([u for u in urls if "req-session" in u], urls)
+        withdrawn = {u.split("/")[-2] for u in urls if u.endswith("/withdraw")}
+        self.assertIn("req-cut", withdrawn)
+        self.assertIn("req-3", withdrawn)
+        self.assertLessEqual(withdrawn - {"req-cut"}, set(waiting_requests()))
+        self.assertIn("[note] request req-session of PERSON_TOKEN waits", result.stdout)
 
     def test_a_reused_request_is_never_withdrawn(self) -> None:
         answers = good_answers()

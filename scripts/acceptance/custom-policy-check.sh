@@ -72,10 +72,14 @@ What it does:
   (extras.approval_request_reused), the check fails, and the script never
   asks anyone to approve that request and never withdraws it.
 
-  It takes back only what this run made: each request of its own logins
-  made since the start, and each person step that was done. A request
-  whose state cannot be read, or that cannot be withdrawn, prints a
-  [left] line with its id and its login.
+  It takes back only what this run made: each request that carries this
+  run's work reference (every call sends it: the Meho-Work-Ref header, and
+  --work-ref for meho), and each person step that was done. A waiting
+  request of its logins without that reference stays, with a [note] line.
+  A request whose state cannot be read, or that cannot be withdrawn, prints
+  a [left] line with its id and its login. So does an override, the agent
+  rule or the role whose removal it cannot confirm. When the overrides
+  cannot be read at the start, the person steps that edit one do not run.
 
   A step that needs a person in the web console prints what to do and asks
   "Is it done?". With no terminal, or when the person answers no, it prints
@@ -231,6 +235,16 @@ waits_for() { check_skip "$1: not run: waits for the person step $2"; }
 
 WORK="$(mktemp -d)"
 REQUESTS=()
+
+# The work reference of this run: new for each run. Every call sends it (the
+# Meho-Work-Ref header, and --work-ref for meho), so each request that this
+# run makes carries it, and the clean-up withdraws only those requests. A dry
+# run uses "@work-ref".
+if [[ -n "$DRY_DIR" ]]; then
+    WORK_REF="@work-ref"
+else
+    WORK_REF="custom-policy-check-$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+fi
 RUN_START=""
 RUN_START_EXACT=""
 TAKEN_BACK=""
@@ -261,6 +275,7 @@ trap 'exit 143' TERM
 
 REPLY_CODE=""
 REPLY_BODY=""
+REPLY_TEXT=""  # the body as text, for an answer that is not JSON (rest only)
 REST_HEADER=""
 
 # with_request_id STEP: the next rest call sends an X-Request-Id, so its own
@@ -287,9 +302,11 @@ recorded() {
     if [[ -f "$file" ]]; then
         REPLY_CODE="$(jq -r '.code // 0' "$file")"
         REPLY_BODY="$(jq -c '.body' "$file")"
+        REPLY_TEXT="$(jq -r 'if (.body | type) == "string" then .body else (.body | tojson) end' "$file")"
     else
         REPLY_CODE=0
         REPLY_BODY=null
+        REPLY_TEXT=""
     fi
 }
 
@@ -306,7 +323,8 @@ rest() {
     if [[ -n "$DRY_DIR" ]]; then recorded "$step"; return 0; fi
     local out="$WORK/out" data="$WORK/data" args
     rm -f "$out"
-    args=(-sS -o "$out" -w '%{http_code}' -X "$method" -H "Content-Type: $ctype")
+    args=(-sS -o "$out" -w '%{http_code}' -X "$method" -H "Content-Type: $ctype"
+        -H "Meho-Work-Ref: $WORK_REF")
     [[ -n "$REST_HEADER" ]] && args+=(-H "$REST_HEADER")
     if [[ -n "$body" ]]; then
         printf '%s' "$body" >"$data"
@@ -315,6 +333,7 @@ rest() {
     REPLY_CODE="$(curl "${args[@]}" -H @<(auth_header "$token_name") "$BACKPLANE$path" 2>/dev/null)" \
         || REPLY_CODE=000
     read_out "$out"
+    REPLY_TEXT="$(cat "$out" 2>/dev/null || true)"
 }
 
 # get_open STEP PATH [TOKEN_NAME]: a GET of a route that needs no login.
@@ -325,11 +344,11 @@ get_open() {
     local out="$WORK/out"
     rm -f "$out"
     if [[ -n "$token_name" && -n "${!token_name:-}" ]]; then
-        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H @<(auth_header "$token_name") \
-            "$BACKPLANE$path" 2>/dev/null)" || REPLY_CODE=000
+        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $WORK_REF" \
+            -H @<(auth_header "$token_name") "$BACKPLANE$path" 2>/dev/null)" || REPLY_CODE=000
     else
-        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' "$BACKPLANE$path" 2>/dev/null)" \
-            || REPLY_CODE=000
+        REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -H "Meho-Work-Ref: $WORK_REF" \
+            "$BACKPLANE$path" 2>/dev/null)" || REPLY_CODE=000
     fi
     read_out "$out"
 }
@@ -345,13 +364,13 @@ mcp() {
     rm -f "$headers" "$out"
     printf '%s' "$MCP_INIT" >"$data"
     curl -sS -o /dev/null -D "$headers" -X POST -H 'Content-Type: application/json' \
-        -H @<(auth_header "$token_name") --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null || true
+        -H "Meho-Work-Ref: $WORK_REF" -H @<(auth_header "$token_name") --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null || true
     session="$(awk 'tolower($1) == "mcp-session-id:" {print $2}' "$headers" 2>/dev/null | tr -d '\r')"
     printf '%s' "$arguments" | jq -c --arg t "$tool" \
         '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$t,arguments:.}}' >"$data"
     REPLY_CODE="$(curl -sS -o "$out" -w '%{http_code}' -X POST \
         -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2025-06-18' \
-        ${session:+-H "Mcp-Session-Id: $session"} \
+        -H "Meho-Work-Ref: $WORK_REF" ${session:+-H "Mcp-Session-Id: $session"} \
         -H @<(auth_header "$token_name") \
         --data-binary "@$data" "$BACKPLANE/mcp" 2>/dev/null)" || REPLY_CODE=000
     REPLY_BODY="$(jq -c '.result.structuredContent // (.result.content[0].text | fromjson? ) // .' \
@@ -443,7 +462,7 @@ meho_cli() {
     if [[ -n "$DRY_DIR" ]]; then recorded "$step"; return 0; fi
     local out="$WORK/cli"
     REPLY_CODE=0
-    meho "$@" --backplane "$BACKPLANE" >"$out" 2>/dev/null || REPLY_CODE=$?
+    meho "$@" --work-ref "$WORK_REF" --backplane "$BACKPLANE" >"$out" 2>/dev/null || REPLY_CODE=$?
     read_out "$out"
 }
 
@@ -883,8 +902,17 @@ edit_rows() {
         '[.[] | select((.path // "") == "meho_connector_edit_op" and (.payload.op_id // "") == $o)]' <<<"$ROWS")"
 }
 
+# overrides_known LINE: 0 when the overrides were read at the start. Else a
+# person step that edits an override does not run: it prints [skip] LINE.
+overrides_known() {
+    [[ "$BEFORE_OVERRIDES" != null ]] && return 0
+    check_skip "$1: not run: the overrides could not be read at the start"
+    return 1
+}
+
 check_1() {
     local since op connector
+    overrides_known "check 1 (an Admin and an Operator, persons, web console)" || return 0
     since="$(now_iso)"
     op="$(op_part CPC_OP_LOWERED 2)"; connector="$(op_part CPC_OP_LOWERED 1)"
     if ! person p1 "Check 1. As an Admin, in the web console, lower $(op_label CPC_OP_LOWERED) from dangerous to caution. Give a reason and sign in again when MEHO asks. Then, as the Operator of CPC_PERSON_TOKEN, in the web console, run $(op_label CPC_OP_LOWERED)."; then
@@ -1035,6 +1063,7 @@ check_6_guarded() {
     expect_previewed c6-delete-grant rest CPC_DELETE_GRANT_TOKEN CPC_OP_DELETE "6 delete" \
         "a service login with a delete grant, a service agent" REST runs "standing_grant:sandbox_delete_grant" service_agent || true
 
+    overrides_known "$who_lowered" || return 0
     if ! person p6-lower "Check 6. As an Admin, in the web console, lower $(op_label CPC_OP_DELETE) by one risk level, with a reason and a fresh sign-in."; then
         needs_person "check 6 delete lowering (an Admin, a person, web console)"
         waits_for "$who_lowered" 6
@@ -1134,6 +1163,7 @@ console_edit_rows() {
 
 check_8_console() {
     local since
+    overrides_known "check 8 (an Admin, a person, web console)" || return 0
     since="$(now_iso)"
     if ! person p8 "Check 8. As the Admin of CPC_ADMIN_TOKEN, in the web console, try to lower $(op_label CPC_OP_WRITE) (a write) to safe, with a reason and a fresh sign-in. MEHO must refuse it."; then
         needs_person "check 8 (an Admin, a person, web console)"
@@ -1190,6 +1220,7 @@ check_8() {
 
 check_9() {
     local since
+    overrides_known "check 9 (an Admin, a person, web console)" || return 0
     since="$(now_iso)"
     if ! person p9 "Check 9. As an Admin whose sign-in is older than the fresh sign-in time, in the web console: raise $(op_label CPC_OP_WRITE) to dangerous, then remove that override again."; then
         needs_person "check 9 (an Admin, a person, web console)"
@@ -1375,9 +1406,11 @@ withdraw_one() {
 }
 
 # Withdraw each request of this run that still waits, with the login that
-# made it. Then read the queue: a waiting request of one of the script's
-# logins, made since the run started, is this run's too (a call that a stop
-# cut off); it is withdrawn as well.
+# made it. Then read the queue: a waiting request with this run's work
+# reference is this run's too (a call that a stop cut off); it is withdrawn
+# as well. A waiting request of one of the script's logins, made since the
+# run started, without this run's work reference is another session's: it
+# stays, with one [note] line.
 withdraw_requests() {
     TAKEN_BACK=yes
     local entry request token_name _rest done_ids=" "
@@ -1393,13 +1426,26 @@ withdraw_requests() {
         left "the waiting requests of the script's logins: could not read the queue, HTTP $REPLY_CODE"
         return
     fi
-    local queue line sub
-    queue="$(jq -r --arg s "$RUN_START_EXACT" \
-        '.[]? | select(((.created_at // "") | .[0:19]) >= $s) | "\(.id) \(.principal_sub)"' \
+    local queue sub ref since
+    queue="$(jq -r --arg s "$RUN_START_EXACT" --arg w "$WORK_REF" \
+        '.[]? | select((.work_ref // "") == $w or ((.created_at // "") | .[0:19]) >= $s)
+         | [.id, (.principal_sub // ""), (.work_ref // ""), ((.created_at // "") | .[0:19] >= $s | tostring)]
+         | map(if . == "" then "-" else . end) | @tsv' \
         <<<"$REPLY_BODY" 2>/dev/null || true)"
-    while read -r request sub; do
-        [[ -n "$request" && "$done_ids" != *" $request "* ]] || continue
-        token_name="$(token_of_sub "$sub")" || continue
+    while IFS=$'\t' read -r request sub ref since; do
+        [[ -n "$request" && "$request" != - && "$done_ids" != *" $request "* ]] || continue
+        [[ "$sub" == - ]] && sub=""
+        [[ "$ref" == - ]] && ref=""
+        if [[ "$ref" != "$WORK_REF" ]]; then
+            if [[ "$since" == true ]] && token_name="$(token_of_sub "$sub")"; then
+                note "request $request of ${token_name#CPC_} waits, but it does not carry this run's work reference (it has ${ref:-none}); it stays"
+            fi
+            continue
+        fi
+        if ! token_name="$(token_of_sub "$sub")"; then
+            left "request $request (work reference of this run, login ${sub:-unknown}): not withdrawn, the login is none of the script's"
+            continue
+        fi
         withdraw_one "$request" "$token_name"
     done <<<"$queue"
 }
@@ -1417,22 +1463,42 @@ took_back_later() {
 }
 
 # The state before the run, so the take-back keeps what was there before:
-# the override of each operation an Admin edits in the checks, the answer of
-# the agent rule's operation, and who may approve on the approver connector.
-BEFORE_OVERRIDES="null"; BEFORE_AGENT_RULE=""; BEFORE_APPROVERS=""
+# the overrides of the operations an Admin edits in the checks, and the
+# tenant's policy file, which holds the agent rule of check 4 and the
+# approval routing of the custom role of check 5.
+BEFORE_OVERRIDES="null"; BEFORE_POLICY=""; BEFORE_POLICY_READ=""
 read_state_before() {
     rest before-overrides GET /api/v1/connectors/operation-overrides CPC_ADMIN_TOKEN
-    [[ "$REPLY_CODE" == 200 ]] && BEFORE_OVERRIDES="$REPLY_BODY"
-    explain before-agent-rule CPC_PERSON_TOKEN CPC_OP_AGENT_RULE token
-    [[ "$REPLY_CODE" == 200 ]] && BEFORE_AGENT_RULE="$(jq -r '.answer // ""' <<<"$REPLY_BODY")"
-    explain before-role CPC_ADMIN_TOKEN CPC_OP_APPROVER token
-    [[ "$REPLY_CODE" == 200 ]] && BEFORE_APPROVERS="$(jq -cS '.approvers.groups // [] | sort' <<<"$REPLY_BODY")"
+    if [[ "$REPLY_CODE" == 200 ]] && jq -e '.overrides | type == "array"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
+        BEFORE_OVERRIDES="$REPLY_BODY"
+    else
+        note "the overrides could not be read at the start (HTTP $REPLY_CODE); the person steps that edit an override do not run"
+    fi
+    policy_file before-policy-file
+    BEFORE_POLICY="$POLICY_TEXT"; BEFORE_POLICY_READ="$POLICY_READ"
     return 0
 }
 
-override_of() { # override_of OVERRIDES_JSON OP_VAR: the safety level of its override, or "none"
+# policy_file STEP: the tenant's policy file as text. Sets POLICY_TEXT, and
+# POLICY_READ to yes when it was read.
+POLICY_TEXT=""; POLICY_READ=""
+policy_file() {
+    rest "$1" GET "/api/v1/policy/export?scope=tenant" CPC_ADMIN_TOKEN
+    POLICY_TEXT=""; POLICY_READ=""
+    if [[ "$REPLY_CODE" == 200 && -n "$REPLY_TEXT" ]]; then
+        POLICY_TEXT="$REPLY_TEXT"; POLICY_READ=yes
+    fi
+    return 0
+}
+
+# overrides_of OVERRIDES_JSON OP_VAR: each override of the operation, by
+# scope (install or tenant), risk level and approval setting, sorted; or
+# "none".
+overrides_of() {
     jq -r --arg o "$(op_part "$2" 2)" --arg c "$(op_part "$2" 1)" \
-        '[.overrides[]? | select(.op_id == $o and .connector_id == $c) | .safety_level][0] // "none"' \
+        '[.overrides[]? | select(.op_id == $o and .connector_id == $c)
+          | "\(.scope // "unknown scope") \(.safety_level // "no level"), approval \(if .requires_approval == null then "not set" else (.requires_approval | tostring) end)"]
+         | sort | if length == 0 then "none" else join("; ") end' \
         <<<"$1" 2>/dev/null || echo unreadable
 }
 
@@ -1441,47 +1507,44 @@ take_back_text() { # the person's task for one entry of TAKE_BACK
     IFS='|' read -r kind label op_var <<<"$1"
     case "$kind" in
         override)
-            before="$(override_of "$BEFORE_OVERRIDES" "$op_var")"
+            before="$(overrides_of "$BEFORE_OVERRIDES" "$op_var")"
             if [[ "$before" == none ]]; then
                 printf '%s: remove any override of %s that it left' "$label" "$(op_label "$op_var")"
             else
-                printf '%s: set the override of %s back to %s, as it was before the run' "$label" "$(op_label "$op_var")" "$before"
+                printf '%s: set the overrides of %s back to how they were before the run (%s)' "$label" "$(op_label "$op_var")" "$before"
             fi ;;
         *) printf 'remove %s' "$label" ;;
     esac
 }
 
-# Read back one entry of TAKE_BACK: a [left] line when it is still there.
+# Read back one entry of TAKE_BACK: a [left] line when it is still there, or
+# when its removal cannot be confirmed. The agent rule and the role are read
+# from the tenant's policy file, never from an explain answer.
 read_back() {
-    local kind label op_var now
+    local kind label op_var now before
     IFS='|' read -r kind label op_var <<<"$1"
     case "$kind" in
         override)
-            if [[ "$BEFORE_OVERRIDES" == null || "$TAKEBACK_OVERRIDES" == null ]]; then
-                left "$label: the overrides could not be read"
+            if [[ "$TAKEBACK_OVERRIDES" == null ]]; then
+                left "$label: removal not confirmed: the overrides could not be read"
                 return
             fi
-            now="$(override_of "$TAKEBACK_OVERRIDES" "$op_var")"
-            [[ "$now" == "$(override_of "$BEFORE_OVERRIDES" "$op_var")" ]] \
-                || left "$label: still there (override $now, before the run $(override_of "$BEFORE_OVERRIDES" "$op_var"))" ;;
-        agent_rule)
-            explain takeback-agent-rule CPC_PERSON_TOKEN CPC_OP_AGENT_RULE token
-            now="$(jq -r '.answer // "none"' <<<"$REPLY_BODY" 2>/dev/null || echo none)"
-            if [[ "$REPLY_CODE" != 200 || -z "$BEFORE_AGENT_RULE" || "$now" != "$BEFORE_AGENT_RULE" ]]; then
-                left "$label: still there or not readable (the Operator's token gets $now for $(op_label CPC_OP_AGENT_RULE), before the run ${BEFORE_AGENT_RULE:-none})"
-            fi ;;
-        role)
-            explain takeback-role CPC_ADMIN_TOKEN CPC_OP_APPROVER token
-            now="$(jq -cS '.approvers.groups // [] | sort' <<<"$REPLY_BODY" 2>/dev/null || echo none)"
-            if [[ "$REPLY_CODE" != 200 || -z "$BEFORE_APPROVERS" || "$now" != "$BEFORE_APPROVERS" ]]; then
-                left "$label: still there or not readable (approvers $now, before the run ${BEFORE_APPROVERS:-none})"
+            now="$(overrides_of "$TAKEBACK_OVERRIDES" "$op_var")"
+            before="$(overrides_of "$BEFORE_OVERRIDES" "$op_var")"
+            [[ "$now" == "$before" ]] \
+                || left "$label: not as before the run (now: $now; before the run: $before)" ;;
+        agent_rule|role)
+            if [[ -z "$BEFORE_POLICY_READ" || -z "$TAKEBACK_POLICY_READ" ]]; then
+                left "$label: removal not confirmed: the tenant's policy file could not be read"
+            elif [[ "$TAKEBACK_POLICY" != "$BEFORE_POLICY" ]]; then
+                left "$label: removal not confirmed: the tenant's policy file is not as it was before the run"
             fi ;;
     esac
 }
 
 # Ask the person to take back only what the person steps of this run added,
 # each by name, then read back each one. No person step done: no question.
-TAKEBACK_OVERRIDES="null"
+TAKEBACK_OVERRIDES="null"; TAKEBACK_POLICY=""; TAKEBACK_POLICY_READ=""
 take_back_changes() {
     [[ ${#TAKE_BACK[@]} -gt 0 ]] || return 0
     local entry text="Take back. As an Admin, in the web console:"
@@ -1493,7 +1556,11 @@ take_back_changes() {
         return
     fi
     rest takeback-overrides GET /api/v1/connectors/operation-overrides CPC_ADMIN_TOKEN
-    [[ "$REPLY_CODE" == 200 ]] && TAKEBACK_OVERRIDES="$REPLY_BODY"
+    if [[ "$REPLY_CODE" == 200 ]] && jq -e '.overrides | type == "array"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
+        TAKEBACK_OVERRIDES="$REPLY_BODY"
+    fi
+    policy_file takeback-policy-file
+    TAKEBACK_POLICY="$POLICY_TEXT"; TAKEBACK_POLICY_READ="$POLICY_READ"
     for entry in "${TAKE_BACK[@]}"; do read_back "$entry"; done
 }
 
@@ -1562,6 +1629,7 @@ note "the switch CUSTOM_POLICY is on"
 
 RUN_START_EXACT="$(now_exact)"
 RUN_START="$(now_iso)"
+note "this run's work reference: $WORK_REF"
 learn_logins
 read_state_before
 

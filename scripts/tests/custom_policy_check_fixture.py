@@ -105,6 +105,11 @@ PERSON_SUB = "operator-1"
 SENSOR_ID = "11111111-1111-4111-8111-111111111111"
 SENSOR_DUE = "2026-01-01T00:00:05.123456Z"
 FAR_FUTURE = "2999-01-01T00:00:00Z"
+#: The work reference of a dry run. The stand-in curl puts the reference that
+#: a live run sent in its place.
+WORK_REF = "@work-ref"
+#: The tenant's policy file before and after a run.
+POLICY_FILE = "policy: v1\nclassifications: []\n"
 WRITE_FLOOR_MISTAKE = (
     "`classifications[0]`: `k8s.annotate` changes something, so it stays at least caution."
 )
@@ -262,7 +267,9 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
                 {
                     "connector_id": "k8s",
                     "op_id": "k8s.scale",
+                    "scope": "tenant",
                     "safety_level": "caution",
+                    "requires_approval": None,
                     "set_at": FAR_FUTURE,
                     "set_by_sub": "admin-1",
                     "rule_ref": "",
@@ -347,11 +354,9 @@ def _end(a: dict[str, dict[str, Any]]) -> None:
           for n, s in SUBS.items())
     )  # fmt: skip
     a["before-overrides"] = {"code": 200, "body": {"overrides": []}}
-    a["before-agent-rule"] = explained()
-    a["before-role"] = explained()
+    a["before-policy-file"] = {"code": 200, "body": POLICY_FILE}
     a["takeback-overrides"] = {"code": 200, "body": {"overrides": []}}
-    a["takeback-agent-rule"] = explained()
-    a["takeback-role"] = explained()
+    a["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE}
     a["c7-ready"] = ready(False)
     with_params = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
     for i in range(1, len(PROBE_KEYS) + 1):
@@ -478,6 +483,9 @@ def request_id(match):
     path = os.path.join(folder, ".request-id-" + match.group(1))
     return open(path).read() if os.path.exists(path) else match.group(0)
 body = re.sub(r"@request-id:([A-Za-z0-9_.-]+)", request_id, body)
+for h in headers:
+    if h.lower().startswith("meho-work-ref: "):
+        body = body.replace("@work-ref", h.split(" ", 1)[1])
 if values["-o"]:
     open(values["-o"], "w").write(body)
 else:

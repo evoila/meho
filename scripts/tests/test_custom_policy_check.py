@@ -24,15 +24,16 @@ from custom_policy_check_fixture import (
     FAR_FUTURE,
     OPS,
     PARAMS,
+    POLICY_FILE,
     PROBE_KEYS,
     SCRIPT,
     SENSOR_ID,
+    WORK_REF,
     audit_id,
     base_env,
     baseline_text,
     call,
     edit_row,
-    explained,
     good_answers,
     post_row,
     preview,
@@ -813,17 +814,13 @@ class TakeBackTest(DryRunTestCase):
     def test_what_could_not_be_taken_back_is_named(self) -> None:
         self.answers["withdraw-req-3"] = {"code": 403, "body": {"detail": "not_request_sender"}}
         self.answers["takeback-overrides"] = self.answers["c1-overrides"]
-        self.answers["takeback-agent-rule"] = explained("run")
-        self.answers["takeback-role"] = {
-            "code": 200,
-            "body": {"answer": "wait", "approvers": {"groups": ["Approvers-VMW"]}},
-        }
+        self.answers["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE + "routing: []\n"}
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
         left = self.left_lines(result)
         self.assertEqual(len(left), 4, left)
         self.assertIn("request req-3 (sent with PERSON_TOKEN): not withdrawn, HTTP 403", left[0])
-        self.assertIn("the lowering of k8s.scale (check 1): still there", left[1])
+        self.assertIn("the lowering of k8s.scale (check 1): not as before the run", left[1])
         self.assertIn("the personal agent rule of check 4", left[2])
         self.assertIn("the custom role Approvers-VMW of check 5", left[3])
 
@@ -859,28 +856,122 @@ class TakeBackTest(DryRunTestCase):
 
     def test_the_override_of_check_9_is_read_back(self) -> None:
         del self.answers["p8"]
-        override = {"connector_id": "k8s", "op_id": "k8s.annotate", "safety_level": "dangerous"}
+        override = {
+            "connector_id": "k8s", "op_id": "k8s.annotate", "scope": "tenant",
+            "safety_level": "dangerous", "requires_approval": None,
+        }  # fmt: skip
         self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [override]}}
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the override of k8s.annotate (check 9): still there (override dangerous, "
-             "before the run none)"],
+            ["[left] the override of k8s.annotate (check 9): not as before the run (now: tenant "
+             "dangerous, approval not set; before the run: none)"],
         )  # fmt: skip
 
     def test_an_override_from_before_the_run_is_set_back_not_removed(self) -> None:
-        before = {"connector_id": "k8s", "op_id": "k8s.scale", "safety_level": "dangerous"}
+        before = {
+            "connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
+            "safety_level": "dangerous", "requires_approval": True,
+        }  # fmt: skip
         self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
         self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [before]}}
         result = self.run_script()
-        self.assertIn("set the override of k8s.scale back to dangerous", result.stdout)
+        self.assertIn(
+            "set the overrides of k8s.scale back to how they were before the run "
+            "(tenant dangerous, approval true)",
+            result.stdout,
+        )
         self.assertEqual(self.left_lines(result), [])
+
+    def test_a_tenant_lowering_left_next_to_an_install_override_is_named(self) -> None:
+        install = {
+            "connector_id": "k8s", "op_id": "k8s.scale", "scope": "install",
+            "safety_level": "dangerous", "requires_approval": None,
+        }  # fmt: skip
+        tenant = dict(install, scope="tenant", safety_level="caution")
+        self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [install]}}
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [install, tenant]}}
+        result = self.run_script()
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the lowering of k8s.scale (check 1): not as before the run (now: install "
+             "dangerous, approval not set; tenant caution, approval not set; before the run: "
+             "install dangerous, approval not set)"],
+        )  # fmt: skip
+        self.assertIn("1 not taken back", result.stdout)
+
+    def test_an_approval_setting_left_changed_is_named(self) -> None:
+        before = {
+            "connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
+            "safety_level": "dangerous", "requires_approval": True,
+        }  # fmt: skip
+        self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
+        after = dict(before, requires_approval=False)
+        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
+        result = self.run_script()
+        left = self.left_lines(result)
+        self.assertEqual(len(left), 1, left)
+        self.assertIn("approval false; before the run: tenant dangerous, approval true", left[0])
+
+    def test_an_override_read_that_fails_at_the_start_skips_the_four_edit_steps(self) -> None:
+        self.answers["before-overrides"] = {"code": 500, "body": {"detail": "boom"}}
+        result = self.run_script()
+        reason = "not run: the overrides could not be read at the start"
+        for line in (
+            f"[skip] check 1 (an Admin and an Operator, persons, web console): {reason}",
+            "[skip] check 6 delete after a lowering (an Operator's token, a personal agent, "
+            f"REST): {reason}",
+            f"[skip] check 8 (an Admin, a person, web console): {reason}",
+            f"[skip] check 9 (an Admin, a person, web console): {reason}",
+        ):
+            self.assertIn(line, result.stdout)
+        for asked in ("[person] Check 1.", "[person] Check 6. As an Admin", "[person] Check 8.",
+                      "[person] Check 9."):  # fmt: skip
+            self.assertNotIn(asked, result.stdout)
+        question = next(
+            x for x in result.stdout.splitlines() if x.startswith("[person] Take back.")
+        )
+        self.assertNotIn("override", question)
+        for op in ("k8s.scale", "k8s.pod.delete", "k8s.annotate"):
+            self.assertNotIn(op, question)
+        self.assertEqual(self.left_lines(result), [])
+
+    def test_a_rule_left_in_the_policy_file_is_named_although_explain_is_the_same(self) -> None:
+        del self.answers["p5-role"]
+        rule = "agents:\n  - match: {connector: k8s, op: k8s.cordon}\n    run: now\n"
+        self.answers["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE + rule}
+        result = self.run_script()
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the personal agent rule of check 4: removal not confirmed: the tenant's "
+             "policy file is not as it was before the run"],
+        )  # fmt: skip
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_a_role_that_cannot_be_read_is_not_confirmed_as_removed(self) -> None:
+        del self.answers["p4"]
+        self.answers["takeback-policy-file"] = {"code": 500, "body": {"detail": "boom"}}
+        result = self.run_script()
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the custom role Approvers-VMW of check 5: removal not confirmed: the "
+             "tenant's policy file could not be read"],
+        )  # fmt: skip
+
+    def test_a_policy_file_that_cannot_be_read_at_the_start_is_not_confirmed(self) -> None:
+        self.answers["before-policy-file"] = {"code": 403, "body": {"detail": "no"}}
+        result = self.run_script()
+        left = self.left_lines(result)
+        self.assertEqual(len(left), 2, left)
+        for line in left:
+            self.assertIn("removal not confirmed", line)
 
     def test_withdraws_a_request_of_its_own_logins_that_the_list_does_not_hold(self) -> None:
         self.answers["withdraw-queue"] = {
             "code": 200,
             "body": [
-                {"id": "req-cut", "principal_sub": "service-1", "created_at": "2026-01-01T00:00:01Z"},
+                {"id": "req-cut", "principal_sub": "service-1", "created_at": "2026-01-01T00:00:01Z",
+                 "work_ref": WORK_REF},
                 {"id": "req-other", "principal_sub": "someone-else", "created_at": "2026-01-01T00:00:01Z"},
                 {"id": "req-before", "principal_sub": "service-1", "created_at": "2025-12-31T23:59:59Z"},
             ],
@@ -892,6 +983,24 @@ class TakeBackTest(DryRunTestCase):
             self.left_lines(result),
             ["[left] request req-cut (sent with SERVICE_TOKEN): not withdrawn, HTTP 403"],
         )
+
+    def test_a_request_of_its_logins_without_this_runs_work_reference_stays(self) -> None:
+        self.answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {"id": "req-session", "principal_sub": "operator-1", "created_at": FAR_FUTURE},
+                {"id": "req-ticket", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
+                 "work_ref": "CHG0012345"},
+            ],
+        }  # fmt: skip
+        result = self.run_script()
+        self.assertIn(
+            "[note] request req-session of PERSON_TOKEN waits, but it does not carry this run's "
+            "work reference (it has none); it stays",
+            result.stdout,
+        )
+        self.assertIn("[note] request req-ticket of PERSON_TOKEN waits", result.stdout)
+        self.assertEqual(self.left_lines(result), [])
 
 
 class NoSecretsInTheScriptTest(unittest.TestCase):

@@ -687,6 +687,7 @@
   "tests/test_db_sensor_results.py": 0.41,
   "tests/test_db_targets.py": 99.7,
   "tests/test_delete_names.py": 1.67,
+  "tests/test_delete_names_add_only.py": 6.0,
   "tests/test_deploy_and_kernel_writes_wait.py": 14.38,
   "tests/test_destructive_builder_conformance.py": 0.87,
   "tests/test_destructive_preview_binding.py": 2.69,

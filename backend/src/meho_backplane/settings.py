@@ -143,21 +143,33 @@ def parse_bool_env(value: str | None) -> bool:
 #: Robot vSwitch writes sent as POST (add servers, rename or change the
 #: VLAN): each changes a private network that several servers share, so it
 #: always waits for a human, like a delete. Overridable via
-#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
+#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated). With
+#: ``CUSTOM_POLICY`` on, the setting only adds to these names.
 _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
     *DELETE_SHAPED_OP_ID_PATTERNS,
     "POST:/vswitch/*",
 )
 
 
-def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:
+def _parse_service_grant_delete_shaped_patterns(
+    raw: str, *, add_only: bool = False
+) -> tuple[str, ...]:
     """Parse the comma-separated override, falling back to the default set.
 
     An empty / whitespace-only value keeps the built-in default patterns so
     the delete-shaped guardrail never silently disappears on a blank env var.
+
+    With *add_only* (``CUSTOM_POLICY`` on) the listed names only add to the
+    built-in names: the result is every built-in name, then each listed name
+    that is not one of them. No setting can remove a built-in delete name.
     """
     parts = tuple(chunk.strip() for chunk in raw.split(",") if chunk.strip())
-    return parts or _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+    if not add_only:
+        return parts or _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+    added = (
+        p for p in dict.fromkeys(parts) if p not in _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+    )
+    return (*_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS, *added)
 
 
 #: The five MEHO login groups (``docs/decisions/login-role-groups.md``).
@@ -3323,6 +3335,9 @@ def get_settings() -> Settings:
     in code review. When the surface grows, switching to
     ``BaseSettings`` is a one-commit refactor.
     """
+    # Imported here: the switch module imports this module.
+    from meho_backplane.policy.switches import custom_policy_on_in_environment
+
     vault_namespace_env = os.environ.get("VAULT_NAMESPACE")
     broadcast_redis_url = os.environ.get("BROADCAST_REDIS_URL", "redis://localhost:6379")
     # ``or None`` collapses an empty-string env to no-auth, so an
@@ -3717,8 +3732,10 @@ def get_settings() -> Settings:
         ),
         # #3151 — delete-shaped op-id patterns never grantable to a service
         # principal. Comma-separated override; empty keeps the default set.
+        # With CUSTOM_POLICY on, the override only adds to the default set.
         service_grant_delete_shaped_patterns=_parse_service_grant_delete_shaped_patterns(
             os.environ.get("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", ""),
+            add_only=custom_policy_on_in_environment(),
         ),
         agent_run_reaper_enabled=parse_bool_env(
             os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),

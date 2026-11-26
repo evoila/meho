@@ -510,7 +510,8 @@ delete-shaped ops:
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
   default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`,
-  `POST:/vswitch/*`),
+  `POST:/vswitch/*`; with `CUSTOM_POLICY` off a set value replaces the
+  default, with it on a set value only adds to the default),
 - **by vendor action name** (#4632): an ingested op id whose last path part
   starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
   `POST:/VirtualMachine/{moId}/Destroy_Task`. The word may also follow a

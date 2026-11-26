@@ -6133,6 +6133,9 @@ service`). A person's call follows its own rule (`_person_park_reason`,
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
+With `CUSTOM_POLICY` on, the setting `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`
+only adds names to the built-in delete names and never removes one, so an
+empty setting or one with other names keeps every built-in delete name.
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
 
 ## Sandbox mode (#4622)

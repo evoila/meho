@@ -158,10 +158,10 @@ kubectl -n $NS create rolebinding $NS-installer-admin \
 umask 077
 TOKEN=$(kubectl -n $NS create token $NS-installer --duration=8h)
 KC=$W/installer.kubeconfig
+printf 'apiVersion: v1\nkind: Config\nusers:\n- name: installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
 kubectl config --kubeconfig=$KC set-cluster ocp --server="$API"
 kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > $W/cluster-ca.crt
 [ -s $W/cluster-ca.crt ] && kubectl config --kubeconfig=$KC set-cluster ocp --certificate-authority=$W/cluster-ca.crt --embed-certs=true
-kubectl config --kubeconfig=$KC set-credentials installer --token="$TOKEN"
 kubectl config --kubeconfig=$KC set-context installer --cluster=ocp --user=installer --namespace=$NS
 kubectl config --kubeconfig=$KC use-context installer
 unset TOKEN; rm -f $W/cluster-ca.crt
@@ -341,8 +341,10 @@ shell history.
 ```bash
 read -r 'PULL_USER?Pull user: ' 2>/dev/null || read -rp 'Pull user: ' PULL_USER
 read -rs 'PULL_PASSWORD?Pull password: ' 2>/dev/null || read -rsp 'Pull password: ' PULL_PASSWORD; echo
-kubectl -n $NS create secret docker-registry registry-pull \
-  --docker-server=$REG_HOST --docker-username="$PULL_USER" --docker-password="$PULL_PASSWORD"
+printf '{"auths":{"%s":{"auth":"%s"}}}' "$REG_HOST" \
+  "$(printf '%s:%s' "$PULL_USER" "$PULL_PASSWORD" | base64 | tr -d '\n')" \
+  | kubectl -n $NS create secret generic registry-pull \
+      --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
 unset PULL_USER PULL_PASSWORD
 ```
 

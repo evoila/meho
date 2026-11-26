@@ -97,9 +97,9 @@ kubectl config view --minify --raw \
   -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > cluster-ca.crt
 TOKEN=$(kubectl -n meho create token meho-installer --duration=8h)
 KC=meho-installer.kubeconfig
+printf 'apiVersion: v1\nkind: Config\nusers:\n- name: meho-installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
 kubectl config --kubeconfig=$KC set-cluster vks --server="$SERVER" \
   --certificate-authority=cluster-ca.crt --embed-certs=true
-kubectl config --kubeconfig=$KC set-credentials meho-installer --token="$TOKEN"
 kubectl config --kubeconfig=$KC set-context meho --cluster=vks --user=meho-installer --namespace=meho
 kubectl config --kubeconfig=$KC use-context meho
 unset TOKEN; rm -f cluster-ca.crt
@@ -300,10 +300,10 @@ of your shell history.
 
 ```bash
 read -rsp "Password of the pull login: " PULL_PASSWORD; echo
-kubectl -n meho create secret docker-registry registry-pull \
-  --docker-server=registry.example.com \
-  --docker-username=<pull user> \
-  --docker-password="$PULL_PASSWORD"
+printf '{"auths":{"registry.example.com":{"auth":"%s"}}}' \
+  "$(printf '%s:%s' '<pull user>' "$PULL_PASSWORD" | base64 | tr -d '\n')" \
+  | kubectl -n meho create secret generic registry-pull \
+      --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
 unset PULL_PASSWORD
 ```
 

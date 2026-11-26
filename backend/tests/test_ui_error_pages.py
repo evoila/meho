@@ -131,7 +131,7 @@ def test_the_page_does_not_echo_the_address(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     ("path", "expected"),
-    [("/api/v1/nope", 404), ("/api/v1/forbidden", 403), ("/api/v1/boom", 500)],
+    [("/api/v1/nope", 404), ("/api/v1/forbidden", 403)],
 )
 def test_a_wrong_api_address_still_returns_json_to_a_browser(
     client: TestClient, path: str, expected: int
@@ -143,6 +143,22 @@ def test_a_wrong_api_address_still_returns_json_to_a_browser(
     assert "<!doctype html>" not in response.text.lower()
     # Parsable, which is the whole point.
     assert isinstance(response.json(), dict)
+
+
+def test_an_api_500_keeps_starlettes_plain_text_body(client: TestClient) -> None:
+    """A 500 off ``/ui`` is plain text, not JSON -- the released shape.
+
+    Listed apart from the 404 and 403 above because the body differs:
+    FastAPI renders a raised ``HTTPException`` as JSON, while an
+    unhandled exception has always come back as
+    ``PlainTextResponse("Internal Server Error")``. Asserting JSON here
+    would pin a change to that contract rather than the contract.
+    """
+    response = client.get("/api/v1/boom", headers=_BROWSER)
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "Internal Server Error"
+    assert "<!doctype html>" not in response.text.lower()
 
 
 @pytest.mark.parametrize("path", ["/mcp/anything", "/.well-known/anything", "/metrics"])
@@ -241,3 +257,118 @@ def _seed_tenant_row(tenant_id: uuid.UUID) -> None:
             session.add(Tenant(id=tenant_id, slug="error-page-tenant", name="Error page"))
 
     asyncio.run(_do())
+
+
+# --------------------------------------------------------------------
+# review findings: what a console address does *not* change
+# --------------------------------------------------------------------
+
+#: A top-level browser navigation. ``Sec-Fetch-Dest: document`` is what
+#: a browser sends when it is replacing the whole page.
+_NAVIGATION = {**_BROWSER, "Sec-Fetch-Dest": "document"}
+
+
+def test_an_unhandled_error_outside_the_console_keeps_the_released_body() -> None:
+    """A 500 off ``/ui`` stays ``Internal Server Error`` as plain text.
+
+    That is what ``ServerErrorMiddleware.error_response`` has always
+    sent. Whatever reads a 500 today -- an agent, a script, a retry loop
+    -- is reading this body, so changing it is a change to a released
+    contract, not a presentation detail.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+    app.add_exception_handler(Exception, web_server_error_handler)
+
+    @app.get("/api/v1/boom")
+    async def boom() -> None:
+        raise RuntimeError("unhandled")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/boom", headers=_NAVIGATION)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "Internal Server Error"
+
+
+def test_an_htmx_caller_on_a_console_address_keeps_its_json_detail() -> None:
+    """htmx and ``fetch`` callers read the body; they must still get it.
+
+    The run console's Stop button shows a 403's ``detail`` to explain who
+    may stop another person's run. A generic page would drop that text.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/agents/runs/stop")
+    async def stop() -> None:
+        raise HTTPException(status_code=403, detail="only_the_owner_may_stop_this_run")
+
+    with TestClient(app) as client:
+        response = client.get("/ui/agents/runs/stop", headers={**_BROWSER, "HX-Request": "true"})
+
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "only_the_owner_may_stop_this_run"
+
+
+def test_a_fetch_caller_on_a_console_address_keeps_its_json_detail() -> None:
+    """Same for a plain ``fetch``: ``Sec-Fetch-Dest`` is not ``document``."""
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/memory/thing")
+    async def thing() -> None:
+        raise HTTPException(status_code=403, detail="permission_denied: not an admin")
+
+    with TestClient(app) as client:
+        response = client.get("/ui/memory/thing", headers={**_BROWSER, "Sec-Fetch-Dest": "empty"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "permission_denied: not an admin"
+
+
+def test_the_branded_page_carries_the_anti_framing_headers() -> None:
+    """The 500 page is sent outside the middleware that would add them.
+
+    ``ServerErrorMiddleware`` sits outside every application middleware,
+    so ``UIFramingHeadersMiddleware`` never sees this response. Without
+    the headers stamped in the handler another site could frame it.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+    app.add_exception_handler(Exception, web_server_error_handler)
+
+    @app.get("/ui/boom")
+    async def boom() -> None:
+        raise RuntimeError("unhandled")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/ui/boom", headers=_NAVIGATION)
+
+    assert response.status_code == 500
+    assert 'data-error-page="500"' in response.text
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+
+
+def test_an_explicitly_raised_500_also_gets_the_page() -> None:
+    """A route raising ``HTTPException(500)`` is a 500 like any other.
+
+    It arrives as an ``HTTPException`` rather than through
+    ``ServerErrorMiddleware``, so without 500 on the page list the two
+    ways of producing the same status answered differently.
+    """
+    app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+
+    @app.get("/ui/explicit")
+    async def explicit() -> None:
+        raise HTTPException(status_code=500)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/ui/explicit", headers=_NAVIGATION)
+
+    assert response.status_code == 500
+    assert 'data-error-page="500"' in response.text

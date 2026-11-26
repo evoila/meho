@@ -19,7 +19,7 @@
   ``status``, ``heading`` and ``message`` come from
   ``meho_backplane.ui.error_pages``; the page never derives them from
   anything the caller sent, so the address can never put text on
-  the page.
+  the page. The one link is a literal for the same reason.
 -#}
 <!doctype html>
 <html lang="en" data-theme="evoila-system" class="h-full">
@@ -34,8 +34,10 @@
     <main class="mx-auto max-w-xl space-y-4 px-4 py-12" data-error-page="{{ status }}">
       <p class="font-mono text-sm text-subtle" data-field="error-status">{{ status }}</p>
       <h1 class="text-xl font-semibold" data-field="error-heading">{{ heading }}</h1>
-      <p class="text-sm opacity-90" data-field="error-message">{{ message }}</p>
-      <p><a class="link text-sm" href="{{ home_path }}">Back to the console</a></p>
+      <p class="text-sm" data-field="error-message">{{ message }}</p>
+      {#- A literal, not a variable: the only link on the page is the console
+         root, and nothing the caller sent may reach an href. -#}
+      <p><a class="link text-sm" href="/ui">Back to the console</a></p>
     </main>
   </body>
 </html>

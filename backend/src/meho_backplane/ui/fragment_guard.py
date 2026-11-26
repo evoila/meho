@@ -135,7 +135,7 @@ def _header(scope: Scope, name: bytes) -> bytes | None:
     return None
 
 
-def _is_document_navigation(scope: Scope) -> bool:
+def is_document_navigation(scope: Scope) -> bool:
     """True when the browser is navigating to this URL, not fetching part of a page.
 
     An htmx request is never a navigation: it carries ``HX-Request:
@@ -300,7 +300,7 @@ class FragmentNavigationMiddleware:
         if not isinstance(path, str) or not path.startswith(_UI_PREFIX):
             await self.app(scope, receive, send)
             return
-        if path.startswith(_EXEMPT_PREFIXES) or not _is_document_navigation(scope):
+        if path.startswith(_EXEMPT_PREFIXES) or not is_document_navigation(scope):
             await self.app(scope, receive, send)
             return
 
@@ -375,3 +375,7 @@ class FragmentNavigationMiddleware:
             await send({"type": "http.response.body", "body": b"", "more_body": False})
 
         await self.app(scope, receive, guarded_send)
+
+
+#: Kept so in-module callers and tests that used the private name still work.
+_is_document_navigation = is_document_navigation

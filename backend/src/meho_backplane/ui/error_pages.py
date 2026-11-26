@@ -21,6 +21,14 @@ Three statuses get a page: 404, 403 and 500. Every other status, and
 every path outside :data:`WEB_PREFIXES`, is left to the handler that
 was already there.
 
+**A console address is not by itself a page.** Many ``/ui`` routes
+answer htmx and ``fetch`` callers that read the JSON body -- the run
+console's Stop button shows a 403's ``detail`` to say who may stop
+another person's run, and a 403 elsewhere names the missing permission.
+Replacing those with a generic page would drop text the caller needs,
+so the page is rendered only for a *document navigation* and every
+other caller keeps the response it had.
+
 Ordering with the session handler
 ---------------------------------
 
@@ -60,10 +68,12 @@ from typing import Final
 
 import structlog
 from fastapi import Request, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import PlainTextResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from meho_backplane.ui.auth.errors import ui_session_expired_exception_handler
+from meho_backplane.ui.fragment_guard import is_document_navigation
+from meho_backplane.ui.security_headers import FRAME_ANCESTORS_CSP, X_FRAME_OPTIONS
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -83,9 +93,6 @@ _log = structlog.get_logger(__name__)
 #: machine prefixes and treating the remainder as web, means a new
 #: machine surface added tomorrow keeps its JSON by default.
 WEB_PREFIXES: Final[tuple[str, ...]] = ("/ui",)
-
-#: The console's front door, for the link on the page.
-_HOME_PATH: Final[str] = "/ui"
 
 _TEMPLATE: Final[str] = "errors/web_error.html"
 
@@ -118,20 +125,50 @@ def is_web_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in WEB_PREFIXES)
 
 
-def _render(request: Request, code: int) -> HTMLResponse:
-    """Render the branded page for *code*."""
+def _render(request: Request, code: int) -> Response:
+    """Render the branded page for *code*, anti-framing headers included.
+
+    The headers are stamped here rather than left to
+    :class:`~meho_backplane.ui.security_headers.UIFramingHeadersMiddleware`
+    because the 500 path does not pass through it:
+    ``ServerErrorMiddleware`` sits outside every application middleware,
+    so a page rendered from the 500 handler would otherwise ship without
+    them and could be framed by another site. Stamping unconditionally
+    keeps the two paths identical; the middleware setting the same values
+    again on the 404/403 path is a no-op.
+    """
     heading, message = _PAGES[code]
-    return get_templates().TemplateResponse(
+    response: Response = get_templates().TemplateResponse(
         request,
         _TEMPLATE,
         {
             "status": code,
             "heading": heading,
             "message": message,
-            "home_path": _HOME_PATH,
         },
         status_code=code,
     )
+    response.headers["Content-Security-Policy"] = FRAME_ANCESTORS_CSP
+    response.headers["X-Frame-Options"] = X_FRAME_OPTIONS
+    return response
+
+
+def _wants_a_page(request: Request) -> bool:
+    """True when this request would replace the whole page in a browser.
+
+    A console address does not imply a page. Plenty of ``/ui`` routes
+    answer htmx and ``fetch`` callers, and those callers read the JSON
+    body: the run console's Stop button shows the 403 ``detail`` to say
+    who may stop another person's run. Handing them HTML would drop that
+    text on the floor, so only a document navigation gets the page and
+    every other caller keeps the response it had.
+
+    :func:`~meho_backplane.ui.fragment_guard.is_document_navigation` is
+    the console's existing answer to this question -- htmx is never a
+    navigation, ``Sec-Fetch-Dest`` decides where it is sent, and an
+    ``Accept`` asking for HTML is the fallback.
+    """
+    return is_document_navigation(request.scope)
 
 
 #: The statuses that get a page. Deliberately disjoint from the three
@@ -142,6 +179,7 @@ def _render(request: Request, code: int) -> HTMLResponse:
 _PAGE_STATUSES: Final[tuple[int, ...]] = (
     status.HTTP_403_FORBIDDEN,
     status.HTTP_404_NOT_FOUND,
+    status.HTTP_500_INTERNAL_SERVER_ERROR,
 )
 
 
@@ -150,12 +188,17 @@ async def web_http_exception_handler(request: Request, exc: Exception) -> Respon
 
     Wraps the session handler rather than replacing it -- see the module
     docstring on ordering. The two cannot collide: that handler acts
-    only on 401, 400 and 409, and this one only on 403 and 404.
+    only on 401, 400 and 409, and this one only on 403, 404 and 500.
+
+    A page is rendered only for a document navigation -- an htmx or
+    ``fetch`` caller on the same address keeps the JSON body and its
+    ``detail``.
     """
     if (
         isinstance(exc, StarletteHTTPException)
         and exc.status_code in _PAGE_STATUSES
         and is_web_path(request.url.path)
+        and _wants_a_page(request)
     ):
         return _render(request, exc.status_code)
     return await ui_session_expired_exception_handler(request, exc)
@@ -168,13 +211,16 @@ async def web_server_error_handler(request: Request, exc: Exception) -> Response
     and then re-raises the original error, so an exception here would
     lose the page and leave the caller with a bare 500.
     """
-    if is_web_path(request.url.path):
+    if is_web_path(request.url.path) and _wants_a_page(request):
         try:
             return _render(request, status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception:  # pragma: no cover - the page itself failing
             _log.exception("web_error_page_render_failed", path=request.url.path)
-    return Response(
-        content='{"detail":"Internal Server Error"}',
+    # Exactly what ``ServerErrorMiddleware.error_response`` has always
+    # sent. Anything parsing a 500 today -- an agent, a script, a retry
+    # loop -- is reading this body, so the only safe default is to keep
+    # it byte for byte and change the response on web navigations alone.
+    return PlainTextResponse(
+        "Internal Server Error",
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        media_type="application/json",
     )

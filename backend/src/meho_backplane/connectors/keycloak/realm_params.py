@@ -204,12 +204,20 @@ def check_answered_realm(
         name = expected if expected is not None else resolve_realm_config(target).managed_realm
         text = (
             f"{op_id}: Keycloak did not answer with the realm {name!r}, so MEHO "
-            "returns and changes nothing. Check the managed realm of the target."
+            "returns and changes nothing. Check the 'managed_realm' of the target."
         )
         note_refusal(text)
         error = ValueError(text)
         setattr(error, _MISMATCH_MARK, True)
         raise error
+
+
+def _asked_url(connector: KeycloakConnector, target: KeycloakTargetLike, path: str) -> Any:
+    """The address MEHO asks for at *path*, as the HTTP client builds it; ``None`` if unknown."""
+    try:
+        return httpx.URL(f"{connector._base_url(target)}/{path.lstrip('/')}")
+    except (AttributeError, KeyError, TypeError, ValueError, httpx.InvalidURL):
+        return None
 
 
 async def read_realm_held(
@@ -228,10 +236,11 @@ async def read_realm_held(
     the stored trace and the agent copy hold only bodies that passed the
     check. A try before an answer that passed (Keycloak answered only on a
     retry) keeps its headers and body; with ``KEYCLOAK_TRACE_RETRY_STATUS_ONLY``
-    on, it keeps its status only.
+    on, it keeps its status only. A span with its status only names the
+    address MEHO asked for, also when Keycloak answered through a redirect.
     The caller decides what a wrong answer means.
     """
-    with flight_recorder_capture.held() as spans:
+    with flight_recorder_capture.held(_asked_url(connector, target, path)) as spans:
         try:
             answer = await connector._get_admin_json(target, path, operator=operator)
         except BaseException:

@@ -351,28 +351,44 @@ def paused() -> Iterator[None]:
 
 #: The span attributes a span keeps when its answer did not pass its check
 #: (:meth:`HeldSpans.release_status`): which call it was and how it ended. No
-#: header, no body and no other text of the answer.
-_STATUS_KEYS: Final = ("connector_id", "op_id", "method", "url", "request_id", "phase")
+#: header, no body and no other text of the answer. The address is the one
+#: MEHO asked for (:func:`_status_only`).
+_STATUS_KEYS: Final = ("connector_id", "op_id", "method", "request_id", "phase")
 
 
-def _status_only(span: SpanInput) -> SpanInput:
-    """*span* with only the call, its status and its time: no value of the answer."""
+def _status_only(span: SpanInput, asked_url: str | None) -> SpanInput:
+    """*span* with only the call, its status and its time: no value of the answer.
+
+    The address in ``url`` and in the span name is *asked_url*, the address
+    MEHO asked for, and not the one a redirect named. Without *asked_url*,
+    the span keeps its own address and name.
+    """
     attributes: dict[str, Any] = {
         key: span.attributes[key] for key in _STATUS_KEYS if key in span.attributes
     }
+    if asked_url is None:
+        if "url" in span.attributes:
+            attributes["url"] = span.attributes["url"]
+        name = span.name
+    else:
+        attributes["url"] = asked_url
+        name = f"{span.attributes.get('method')} {asked_url}"
     if "exception_class" in span.attributes:
         attributes["exception_class"] = span.attributes["exception_class"]
     else:
         attributes["body_recorded"] = False
-    return replace(span, attributes=attributes)
+    return replace(span, name=name, attributes=attributes)
 
 
 class HeldSpans:
     """The spans of a :func:`held` block, kept out of the trace until released."""
 
-    def __init__(self, outer: _CaptureScope | None, buffer: _CaptureScope | None) -> None:
+    def __init__(
+        self, outer: _CaptureScope | None, buffer: _CaptureScope | None, asked_url: str | None
+    ) -> None:
         self._outer = outer
         self._buffer = buffer
+        self._asked_url = asked_url
 
     @property
     def recording(self) -> bool:
@@ -403,7 +419,7 @@ class HeldSpans:
         spans = self._buffer.spans
         for index, span in enumerate(spans):
             full = full_last if index == len(spans) - 1 else full_earlier
-            self._outer.add(span if full else _status_only(span))
+            self._outer.add(span if full else _status_only(span, self._asked_url))
         for kind, count in self._buffer.overflow.items():
             self._outer.overflow[kind] = self._outer.overflow.get(kind, 0) + count
         if full_last and self._buffer.redaction_uncertain:
@@ -415,14 +431,16 @@ class HeldSpans:
 
 
 @contextmanager
-def held() -> Iterator[HeldSpans]:
+def held(asked_url: Any = None) -> Iterator[HeldSpans]:
     """Keep the spans of the calls made inside this block out of the trace until released.
 
     A connector uses it for a call whose answer it must check first: only
     after the check passes does it call :meth:`HeldSpans.release`. Spans that
     are not released are dropped, so the stored trace and the agent copy
-    hold no answer that failed the check. Capture goes on as before after
-    the block.
+    hold no answer that failed the check. A span added with its status only
+    names *asked_url* (an :class:`httpx.URL` or a text), the address the
+    connector asked for, with no query part, also when a redirect on the
+    same server answered. Capture goes on as before after the block.
     """
     outer = _active_capture_var.get()
     buffer = (
@@ -432,7 +450,7 @@ def held() -> Iterator[HeldSpans]:
     )
     token = _active_capture_var.set(buffer)
     try:
-        yield HeldSpans(outer, buffer)
+        yield HeldSpans(outer, buffer, safe_url(asked_url) if asked_url is not None else None)
     finally:
         _active_capture_var.reset(token)
 

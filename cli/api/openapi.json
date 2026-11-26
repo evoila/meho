@@ -11821,7 +11821,7 @@
           "checks"
         ],
         "summary": "Post Results",
-        "description": "Ingest a runner's result batch idempotently (runner-authenticated).\n\nThe runner submits only its own results (``batch.runner_id`` is the\nrunner name; :func:`assert_runner_scope` binds it to the token's\n``runner_id``). ``received_at`` is central-stamped; re-posts from the\nrunner's retry spool are deduped by ``result_uid``.",
+        "description": "Ingest a runner's result batch idempotently (runner-authenticated).\n\nThe runner submits only its own results (``batch.runner_id`` is the\nrunner name; :func:`assert_runner_scope` binds it to the token's\n``runner_id``). ``received_at`` is central-stamped; re-posts from the\nrunner's retry spool are deduped by ``result_uid``. When MEHO cannot save\nthe set-aside notices of the batch, it answers 503 with the code\n``set_aside_not_saved``; the results of the batch are stored.",
         "operationId": "post_results_api_v1_checks_results_post",
         "parameters": [
           {
@@ -43326,6 +43326,15 @@
             "type": "string",
             "nullable": true,
             "title": "Package Set Digest"
+          },
+          "set_aside_count": {
+            "type": "integer",
+            "title": "Set Aside Count"
+          },
+          "set_aside_last_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set Aside Last At"
           }
         },
         "type": "object",
@@ -43406,6 +43415,15 @@
             "type": "string",
             "nullable": true,
             "title": "Package Set Digest"
+          },
+          "set_aside_count": {
+            "type": "integer",
+            "title": "Set Aside Count"
+          },
+          "set_aside_last_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Set Aside Last At"
           },
           "enrollment_code": {
             "type": "string",
@@ -43507,6 +43525,24 @@
             },
             "type": "array",
             "title": "Results"
+          },
+          "set_aside": {
+            "items": {
+              "$ref": "#/components/schemas/SetAsideNotice"
+            },
+            "type": "array",
+            "title": "Set Aside"
+          },
+          "set_aside_total": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Set Aside Total"
+          },
+          "set_aside_last_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Set Aside Last At"
           }
         },
         "type": "object",
@@ -43514,7 +43550,7 @@
           "runner_id"
         ],
         "title": "RunnerResultBatch",
-        "description": "A batch of results the runner reports (or spools) in one POST."
+        "description": "A batch of results the runner reports (or spools) in one POST.\n\n``set_aside`` names the results of batches the runner set aside since its\nlast notice. ``set_aside_total`` and ``set_aside_last_at`` say how many\nbatches are in the runner's set-aside folder and when the newest one was\nset aside. All three stay empty on a batch without a notice. MEHO reads at\nmost the first 1,000 entries of ``set_aside`` and skips the rest before it\nchecks any entry. It keeps a ``set_aside_total`` that is a whole number from\n0 to 2147483647 and a ``set_aside_last_at`` that is a date-time text with a\ntime zone; it drops any other value of these two (also ``true`` or a\nnumber) and still takes the batch."
       },
       "RunnerWorkItem": {
         "properties": {
@@ -45520,6 +45556,41 @@
         ],
         "title": "SessionUploadResult",
         "description": "What one upload did."
+      },
+      "SetAsideNotice": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Code"
+          },
+          "produced_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Produced At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "result_uid",
+          "status"
+        ],
+        "title": "SetAsideNotice",
+        "description": "A result of a batch that MEHO refused every time, so the runner set it aside.\n\nThe runner keeps the batch in its set-aside folder and sends only this\nnotice: which check, which result, the status and the code MEHO answered\nwith (never the free text of the answer), and the runner time of the result."
       },
       "SettingsImportResponse": {
         "properties": {

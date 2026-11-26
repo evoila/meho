@@ -332,8 +332,73 @@ def addon_family_active(
 _WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
 
 
+#: Keywords whose value is plain data, not a schema. An ``enum`` key inside such
+#: a value is not a rule of the schema, so it stays as it is.
+_LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "enum", "examples", "example"})
+
+#: Keywords whose value maps a name to a schema. The names are free text (a
+#: property may be called ``default``), so they are never read as keywords.
+_SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+
+
+def _enum_rule_without_null(schema: dict[str, Any], members: list[Any]) -> dict[str, Any]:
+    """Return the rule that takes the place of the ``enum`` *members* of *schema*.
+
+    Only the direct ``None`` members go. When nothing else is left, the rule
+    becomes ``const: null``, so the sent schema does not accept more than the
+    server does. When *schema* already has a ``const`` other than ``null``, no
+    value passes both rules, and an empty ``enum`` says so.
+    """
+    kept = [member for member in members if member is not None]
+    if not kept and schema.get("const") is None:
+        return {"const": None}
+    return {"enum": kept}
+
+
+def _without_null_enum_members(node: Any, *, names_are_keys: bool = False) -> Any:
+    """Return *node* (a schema) with ``None`` removed from every ``enum`` list.
+
+    Used for the wire copy of each tool schema. It goes to any depth. Nothing else
+    changes: a ``type`` list such as ``["string", "null"]`` stays, and so do
+    the values under ``default``, ``const`` and ``examples``. The members of an
+    ``enum`` are values too, so an object among them stays as it is. An
+    ``enum`` of only ``null`` becomes ``const: null``. An ``enum`` without
+    ``null``, also an empty one, stays. *node* is not mutated. A node with
+    nothing to change is returned as the same object.
+
+    *names_are_keys* is true for the value of ``properties`` and the like,
+    where the keys are names, not keywords.
+    """
+    if isinstance(node, dict):
+        changed = False
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if not names_are_keys and key == "enum" and isinstance(value, list) and None in value:
+                out.update(_enum_rule_without_null(node, value))
+                changed = True
+                continue
+            if not names_are_keys and key in _LITERAL_KEYWORDS:
+                out[key] = value
+                continue
+            new_value = _without_null_enum_members(
+                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+            )
+            changed = changed or new_value is not value
+            out[key] = new_value
+        return out if changed else node
+    if isinstance(node, list):
+        items = [_without_null_enum_members(item) for item in node]
+        if any(new is not old for new, old in zip(items, node, strict=True)):
+            return items
+    return node
+
+
 def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return *schema* with any top-level combinator keyword removed.
+
+    ``None`` is also removed from every ``enum`` at every depth.
 
     See :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why. *schema* is not
     mutated: when it carries no forbidden top-level key the same object is
@@ -341,9 +406,12 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     shallow copy minus those keys is returned. Nested combinators are
     untouched — the Anthropic restriction is top-level only.
     """
-    if not any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
-        return schema
-    return {key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS}
+    if any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
+        schema = {
+            key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS
+        }
+    stripped: dict[str, Any] = _without_null_enum_members(schema)
+    return stripped
 
 
 class ToolAnnotations(BaseModel):
@@ -546,7 +614,8 @@ class ToolDefinition(BaseModel):
         :func:`_wire_safe_input_schema`, which strips top-level
         ``oneOf`` / ``allOf`` / ``anyOf`` — the Anthropic Messages API
         rejects those at the top level of a tool's ``input_schema`` and
-        the rejection poisons the whole session. The full schema (with
+        the rejection poisons the whole session. ``null`` is also dropped from
+        every ``enum``, because a strict model gateway refuses it. The full schema (with
         the combinators) is retained on ``self.inputSchema`` so
         server-side jsonschema validation in
         :mod:`~meho_backplane.mcp.handlers` is unaffected.

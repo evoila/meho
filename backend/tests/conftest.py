@@ -1493,3 +1493,17 @@ def _no_similar_kb_entries(
 @pytest.fixture
 def real_similar_check() -> None:
     """Opt out of :func:`_no_similar_kb_entries`: run the real similar-entries search."""
+
+
+@pytest.fixture(autouse=True)
+def _clear_runner_refused_memory() -> Iterator[None]:
+    """Start every test with an empty memory of refused runner results.
+
+    The gateway remembers refused results for the whole process, so tests
+    that reuse a result id would otherwise depend on the order they run in.
+    """
+    from meho_backplane.gateway import runner_checks
+
+    runner_checks._refused_seen.clear()
+    yield
+    runner_checks._refused_seen.clear()

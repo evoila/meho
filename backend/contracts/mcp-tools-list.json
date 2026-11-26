@@ -1611,8 +1611,7 @@
           "scope_field": {
             "enum": [
               "namespace",
-              "target_name",
-              null
+              "target_name"
             ],
             "type": [
               "string",
@@ -1940,8 +1939,7 @@
               "safe",
               "caution",
               "dangerous",
-              "destructive",
-              null
+              "destructive"
             ],
             "type": [
               "string",
@@ -2003,8 +2001,7 @@
             "enum": [
               "tenant",
               "builtin",
-              "legacy",
-              null
+              "legacy"
             ],
             "type": [
               "string",
@@ -2043,8 +2040,7 @@
               "session_login",
               "session_login_basic",
               "session_login_token",
-              "static_header",
-              null
+              "static_header"
             ],
             "type": [
               "string",
@@ -2201,8 +2197,7 @@
             "enum": [
               "tenant",
               "builtin",
-              "legacy",
-              null
+              "legacy"
             ],
             "type": [
               "string",
@@ -2462,8 +2457,7 @@
             "enum": [
               "in_progress",
               "completed",
-              "abandoned",
-              null
+              "abandoned"
             ],
             "type": [
               "string",
@@ -2504,8 +2498,7 @@
             "enum": [
               "draft",
               "published",
-              "deprecated",
-              null
+              "deprecated"
             ],
             "type": [
               "string",
@@ -4286,8 +4279,7 @@
               "approval_decision",
               "security_event",
               "config_change",
-              "legacy_request",
-              null
+              "legacy_request"
             ],
             "maxLength": 32,
             "type": [
@@ -4311,8 +4303,7 @@
               "audit_query",
               "approval",
               "checks",
-              "other",
-              null
+              "other"
             ],
             "maxLength": 64,
             "type": [
@@ -4351,8 +4342,7 @@
           "shape": {
             "enum": [
               "flat",
-              "tree",
-              null
+              "tree"
             ],
             "type": [
               "string",
@@ -4541,7 +4531,6 @@
           },
           "relation_class": {
             "enum": [
-              null,
               "containment",
               "placement",
               "dependency",
@@ -4561,7 +4550,6 @@
           },
           "source": {
             "enum": [
-              null,
               "auto",
               "curated"
             ],
@@ -5237,8 +5225,7 @@
             "enum": [
               "all",
               "tenant",
-              "shared",
-              null
+              "shared"
             ],
             "type": [
               "string",
@@ -5255,8 +5242,7 @@
               "confirmed",
               "disputed",
               "replaced",
-              "retired",
-              null
+              "retired"
             ],
             "type": [
               "string",
@@ -5344,8 +5330,7 @@
               "user-tenant",
               "user-target",
               "tenant",
-              "target",
-              null
+              "target"
             ],
             "type": [
               "string",
@@ -5358,8 +5343,7 @@
               "confirmed",
               "disputed",
               "replaced",
-              "retired",
-              null
+              "retired"
             ],
             "type": [
               "string",

@@ -3456,7 +3456,7 @@ tests and its <code>pyproject.toml</code>.</p>
 <p>Your package imports MEHO only through one module:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">meho_connector_kit</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">kit</span>
 </code></pre></div>
-<p>The kit version this page describes: <strong>1.5</strong>.</p>
+<p>The kit version this page describes: <strong>1.6</strong>.</p>
 <p>The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
 part that starts with an underscore is private by its name too.</p>
@@ -3533,6 +3533,21 @@ part that starts with an underscore is private by its name too.</p>
 <td>Connector</td>
 <td><code>Target</code></td>
 <td>The target fields a connector may read.</td>
+</tr>
+<tr>
+<td>Connector</td>
+<td><code>TargetField</code></td>
+<td>One extra setting of a target, for <code>target_fields</code>. Needs kit 1.6 or higher.</td>
+</tr>
+<tr>
+<td>Connector</td>
+<td><code>CredentialWay</code></td>
+<td>One way to log in, with the fields of its secret, for <code>credential_ways</code>. Needs kit 1.6 or higher.</td>
+</tr>
+<tr>
+<td>Connector</td>
+<td><code>CredentialField</code></td>
+<td>One field of the secret of a <code>CredentialWay</code>. Needs kit 1.6 or higher.</td>
 </tr>
 <tr>
 <td>Answers</td>
@@ -3661,7 +3676,7 @@ part that starts with an underscore is private by its name too.</p>
 </tr>
 </tbody>
 </table>
-<p>Inside three classes, the kit also promises some parts:</p>
+<p>Inside six classes, the kit also promises some parts:</p>
 <ul>
 <li><code>HttpConnector</code>: <code>__init__</code>, <code>auth_headers</code>, <code>aclose</code>,
   <code>trace_response_body</code>, <code>_get_json</code> and <code>_post_json</code>. The last two
@@ -3671,6 +3686,11 @@ part that starts with an underscore is private by its name too.</p>
   and <code>connector_id</code>.</li>
 <li><code>Target</code>: <code>name</code>, <code>host</code>, <code>extras</code>, <code>auth_model</code>, <code>verify_tls</code> and
   <code>secret_ref</code>. Any other field of a target is private.</li>
+<li><code>TargetField</code>: <code>key</code>, <code>label</code>, <code>help</code>, <code>required</code>, <code>kind</code>, <code>choices</code>
+  and <code>default</code>.</li>
+<li><code>CredentialWay</code>: <code>key</code>, <code>label</code> and <code>fields</code>.</li>
+<li><code>CredentialField</code>: <code>name</code>, <code>label</code>, <code>help</code>, <code>required</code>, <code>hidden</code> and
+  <code>multiline</code>.</li>
 </ul>
 <p>For every other class, the kit promises only the name.</p>
 <h2 id="4-write-the-connector">4. Write the connector<a class="headerlink" href="#4-write-the-connector" title="Permanent link">&para;</a></h2>
@@ -3704,6 +3724,20 @@ operations you register, not <code>execute</code>.</p>
   list them in <code>product_aliases</code>, for example <code>("vcenter", "vsphere")</code>.
   With the switch <code>CONNECTOR_LIST_PRODUCT_ALIASES</code> on, a <code>product</code> filter
   of <code>meho_connector_list</code> also finds your connector by these names.</li>
+<li><strong>What a target needs.</strong> A connector can declare four optional
+  attributes: <code>default_port</code>, <code>target_fields</code> (the extra settings of a
+  target), <code>credential_ways</code> (the ways to log in and the fields of the
+  secret) and <code>test_operation</code> (one safe read that needs no input). MEHO
+  checks them at start. The console reads them from
+  <code>GET /api/v1/connectors/target-form?product=&lt;product&gt;</code>. A connector that
+  declares nothing passes the start check, and the route shows the four as
+  <code>null</code>. The test read is an operation that a registrar of the
+  connector itself writes at start (a typed or multi-step operation). A
+  read from an imported API spec cannot be declared: a class that declares
+  one stops the start with a message that names the class. Build the
+  entries with
+  <code>kit.TargetField</code>, <code>kit.CredentialWay</code> and <code>kit.CredentialField</code>
+  (kit 1.6 or higher).</li>
 <li><strong>Caches.</strong> Key a cache you keep across calls, for example a login
   token, with <code>kit.target_cache_key(target)</code>.</li>
 </ul>

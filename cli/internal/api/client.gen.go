@@ -10470,10 +10470,12 @@ type RunnerResult_Result struct {
 // batches are in the runner's set-aside folder and when the newest one was
 // set aside. All three stay empty on a batch without a notice. MEHO reads at
 // most the first 1,000 entries of “set_aside“ and skips the rest before it
-// checks any entry. It keeps a “set_aside_total“ that is a whole number from
-// 0 to 2147483647 and a “set_aside_last_at“ that is a date-time text with a
-// time zone; it drops any other value of these two (also “true“ or a
-// number) and still takes the batch.
+// checks any entry. Then it checks the entries one by one and skips each
+// entry that is not a valid notice; the other entries are kept. It keeps a
+// “set_aside_total“ that is a whole number from 0 to 2147483647 and a
+// “set_aside_last_at“ that is a date-time text with a time zone; it drops
+// any other value of these two (also “true“ or a number) and still takes
+// the batch.
 type RunnerResultBatch struct {
 	Results        *[]RunnerResult   `json:"results,omitempty"`
 	RunnerId       string            `json:"runner_id"`

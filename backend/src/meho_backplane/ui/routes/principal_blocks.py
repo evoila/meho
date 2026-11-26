@@ -28,7 +28,8 @@ tenant of that block, with a fresh sign-in. It removes only the block of
 that tenant. A block in every tenant stays until another platform admin
 removes it. A tenant admin cannot remove a block on their own login.
 Another tenant admin of that tenant removes a block of that tenant, and a
-platform admin removes any block, on this page or with
+platform admin with `tenant_admin` in the current tenant removes every
+block of another login, on the Blocked people page or with
 `meho principal unblock`. Only a platform admin removes a block in every
 tenant. Each block and unblock writes one audit row named
 ``principal.block`` or ``principal.unblock``. The row names the console
@@ -88,8 +89,9 @@ _OWN_LOGIN_UNBLOCK = (
     "A block in every tenant stays until another platform admin removes it. "
     "A tenant admin cannot remove a block on their own login. "
     "Another tenant admin of that tenant removes a block of that tenant, "
-    "and a platform admin removes any block, "
-    "on this page or with `meho principal unblock`. "
+    "and a platform admin with `tenant_admin` in the current tenant "
+    "removes every block of another login, "
+    "on the Blocked people page or with `meho principal unblock`. "
     "Only a platform admin removes a block in every tenant."
 )
 _CONFIRMED = "yes"
@@ -185,6 +187,8 @@ async def block_person(
         errors = _errors_of(exc)
     except CannotBlockSelfError:
         errors = {"sub": _SELF_BLOCK_MESSAGE}
+    except PrincipalBlockUnavailableError as exc:
+        raise _unavailable() from exc
     else:
         return _back_to_page()
     return await _page(
@@ -268,8 +272,16 @@ _JSON_DETAIL = {
 _BACK_TO_PAGE: dict[int | str, dict[str, Any]] = {
     303: {"description": "Done. The answer sends the browser back to the page."}
 }
+#: JSON from the page, or plain text from the session check that runs first.
+_JSON_OR_TEXT = {**_JSON_DETAIL, "text/plain": {"schema": {"type": "string"}}}
 _UNREADABLE: dict[int | str, dict[str, Any]] = {
-    503: {"description": "MEHO cannot read the block list now.", "content": _JSON_DETAIL}
+    503: {
+        "description": (
+            "MEHO cannot read the block list now. The page answers with JSON; "
+            "the session check before the page answers with plain text."
+        ),
+        "content": _JSON_OR_TEXT,
+    }
 }
 _OTHER_TENANT: dict[int | str, dict[str, Any]] = {
     409: {
@@ -322,7 +334,13 @@ def build_principal_blocks_router() -> APIRouter:
                 ),
                 "content": _HTML,
             },
-            403: {"description": "The login is the admin's own login.", "content": _JSON_DETAIL},
+            403: {
+                "description": (
+                    "The login is the admin's own login (JSON), or the admin's own "
+                    "login is blocked in this tenant (plain text, from the session check)."
+                ),
+                "content": _JSON_OR_TEXT,
+            },
             404: {"description": "The login has no block you may remove.", "content": _JSON_DETAIL},
             **_UNREADABLE,
             **_OTHER_TENANT,

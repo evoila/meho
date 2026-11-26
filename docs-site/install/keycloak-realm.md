@@ -1185,11 +1185,16 @@ run `meho principal unblock <sub>`. `meho principal blocked` lists the
 blocks. The console page `/ui/blocked-people` ("Blocked people" in the
 menu) does the same for a person with the tenant admin role: it lists the blocks, blocks a
 person with a reason, and unblocks a person after a confirm step. The
-page never removes a block on your own login. A platform admin removes it with
-`meho principal unblock <sub> --reason "<why>"` (see below). A tenant admin
-cannot remove it, on the page or with the command: another tenant admin of
-that tenant, or a platform admin, removes it. A block in every tenant on a
-tenant admin: only a platform admin removes it.
+page never removes a block on your own login. A platform admin removes a
+block on their own login with `meho principal unblock <sub> --reason "<why>"`,
+run in the tenant of that block, with a fresh sign-in. It removes only the
+block of that tenant. A block in every tenant stays until another platform
+admin removes it. A tenant admin cannot remove a block on their own login.
+This holds on the page and with the command. Another tenant admin of that
+tenant removes a block of that tenant, and a platform admin with
+`tenant_admin` in the current tenant removes every block of another login,
+on the Blocked people page or with `meho principal unblock`. Only a platform
+admin removes a block in every tenant.
 
 Who blocks whom:
 

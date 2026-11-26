@@ -4054,7 +4054,8 @@ admin block list (`docs/codebase/principal-block.md`):
   block form.
 - `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
   303 back to the page. Refused: 422, the page again with the typed
-  values and the message next to its field.
+  values and the message next to its field. The table cannot be read or
+  written: 503, and no block is written.
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
   the scope (all tenants for a platform admin). The confirm form carries
@@ -4071,10 +4072,15 @@ admin block list (`docs/codebase/principal-block.md`):
   tenant. A block in every tenant stays until another platform admin
   removes it. A tenant admin cannot remove a block on their own login.
   Another tenant admin of that tenant removes a block of that tenant, and
-  a platform admin removes any block, on this page or with
+  a platform admin with `tenant_admin` in the current tenant removes
+  every block of another login, on the Blocked people page or with
   `meho principal unblock`. Only a platform admin removes a block in
   every tenant.
   No block to remove: 404. The blocks cannot be read: 503.
+
+A 503 or a 403 can also come as plain text from the session check that
+runs before the page (the block list cannot be read, or the admin's own
+login is blocked). The OpenAPI entries name both formats.
 
 Every form is a plain `POST` form with the CSRF token and the page's
 tenant (`meho_tenant`) in hidden fields, so it works without JavaScript.

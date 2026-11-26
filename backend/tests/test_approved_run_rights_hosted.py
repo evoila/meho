@@ -27,6 +27,7 @@ import pytest
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.audit_query.approval_payload import approval_payload_view
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY, delegated_operator
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -207,6 +208,7 @@ async def test_rerun_by_another_caller_writes_its_audit_row(
     assert row.payload == {
         "approval_request_id": str(request_id),
         "principal_sub": "person-2",
+        "requester_sub": None,
         "result_status": "refused",
         "refusal": detail,
     }
@@ -214,3 +216,21 @@ async def test_rerun_by_another_caller_writes_its_audit_row(
     request = await _request(request_id)
     assert request.rerun_count == 0
     assert approval_result_state(request) is ApprovalResultState.FAILED
+
+    # Every audit view shows the caller only as the person who acted.
+    shown = await client[0].get(
+        f"/api/v1/audit/show/{row.id}",
+        headers=_token(client[1], "auditor", role=TenantRole.TENANT_ADMIN),
+    )
+    assert shown.status_code == 200, shown.text
+    views = [
+        shown.json()["payload"],
+        # The audit query and the console audit page read the row this way.
+        approval_payload_view(
+            method=row.method, operator_sub=row.operator_sub, payload=row.payload
+        ),
+    ]
+    for view in views:
+        assert view["principal_sub"] == "person-2"
+        assert view["requester_sub"] is None
+        assert "person-1" not in str(view)

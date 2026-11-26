@@ -357,7 +357,9 @@ async def _refuse_other_caller(
     """Write the row of a re-run refused to a caller who did not make the request.
 
     The row names the caller and the request id, and no other field of the
-    request: the caller may not read the request.
+    request: the caller may not read the request. ``requester_sub`` is
+    ``None``, so every audit view shows the caller only as the person who
+    acted (:func:`~meho_backplane.audit_query.approval_payload.approval_payload_view`).
     """
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.db.models import AuditLog
@@ -378,6 +380,7 @@ async def _refuse_other_caller(
                 payload={
                     "approval_request_id": str(request_id),
                     "principal_sub": operator.sub,
+                    "requester_sub": None,
                     "result_status": "refused",
                     "refusal": code,
                 },

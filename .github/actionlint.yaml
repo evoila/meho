@@ -8,6 +8,10 @@
 # Drop `meho-runners` here when the old pool is retired.
 # The two heavy sets: `meho-runners-ci-heavy-queue` (merge-queue runs only)
 # and `meho-runners-ci-heavy` (every other event).
+# `meho-runners-ci-heavy-site2` is the second runner site (unit shards 4-6 of
+# a pull request, and its smoke check). Only the job
+# python-unit-shard-second-site in ci.yml and second-site-smoke.yml may name
+# it; backend/tests/test_ci_second_runner_site.py checks every workflow file.
 #
 # Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
@@ -16,3 +20,4 @@ self-hosted-runner:
     - meho-runners-ci
     - meho-runners-ci-heavy
     - meho-runners-ci-heavy-queue
+    - meho-runners-ci-heavy-site2

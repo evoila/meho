@@ -2609,6 +2609,95 @@ run, not a broken `main`.
   checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
   step waits for every coverage shard.
 
+### Second runner site
+
+**What it is for.** The heavy runner pool is often full, so pull request
+shards wait for a free runner. A second runner site adds room for unit test
+shards 4-6 of a pull request. Another team runs the site, on other
+machines. So a job there gets no secret of this repository, and a site that
+is down must not hold up CI.
+
+**Which jobs may use it.** Only the job `python-unit-shard-second-site` in
+`ci.yml` (shards 4-6 of a pull request) and the smoke check
+`second-site-smoke.yml`. Only these two name the label
+`meho-runners-ci-heavy-site2`. Never on the site: the merge queue, the
+nightly run, `workflow_dispatch`, coverage, integration, migrations, image
+build, signing and release workflows, `pr-smoke.yml`, and any job with a
+registry or release secret.
+
+**When shards 4-6 go there.** The step "Pick the runner site for unit
+shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
+`second_site=on` only when all of these hold:
+
+- the repository variable `MEHO_CI_SECOND_SITE` is `on`;
+- the event is `pull_request`, from this repository (not a fork);
+- the actor is not Dependabot;
+- it is the first attempt of the run;
+- all six shards really run (not docs-only, a backend change, not a
+  one-connector run, not a test map run);
+- the newest passed run of `second-site-smoke.yml` on `main` started at most
+  45 minutes ago.
+
+Every doubt (an API error, an odd answer, no smoke run) gives empty, which
+means today's pool. The step never fails the job. Its notice says why.
+
+**What changes when it is on.** `python-unit-shard` runs shards 1-3, with
+its runner, secrets and steps as before. `python-unit-shard-second-site`
+runs shards 4-6, under the same check names `Python unit shard N/6`:
+
+- its text names no secret, no `environment` and no `id-token`, and its
+  token is read-only. GitHub may send a job every secret its text names,
+  also when a condition makes the value empty, so a condition is not
+  enough;
+- the test images are the public `docker.io/` names, from the same image
+  lines as the other job. There is no Docker Hub login, and the spec-shelf
+  tests skip, as on a fork;
+- its first step fails on the first attempt unless the runner has
+  `MEHO_CI_SITE=site2`;
+- its test steps are YAML aliases (`*unit-...`) of the steps of
+  `python-unit-shard`, so the two jobs cannot drift apart. Only the steps
+  that read a secret differ.
+
+The fan-in `Python (ruff + mypy + pytest)` needs both jobs to succeed when
+the site is on. When it is off, the second-site job must be skipped.
+
+**The smoke check.** `second-site-smoke.yml` runs by hand, and at minutes 7
+and 37 of each hour while the variable is `on`. It has no `pull_request`
+and no `pull_request_target` trigger. `scripts/ci/second_site_smoke.sh`
+fails unless the runner has `MEHO_CI_SITE=site2`, reaches the hosts a shard
+needs, and pulls one test image. Every address in the private pod env
+`MEHO_CI_DENY_PROBE_HOSTS` must end in a timeout with no connection made. A
+refused connection, a certificate error, a success, a name that never
+resolved and an empty list all fail. The log shows only the position and
+the exit code of each address, never the address.
+
+**When the site dies.** The job `second-site-watchdog` runs on a
+GitHub-hosted runner when the site was picked. After 30 minutes, if a
+shard of the second-site job still has no runner, it reads the jobs again
+and cancels the run. A failed read never leads to a cancel. Only this job
+and `merge-queue-watchdog` have `actions: write`.
+
+**Switch on.** Start "Second runner site smoke" by hand on `main` and check
+that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to
+`on`.
+
+**Switch off.** Set `MEHO_CI_SECOND_SITE` to any other value, or delete it.
+The next run uses today's pool for all six shards, and the schedule of the
+smoke check stops.
+
+**A re-run.** A re-run (attempt 2 or later) never uses the site. "Re-run all
+jobs" picks again, and the pick says today's pool. "Re-run failed jobs"
+keeps the old split, and the failed shards 4-6 run on today's pool, still
+with no secret and with the public images.
+
+**Forks.** A fork pull request never uses the site: the job-level guard on
+`head.repo`, the pick rule, and no `pull_request` trigger on the smoke
+workflow. The repository setting "Require approval for all external
+contributors" must stay on, because a fork can edit its own copy of a
+workflow.
+
+**Tests.** `tests/test_ci_second_runner_site.py`.
+
 ### Runner-CPU rule
 
 **`pytest-xdist -n` must stay below the runner container's usable

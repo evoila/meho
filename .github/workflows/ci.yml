@@ -41,6 +41,12 @@
 # four short jobs `changes`, `python-unit-lane`, `python-integration` and
 # `helm-lint-template` stay hosted, to keep the main pool free.
 #
+# Second runner site (#7085): unit test shards 4-6 of a pull request can run
+# on a second runner site, in the job `python-unit-shard-second-site`. This
+# happens only when a person has switched it on and its smoke check passed
+# in the last 45 minutes. That job names no secret. Every doubt means today's
+# pool. See `docs/codebase/devops.md`, "Second runner site".
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
 # `.md`). On such a PR the heavy Python lanes — `python-lint`, the six
@@ -271,6 +277,13 @@ jobs:
     #                tests, any error, and every merge_group / nightly run give
     #                `false` (the full run).
     #
+    #   second_site — `on` when unit test shards 4-6 run on the second
+    #                runner site (#7085), else empty. Only on a pull request
+    #                from this repository that runs all six shards, on the
+    #                first attempt, when the site is switched on and its smoke
+    #                check passed in the last 45 minutes. Every doubt gives
+    #                empty (today's pool). The step `second-site` decides.
+    #
     # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
     # a read-only token and no secret, so a fork pull request may run it. The
     # jobs on our own pool re-check head.repo in their own `if:`.
@@ -291,6 +304,7 @@ jobs:
       single_connector: ${{ steps.detect.outputs.single_connector }}
       # `true` only when the picked tests were also stored.
       test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+      second_site: ${{ steps.second-site.outputs.second_site }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -519,6 +533,27 @@ jobs:
           path: ${{ runner.temp }}/unit-test-map/selection.txt
           retention-days: 1
           if-no-files-found: error
+      - name: Pick the runner site for unit shards 4-6
+        # #7085. The script checks every rule and writes one notice that
+        # says why. A failure or a timeout here leaves the output empty,
+        # which means today's pool, so this step can never fail or hold up
+        # the job. `actions: read` above lets it read the smoke runs.
+        id: second-site
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          # The same value as the job output `test_map` above.
+          TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+        run: bash scripts/ci/pick_second_site.sh
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -691,9 +726,11 @@ jobs:
       # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
       # lockstep. To rebalance the shards, refresh the measured file times
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
+      # Second runner site: when `changes` says `second_site=on`, this job
+      # runs shards 1-3 and python-unit-shard-second-site runs shards 4-6.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || '[1, 2, 3, 4, 5, 6]') }}
+        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || needs.changes.outputs.second_site == 'on' && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6]') }}
     # 30-min cap: hang backstop only. Expected job wall is ~8-12 min (setup
     # ~2 min + pytest ~6-10 min); on busy nights passed shards took up to ~20
     # min, and a 20-min cap cut good shards. The perf-budget step below is the
@@ -738,7 +775,8 @@ jobs:
         # and uv.lock both live here.
         working-directory: backend
     steps:
-      - name: Checkout
+      - &unit-checkout
+        name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Read the CI repository secrets
@@ -770,7 +808,8 @@ jobs:
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           IMAGES
 
-      - name: Start memory sampling
+      - &unit-memory-start
+        name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
         # background loop reads this container's cgroup v2 memory files once a
         # second and keeps the highest values until that step stops it. It
@@ -911,7 +950,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Install uv
+      - &unit-uv
+        name: Install uv
         # uv is the project's canonical Python toolchain (pyproject.toml
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
@@ -925,14 +965,16 @@ jobs:
           enable-cache: true
           add-problem-matchers: false
 
-      - name: Sync Python environment (locked)
+      - &unit-sync
+        name: Sync Python environment (locked)
         # --locked refuses to update uv.lock; if pyproject.toml drifted
         # from the lock, CI fails here rather than silently bumping
         # deps. --all-groups pulls dev tools (ruff, mypy, pytest, etc.)
         # declared in [dependency-groups.dev].
         run: uv sync --locked --all-groups
 
-      - name: Cache fastembed model (drift-guard + slow-lane)
+      - &unit-fastembed-cache
+        name: Cache fastembed model (drift-guard + slow-lane)
         # The drift-guard below downloads the ~67 MB default ONNX model
         # from HuggingFace. Without this cache every run re-fetches it
         # unauthenticated over the cluster's shared NAT egress (HF
@@ -968,10 +1010,11 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
+        run: &unit-warm-run |
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
 
-      - name: Restore the spaCy model from the cache
+      - &unit-spacy-cache
+        name: Restore the spaCy model from the cache
         # install_spacy_model.sh uses the model when it is installed at the
         # pinned version, then this cache, and downloads (three tries) last.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -979,7 +1022,8 @@ jobs:
           path: ~/.cache/meho-ci-tools
           key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
-      - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
+      - &unit-spacy
+        name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
         # (capability-flagged per policy). The acceptance gate
         # (``Tier-2 redacts a free-text field containing a person
@@ -1011,7 +1055,8 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
-      - name: Install Helm
+      - &unit-helm
+        name: Install Helm
         # The chart render tests (tests/test_chart_*.py) call `helm
         # template`. Without helm they skip, so a broken chart test could
         # stay hidden on main. Same pinned action and Helm version as
@@ -1021,7 +1066,8 @@ jobs:
         with:
           version: v3.16.4
 
-      - name: Name the PHP package cache
+      - &unit-php-name
+        name: Name the PHP package cache
         # The key holds the OS release and the CPU type, because the cached
         # package files fit only that. Bump the -v1 at the end to drop a
         # bad cache entry.
@@ -1033,14 +1079,16 @@ jobs:
           . /etc/os-release
           echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the PHP package files from the cache
+      - &unit-php-restore
+        name: Restore the PHP package files from the cache
         id: php-debs-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
-      - name: Install PHP CLI
+      - &unit-php-install
+        name: Install PHP CLI
         id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
@@ -1126,7 +1174,8 @@ jobs:
           fi
           php --version | head -1
 
-      - name: Save the PHP package files to the cache
+      - &unit-php-save
+        name: Save the PHP package files to the cache
         # Only after a download into an empty cache. A cache entry cannot
         # be changed, so a bad one needs a new key (see "Name the PHP
         # package cache").
@@ -1136,7 +1185,8 @@ jobs:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
-      - name: Name the GBK locale package cache
+      - &unit-locale-name
+        name: Name the GBK locale package cache
         # Same pattern as "Name the PHP package cache". Bump the -v1 at
         # the end to drop a bad cache entry.
         id: locale-debs
@@ -1147,14 +1197,16 @@ jobs:
           . /etc/os-release
           echo "key=locales-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the GBK locale package files from the cache
+      - &unit-locale-restore
+        name: Restore the GBK locale package files from the cache
         id: locale-debs-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/meho-ci-locale-debs
           key: ${{ steps.locale-debs.outputs.key }}
 
-      - name: Install the GBK locale data
+      - &unit-locale-install
+        name: Install the GBK locale data
         id: locale-install
         # The linux.script.run locale test
         # (tests/test_connectors_linux_script_env_locale.py) builds the
@@ -1227,7 +1279,8 @@ jobs:
           echo "::error::SETUP FAILURE, not a test failure: the locales package did not install after 2 tries (package mirror problem on the runner)"
           exit 1
 
-      - name: Save the GBK locale package files to the cache
+      - &unit-locale-save
+        name: Save the GBK locale package files to the cache
         # Only after a download into an empty cache. A cache entry cannot
         # be changed, so a bad one needs a new key (see "Name the GBK
         # locale package cache").
@@ -1237,7 +1290,8 @@ jobs:
           path: ~/.cache/meho-ci-locale-debs
           key: ${{ steps.locale-debs.outputs.key }}
 
-      - name: Download the picked unit tests
+      - &unit-download-picked
+        name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
         if: needs.changes.outputs.test_map == 'true'
         timeout-minutes: 2
@@ -1246,7 +1300,8 @@ jobs:
           name: unit-test-selection
           path: ${{ runner.temp }}/unit-test-selection
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/6)
+      - &unit-pytest
+        name: Pytest (unit shard ${{ matrix.shard }}/6)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -1428,7 +1483,8 @@ jobs:
             exit 1
           fi
 
-      - name: Upload per-test times (input for the shard split)
+      - &unit-upload-times
+        name: Upload per-test times (input for the shard split)
         # #4809: tests/_unit_shard_split.py balances the shards with the
         # seconds in tests/_unit_shard_durations.json. Refresh that file
         # from these artifacts (one per shard) of a green run; the module
@@ -1448,7 +1504,8 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Print peak memory
+      - &unit-peak-memory
+        name: Print peak memory
         # Prints how much memory this job's runner container used and how many
         # CPUs it had, so a change to the heavy runner pool can be checked
         # against real numbers. Reads the cgroup files (v2 first, else v1) and
@@ -1500,6 +1557,117 @@ jobs:
           fi
           echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/6)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
+
+
+  python-unit-shard-second-site:
+    name: Python unit shard ${{ matrix.shard }}/6
+    # Second runner site (#7085). Unit shards 4-6 of a pull request, when the
+    # `changes` job says `second_site=on`: a person switched the site on
+    # (repository variable MEHO_CI_SECOND_SITE), and its smoke check
+    # (second-site-smoke.yml) passed in the last 45 minutes. Then
+    # python-unit-shard runs only shards 1-3. In every other case this job
+    # is skipped and python-unit-shard runs all six shards, as before.
+    #
+    # The second site is run by another team, on other machines. So:
+    # - The text of this job names no secret. GitHub may send a job every
+    #   secret its text names, also when a condition makes the value empty,
+    #   so a condition is not enough. A test checks the text
+    #   (backend/tests/test_ci_second_runner_site.py).
+    # - No `environment`, no `id-token`, and a read-only token.
+    # - The test images are the public docker.io names, there is no Docker
+    #   Hub login, and the spec-shelf tests skip, as on a fork.
+    #
+    # The test steps are YAML aliases (`*unit-...`) of the steps of
+    # python-unit-shard, so the two jobs run the same steps. Only the steps
+    # that read a secret differ. A test checks that too.
+    #
+    # Never on a fork pull request, the merge queue, the nightly run or any
+    # other event: the `if:` below, and the pick rules in
+    # scripts/ci/pick_second_site.sh.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.second_site == 'on'
+    # A re-run (run_attempt above 1) always uses today's pool, so one click
+    # gets a run off a dead site, also with "re-run failed jobs", which keeps
+    # the old `changes` output. The job still names no secret there.
+    runs-on: ${{ github.run_attempt == '1' && 'meho-runners-ci-heavy-site2' || 'meho-runners-ci-heavy' }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [4, 5, 6]
+    # Same cap as python-unit-shard. A job that waits for a runner is not
+    # stopped by it: the job `second-site-watchdog` covers that.
+    timeout-minutes: 30
+    env:
+      # The spec-shelf checkout does not run here, so this folder does not
+      # exist and the spec-backed tests skip, as on a fork.
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check that this runner is on the second site
+        # On the first attempt, `runs-on` names the second site's label. Its
+        # runners have MEHO_CI_SITE=site2 in their pod env, so this proves
+        # the label reached the second site. A re-run uses today's pool.
+        if: github.run_attempt == '1'
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          if [ "${MEHO_CI_SITE:-}" != "site2" ]; then
+            echo "::error title=Second runner site::This runner does not have MEHO_CI_SITE=site2, so the label of the second site reached another site. Switch the site off (repository variable MEHO_CI_SECOND_SITE) and check the runner set."
+            exit 1
+          fi
+          echo "This runner is on the second site."
+
+      - *unit-checkout
+
+      - name: Use the public test images
+        # The same script and image lines as the step "Read the CI
+        # repository secrets" of python-unit-shard, but with no secret name
+        # and REQUIRE_SECRETS false. So it writes the public docker.io/
+        # names. The second site pulls them through its own Docker Hub cache.
+        env:
+          REQUIRE_SECRETS: "false"
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          IMAGES
+
+      - *unit-memory-start
+      - *unit-uv
+      - *unit-sync
+      - *unit-fastembed-cache
+
+      - name: Embedding-model drift guard (evoila/meho#574)
+        # The same command as in python-unit-shard, with no HF_TOKEN: the
+        # model download is anonymous here.
+        env:
+          MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+        run: *unit-warm-run
+
+      - *unit-spacy-cache
+      - *unit-spacy
+      - *unit-helm
+      - *unit-php-name
+      - *unit-php-restore
+      - *unit-php-install
+      - *unit-php-save
+      - *unit-locale-name
+      - *unit-locale-restore
+      - *unit-locale-install
+      - *unit-locale-save
+      - *unit-download-picked
+      - *unit-pytest
+      - *unit-upload-times
+      - *unit-peak-memory
 
   python-outside-backend:
     name: Python tests that read files outside backend
@@ -1926,7 +2094,12 @@ jobs:
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
-    needs: [changes, python-lint, python-unit-shard, python-outside-backend]
+    #  5. Second runner site (#7085). When `second_site` is `on`, shards 1-3
+    #     run in python-unit-shard and shards 4-6 in
+    #     python-unit-shard-second-site, and both must succeed. When it is
+    #     empty, the second-site job must be skipped and the rest works as
+    #     before.
+    needs: [changes, python-lint, python-unit-shard, python-unit-shard-second-site, python-outside-backend]
     if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the
     # allowlist in test_ci_fork_runner_isolation.py, with its reason.
@@ -1950,6 +2123,8 @@ jobs:
           CHANGES_SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
           LINT_RESULT: ${{ needs.python-lint.result }}
           SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
+          CHANGES_SECOND_SITE: ${{ needs.changes.outputs.second_site }}
+          SECOND_SITE_RESULT: ${{ needs.python-unit-shard-second-site.result }}
           OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
           detect="${CHANGES_RESULT}"
@@ -1963,6 +2138,9 @@ jobs:
           echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
           echo "single_connector='${CHANGES_SINGLE_CONNECTOR}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
+          second_site="${CHANGES_SECOND_SITE}"
+          site2="${SECOND_SITE_RESULT}"
+          echo "second_site='${second_site}' (on = shards 4-6 ran on the second runner site); python-unit-shard-second-site: ${site2}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -1971,6 +2149,19 @@ jobs:
           # fork PR too (#4835).
           if [ "${detect}" != "success" ]; then
             echo "::error title=Python unit lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required unit lane closed."
+            exit 1
+          fi
+
+          # Second runner site (#7085). When it is on, the shards are split
+          # over two jobs, and both must succeed: from here on `shards`
+          # stands for both. When it is off, the second-site job must be
+          # skipped, and any other result fails the lane closed.
+          if [ "${second_site}" = "on" ]; then
+            if [ "${shards}" != "success" ] || [ "${site2}" != "success" ]; then
+              shards="failure (shards 1-3: ${shards}, shards 4-6 on the second site: ${site2})"
+            fi
+          elif [ "${site2}" != "skipped" ]; then
+            echo "::error title=Python unit lane red::the second runner site is off for this run, but python-unit-shard-second-site reports '${site2}' instead of 'skipped'. Failing the required unit lane closed."
             exit 1
           fi
 
@@ -3874,3 +4065,43 @@ jobs:
           done
           echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
           exit 0
+
+  # ---------------------------------------------------------------------------
+  # Second runner site watchdog (#7085). The site can die after its last good
+  # smoke check, and unit shards 4-6 would then wait for a runner. A job that
+  # has no runner is not stopped by `timeout-minutes`, and GitHub gives up on
+  # it only after 24 hours, so the required check would hang with it. This job
+  # stops the run after 30 minutes, right after a fresh read of the jobs, so
+  # the check goes red instead. A failed read never leads to a cancel.
+  #
+  # Not a required check. It runs only when `changes` picked the second site,
+  # on a GitHub-hosted runner so it does not need that site, and not on a
+  # re-run, because a re-run uses today's pool.
+  # ---------------------------------------------------------------------------
+  second-site-watchdog:
+    name: Second runner site watchdog
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.second_site == 'on' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    # Backstop only: the script stops itself after about 31 minutes.
+    timeout-minutes: 40
+    # `actions: write` is what cancelling a run needs. Only this job and
+    # `merge-queue-watchdog` get it. `contents: read` is listed again because
+    # a job-level block replaces the workflow-wide one.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stop this run if unit shards cannot get a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/second_site_watchdog.sh

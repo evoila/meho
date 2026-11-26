@@ -32,9 +32,12 @@ site-specific fields use a `<REPLACE: ...>` placeholder that fails
 `values.schema.json` validation at install time, so an operator who
 forgets to substitute one fails-loud at `helm install` rather than
 silently connecting to the wrong system or CrashLoopBackOff'ing at first
-request. `config.forwardedAllowIps` is the exception: it holds an
-example address that the chart accepts, so replace it with your ingress
-controller's own address.
+request. Some fields have no marker: they hold example values that the
+chart accepts, for example `ingress.host`, the Vault and PostgreSQL
+addresses, `config.forwardedAllowIps` and `config.targetSsrfAllowlist`.
+So check every value before you install, not only the marked ones.
+Replace `config.forwardedAllowIps` with your ingress controller's own
+address.
 
 ## Files
 

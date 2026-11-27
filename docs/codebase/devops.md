@@ -2666,6 +2666,120 @@ run, not a broken `main`.
   checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
   step waits for every coverage shard.
 
+### Second runner site
+
+**What it is for.** The heavy runner pool is often full, so pull request
+shards wait for a free runner. A second runner site adds room for unit test
+shards 4-6 of a pull request. Another team runs the site, on other
+machines. So a job there gets no secret of this repository, and a site that
+is down must not hold up CI.
+
+**Which jobs may use it.** Only the job `python-unit-shard-second-site` in
+`ci.yml` (shards 4-6 of a pull request) and the smoke check
+`second-site-smoke.yml`. Only these two name the label
+`meho-runners-ci-heavy-site2`. No workflow other than the smoke check, and
+no job other than `python-unit-shard-second-site`, runs on the site. So the
+merge queue, the nightly run, coverage, integration, migrations, image
+build, signing and release workflows, `pr-smoke.yml`, and every job with a
+registry or release secret never run there. The smoke check runs there on
+its schedule, and when a person starts it by hand.
+
+**When shards 4-6 go there.** The step "Pick the runner site for unit
+shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
+`second_site=on` only when all of these hold:
+
+- the repository variable `MEHO_CI_SECOND_SITE` is exactly `on` (lower
+  case; `ON` counts as off);
+- the event is `pull_request`, from this repository (not a fork);
+- the actor is not Dependabot;
+- it is the first attempt of the run;
+- all six shards really run (not docs-only, a backend change, not a
+  one-connector run, not a test map run);
+- the newest passed run of `second-site-smoke.yml` on `main` of this
+  repository started at most 45 minutes ago. Both repository names of that
+  run must be this repository; a missing name does not count;
+- the job "Smoke check of the second runner site" passed in that same run
+  attempt. A run where the switch job skipped the smoke job also counts as
+  passed on GitHub, but no runner of the site took a job in it.
+
+Every doubt (an API error, an odd answer, no smoke run) gives empty, which
+means today's pool. The step never fails the job. Its notice says why.
+
+**What changes when it is on.** `python-unit-shard` runs shards 1-3, with
+its own runner, secrets and steps. `python-unit-shard-second-site`
+runs shards 4-6, under the same check names `Python unit shard N/6`:
+
+- its text names no secret, no `environment` and no `id-token`, and its
+  token is read-only. GitHub may send a job every secret its text names,
+  also when a condition makes the value empty, so a condition is not
+  enough;
+- the test images are the public `docker.io/` names, from the same image
+  lines as the other job. There is no Docker Hub login, and the spec-shelf
+  tests skip, as on a fork. So the skip limit check of the job takes the
+  `without_secrets` numbers;
+- its first step fails on the first attempt unless the runner has
+  `MEHO_CI_SITE=site2`;
+- its test steps are YAML aliases (`*unit-...`) of the steps of
+  `python-unit-shard`, so the two jobs cannot drift apart. Only the steps
+  that read a secret, the cache steps and the step "Hide the proxy name in
+  the test reports" differ. That step is the same as in
+  `python-unit-shard`, with no `env:` block, so it names no secret;
+- its time limit (`timeout-minutes`) is the same as in `python-unit-shard`;
+- the job sets `cache-mode: read`, so GitHub lets its token restore caches
+  and never save one;
+- it restores caches and never saves one: its cache steps use
+  `actions/cache/restore`, its `astral-sh/setup-uv` step has
+  `save-cache: false`, and it has no step that saves the PHP or the GBK
+  locale package files.
+
+The fan-in `Python (ruff + mypy + pytest)` needs both jobs to succeed when
+the site is on. When it is off, the second-site job must be skipped.
+
+**The smoke check.** `second-site-smoke.yml` runs by hand, and at minutes 7
+and 37 of each hour while the variable is exactly `on`. GitHub compares
+strings in an `if` without regard to case, so a small job on a GitHub-hosted
+runner checks the exact value in bash before the smoke job is queued on the
+site. It has no `pull_request` and no `pull_request_target` trigger.
+`scripts/ci/second_site_smoke.sh` fails unless the runner has
+`MEHO_CI_SITE=site2`, reaches the hosts a shard needs, and pulls one test
+image. Each host is checked on a file that exists, and only a 2xx answer
+counts: an error answer from a proxy (for example 502) fails the check.
+Every address in the private pod env `MEHO_CI_DENY_PROBE_HOSTS` (a comma or
+a line break ends an entry) must end in a timeout with no connection made. A
+refused connection, a certificate error, a success, a name that never
+resolved and an empty list all fail. The log shows only the position and
+the exit code of each address, never the address. The smoke job sets
+`cache-mode: none`, so GitHub gives it no cache access.
+
+**When the site dies.** The job `second-site-watchdog` runs on a
+GitHub-hosted runner when the site was picked. After 30 minutes, if a
+shard of the second-site job still has no runner, it reads the jobs again.
+It cancels the run only when that fresh read shows at least one shard with a
+waiting status (queued, waiting, requested or pending). A failed read, or a
+shard with no status, never leads to a cancel. Only this job
+and `merge-queue-watchdog` have `actions: write`.
+
+**Switch on.** Start "Second runner site smoke" by hand on `main` and check
+that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to
+`on`.
+
+**Switch off.** Set `MEHO_CI_SECOND_SITE` to any other value, or delete it.
+The next run uses today's pool for all six shards. A scheduled smoke run
+then starts no job on the second site.
+
+**A re-run.** A re-run (attempt 2 or later) never uses the site. "Re-run all
+jobs" picks again, and the pick says today's pool. "Re-run failed jobs"
+keeps the old split, and the failed shards 4-6 run on today's pool, still
+with no secret and with the public images.
+
+**Forks.** A fork pull request never uses the site: the job-level guard on
+`head.repo`, the pick rule, and no `pull_request` trigger on the smoke
+workflow. The repository setting "Require approval for all external
+contributors" must stay on, because a fork can edit its own copy of a
+workflow.
+
+**Tests.** `tests/test_ci_second_runner_site.py`.
+
 ### Runner-CPU rule
 
 **`pytest-xdist -n` must stay below the runner container's usable
@@ -2833,9 +2947,10 @@ The rule:
 - When the proxy is down or has no copy of an image, the pull fails. CI does
   not pull that image from Docker Hub instead. The test then fails, or skips
   where its fixture skips when its container cannot start.
-- GitHub hides a secret in the job log only. So the unit shard, coverage and
-  integration shard jobs run the step "Hide the proxy name in the test
-  reports" before they upload their JUnit files and pytest log.
+- GitHub hides a secret in the job log only. So the unit shard jobs (also
+  `python-unit-shard-second-site`), the coverage job and the integration
+  shard jobs run the step "Hide the proxy name in the test reports" before
+  they upload their JUnit files and pytest log.
   `scripts/ci/hide_proxy_name.py` replaces the proxy value and its host with
   `PROXY`, also in URL-encoded form. Each upload of these reports runs only
   when this step passed. The coverage data files stay as they are.
@@ -2882,6 +2997,11 @@ list does not grow old. It holds:
 - `python-outside-backend` in `ci.yml`: a GitHub-hosted runner on pull
   requests. The merge queue runs the same tests in the unit shards, through
   the proxy.
+- `python-unit-shard-second-site` in `ci.yml`: the job names no secret, so
+  it reads no proxy name. Its step "Use the public test images" sets the
+  same image lines as `python-unit-shard`, with the public `docker.io/`
+  names, and `test_image_step_uses_the_same_image_lines_with_no_secret`
+  keeps the lines equal.
 - the four kind jobs in `chart.yml` (`helm-test`, `helm-test-byo`,
   `rollback-drill`, `upgrade-from-release`): GitHub-hosted runners. kind
   pulls its node image, and the jobs pull the images they load into kind.

@@ -5,8 +5,8 @@
 
 The console script tests run JavaScript in ``node`` and skip when it is
 missing, unless ``MEHO_REQUIRE_NODE=1`` is set. These tests pin, in
-``.github/workflows/ci.yml``, that the unit shards and the job for the
-tests that read files outside backend have an "Install Node" step before
+``.github/workflows/ci.yml``, that the unit shards (also the second-site
+job) and the job for the tests that read files outside backend have an "Install Node" step before
 their pytest step, and that the pytest step sets ``MEHO_REQUIRE_NODE: "1"``.
 So a missing node fails the tests instead of skipping them.
 """
@@ -22,7 +22,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
-_JOBS = ("python-unit-shard", "python-outside-backend")
+_JOBS = ("python-unit-shard", "python-unit-shard-second-site", "python-outside-backend")
 _PINNED = re.compile(r"^actions/setup-node@[0-9a-f]{40}$")
 
 
@@ -71,8 +71,11 @@ def test_node_step_has_the_same_pin_as_plugin_test() -> None:
 
 
 def _drop_node_step(text: str) -> str:
+    """Drop the Install Node step of python-unit-shard and its alias in the second-site job."""
+    text = text.replace("      - *unit-node\n", "", 1)
     return re.sub(
-        r"\n      - name: Install Node\n(?:        .*\n|\n(?=        ))*?(?=\n      - name:)",
+        r"\n      - &unit-node\n        name: Install Node\n"
+        r"(?:        .*\n|\n(?=        ))*?(?=\n      - )",
         "\n",
         text,
         count=1,

@@ -347,6 +347,7 @@ def _step_runs(job_name: str) -> list[str]:
     ("job_name", "lane", "junit_name"),
     [
         ("python-unit-shard", "unit", "pytest-unit-shard.xml"),
+        ("python-unit-shard-second-site", "unit", "pytest-unit-shard.xml"),
         ("python-integration-shard", "integration", "pytest-integration-shard.xml"),
     ],
 )
@@ -362,7 +363,8 @@ def test_the_shards_run_the_check_after_pytest(job_name: str, lane: str, junit_n
 @pytest.mark.parametrize(
     ("job_name", "switch"),
     [
-        ("python-unit-shard", '"${SPEC_SHELF_READY}" != "true"'),
+        ("python-unit-shard", '"${SPEC_SHELF_READY:-}" != "true"'),
+        ("python-unit-shard-second-site", '"${SPEC_SHELF_READY:-}" != "true"'),
         ("python-integration-shard", '-z "${MEHO_TEST_KEYCLOAK_IMAGE:-}"'),
     ],
 )

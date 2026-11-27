@@ -577,6 +577,7 @@ RECORD_OPS: tuple[WindowsDnsOp, ...] = (
         tags=("write", "record", "delete", "destructive"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=WINDOWS_DNS_RECORD_REMOVE_LLM_INSTRUCTIONS,
     ),
 )

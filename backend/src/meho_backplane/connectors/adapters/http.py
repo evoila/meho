@@ -107,7 +107,11 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
-from meho_backplane.connectors._shared.login_mark import in_login_request, login_request
+from meho_backplane.connectors._shared.login_mark import (
+    in_login_request,
+    login_request,
+    mark_as_login,
+)
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -1037,11 +1041,13 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # ``follow_redirects=True`` slipping through a convenience method.
         # A read and a named login follow a redirect on the same origin. Every
         # other request is a change, when this client has the change rule.
+        is_login = in_login_request() and not _operation_request.get()
         is_change = (
-            self.change_rule
-            and request.method.upper() not in _IDEMPOTENT_METHODS
-            and not (in_login_request() and not _operation_request.get())
+            self.change_rule and request.method.upper() not in _IDEMPOTENT_METHODS and not is_login
         )
+        if is_login:
+            # The error handling reads the kind of the request from the request.
+            mark_as_login(request)
         if is_change:
             # The repeated operation request follows no redirect.
             max_hops = 0 if _change_sent_before.get() else _MAX_CHANGE_REDIRECTS
@@ -1120,6 +1126,8 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             # The send below runs the client's request hook (``_note_request_sent``),
             # so a followed redirect passes the same block check as the first send.
             request = next_request
+            if is_login:
+                mark_as_login(request)
             sent_urls.add(_sent_address(request.url))
             hop_start = self._hop_span_start()
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)

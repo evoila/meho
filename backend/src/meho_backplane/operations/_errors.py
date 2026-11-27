@@ -53,6 +53,7 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
+from meho_backplane.connectors._shared.login_mark import is_login
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -1720,14 +1721,15 @@ _REDIRECT_ON_CHANGE_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 
 def is_redirect_on_change(exc: httpx.HTTPStatusError) -> bool:
     """Whether *exc* is a redirect that MEHO did not follow after a change.
 
-    A change is a request whose method is not a read. The redirect must name
-    a ``Location``, and its status must be one of
-    :data:`_REDIRECT_ON_CHANGE_STATUSES`.
+    A change is a request whose method is not a read and that the pooled
+    client did not send as a login (:func:`is_login`). Its status must be one
+    of :data:`_REDIRECT_ON_CHANGE_STATUSES`, also when the answer names no
+    ``Location``: the target got the change all the same.
     """
     return (
         exc.request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and not is_login(exc.request)
         and exc.response.status_code in _REDIRECT_ON_CHANGE_STATUSES
-        and bool(exc.response.headers.get("Location"))
     )
 
 
@@ -1750,10 +1752,10 @@ def _origin(url: httpx.URL) -> str:
     return f"{url.scheme}://{url.netloc.decode('ascii')}"
 
 
-def _redirect_url(exc: httpx.HTTPStatusError) -> httpx.URL | None:
-    """The absolute address a redirect names, or ``None`` when MEHO cannot read it."""
+def _redirect_url(location: str, exc: httpx.HTTPStatusError) -> httpx.URL | None:
+    """The absolute address *location* names, or ``None`` when MEHO cannot read it."""
     try:
-        return exc.request.url.join(exc.response.headers.get("Location", ""))
+        return exc.request.url.join(location)
     except httpx.InvalidURL:
         return None
 
@@ -1764,7 +1766,10 @@ def _redirect_address(exc: httpx.HTTPStatusError) -> str:
     The query and any login part of the address are dropped, so a one-time
     ticket in the address never reaches an error text.
     """
-    url = _redirect_url(exc)
+    location = exc.response.headers.get("Location")
+    if not location:
+        return "an address it did not name"
+    url = _redirect_url(location, exc)
     return "an address MEHO could not read" if url is None else _safe_address(url)
 
 
@@ -1783,8 +1788,9 @@ def result_connector_redirect_on_change(
 
     The answer while the switch ``redirect_on_change_result`` is on. The text
     follows what the HTTP status code means: 307 / 308 ask for the same call
-    at another address; 303 says the change ran and the result is at the
-    address; 301 / 302 are unclear. The result keeps the shape of a
+    at another address; 303 directs MEHO to another resource; 301 / 302 are
+    unclear. After a 301, 302 or 303 the operator must check whether the
+    change ran. The result keeps the shape of a
     ``connector_error`` and adds no field.
 
     Every text is built here from the status, the method and the safe parts
@@ -1805,7 +1811,8 @@ def result_connector_redirect_on_change(
         )
     elif status_code == 303:
         message = (
-            f"The target says the change ran. It put the result at {address}. MEHO did not read it."
+            f"The target directed MEHO to another resource at {address}. MEHO did not "
+            "follow it. Check on the target whether the change ran."
         )
     else:
         message = (

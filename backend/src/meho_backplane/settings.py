@@ -1701,8 +1701,8 @@ class Settings(BaseModel):
         PATCH, DELETE) that ends on a redirect MEHO does not follow, and the
         error of a named login that ends on such a redirect. When on, the
         ``error`` text says what the HTTP code means (307 / 308: the target
-        asks for the call at another address; 303: the target says the
-        change ran; 301 / 302: MEHO could not find out); after a 301, 302 or
+        asks for the call at another address; 303: the target directs MEHO
+        to another resource; 301 / 302: MEHO could not find out); after a 301, 302 or
         303 an operation that may change the target also gets
         ``execution_outcome``, ``retry`` and ``remediation``; a login gives
         the ``SessionLoginRedirectError`` text. When off, the answer is the

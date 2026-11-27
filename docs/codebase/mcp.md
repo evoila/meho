@@ -2205,8 +2205,9 @@ DELETE) that ends on a redirect MEHO does not follow, and the error of a
 login that ends on such a redirect. With it off, the answer is the generic
 `connector_error` answer for that status, and a login gives its own error.
 With it on, the `error` text says what the HTTP code means (307 / 308: the
-target asks for the call at another address; 303: the target says the
-change ran; 301 / 302: MEHO could not find out), and after a 301, 302 or
+target asks for the call at another address; 303: the target directs
+MEHO to another resource, and the operator checks whether the change ran;
+301 / 302: MEHO could not find out), and after a 301, 302 or
 303 an operation that may change the target also gets `execution_outcome`,
 `retry` and `remediation`. A login that ends on such a redirect gets a
 fixed sentence: the login got a redirect, MEHO did not follow it, with the

@@ -28,6 +28,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.connectors._shared.login_mark import mark_as_login
 from meho_backplane.connectors.adapters import http as http_adapter
 from meho_backplane.connectors.adapters.http import (
     HttpConnector,
@@ -999,11 +1000,12 @@ def test_result_for_307_308_asks_for_a_new_approval(status: int) -> None:
 
 
 @pytest.mark.usefixtures("answer_switch_on")
-def test_result_for_303_says_the_change_ran() -> None:
+def test_result_for_303_names_another_resource_and_claims_no_success() -> None:
     result = _classify(_status_error("POST", 303, "/jobs/42"))
-    assert "target says the change ran" in result.error
+    assert "directed MEHO to another resource" in result.error
     assert "https://svc.example.com/jobs/42" in result.error
-    assert "did not read it" in result.error
+    assert "Check on the target whether the change ran" in result.error
+    assert "says the change ran" not in result.error
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
 
 
@@ -1023,10 +1025,22 @@ def test_redirect_on_a_read_keeps_the_generic_result() -> None:
     assert "execution_outcome" not in result.extras
 
 
-def test_redirect_without_location_keeps_the_generic_result() -> None:
-    exc = _status_error("PUT", 307, None)
+@pytest.mark.usefixtures("answer_switch_on")
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirect_without_location_after_a_change_is_worded_by_its_code(status: int) -> None:
+    # The target got the change, also when its answer names no address.
+    exc = _status_error("PUT", status, None)
+    assert is_redirect_on_change(exc)
+    result = _classify(exc)
+    assert "an address it did not name" in result.error
+    may_have_run = status in (301, 302, 303)
+    assert (result.extras.get("execution_outcome") == UNCERTAIN_OUTCOME) is may_have_run
+
+
+def test_redirect_on_a_login_is_not_a_redirect_on_change() -> None:
+    exc = _status_error("POST", 302, "https://other.example.test/x")
+    mark_as_login(exc.request)
     assert not is_redirect_on_change(exc)
-    assert _classify(exc).error.startswith("connector_error: HTTPStatusError")
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])

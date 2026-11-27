@@ -98,7 +98,7 @@ class _RedirectingConnector(_NoHook403Connector):
 
     impl_id = "vcfops-rest-redirect"
     status: ClassVar[int] = 303
-    location: ClassVar[str] = "/jobs/42"
+    location: ClassVar[str | None] = "/jobs/42"
     expired: ClassVar[bool] = False
 
     def __init__(self) -> None:
@@ -106,7 +106,8 @@ class _RedirectingConnector(_NoHook403Connector):
         self.sent: list[str] = []
 
     def answer(self, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(self.status, headers={"Location": self.location})
+        headers = {} if self.location is None else {"Location": self.location}
+        return httpx.Response(self.status, headers=headers)
 
     async def _send(self, method: str, path: str) -> dict[str, Any]:
         def answer(request: httpx.Request) -> httpx.Response:
@@ -183,6 +184,41 @@ async def test_change_that_may_have_run_is_marked_uncertain_in_the_audit_row(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("status", [301, 302, 303])
+async def test_change_redirect_without_location_is_marked_uncertain_in_the_audit_row(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    on: bool,
+    answer_switch: Any,
+) -> None:
+    # The answer names no address, but the target got the change all the same.
+    answer_switch(on)
+
+    class _Conn(_RedirectingConnector):
+        impl_id = f"vcfops-rest-redirect-nolocation-{status}-{'on' if on else 'off'}"
+        location = None
+
+    _Conn.status = status
+    result, connector = await _run(
+        _Conn,
+        stub_embedding_service,
+        session,
+        _web_operator(),
+        method="PUT",
+        safety_level="caution",
+    )
+
+    assert result.status == "error"
+    assert connector.sent == ["PUT"]
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["error"].get("execution_outcome") == UNCERTAIN_OUTCOME
+    assert (result.extras.get("execution_outcome") == UNCERTAIN_OUTCOME) is on
+
+
+@pytest.mark.asyncio
 async def test_read_that_gets_a_redirect_is_not_marked_uncertain(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
@@ -237,7 +273,7 @@ async def test_approved_ingested_put_with_303_is_sent_once_and_stored(
     assert connector.sent == ["PUT"]
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
     assert result.error is not None
-    assert "The target says the change ran" in result.error
+    assert "directed MEHO to another resource" in result.error
     rows = await _audit_rows()
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
@@ -245,7 +281,7 @@ async def test_approved_ingested_put_with_303_is_sent_once_and_stored(
     # The result that is stored on the approval request holds the message.
     stored = _dump_result_envelope(result)
     assert stored is not None
-    assert "The target says the change ran" in json.dumps(stored)
+    assert "directed MEHO to another resource" in json.dumps(stored)
 
 
 class _TicketRedirectConnector(_RedirectingConnector):

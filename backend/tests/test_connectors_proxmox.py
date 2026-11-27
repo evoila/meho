@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 
 import meho_backplane.connectors.proxmox  # noqa: F401 -- registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -52,6 +53,7 @@ from meho_backplane.connectors.proxmox.session import (
 )
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
@@ -537,3 +539,54 @@ async def test_task_status_polls_to_terminal(
     assert result["result"]["status"] == "stopped"
     assert result["result"]["exitstatus"] == "OK"
     assert result["result"]["timed_out"] is False
+
+
+@pytest.fixture
+async def proxmox_ticket_dispatch() -> AsyncIterator[ProxmoxConnector]:
+    set_default_reducer(PassThroughReducer())
+    await ProxmoxConnector.register_operations()
+    await _seed_target()
+    connector = ProxmoxConnector(credentials_loader=_ticket_loader)
+    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+
+    _CONNECTOR_INSTANCE_CACHE[ProxmoxConnector] = connector
+    yield connector
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+async def test_ticket_login_redirect_before_a_write_is_not_an_uncertain_change(
+    proxmox_ticket_dispatch: ProxmoxConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    switch_on: bool,
+) -> None:
+    # The ticket login gets a redirect to another host, so the write is never
+    # sent. The audit row does not say that the write may have run.
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if switch_on else "false")
+    get_settings.cache_clear()
+    with respx.mock(base_url=_PVE_BASE_URL, assert_all_called=False) as mock:
+        login = mock.post("/api2/json/access/ticket").respond(
+            302, headers={"Location": "https://other.example.test/login"}
+        )
+        write = mock.post("/api2/json/nodes/pve/qemu/100/status/stop").respond(
+            200, json={"data": "UPID:pve:0001:qmstop:100:root@pam:"}
+        )
+        result = await _dispatch(
+            "proxmox.api.write",
+            {"path": "nodes/pve/qemu/100/status/stop", "method": "POST"},
+        )
+    assert result["status"] == "error", result
+    assert login.call_count == 1
+    assert not write.called
+    assert "execution_outcome" not in result["extras"]
+    async with get_sessionmaker()() as session:
+        rows = [
+            row
+            for row in (await session.execute(select(AuditLog))).scalars()
+            if row.payload.get("result_status") == "error"
+        ]
+    assert len(rows) == 1
+    assert "execution_outcome" not in (rows[0].payload.get("error") or {})

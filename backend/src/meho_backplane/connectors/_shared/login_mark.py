@@ -22,8 +22,12 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from collections.abc import Iterator
+from typing import Any
 
-__all__ = ["in_login_request", "login_request"]
+__all__ = ["in_login_request", "is_login", "login_request", "mark_as_login"]
+
+#: The request extension that the pooled client sets on each login it sends.
+_LOGIN_EXTENSION = "meho_login"
 
 _login_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "meho_login_request", default=False
@@ -43,3 +47,13 @@ def login_request() -> Iterator[None]:
 def in_login_request() -> bool:
     """Whether the request sent now is named as a login."""
     return _login_request.get()
+
+
+def mark_as_login(request: Any) -> None:
+    """Mark *request* (an ``httpx.Request``) as a login, for the error handling later."""
+    request.extensions[_LOGIN_EXTENSION] = True
+
+
+def is_login(request: Any) -> bool:
+    """Whether the pooled client sent *request* (an ``httpx.Request``) as a login."""
+    return bool(request.extensions.get(_LOGIN_EXTENSION))

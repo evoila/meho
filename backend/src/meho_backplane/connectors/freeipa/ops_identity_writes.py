@@ -206,6 +206,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response={"entry": entry_schema("The new group, with FreeIPA's default attributes.")},
         tags=("group",),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": "Call to add a new, empty user group to the IPA domain.",
             "preconditions": (

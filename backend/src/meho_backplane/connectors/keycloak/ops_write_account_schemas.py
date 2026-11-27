@@ -313,6 +313,7 @@ ACCOUNT_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_ACCOUNT_WRITE,
             "when_to_call": "When a person's user name, email or name is wrong or has changed.",

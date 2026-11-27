@@ -174,6 +174,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         entry="The new sudo command; sudocmd holds its path.",
         example={"command": "/usr/bin/systemctl", "description": "Manage services"},
         tags=("sudocmd", "sudo-command"),
+        changes_rights=True,
         summary=(
             "Create a sudo command in the IPA domain, so sudo rules can allow it. Waits until a "
             "second person approves."

@@ -399,9 +399,12 @@ agents:
 - The part holds at most 200 rules. A file with more is refused.
 - The import plan (the preview and the approval card) shows, for each
   role, the operations that would start to run at once (`runs_at_once`).
-  The list holds only what the import changes: an operation that already
-  runs at once under the stored rules is not in it. So a file that leaves
-  the rules as they are lists no operation.
+  The list holds each operation that waits under the tenant's stored
+  policy and runs at once under the file. MEHO reads the stored rules with
+  the stored classifications, and the file's rules with the file's
+  classifications. So a file that drops an "always wait" lists the
+  operation, also when the rules stay the same. A file that changes
+  neither the rules nor what waits lists no operation.
 - The list uses the same values as a call by a login of the tenant: the
   operations the tenant turned on or off for itself, an admin's edit of
   one operation (its risk level, or approval for each call), and the
@@ -414,10 +417,17 @@ agents:
   root shell, and a multi-step operation. An operation that waits only
   because its code asks for approval counts as `dangerous`: it is in the
   list only under a rule that allows `dangerous`.
-- A person reads each role's whole list on the approval card. The MCP
-  approval tools, and an agent or a service login over REST, get for
-  each role the count, the first 50 operations, and "N more" when there
-  are more.
+- A person reads each role's whole list over REST, in the history and in
+  the web console. Every MCP answer (`meho_approvals_get`,
+  `meho_approvals_list` and `preview_operation` of `policy.apply`), also
+  for a person, gives for each role the count, the first 50 operations,
+  and "N more" when there are more. So does every answer to a caller that
+  is not a person: the REST approvals answers and `meho policy history`.
+- A tenant's import that waits for approval runs only on the install's
+  policy it was planned with. If the install's outer limit or its
+  classifications change while it waits, the click does not store the
+  file: "The install's policy changed since this request was planned.
+  Ask again."
 - Setting the rules is a change of the policy. In the web console, an
   Admin who signed in again just before runs the import in the Run
   window, and it runs at once. With a token it waits until an Admin
@@ -429,7 +439,9 @@ agents:
   by name, and for each role the operations that start to run at once.
 - The install's file never holds `agents`. When a platform admin lowers
   the outer limit, the install's import plan lists each tenant with a rule
-  above the new limit (`agents_above_limit`). Such a tenant's file is then
+  above the new limit (`agents_above_limit`). Only a platform admin who
+  reads as a person sees that list and its warnings; every other reader
+  gets the card without them. Such a tenant's file is then
   refused on its next import, also when it did not change: lower the rule
   first.
 - If MEHO cannot read the stored rules, no rule counts, and MEHO logs one

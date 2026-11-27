@@ -202,16 +202,18 @@ of `docs-site/guides/policy-file.md`.
   rule that is not a mapping, or whose `name` is not text, keys on its
   whole text, so the plan shows it as removed and a valid file replaces it.
 - `runs_at_once` holds, for each role, the operations that run at once
-  under the file's rules and do not under the stored rules
-  (`runs_at_once_by_role(..., before=...)`). An edit that leaves the rules
-  the same lists none. `_rule_ops` reads the operations with the functions
+  under the file's rules and the file's classifications, and wait under
+  the stored rules and the stored classifications
+  (`runs_at_once_by_role(..., before=..., before_ops=...)`; `_rule_ops`
+  runs once for each side of the plan). An edit that changes neither the
+  rules nor what waits lists none. `_rule_ops` reads the operations with the functions
   dispatch uses (`lookup_descriptor`): `visible_scope_clause` (the
   tenant's own copy of a connector in place of the built-in rows, so each
   operation once), `enabled_for_tenant_clause` (the tenant's own on/off
   choice), `installed_owner_clause` and `row_code_missing`. The values
   are `policy_in_force` with the overrides of `load_overrides` (an admin's
-  per-operation risk level and approval) and the classification after the
-  import. An operation is never listed when it is `safe` (a token runs it
+  per-operation risk level and approval) and the classification of that
+  side. An operation is never listed when it is `safe` (a token runs it
   at once today), or when a check that no rule lowers makes it wait:
   `destructive` (by code, edit or policy), "always wait" or a
   classification conflict, `never_covered_reason` (credential, per-call
@@ -581,18 +583,32 @@ it.
   the switch off; so does a card that waited during an upgrade. After the
   approval, the run reads the switch again. When it is not the same as on
   the card, the run writes nothing and gives the same sentence.
+- The card of a tenant import planned with `CUSTOM_POLICY` on also holds
+  `planned_with_install_limits`: the hash of the install's stored
+  `limits` and `classifications` (`install_limits_sha256`). The run after
+  the approval compares it with the install's policy at the run, in the
+  same transaction as the write. When they differ: "The install's policy
+  changed since this request was planned. Ask again." Nothing is written,
+  and the audit row of the run holds the sentence.
 - How each reader sees a stored import card:
   `connectors/policy/apply_card.py` (`policy_card_as_read`, registered
-  with `register_card_view` in `operations/_preview.py`). The REST
+  with `register_card_view` in `operations/platform_admin_card.py`). Every
+  view shapes the card in one call of `card_for_reader`: the REST
   approval views, the console (`project_request_to_view`) and the MCP
-  approval tools (`proposed_effect_for_agent`) call it through
-  `card_as_read`; the stored row never changes. With `CUSTOM_POLICY` off,
+  approval tools. It runs the card view first and then the filter of the
+  parts only a platform admin reads (`card_without_tenant_parts`, which
+  also empties `agents_above_limit` and drops its `Tenant <id>:`
+  warnings). The stored row never changes. With `CUSTOM_POLICY` off,
   every view shows the card without `agents`, `runs_at_once`,
-  `agents_above_limit` and its warnings, and `planned_with_custom_policy`.
-  With it on, a person over REST and in the console reads each role's
-  whole `runs_at_once` list; the MCP approval tools and an agent or
-  service login over REST get, for each role, `count`, the first 50
-  `items`, and `more` ("N more") when there are more. A runner login
+  `agents_above_limit` and its warnings, `planned_with_custom_policy` and
+  `planned_with_install_limits`. With it on, a person over REST and in
+  the console reads each role's whole `runs_at_once` list; every MCP
+  answer (the approval tools and `preview_operation`, also for a person)
+  and an agent or service login over REST get, for each role, `count`,
+  the first 50 `items`, and `more` ("N more") when there are more. The
+  policy history (`GET /api/v1/policy/history`) shapes each entry's
+  `diff` the same way (`diff_as_read`); the stored revision never
+  changes. A runner login
   reads no approval card. This is how the approvals tools hold the size
   rule (no agent sees a big raw answer): an approval card is not an
   operation result, so it has no result link. An admin's

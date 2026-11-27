@@ -271,7 +271,8 @@ sign-in, after a tenant switch, and on the first page view after
 `UI_SESSION_READ_REVALIDATION_SECONDS` (default 300 seconds). So after a
 change of role the entry follows within that time, while the page itself
 answers by the new role at once. The check keeps the role under the tenant
-it ran in, also when a token refresh finds the session in another tenant.
+it ran in, also when a token refresh finds the session in another tenant,
+or finds that a tenant was chosen for a session that waited for a choice.
 Then the page names that tenant, and the block check runs again for it.
 The page and both forms keep their own 403. When the database answers the
 write of a block with an error, the block answers 503

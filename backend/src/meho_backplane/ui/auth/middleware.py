@@ -477,9 +477,13 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
     revalidated = await revalidate_read_session(decrypted)
     if revalidated is None:
         return None
-    if revalidated.tenant_id != decrypted.tenant_id:
+    if (
+        revalidated.tenant_id != decrypted.tenant_id
+        or revalidated.tenant_chosen != decrypted.tenant_chosen
+    ):
         # A token refresh reads the row again, and another tab may have
-        # switched its tenant in the meantime: name and check that tenant.
+        # switched or chosen its tenant in the meantime: name and check
+        # that tenant.
         async with sessionmaker() as session:
             tenant_row = await _tenant_row(session, revalidated.tenant_id)
         await _refuse_blocked(revalidated, path)

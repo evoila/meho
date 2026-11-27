@@ -875,6 +875,56 @@ def test_a_refresh_that_finds_another_tenant_names_and_checks_that_tenant(
     assert f'name="meho_tenant" value="{_TENANT_A}"' not in page.text
 
 
+class _OtherTabChoosesTheSameTenant:
+    """A token check during which another tab chooses tenant A, the tenant the session holds."""
+
+    async def __call__(self, decrypted: Any, *, expected_audience: str) -> tuple[Any, Any]:
+        await save_session_tenant(
+            decrypted.id, tenant_id=_TENANT_A, tenant_chosen=True, can_switch=True
+        )
+        operator = SimpleNamespace(
+            tenant_role=TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.USER
+        )
+        return dataclasses.replace(decrypted, tenant_chosen=True), operator
+
+
+@pytest.mark.parametrize("blocked_in_a", [False, True], ids=["not-blocked", "blocked-in-a"])
+def test_a_refresh_that_finds_the_tenant_chosen_names_and_checks_that_tenant(
+    monkeypatch: pytest.MonkeyPatch, blocked_in_a: bool
+) -> None:
+    _tenants()
+    if blocked_in_a:
+        _seed_blocks((_OP_A, str(_TENANT_A), "blocked in a"))
+    admin_in_both = {
+        "meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Admins"]
+    }
+    client, mock, _csrf = _client(extra_claims=admin_in_both)
+    monkeypatch.setattr(
+        revalidation, "verify_access_token_with_refresh", _OtherTabChoosesTheSameTenant()
+    )
+    pages = {}
+    try:
+        for path in ("/ui/", "/ui/account"):
+            # The session waits for a tenant choice and holds the id of tenant A.
+            asyncio.run(
+                save_session_tenant(
+                    client.session_id, tenant_id=_TENANT_A, tenant_chosen=False, can_switch=True
+                )
+            )
+            # The next request checks the token again; the check finds tenant A chosen.
+            revalidation.reset_read_revalidation_cache_for_testing()
+            pages[path] = client.get(path)
+    finally:
+        mock.stop()
+    for path, page in pages.items():
+        if blocked_in_a:
+            assert page.status_code == 403, (path, page.text)
+            assert page.text == PRINCIPAL_BLOCKED_MESSAGE, path
+        else:
+            assert page.status_code == 200, (path, page.text)
+            assert "Tenant tenant-a" in page.text, path
+
+
 def _signed_in(kind: str, sub: str, claims: dict[str, Any] | None) -> tuple[Any, Any, Any]:
     """Sign in through the real login step with a ``tenant_admin`` token of *kind*."""
     clear_jwks_cache()

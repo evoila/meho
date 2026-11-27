@@ -84,7 +84,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from glob import escape as glob_escape
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 from sqlalchemy import func, or_, select, update
@@ -118,6 +118,9 @@ from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, 
 from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
+if TYPE_CHECKING:
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+
 __all__ = [
     "CREDENTIAL_CARD_LINE",
     "CREDENTIAL_CLASSES",
@@ -138,10 +141,12 @@ __all__ = [
     "delete_shaped_refusal_reason",
     "descriptor_credential_reason",
     "descriptor_credential_waits",
+    "descriptor_needs_per_call_approval",
     "find_live_grant",
     "never_covered_reason",
     "null_target_only_park_hint",
     "per_call_approval_grant_reason",
+    "per_call_mark_turned_off",
 ]
 
 #: Either standing-grant table. The lookup, list and revoke code takes one.
@@ -425,15 +430,132 @@ def descriptor_credential_waits(descriptor: EndpointDescriptor) -> bool:
     return credential_call_waits(descriptor.op_id, getattr(descriptor, "op_class", None))
 
 
-def per_call_approval_grant_reason(op_id: str) -> str | None:
+_PROTO_SAFETY_LEVELS = frozenset({"safe", "caution", "dangerous", "destructive"})
+
+
+def _stored_proto(descriptor: EndpointDescriptor) -> EndpointDescriptorProto:
+    """Build the ingest shape of a stored row, for the connector's ingest correction.
+
+    A stored risk level outside the four ingest levels is left out (the
+    shape's default is used), so such a row still gets its correction. The
+    in-memory row of a step has no method and path; it takes them from
+    ``correction_route``, the pair of its stored row.
+    """
+    from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
+
+    level = getattr(descriptor, "safety_level", "safe")
+    method, path = descriptor.method, descriptor.path
+    route = getattr(descriptor, "correction_route", None)
+    if not method and route is not None:
+        method, path = route
+    return EndpointDescriptorProto(
+        op_id=descriptor.op_id,
+        method=method or "",
+        path=path or "",
+        summary=getattr(descriptor, "summary", None),
+        description=getattr(descriptor, "description", None),
+        tags=list(getattr(descriptor, "tags", None) or []),
+        parameter_schema=dict(getattr(descriptor, "parameter_schema", None) or {}),
+        response_schema=getattr(descriptor, "response_schema", None),
+        safety_level=cast(SafetyLevel, level if level in _PROTO_SAFETY_LEVELS else "safe"),
+        requires_approval=bool(getattr(descriptor, "requires_approval", False)),
+        op_class=getattr(descriptor, "op_class", None),
+        llm_instructions=getattr(descriptor, "llm_instructions", None),
+    )
+
+
+_CORRECTION_FAILED: Final = object()
+
+
+def _corrected_op_id(descriptor: EndpointDescriptor) -> str | object | None:
+    """The op id the connector's ingest correction gives *descriptor*.
+
+    ``None`` when the connector registered no per-operation correction, and
+    :data:`_CORRECTION_FAILED` when the correction failed on the row. The
+    correction gets the stored fields of the row, the same fields it gets
+    at ingest (:func:`_stored_proto`).
+    """
+    from meho_backplane.operations.ingest.spec_corrections import (
+        apply_spec_correction,
+        has_spec_correction,
+    )
+
+    product = getattr(descriptor, "product", None)
+    impl_id = getattr(descriptor, "impl_id", None)
+    if not isinstance(product, str) or not isinstance(impl_id, str):
+        return None
+    if not has_spec_correction(product=product, impl_id=impl_id):
+        return None
+    try:
+        return apply_spec_correction(
+            product=product,
+            version=descriptor.version,
+            impl_id=impl_id,
+            proto=_stored_proto(descriptor),
+        ).op_id
+    except Exception:
+        return _CORRECTION_FAILED
+
+
+def descriptor_needs_per_call_approval(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when a connector marked the call of *descriptor* per call.
+
+    The mark is a set of op ids. A stored row can carry another op id than
+    the one the connector's ingest correction gives the same method and path
+    (:func:`~meho_backplane.operations.ingest.spec_corrections.apply_spec_correction`).
+    So the check reads the op id of the row and the op id the correction
+    gives it (:func:`_corrected_op_id`). A correction that fails counts the
+    call as marked.
+    """
+    if needs_per_call_approval(descriptor.op_id):
+        return True
+    corrected = _corrected_op_id(descriptor)
+    if corrected is _CORRECTION_FAILED:
+        return True
+    return isinstance(corrected, str) and needs_per_call_approval(corrected)
+
+
+def per_call_mark_turned_off(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when a platform admin's approval-off edit ends the per-call wait.
+
+    The edit is an override with ``requires_approval=False`` on the row's
+    operation (``descriptor.policy_approval_off``, set by
+    :func:`~meho_backplane.operations.op_policy.apply_effective_policy`).
+    MEHO refuses that edit for a change of rights, so it does not count when
+    the row's op id, or the op id the connector's ingest correction gives
+    the row, is a change of rights, or when the correction fails.
+    """
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    if not getattr(descriptor, "policy_approval_off", False):
+        return False
+    if is_rights_change_op(descriptor.op_id):
+        return False
+    corrected = _corrected_op_id(descriptor)
+    if corrected is _CORRECTION_FAILED:
+        return False
+    return not (isinstance(corrected, str) and is_rights_change_op(corrected))
+
+
+def per_call_approval_grant_reason(
+    op_id: str, descriptor: EndpointDescriptor | None = None
+) -> str | None:
     """Return why a grant cannot cover *op_id*, or ``None`` when it can.
 
     A connector marks an operation with
     :func:`~meho_backplane.op_classes.declare_per_call_approval` when a
     person approves each of its calls. Grant create refuses it and
     :func:`consult_and_record_grant` never lets a grant row clear it.
+    With the stored row in *descriptor*, the op id that the connector's
+    ingest correction gives the row counts too
+    (:func:`descriptor_needs_per_call_approval`).
     """
-    if not needs_per_call_approval(op_id):
+    marked = (
+        descriptor_needs_per_call_approval(descriptor)
+        if descriptor is not None
+        else needs_per_call_approval(op_id)
+    )
+    if not marked:
         return None
     return f"A standing grant cannot cover {op_id}: a person approves each call."
 
@@ -497,7 +619,7 @@ def never_covered_reason(descriptor: EndpointDescriptor) -> tuple[NeverCoveredKi
     patterns = get_settings().service_grant_delete_shaped_patterns
     checks: tuple[tuple[NeverCoveredKind, str | None], ...] = (
         ("credential", descriptor_credential_reason(descriptor)),
-        ("per_call_approval", per_call_approval_grant_reason(op_id)),
+        ("per_call_approval", per_call_approval_grant_reason(op_id, descriptor)),
         ("caller_address", caller_address_grant_reason(descriptor)),
         ("always_wait", always_wait_grant_reason(descriptor)),
         ("delete_shaped", delete_grant_reason(op_id, patterns, descriptor)),
@@ -534,7 +656,7 @@ def _sandbox_delete_exception(
     if params is not None and params_make_credential_call(op_id, params):
         return False
     if (
-        per_call_approval_grant_reason(op_id)
+        per_call_approval_grant_reason(op_id, descriptor)
         or caller_address_grant_reason(descriptor)
         or always_wait_grant_reason(descriptor)
     ):
@@ -892,6 +1014,7 @@ class ServicePrincipalGrantService:
         sandbox_delete = _sandbox_delete_exception(payload.op_id, stored_op_class, descriptor)
         address_reason = (
             (None if sandbox_delete else credential_refusal(payload.op_id, stored_op_class))
+            or per_call_approval_grant_reason(payload.op_id, descriptor)
             or caller_address_grant_reason(descriptor)
             or always_wait_grant_reason(descriptor)
         )

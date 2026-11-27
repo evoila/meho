@@ -127,6 +127,8 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
     from collections.abc import Awaitable, Callable
 
+    from meho_backplane.db.models import EndpointDescriptor
+
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
     "CompositeRecursionLimitExceeded",
@@ -143,6 +145,7 @@ __all__ = [
     "credential_step_waits_after_approval",
     "enforce_subop_policy",
     "get_dispatch_child",
+    "per_call_step_waits_after_approval",
     "run_governed_subop",
 ]
 
@@ -668,6 +671,7 @@ def _covered_by_approved_run(
     requires_approval: bool,
     always_wait: bool = False,
     stored_op_class: str | None = None,
+    per_call_approval: bool = False,
 ) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
@@ -676,13 +680,14 @@ def _covered_by_approved_run(
     (:data:`composite_resume_scope_var`). Such an approval covers every other
     internal step, except a ``destructive`` step, a step marked
     ``requires_approval``, a step a classification entry makes always
-    wait and a step that reads, writes or makes a credential
-    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
-    those keep their own approval.
+    wait, a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    and a step that a connector marks so that a person approves each call
+    (*per_call_approval*): those keep their own approval.
     """
     from meho_backplane.operations.service_grants import credential_call_waits
 
-    if safety_level == "destructive" or requires_approval or always_wait:
+    if safety_level == "destructive" or requires_approval or always_wait or per_call_approval:
         return False
     if credential_call_waits(op_id, stored_op_class):
         return False
@@ -707,6 +712,21 @@ def credential_step_waits_after_approval(op_id: str, stored_op_class: str | None
     from meho_backplane.operations.service_grants import credential_call_waits
 
     return _runs_after_approval() and credential_call_waits(op_id, stored_op_class)
+
+
+def per_call_step_waits_after_approval(descriptor: EndpointDescriptor) -> bool:
+    """True when a step or child call of a run after an approval is marked per call.
+
+    A connector marks some operations so that a person approves each call
+    (:func:`~meho_backplane.operations.service_grants.descriptor_needs_per_call_approval`).
+    Such a step or child call waits for its own approval in a run that goes on
+    after an approval, whatever rights the approving person has and whatever
+    level the step declares. The approved step itself is cleared before this
+    check (:func:`_subop_resume_cleared`).
+    """
+    from meho_backplane.operations.service_grants import descriptor_needs_per_call_approval
+
+    return _runs_after_approval() and descriptor_needs_per_call_approval(descriptor)
 
 
 def _resume_parent_for_current_composite(
@@ -1222,7 +1242,10 @@ async def _gate_subop(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_policy
-    from meho_backplane.operations.service_grants import _sandbox_delete_exception
+    from meho_backplane.operations.service_grants import (
+        _sandbox_delete_exception,
+        descriptor_needs_per_call_approval,
+    )
     from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
     from meho_backplane.policy.stamp import take_rule
 
@@ -1333,13 +1356,17 @@ async def _gate_subop(
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         # A step marked for a sandbox delete grant is cleared here only by
         # that grant: no other grant covers it.
-        if not credential_step_waits_after_approval(op_id) and (
+        if per_call_step_waits_after_approval(descriptor):
+            _log.info("composite_per_call_step_waits_after_approval", op_id=op_id)
+            verdict = PermissionVerdict.NEEDS_APPROVAL
+        elif not credential_step_waits_after_approval(op_id) and (
             not descriptor.credential_call
             or _sandbox_delete_exception(op_id, None, descriptor, params)
         ):
             return _GoAhead.NO_PERSON
-        _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
-        verdict = PermissionVerdict.NEEDS_APPROVAL
+        else:
+            _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
+            verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
@@ -1347,6 +1374,7 @@ async def _gate_subop(
         safety_level=descriptor.safety_level,
         requires_approval=descriptor.requires_approval,
         always_wait=descriptor.policy_always_wait,
+        per_call_approval=descriptor_needs_per_call_approval(descriptor),
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return _GoAhead.PERSON

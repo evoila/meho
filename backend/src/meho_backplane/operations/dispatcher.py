@@ -507,6 +507,7 @@ from meho_backplane.operations.composite import (
     composite_depth_var,
     credential_step_waits_after_approval,
     get_dispatch_child,
+    per_call_step_waits_after_approval,
 )
 from meho_backplane.operations.composite_steps import (
     child_read_sent_again,
@@ -551,6 +552,7 @@ from meho_backplane.operations.secondary_target_policy import approved_requester
 from meho_backplane.operations.service_grants import (
     CREDENTIAL_CARD_LINE,
     descriptor_credential_waits,
+    descriptor_needs_per_call_approval,
 )
 from meho_backplane.operations.shutdown_drain import (
     is_draining,
@@ -4664,7 +4666,9 @@ async def _dispatch_now(
             # a credential, keeps its own approval. A credential read that a
             # resume sends again is refused whenever it would wait, also when
             # it is destructive or needs its own approval: an approval request
-            # for it alone cannot finish the waiting run.
+            # for it alone cannot finish the waiting run. A child that a
+            # connector marks so that a person approves each call keeps its
+            # own approval too.
             if (
                 verdict is PermissionVerdict.NEEDS_APPROVAL
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
@@ -4681,6 +4685,7 @@ async def _dispatch_now(
                     descriptor.safety_level != "destructive"
                     and not descriptor.requires_approval
                     and not descriptor_credential_waits(descriptor)
+                    and not descriptor_needs_per_call_approval(descriptor)
                 ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
                     mark_child_cleared_by_person(op_id)
@@ -4696,6 +4701,13 @@ async def _dispatch_now(
                 )
             ):
                 _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
+                verdict = PermissionVerdict.NEEDS_APPROVAL
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and per_call_step_waits_after_approval(descriptor)
+            ):
+                _log.info("composite_per_call_child_waits_after_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret

@@ -138,7 +138,9 @@ class Asked:
     classification and floors. ``op_class`` holds marks from the code:
     ``root_shell``, ``credential`` (the call reads, writes or makes a
     credential), ``credential_waits`` (such a call waits for a person),
-    ``per_call_approval``, ``delete_shaped``, ``classified_always_wait``,
+    ``per_call_approval``, ``per_call_approval_off`` (a platform admin's
+    approval-off edit ends that wait for a person in the web console),
+    ``delete_shaped``, ``classified_always_wait``,
     ``sandbox_delete_grant`` (in sandbox mode a delete grant may still clear
     the call) and ``rights_change`` (the operation is a change of rights).
     ``target`` is the target id, or ``None``.
@@ -418,6 +420,17 @@ def _rights_change_step(steps: _Steps, found: Lookups) -> None:
     )
 
 
+def _runs_but_for_per_call_mark(asker: Asker, asked: Asked, hits: list[FloorHit]) -> bool:
+    """True when the call runs at once, or waits only for the per-call mark.
+
+    The read scope of a service login holds for such a call, the same as in
+    the policy gate.
+    """
+    steps = _non_agent_default(asker, asked)
+    _apply_floors(steps, [hit for hit in hits if hit.rule_id != "per_call_approval_waits"])
+    return steps.verdict is Verdict.RUN
+
+
 def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     hits = call_floors(asker, asked)
     if hits and hits[0].verdict == "deny":
@@ -429,7 +442,7 @@ def _non_agent(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
         return steps
     if asker.kind != "service":
         return steps
-    if steps.verdict is Verdict.RUN and found.read_scope_denial is not None:
+    if found.read_scope_denial is not None and _runs_but_for_per_call_mark(asker, asked, hits):
         steps.set(
             Verdict.DENY,
             RuleRef(source="read_scope", rule_id="read_scope", text=found.read_scope_denial),
@@ -451,7 +464,8 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     """The stricter of the caller and the hosted agent, in today's order (#4237).
 
     A deny of the agent decides. When the agent waits, only an agent caller
-    can still make it stricter. Otherwise the caller's verdict counts when
+    can still make it stricter, and the read scope of a service caller
+    holds, the same as for its own call. Otherwise the caller's verdict counts when
     it is as strict as the agent's.
     """
     agent_id = asker.acting_agent or ""
@@ -460,7 +474,19 @@ def _hosted_run(asker: Asker, asked: Asked, found: Lookups) -> _Steps:
     agent.rule = replace(
         agent.rule, text=f"agent {agent_id} acting for {asker.sub}: {agent.rule.text}"
     )
-    if agent.verdict is Verdict.DENY or (agent.verdict is Verdict.WAIT and asker.kind != "agent"):
+    if agent.verdict is Verdict.DENY:
+        return agent
+    if agent.verdict is Verdict.WAIT and asker.kind != "agent":
+        caller_asker = replace(asker, acting_agent=None)
+        if (
+            asker.kind == "service"
+            and found.read_scope_denial is not None
+            and _runs_but_for_per_call_mark(caller_asker, asked, call_floors(caller_asker, asked))
+        ):
+            agent.set(
+                Verdict.DENY,
+                RuleRef(source="read_scope", rule_id="read_scope", text=found.read_scope_denial),
+            )
         return agent
     caller = _for_caller(replace(asker, acting_agent=None), asked, found, found.agent_grant)
     caller.steps = [*agent.steps, *caller.steps]

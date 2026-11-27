@@ -23,6 +23,11 @@ fixed rules take their rule ids from :mod:`meho_backplane.policy.fixed_rules`
 * **Credentials.** A call of an agent or a service login that reads,
   writes or makes a credential waits for a person, also at level
   ``safe``, whatever its grants say.
+* **Per-call mark.** A call that a connector marks so that a person
+  approves each call waits, also at level ``safe``, for every caller. After
+  a platform admin's approval-off edit for the operation
+  (``per_call_approval_off``), a person in the web console keeps the rules
+  of the web console.
 * **No grant.** Some calls wait for a person every time: no standing grant
   and no run approval clears them. These are an operation that reads,
   writes or makes a credential, one that connects to an address the caller gives, one marked
@@ -119,6 +124,16 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 sandbox_delete_grant_clears=(
                     asker.kind == "service" and "sandbox_delete_grant" in asked.op_class
                 ),
+            )
+        )
+    if "per_call_approval" in asked.op_class and not (
+        asker.kind == "person" and asker.via == "web" and "per_call_approval_off" in asked.op_class
+    ):
+        hits.append(
+            FloorHit(
+                "wait",
+                "per_call_approval_waits",
+                "the connector marks the operation so that a person approves each call",
             )
         )
     if _token_call(asker) and asked.risk in KNOWN_NON_SAFE:

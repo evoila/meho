@@ -26,6 +26,7 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 __all__ = [
     "apply_spec_correction",
     "apply_spec_corrections",
+    "has_spec_correction",
     "register_ingest_batch_correction",
     "register_ingest_spec_correction",
 ]
@@ -50,6 +51,11 @@ def register_ingest_batch_correction(
 ) -> None:
     """Register a connector-owned correction that sees every op of one spec."""
     _BATCH_CORRECTIONS[(product, impl_id)] = correction
+
+
+def has_spec_correction(*, product: str, impl_id: str) -> bool:
+    """Return ``True`` when the connector registered a per-operation correction."""
+    return (product, impl_id) in _CORRECTIONS
 
 
 def apply_spec_correction(

@@ -646,6 +646,12 @@ CREDENTIAL_WAIT_NOTE = (
     "grant and no run approval covers it; a person approves each call"
 )
 
+#: The wait reason of a call that a connector marks for a person's approval on each call.
+PER_CALL_WAIT_NOTE = (
+    "the connector marks this operation so that a person approves each call; no "
+    "standing grant, no agent grant and no run approval covers it"
+)
+
 
 async def _service_grant_verdict(
     *,
@@ -870,6 +876,13 @@ def _non_agent_park_reason(
     * Service principals: :func:`_service_safety_gate_reason` (#3152). They
       keep their standing-grant rule and are not under the token rule.
     * Everyone else: :func:`_person_park_reason` (#3980).
+    * A call that would run at once but that a connector marks for a
+      person's approval on each call waits (:data:`PER_CALL_WAIT_NOTE`), for
+      every caller. A person's call in the web interface runs at once only
+      after a platform admin's approval-off edit for the operation
+      (:func:`~meho_backplane.operations.service_grants.per_call_mark_turned_off`).
+      An admin's change of rights in the web console keeps its own check
+      (:func:`_console_rights_verdict`).
     """
     if descriptor.safety_level == "destructive":
         reason = (
@@ -882,15 +895,32 @@ def _non_agent_park_reason(
         return reason
     if descriptor.requires_approval:
         return "requires_approval is True; routed to the approval queue (G11.7-T1)"
-    if is_service:
-        return _service_safety_gate_reason(descriptor)
-    return _person_park_reason(operator, descriptor)
+    from meho_backplane.operations.service_grants import (
+        descriptor_needs_per_call_approval,
+        per_call_mark_turned_off,
+    )
+
+    waits = (
+        _service_safety_gate_reason(descriptor)
+        if is_service
+        else _person_park_reason(operator, descriptor)
+    )
+    if waits is not None or not descriptor_needs_per_call_approval(descriptor):
+        return waits
+    in_web = operator.web_session and is_human_principal(operator)
+    if in_web and per_call_mark_turned_off(descriptor):
+        return None
+    return PER_CALL_WAIT_NOTE
 
 
-async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str | None:
+async def _service_read_scope_denial(
+    *, operator: Operator, descriptor: EndpointDescriptor, target: Any
+) -> str | None:
     """The #4992 read-scope refusal for a service principal, or ``None``.
 
-    Runs only for a call that would otherwise run at once. A person can
+    Runs only for a call that would otherwise run at once, also one that
+    waits only because a connector marks it for a person on each call
+    (:data:`PER_CALL_WAIT_NOTE`). A person can
     limit a service principal's reads to named targets; a call on a
     target outside that list (or without a target, when the scope has no
     "no target" entry) is denied. A principal without a scope is not
@@ -898,7 +928,17 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     """
     from meho_backplane.operations.service_read_scopes import read_scope_denial
 
-    return await read_scope_denial(operator=operator, target=target)
+    denial = await read_scope_denial(operator=operator, target=target)
+    if denial is not None:
+        _log.info(
+            "policy_gate_read_scope_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=str(getattr(target, "id", None)) if target is not None else None,
+        )
+    return denial
 
 
 def _person_role_floor_denial(
@@ -971,17 +1011,11 @@ async def _non_agent_verdict(
     )
     if console is not None:
         return console
-    if gate_reason is None and is_service:
-        denial = await _service_read_scope_denial(operator=operator, target=target)
+    if is_service and gate_reason in (None, PER_CALL_WAIT_NOTE):
+        denial = await _service_read_scope_denial(
+            operator=operator, descriptor=descriptor, target=target
+        )
         if denial is not None:
-            _log.info(
-                "policy_gate_read_scope_denied",
-                operator_sub=operator.sub,
-                tenant_id=str(operator.tenant_id),
-                op_id=descriptor.op_id,
-                safety_level=descriptor.safety_level,
-                target_id=target_id_str,
-            )
             return PermissionVerdict.DENY, denial
 
     if gate_reason is None:
@@ -1362,11 +1396,11 @@ async def _direct_run_verdict(
     The caller's verdict is skipped when it cannot change the outcome. A
     hosted-agent deny is already the strictest verdict. When the hosted
     agent needs approval, only an agent-kind caller can still make it
-    stricter (a deny grant); a human or service caller never gets deny
-    for a call that parks (:func:`_non_agent_verdict` denies only a read
-    that would run at once, #4992), and working out its verdict could
-    record a standing grant as used for a call that then waits for
-    approval.
+    stricter (a deny grant). A service caller's read scope still holds
+    then (:func:`_hosted_read_scope_denial`). Otherwise a human or service
+    caller never gets deny for a call that parks, and working out its
+    verdict could record a standing grant as used for a call that then
+    waits for approval.
     """
     agent = operator.model_copy(
         update={"sub": actor_sub, "principal_kind": PrincipalKind.AGENT, "client_id": actor_sub}
@@ -1381,6 +1415,9 @@ async def _direct_run_verdict(
         agent_verdict is PermissionVerdict.NEEDS_APPROVAL
         and operator.principal_kind is not PrincipalKind.AGENT
     ):
+        denial = await _hosted_read_scope_denial(operator, descriptor, target)
+        if denial is not None:
+            return PermissionVerdict.DENY, denial
         return agent_result
     verdict, reason = await _caller_verdict(
         operator=operator,
@@ -1396,6 +1433,24 @@ async def _direct_run_verdict(
     return agent_result
 
 
+async def _hosted_read_scope_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target: Any
+) -> str | None:
+    """The read-scope refusal of a service login whose hosted agent waits, or ``None``.
+
+    The same rule as for the service login's own call
+    (:func:`_non_agent_verdict`): the read scope holds for a call that the
+    login would run at once, or that waits only because a connector marks it
+    for a person on each call. Nothing is written.
+    """
+    if operator.principal_kind is not PrincipalKind.SERVICE:
+        return None
+    reason = _non_agent_park_reason(operator, descriptor, is_service=True, decide_only=True)
+    if reason not in (None, PER_CALL_WAIT_NOTE):
+        return None
+    return await _service_read_scope_denial(operator=operator, descriptor=descriptor, target=target)
+
+
 async def _agent_verdict(
     *,
     operator: Operator,
@@ -1407,12 +1462,18 @@ async def _agent_verdict(
     A call that reads, writes or makes a credential
     (:func:`~meho_backplane.operations.service_grants.descriptor_credential_waits`)
     is at least ``needs-approval``, also at level ``safe``, whatever the
-    agent's grant rows say. The check sits here and not in
+    agent's grant rows say. So is a call that a connector marks for a
+    person's approval on each call
+    (:func:`~meho_backplane.operations.service_grants.descriptor_needs_per_call_approval`).
+    The checks sit here and not in
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, because only
     the row here carries the class a connector's floor stored on an
     ingested operation.
     """
-    from meho_backplane.operations.service_grants import descriptor_credential_waits
+    from meho_backplane.operations.service_grants import (
+        descriptor_credential_waits,
+        descriptor_needs_per_call_approval,
+    )
 
     target_id = getattr(target, "id", target) if target is not None else None
     sessionmaker = get_sessionmaker()
@@ -1433,5 +1494,10 @@ async def _agent_verdict(
         floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
         if floored is not verdict:
             reason = f"{reason}; floored to needs-approval ({CREDENTIAL_WAIT_NOTE})"
+            verdict = floored
+    if descriptor_needs_per_call_approval(descriptor):
+        floored = _more_restrictive(verdict, PermissionVerdict.NEEDS_APPROVAL)
+        if floored is not verdict:
+            reason = f"{reason}; floored to needs-approval ({PER_CALL_WAIT_NOTE})"
             verdict = floored
     return verdict, reason

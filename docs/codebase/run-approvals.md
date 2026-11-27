@@ -170,6 +170,17 @@ a standing grant covers such an operation:
 - `RunApprovalService.request` refuses a list with a marked operation (422).
 - At call time the gate never lets a run approval or a standing grant clear
   a marked operation.
+- The check also reads the op id that the connector's ingest correction gives
+  the stored row (`descriptor_needs_per_call_approval`), so a row stored
+  with another op id for the same call waits too. Such a call waits also at
+  risk level `safe`, for every caller. A person's call in the web console
+  keeps the rules of the web console only after the platform admin's
+  approval-off edit described below.
+- The approval of a multi-step operation does not cover a marked step or
+  child call: it waits for its own approval
+  (`per_call_step_waits_after_approval` in `operations/composite.py`). A
+  step has no method and path of its own, so `apply_step_policy` gives it
+  those of its stored row (`correction_route`) for the ingest correction.
 
 A platform admin can turn approval off for some of these operations, for
 example the MSAD group membership changes, for the whole install or for one

@@ -238,6 +238,8 @@ _MARKED_TYPES = {
     "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
+    # profiled login: a fixed sentence with the HTTP status only; no address.
+    "SessionLoginRedirectError",
 }
 
 

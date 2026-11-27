@@ -106,6 +106,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -573,16 +574,18 @@ class ProfiledRestConnector(HttpConnector):
                     f"{auth.scheme!r} declares login_credentials='basic' but its "
                     f"build_login_auth produced no credential pair"
                 )
+            with login_request():
+                return await client.post(
+                    path, headers=request_headers, auth=basic_auth, extensions=extensions
+                )
+        with login_request():
+            if spec.encoding == "form":
+                return await client.post(
+                    path, data=dict(body), headers=request_headers, extensions=extensions
+                )
             return await client.post(
-                path, headers=request_headers, auth=basic_auth, extensions=extensions
+                path, json=dict(body), headers=request_headers, extensions=extensions
             )
-        if spec.encoding == "form":
-            return await client.post(
-                path, data=dict(body), headers=request_headers, extensions=extensions
-            )
-        return await client.post(
-            path, json=dict(body), headers=request_headers, extensions=extensions
-        )
 
     @staticmethod
     def _session_spec(scheme: str) -> SessionSchemeSpec:

@@ -53,7 +53,12 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import redirect_status_text
+from meho_backplane.connectors._shared.log_host import (
+    UNPARSEABLE_ADDRESS,
+    host_for_log,
+    redirect_status_text,
+)
+from meho_backplane.connectors._shared.login_mark import is_login
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -93,6 +98,8 @@ __all__ = [
     "READ_SCOPE_DENIED_CODE",
     "UPSTREAM_SAID",
     "VAULT_SAID",
+    "is_redirect_on_change",
+    "redirect_change_may_have_run",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
@@ -111,6 +118,7 @@ __all__ = [
     "result_connector_not_found",
     "result_connector_package_not_installed",
     "result_connector_probe_refused",
+    "result_connector_redirect_on_change",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_connector_vault_forbidden",
@@ -1757,6 +1765,123 @@ def result_connector_error(
         error=f"connector_error: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+#: The redirect statuses that :func:`result_connector_redirect_on_change` words
+#: by what the code means.
+_REDIRECT_ON_CHANGE_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
+
+
+def is_redirect_on_change(exc: httpx.HTTPStatusError) -> bool:
+    """Whether *exc* is a redirect that MEHO did not follow after a change.
+
+    A change is a request whose method is not a read and that the pooled
+    client did not send as a login (:func:`is_login`). Its status must be one
+    of :data:`_REDIRECT_ON_CHANGE_STATUSES`, also when the answer names no
+    ``Location``: the target got the change all the same.
+    """
+    return (
+        exc.request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and not is_login(exc.request)
+        and exc.response.status_code in _REDIRECT_ON_CHANGE_STATUSES
+    )
+
+
+def redirect_change_may_have_run(exc: httpx.HTTPStatusError) -> bool:
+    """Whether the target may have run the change before it sent the redirect.
+
+    Yes for a 301, 302 or 303. A 307 or 308 asks for the same request at
+    another address.
+    """
+    return exc.response.status_code in (301, 302, 303)
+
+
+def _redirect_url(location: str, exc: httpx.HTTPStatusError) -> httpx.URL | None:
+    """The absolute address *location* names, or ``None`` when MEHO cannot read it."""
+    try:
+        return exc.request.url.join(location)
+    except (httpx.InvalidURL, UnicodeError):
+        return None
+
+
+def _redirect_address(exc: httpx.HTTPStatusError) -> str:
+    """The host name of the address a redirect names, or fixed words.
+
+    Only the host name is kept, so no path, query, fragment, user part or
+    port of the address (a one-time ticket, say) reaches an error text.
+    """
+    location = exc.response.headers.get("Location")
+    if not location:
+        return "an address it did not name"
+    url = _redirect_url(location, exc)
+    host = UNPARSEABLE_ADDRESS if url is None else host_for_log(url)
+    return "an address MEHO could not read" if host == UNPARSEABLE_ADDRESS else host
+
+
+#: Put in place of the redirect address for an operation that sends a secret.
+_ADDRESS_WITHHELD: Final = "an address that MEHO does not show, because this call sends a secret"
+
+
+def result_connector_redirect_on_change(
+    op_id: str,
+    exc: httpx.HTTPStatusError,
+    duration_ms: float,
+    *,
+    withhold_address: bool = False,
+) -> OperationResult:
+    """A change got a redirect that MEHO did not follow.
+
+    The answer while the switch ``redirect_on_change_result`` is on. The text
+    follows what the HTTP status code means: 307 / 308 ask for the same call
+    at another address; 303 directs MEHO to another resource; 301 / 302 are
+    unclear. After a 301, 302 or 303 the operator must check whether the
+    change ran. The result keeps the shape of a
+    ``connector_error`` and adds no field.
+
+    Every text is built here from the status, the method and the host names
+    of the two addresses. ``str(exc)`` is not used: httpx puts the full
+    ``Location`` there, and a one-time ticket in its query would reach the
+    caller and the audit row. The redirect body is not used either. With
+    *withhold_address* (the operation sends a secret) the redirect address is
+    left out with a fixed sentence. A 307 or 308 with no ``Location`` names
+    no address to approve, so it gets the plain answer of
+    :func:`result_connector_error`.
+    """
+    status_code = exc.response.status_code
+    if status_code in (307, 308) and not exc.response.headers.get("Location"):
+        # No address to go to, so nothing to approve: the plain refusal.
+        return result_connector_error(op_id, exc, duration_ms)
+    address = _ADDRESS_WITHHELD if withhold_address else _redirect_address(exc)
+    if status_code in (307, 308):
+        message = (
+            f"The target asked for this call to go to {address}. MEHO did not follow it: "
+            "that is not the approved call. Make a new preview and approval for that address."
+        )
+    elif status_code == 303:
+        message = (
+            f"The target directed MEHO to another resource at {address}. MEHO did not "
+            "follow it. Check on the target whether the change ran."
+        )
+    else:
+        message = (
+            f"The target answered with a redirect to {address}. MEHO did not follow it "
+            "and could not find out if the change ran. Check the target."
+        )
+    sent = f"{exc.request.method} {host_for_log(exc.request.url)}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"connector_error: {type(exc).__name__}. {message}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_error",
+            "exception_class": type(exc).__name__,
+            "exception_message": f"HTTP {status_code} redirect after {sent}",
+            MESSAGE_SOURCE_KEY: MESSAGE_SOURCE_MEHO,
+            "http_status": status_code,
+            "upstream_message": None,
+        },
     )
 
 

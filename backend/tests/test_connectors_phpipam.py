@@ -526,3 +526,77 @@ def test_trace_body_masks_tokens_and_passwords() -> None:
     traced = conn.trace_response_body(response)
     assert "tok-planted" not in str(traced)
     assert traced["data"]["users"][0]["password"] == "<redacted>"
+
+
+# ---------------------------------------------------------------------------
+# A change is sent at most twice: a redirect and a new login count together
+# ---------------------------------------------------------------------------
+
+_RESERVE = {"subnet_id": 7, "ip": "192.0.2.10", "hostname": "web-01.example.test"}
+_WRITE_PATH = f"/api/{APP_ID}/addresses/"
+
+
+def _with_write_answers(fake: FakePhpipam, answers: list[httpx.Response]) -> Any:
+    """Answer each address write with the next of *answers*, then as the fake does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        is_write = request.method == "POST" and request.url.path.rstrip("/") == _WRITE_PATH[:-1]
+        if is_write and answers:
+            fake.calls.append((request.method, request.url.path, None))
+            return answers.pop(0)
+        return fake.handler(request)
+
+    return handler
+
+
+def _writes(fake: FakePhpipam) -> int:
+    return len([c for c in fake.calls if c[0] == "POST" and c[1].rstrip("/") == _WRITE_PATH[:-1]])
+
+
+async def test_a_write_sent_again_after_a_307_is_not_sent_a_third_time_after_a_401() -> None:
+    fake = _user_fake()
+    conn = _connector(fake)
+    answers = [
+        httpx.Response(307, headers={"Location": _WRITE_PATH[:-1]}),
+        _answer_json(401, "Token expired"),
+    ]
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=_with_write_answers(fake, answers))
+        with pytest.raises(ConnectorAuthError):
+            await conn.address_reserve(_operator(), _Target(), _RESERVE)
+    assert _writes(fake) == 2
+    assert len(fake.calls_of("POST", f"/api/{APP_ID}/user/")) == 1
+
+
+async def test_a_write_sent_again_after_a_401_follows_no_redirect() -> None:
+    fake = _user_fake()
+    conn = _connector(fake)
+    answers = [
+        _answer_json(401, "Token expired"),
+        httpx.Response(307, headers={"Location": _WRITE_PATH[:-1]}),
+    ]
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=_with_write_answers(fake, answers))
+        with pytest.raises(httpx.HTTPStatusError) as info:
+            await conn.address_reserve(_operator(), _Target(), _RESERVE)
+    assert info.value.response.status_code == 307
+    assert _writes(fake) == 2
+    assert len(fake.calls_of("POST", f"/api/{APP_ID}/user/")) == 2
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307])
+async def test_a_redirect_after_a_write_reaches_the_dispatcher_unchanged(status: int) -> None:
+    fake = _fake()
+    conn = _connector(fake)
+    answers = [httpx.Response(status, headers={"Location": "/elsewhere/"})]
+    async with respx.mock(base_url=BASE_URL, assert_all_called=False) as mock:
+        mock.route().mock(side_effect=_with_write_answers(fake, answers))
+        with pytest.raises(httpx.HTTPStatusError) as info:
+            await conn.address_reserve(_operator(), _Target(), _RESERVE)
+    assert not isinstance(info.value, PhpipamApiError)
+    assert info.value.response.status_code == status
+    assert _writes(fake) == 1
+
+
+def _answer_json(status: int, message: str) -> httpx.Response:
+    return httpx.Response(status, json={"code": status, "success": False, "message": message})

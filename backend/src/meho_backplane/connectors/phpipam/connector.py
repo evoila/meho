@@ -34,6 +34,7 @@ recorded. :meth:`PhpipamConnector.trace_response_body` also masks every
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -42,13 +43,14 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     basic_auth_header,
     is_acceptable_auth_model,
 )
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, change_sent_once_before
 from meho_backplane.connectors.phpipam._errors import (
     AUTH_REMEDIATION,
     PhpipamApiError,
@@ -180,17 +182,28 @@ class PhpipamConnector(HttpConnector):
         config = resolve_target_config(target)
         path = api_path(config.base_path, _USER_PATH, {"app_id": config.app_id})
         client = await self._http_client(target)
-        response = await client.post(
-            path,
-            headers={
-                "Authorization": basic_auth_header(
-                    credentials.username or "", credentials.password or ""
-                )
-            },
-            extensions=self._request_extensions(target),
-        )
+        with login_request():
+            response = await client.post(
+                path,
+                headers={
+                    "Authorization": basic_auth_header(
+                        credentials.username or "", credentials.password or ""
+                    )
+                },
+                extensions=self._request_extensions(target),
+            )
         if response.status_code in (401, 403):
             raise auth_error(response, target=target, stage="login")
+        if 300 <= response.status_code < 400:
+            # A redirect that MEHO did not follow is never a login, whatever
+            # its body holds. Nothing of the body reaches the error.
+            raise PhpipamApiError(
+                f"phpIPAM user login for target {target.name!r} failed with HTTP "
+                f"{response.status_code}",
+                http_status=response.status_code,
+                upstream_message=None,
+                remediation=AUTH_REMEDIATION,
+            )
         if response.status_code >= 400:
             # phpIPAM answers HTTP 500 to a wrong user name or password.
             raise PhpipamApiError(
@@ -268,32 +281,52 @@ class PhpipamConnector(HttpConnector):
         ``None`` when phpIPAM answers 404 and *not_found_ok* is set (phpIPAM
         answers 404 for "no addresses", "no subnets" and "address not
         reserved"). A 401 or 403 with a user token logs in again and sends the
-        call once more. Every other error answer raises
+        call once more, unless a change already followed a redirect: a
+        change is sent at most twice. A redirect after a change that MEHO did
+        not follow raises :class:`httpx.HTTPStatusError` unchanged, for the
+        dispatcher. Every other error answer raises
         :class:`~meho_backplane.connectors.phpipam._errors.PhpipamApiError`.
         A lost answer (time-out, broken connection) raises
         :class:`httpx.TransportError` unchanged: a write is never sent twice.
         """
         config = resolve_target_config(target)
         path = api_path(config.base_path, template, {"app_id": config.app_id, **(values or {})})
+        is_change = method != "GET"
         for attempt in (1, 2):
             try:
-                if method == "GET":
+                if not is_change:
                     body = await self._get_json(target, path, operator=operator)
                 else:
-                    body = await self._post_json(
-                        target,
-                        path,
-                        operator=operator,
-                        verb=method,
-                        json=json,
-                    )
+                    # A change is sent at most twice: its repeat after a new
+                    # login follows no redirect.
+                    repeat = change_sent_once_before() if attempt == 2 else nullcontext()
+                    with repeat:
+                        body = await self._post_json(
+                            target,
+                            path,
+                            operator=operator,
+                            verb=method,
+                            json=json,
+                        )
             except httpx.HTTPStatusError as exc:
                 response = exc.response
                 status = response.status_code
+                if is_change and 300 <= status < 400:
+                    # The dispatcher words a redirect after a change that
+                    # MEHO did not follow, and marks the audit row.
+                    raise
                 if status in (401, 403):
                     key = self._key(target)
                     credentials = self._credentials.get(key)
-                    if attempt == 1 and credentials is not None and not credentials.app_token:
+                    # A change that already followed a redirect was sent
+                    # twice, so it is not sent a third time.
+                    sent_twice = is_change and bool(response.history)
+                    if (
+                        attempt == 1
+                        and credentials is not None
+                        and not credentials.app_token
+                        and not sent_twice
+                    ):
                         self._drop_token(target)
                         continue
                     raise auth_error(

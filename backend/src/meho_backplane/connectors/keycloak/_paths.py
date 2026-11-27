@@ -43,6 +43,8 @@ import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+from meho_backplane.flight_recorder.capture import FilledPath
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -202,7 +204,9 @@ def fill_path(template: str, values: Mapping[str, Any]) -> str:
     site instead of dispatching a malformed URL. Every value is encoded
     with :func:`quote_segment`, so a ``/``, a ``?`` or a ``..`` in a realm
     name or an id stays inside its one path segment. Callers pass raw
-    values, never encoded ones.
+    values, never encoded ones. The result keeps *template*
+    (:class:`FilledPath`), so the trace masks the filled segments of an
+    operation that sends a secret.
     """
     placeholders = set(_PLACEHOLDER_RE.findall(template))
     provided = set(values)
@@ -211,4 +215,5 @@ def fill_path(template: str, values: Mapping[str, Any]) -> str:
             f"fill_path template {template!r} declares placeholders "
             f"{sorted(placeholders)} but got values for {sorted(provided)}"
         )
-    return _PLACEHOLDER_RE.sub(lambda match: quote_segment(values[match.group(1)]), template)
+    filled = _PLACEHOLDER_RE.sub(lambda match: quote_segment(values[match.group(1)]), template)
+    return FilledPath(filled, template)

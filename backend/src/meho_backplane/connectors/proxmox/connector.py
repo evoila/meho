@@ -57,6 +57,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_secret_cache_key,
 )
 from meho_backplane.connectors._shared.log_host import redirect_status_text
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
@@ -230,11 +231,12 @@ class ProxmoxConnector(HttpConnector):
             if cached is not None and not is_system_operator(operator):
                 return cached
             client = await self._http_client(target)
-            resp = await client.post(
-                _TICKET_PATH,
-                data={"username": creds.username, "password": creds.password},
-                extensions=self._request_extensions(target),
-            )
+            with login_request():
+                resp = await client.post(
+                    _TICKET_PATH,
+                    data={"username": creds.username, "password": creds.password},
+                    extensions=self._request_extensions(target),
+                )
             resp.raise_for_status()
             data = resp.json().get("data") or {}
             session = {
@@ -271,7 +273,8 @@ class ProxmoxConnector(HttpConnector):
             session = await self._ticket_session(target, operator, creds)
             headers["CSRFPreventionToken"] = session["csrf"]
         client = await self._http_client(target)
-        resp = await client.request(
+        resp = await self._send_traced(
+            client,
             verb,
             path,
             data=data or None,

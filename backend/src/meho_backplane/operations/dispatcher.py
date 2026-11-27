@@ -337,6 +337,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     TargetSecretNotFoundError,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.adapters.http import change_sent_once_before
 from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.connectors.resolver import stale_openbao_probe_hint
 from meho_backplane.db.models import (
@@ -378,6 +379,8 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_pool_busy,
     is_probe_refused,
+    is_redirect_on_change,
+    redirect_change_may_have_run,
     result_ambiguous_connector,
     result_announce_required,
     result_audit_commit_failed,
@@ -392,6 +395,7 @@ from meho_backplane.operations._errors import (
     result_connector_http_422,
     result_connector_not_found,
     result_connector_probe_refused,
+    result_connector_redirect_on_change,
     result_connector_timeout,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
@@ -494,6 +498,7 @@ from meho_backplane.operations._validate import (
 from meho_backplane.operations._vendor_text import (
     redact_error_payload,
     redact_error_result,
+    sends_secret,
     withhold_vendor_text,
 )
 from meho_backplane.operations.approved_run_rights import approved_run_refusal
@@ -559,6 +564,7 @@ from meho_backplane.operations.shutdown_drain import (
 )
 from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.uncertain_outcome import (
+    UNCERTAIN_OUTCOME,
     changes_target,
     connection_lost_after_send,
     with_uncertain_outcome,
@@ -1070,6 +1076,7 @@ async def _execute_and_audit(
         # An approved call runs under the approver, but the trace belongs to
         # the requester, the same owner as its result handle.
         owner_sub=handle_owner_sub_var.get(),
+        params=params,
     )
     try:
         # A multi-step run keeps a log of its steps, so its error result is
@@ -2413,6 +2420,7 @@ async def _audit_error_and_return(
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
     handle_metadata: dict[str, Any] | None = None,
+    change_may_have_run: bool = False,
 ) -> OperationResult:
     """Write the ``result_status='error'`` audit row for a built result, then return it.
 
@@ -2455,6 +2463,11 @@ async def _audit_error_and_return(
     result = mark_when_a_step_is_unknown(result, audit_id)
     result = withhold_vendor_text(result, op_id=descriptor.op_id, tags=descriptor.tags)
     result = redact_error_result(result)
+    error_extras = _error_extras_for_audit(result)
+    if change_may_have_run:
+        # The target may have run the change: the audit row says so, with the
+        # switch ``redirect_on_change_result`` off and on.
+        error_extras = {**(error_extras or {}), "execution_outcome": UNCERTAIN_OUTCOME}
     receipt = await audit_safe(
         audit_id=audit_id,
         event_class=AuditEventClass.OPERATION_EXECUTION,
@@ -2468,9 +2481,33 @@ async def _audit_error_and_return(
         redaction_manifest=redaction_manifest,
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
-        error_extras=_error_extras_for_audit(result),
+        error_extras=error_extras,
     )
     return with_audit_receipt(result, receipt)
+
+
+def _uses_change_rule(connector_instance: Any) -> bool:
+    """Whether the requests of *connector_instance* get the change rule of its client.
+
+    A connector package that does not name its logins keeps the rule of a
+    read for every request (``HttpConnector.uses_change_rule``), and so the
+    resend rule that goes with it.
+    """
+    uses_change_rule = getattr(type(connector_instance), "uses_change_rule", None)
+    return bool(uses_change_rule()) if callable(uses_change_rule) else True
+
+
+def _change_may_have_run(http_exc: httpx.HTTPStatusError, descriptor: EndpointDescriptor) -> bool:
+    """Whether an operation that may change the target ended on a redirect after it may have run.
+
+    A 301, 302 or 303 after a change: the target may have run it. A 307 or
+    308 asks for the same request at another address, so it gets no mark.
+    """
+    return (
+        changes_target(descriptor.safety_level)
+        and is_redirect_on_change(http_exc)
+        and redirect_change_may_have_run(http_exc)
+    )
 
 
 async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
@@ -2513,6 +2550,7 @@ def _classify_http_status_error(
     duration_ms: float,
     relogin: Literal["not_available", "reestablished"] = "not_available",
     changes_target: bool = False,
+    op_sends_secret: bool = False,
 ) -> OperationResult:
     """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
 
@@ -2522,6 +2560,13 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
+    * a redirect after a change (301, 302, 303, 307, 308), only with the
+      switch ``redirect_on_change_result`` on ->
+      :func:`result_connector_redirect_on_change`, worded by what the code
+      means, and marked uncertain after a 301, 302 or 303 when the operation
+      may change the target. The redirect address is left out when the
+      operation sends a secret (*op_sends_secret*). With the switch off, the
+      redirect gets the generic ``connector_error`` answer below.
     * ``410`` -> :func:`result_connector_http_410` -- the product version
       removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream
@@ -2540,6 +2585,16 @@ def _classify_http_status_error(
     rejected (``reestablished``). Only the auth-class branch consumes it.
     """
     status_code = http_exc.response.status_code
+    if is_redirect_on_change(http_exc) and get_settings().redirect_on_change_result:
+        # MEHO did not follow a redirect after a change. With the switch on,
+        # the answer says what the code means. With it off, the answer is the
+        # generic one below for that status.
+        redirected = result_connector_redirect_on_change(
+            op_id, http_exc, duration_ms, withhold_address=op_sends_secret
+        )
+        if changes_target and redirect_change_may_have_run(http_exc):
+            return with_uncertain_outcome(redirected)
+        return redirected
     if status_code == 403:
         return result_connector_http_403(op_id, http_exc, duration_ms)
     if status_code == 410:
@@ -2630,11 +2685,31 @@ async def _handle_http_status_error(
         status_code, _profile_expiry_statuses(connector_instance)
     )
     invalidate_session = getattr(connector_instance, "invalidate_session", None)
-    if callable(invalidate_session) and (
-        is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response)
+    # A connector package that does not name its logins keeps the resend
+    # rule of a read for every request (``HttpConnector.uses_change_rule``).
+    change_rule = _uses_change_rule(connector_instance)
+    redirect_on_change = change_rule and is_redirect_on_change(http_exc)
+    if (
+        redirect_on_change
+        and callable(invalidate_session)
+        and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
+    ):
+        # The login ended, so the kept session is dropped. The change is not
+        # sent again; the redirect result below tells the caller what happened.
+        await invalidate_session(target, rejected=http_exc.request)
+        mark_session_relogin(status_code, resent=False)
+    if (
+        callable(invalidate_session)
+        and not redirect_on_change
+        and (is_auth_failure or session_expired_by_hook(connector_instance, http_exc.response))
     ):
         # One rule for both paths: repeat only when it cannot send a change twice.
-        if not may_resend_after_session_end(descriptor, connector_instance, http_exc.request):
+        if not may_resend_after_session_end(
+            descriptor,
+            connector_instance,
+            http_exc.request,
+            after_redirect=change_rule and bool(http_exc.response.history),
+        ):
             return await _session_ended_not_resent(
                 invalidate_session=invalidate_session,
                 rejected_exc=http_exc,
@@ -2685,6 +2760,7 @@ async def _handle_http_status_error(
             target=target,
             duration_ms=duration_ms,
             changes_target=changes_target(descriptor.safety_level),
+            op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
         ),
         audit_id=audit_id,
         operator=operator,
@@ -2693,6 +2769,7 @@ async def _handle_http_status_error(
         params=params,
         params_hash=params_hash,
         duration_ms=duration_ms,
+        change_may_have_run=_change_may_have_run(http_exc, descriptor),
     )
 
 
@@ -2777,15 +2854,18 @@ async def _retry_after_expired_session_answer(
     """
     await invalidate_session(target, rejected=rejected_exc.request)
     mark_session_relogin(rejected_exc.response.status_code, resent=True)
+    may_have_run = False
     try:
-        raw = await _run_source_kind_branch(
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            audit_id=audit_id,
-        )
+        # The change was sent once already, so the repeat follows no redirect.
+        with change_sent_once_before():
+            raw = await _run_source_kind_branch(
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                audit_id=audit_id,
+            )
     except PrincipalBlockedStepError as blocked_exc:
         # The person was blocked before the repeat: the same answer as on the
         # first try.
@@ -2811,6 +2891,7 @@ async def _retry_after_expired_session_answer(
                 relogin="reestablished",
             )
         else:
+            may_have_run = _change_may_have_run(retry_exc, descriptor)
             result = _classify_http_status_error(
                 http_exc=retry_exc,
                 op_id=op_id,
@@ -2819,6 +2900,7 @@ async def _retry_after_expired_session_answer(
                 duration_ms=duration_ms,
                 relogin="reestablished",
                 changes_target=changes_target(descriptor.safety_level),
+                op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
             )
     except ConnectorAuthError as retry_exc:
         # The fresh sign-in was refused. Drop the kept credential too, so a
@@ -2853,6 +2935,7 @@ async def _retry_after_expired_session_answer(
         params=params,
         params_hash=params_hash,
         duration_ms=_elapsed_ms(started),
+        change_may_have_run=may_have_run,
     )
 
 
@@ -2897,14 +2980,16 @@ async def _retry_after_session_invalidation(
     """
     await invalidate_session(target, rejected=rejected)
     try:
-        raw = await _run_source_kind_branch(
-            descriptor=descriptor,
-            connector_instance=connector_instance,
-            operator=operator,
-            target=target,
-            params=params,
-            audit_id=audit_id,
-        )
+        # The change was sent once already, so the repeat follows no redirect.
+        with change_sent_once_before():
+            raw = await _run_source_kind_branch(
+                descriptor=descriptor,
+                connector_instance=connector_instance,
+                operator=operator,
+                target=target,
+                params=params,
+                audit_id=audit_id,
+            )
     except PrincipalBlockedStepError as blocked_exc:
         # The person was blocked before the repeat: the same answer as on the
         # first try.
@@ -2933,6 +3018,7 @@ async def _retry_after_session_invalidation(
                 duration_ms=duration_ms,
                 relogin="reestablished",
                 changes_target=changes_target(descriptor.safety_level),
+                op_sends_secret=sends_secret(descriptor.op_id, descriptor.tags),
             ),
             audit_id=audit_id,
             operator=operator,
@@ -2941,6 +3027,7 @@ async def _retry_after_session_invalidation(
             params=params,
             params_hash=params_hash,
             duration_ms=duration_ms,
+            change_may_have_run=_change_may_have_run(retry_exc, descriptor),
         )
     except ConnectorAuthError as retry_exc:
         # #2329 convergence with #2067: the one-shot re-dispatch forces a

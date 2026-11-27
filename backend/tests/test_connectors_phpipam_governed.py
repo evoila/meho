@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -406,3 +407,51 @@ async def test_corrected_password_works_on_the_next_call(
     assert fixed.result["total"] == 1
     assert len(fake.calls_of("POST", f"/api/{APP_ID}/user/")) == 2
     assert len(vault.secrets.kv.v2.read_calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# A redirect after a change: the audit row says the change may have run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("switch_on", [False, True], ids=["switch-off", "switch-on"])
+async def test_reserve_that_gets_a_303_is_marked_uncertain_in_the_audit_row(
+    _stub_embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if switch_on else "false")
+    get_settings.cache_clear()
+    await register_phpipam_typed_operations(embedding_service=_stub_embedding)
+    fake = _fake()
+    _install_secret(monkeypatch, fake)
+    writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == f"/api/{APP_ID}/addresses/":
+            writes.append(request.url.path)
+            return httpx.Response(303, headers={"Location": "/jobs/42"})
+        return fake.handler(request)
+
+    async with respx.mock(base_url=f"https://{HOST}", assert_all_called=False) as mock:
+        mock.route().mock(side_effect=handler)
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=PHPIPAM_CONNECTOR_ID,
+            op_id="phpipam.address.reserve",
+            target=_Target(),
+            params={"subnet_id": 7, "ip": "192.0.2.10", "hostname": "web-01.example.test"},
+            _approved=True,
+        )
+    assert result.status == "error"
+    assert writes == [f"/api/{APP_ID}/addresses/"]
+    assert result.extras["http_status"] == 303
+    assert (result.extras.get("execution_outcome") == "uncertain") is switch_on
+    if switch_on:
+        assert result.extras["retry"] is False
+    async with get_sessionmaker()() as s:
+        rows = [
+            row
+            for row in (await s.execute(select(AuditLog))).scalars()
+            if row.payload.get("result_status") == "error"
+        ]
+    assert len(rows) == 1
+    assert rows[0].payload["error"]["execution_outcome"] == "uncertain"

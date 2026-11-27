@@ -2199,6 +2199,30 @@ gets the waiting request writes its own audit row, and the answer's
 `audit_id` is that row, not the first call's. No tool and no input changes.
 See [approvals.md](approvals.md#1-send-an-idempotency_key-so-a-retry-gets-the-same-request).
 
+An eighth switch changes an answer: `REDIRECT_ON_CHANGE_RESULT` (off by
+default). It decides only the answer of a change (PUT, POST, PATCH,
+DELETE) that ends on a redirect MEHO does not follow, and the error of a
+login that ends on such a redirect. With it off, the answer is the generic
+`connector_error` answer for that status, and a login gives its own error.
+With it on, the `error` text says what the HTTP code means (307 / 308: the
+target asks for the call at another address; 303: the target directs
+MEHO to another resource, and the operator checks whether the change ran;
+301 / 302: MEHO could not find out), and after a 301, 302 or
+303 an operation that may change the target also gets `execution_outcome`,
+`retry` and `remediation`. A login that ends on such a redirect gets a
+fixed sentence: the login got a redirect, MEHO did not follow it, with the
+HTTP status. In both modes, the `error` text and `extras.exception_message`
+of a refused change redirect name each address only by its host name. A 307
+or 308 with no `Location` gives the plain refusal of a redirect that MEHO
+does not follow, in both modes, and asks for no approval, because there is
+no address to approve. Which redirects a request follows is the same in
+both modes.
+The audit row of a 301, 302 or 303 after a change has
+`execution_outcome: uncertain` in both modes. No tool and no input changes.
+The issue "measure the switch REDIRECT_ON_CHANGE_RESULT and decide its
+default" tracks the measurement. See the `HttpConnector` row in
+[backend.md](backend.md).
+
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)
 
 A call with `reveal_secret: true` on a secret read waits for a second

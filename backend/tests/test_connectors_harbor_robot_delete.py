@@ -39,6 +39,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -112,18 +113,13 @@ def _stub_embedding() -> AsyncMock:
     return service
 
 
-class _FakeResp:
-    def raise_for_status(self) -> None:
-        return None
-
-
 class _FakeClient:
     def __init__(self, recorder: _RecordingHarborConnector) -> None:
         self._recorder = recorder
 
-    async def request(self, method: str, path: str, headers: Any = None) -> _FakeResp:
+    async def request(self, method: str, path: str, **_: Any) -> httpx.Response:
         self._recorder.delete_calls.append((method, path))
-        return _FakeResp()
+        return httpx.Response(200, request=httpx.Request(method, f"https://harbor.test{path}"))
 
 
 class _RecordingHarborConnector(HarborConnector):

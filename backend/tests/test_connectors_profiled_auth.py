@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -34,6 +35,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -45,6 +47,7 @@ from meho_backplane.connectors.profile import (
 )
 from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.settings import get_settings
 
 
 def _operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -679,6 +682,168 @@ async def test_session_login_post_auth_status_raises_connector_auth_error(status
     # No session cached — the establish failed before a token was minted.
     assert credential_cache_key(target) not in connector._session_tokens
     await connector.aclose()
+
+
+@pytest.fixture
+def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Set the switch ``REDIRECT_ON_CHANGE_RESULT`` for one test."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+
+    def set_to(on: bool) -> None:
+        monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if on else "false")
+        get_settings.cache_clear()
+
+    yield set_to
+    get_settings.cache_clear()
+
+
+#: A made-up value in the ``Location`` path and its query.
+_LOGIN_PATH_MARKER = "mrk-login-path-71c"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["/api/v2/sessions/", "/api/v3/sessions"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_profiled_login_follows_a_same_origin_redirect(
+    on: bool, status: int, location: str, answer_switch: Any
+) -> None:
+    """A login is not a change: it follows a redirect on the same origin, as a read does.
+
+    A 307 or 308 sends the login body again to the new path; a 301, 302 or
+    303 sends a GET there. The login succeeds and the operation is sent once.
+    """
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+    again = "POST" if status in (307, 308) else "GET"
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").respond(status, headers={"Location": location})
+        login_again = mock.route(method=again, path=location).respond(
+            200, json={"sessionId": "tok"}
+        )
+        operation = mock.put("/api/v2/items/7").respond(200, json={"ok": True})
+        await connector._post_json(
+            target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+        )
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert login_again.call_count == 1
+    if again == "POST":
+        assert login_again.calls.last.request.content == login.calls.last.request.content
+    assert operation.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location_origin",
+    ["https://other.invalid", "http://vrli.invalid", "https://vrli.invalid:8443"],
+    ids=["other-host", "other-scheme", "other-port"],
+)
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_profiled_login_redirect_to_another_origin_ends_the_call(
+    on: bool, status: int, location_origin: str, answer_switch: Any
+) -> None:
+    """A login never follows a redirect to another origin, with the switch off and on.
+
+    With the switch on, the error says in plain words that the login got a
+    redirect that MEHO did not follow, and names the status. It holds no part
+    of the login path, the ``Location`` path or its query. With the switch
+    off, the login code gets the redirect answer and raises its own error.
+    In both modes the other origin gets no request and the operation is not
+    sent.
+    """
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+    location = f"{location_origin}/{_LOGIN_PATH_MARKER}/x?q={_LOGIN_PATH_MARKER}-query"
+
+    with respx.mock(assert_all_called=False) as mock:
+        login = mock.post("https://vrli.invalid/api/v2/sessions").respond(
+            status, headers={"Location": location}
+        )
+        elsewhere = mock.route(url__startswith=location_origin + "/").respond(200, json={})
+        operation = mock.put("https://vrli.invalid/api/v2/items/7").respond(200, json={})
+        with pytest.raises(Exception) as exc_info:
+            await connector._post_json(
+                target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
+            )
+    await connector.aclose()
+
+    if on:
+        assert type(exc_info.value) is SessionLoginRedirectError
+        message = str(exc_info.value)
+        assert message == (
+            f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+            "follow it, so the login did not finish."
+        )
+        assert _LOGIN_PATH_MARKER not in message
+        assert "/api/v2/sessions" not in message
+    else:
+        assert type(exc_info.value) is httpx.HTTPStatusError
+        assert exc_info.value.response.status_code == status
+    assert login.call_count == 1
+    assert elsewhere.call_count == 0
+    assert operation.call_count == 0
+
+
+#: Made-up values in the login's redirect answer. None may reach the answer.
+_LOGIN_MARKERS = ("marker-login-location", "marker-login-body", "/api/v2/sessions")
+
+
+def _login_redirect(status: int, with_location: bool) -> httpx.Response:
+    headers = (
+        {"Location": "https://other.invalid/marker-login-location?t=1"} if with_location else {}
+    )
+    return httpx.Response(
+        status, headers=headers, json={"message": "marker-login-body", "code": "marker-login-body"}
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_location", [True, False], ids=["location", "no-location"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
+    on: bool, status: int, with_location: bool, answer_switch: Any
+) -> None:
+    """A read whose login ends on a redirect: the read is not sent, in both modes.
+
+    With the switch on, the answer holds no part of the login's answer: the
+    login path, the ``Location`` and the body stay out, with a ``Location``
+    on another origin and without one. With the switch off, the login code
+    raises its own error for the redirect answer.
+    """
+    from meho_backplane.operations._errors import result_connector_error
+
+    answer_switch(on)
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid", assert_all_called=False) as mock:
+        login = mock.post("/api/v2/sessions").mock(
+            return_value=_login_redirect(status, with_location)
+        )
+        operation = mock.get("/api/v2/items").respond(200, json={})
+        with pytest.raises(Exception) as exc_info:
+            await connector._request_json(target, "GET", "/api/v2/items", operator=_operator())
+    await connector.aclose()
+
+    assert login.call_count == 1
+    assert operation.call_count == 0
+    if not on:
+        assert type(exc_info.value) is httpx.HTTPStatusError
+        return
+    assert type(exc_info.value) is SessionLoginRedirectError
+    answer = result_connector_error("op.read", exc_info.value, 1.0)
+    text = answer.model_dump_json()
+    for marker in _LOGIN_MARKERS:
+        assert marker not in text
 
 
 @pytest.mark.asyncio

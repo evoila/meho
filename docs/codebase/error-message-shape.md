@@ -385,6 +385,31 @@ holds the fixed sentence `MEHO could not read the address in the Location
 header`. Tests: `tests/test_connectors_http_redirect_answer.py`,
 `tests/test_connectors_proxmox_redirect_answer.py`.
 
+**A change that ends on a redirect, with the switch
+`REDIRECT_ON_CHANGE_RESULT` on.** The answer says what the HTTP code means
+(`result_connector_redirect_on_change`) and names each address only by its
+host name. `extras.exception_message` is `HTTP <status> redirect after
+<method> <host>`, for example `HTTP 307 redirect after PUT
+vc.example.com`. The `error` names the `Location` by its host name, for
+example `The target asked for this call to go to other.example.com.` A
+`Location` that MEHO cannot read gives the fixed words `an address MEHO
+could not read`, and a 301, 302 or 303 with no `Location` gives `an
+address it did not name`. For an operation that sends a secret, the
+`Location` is left out with a fixed sentence. With the switch off, the
+answer is the plain refusal above.
+
+**A 307 or 308 with no `Location`.** With the switch on or off, the answer
+is the plain refusal above: `connector_error`, with `Redirect response 307
+from <host>, with no Location header.` It asks for no approval, because
+there is no address to approve.
+
+**A login that ends on a redirect, with the switch on.** The answer is the
+fixed sentence `The login of this connector got HTTP <status>, a redirect.
+MEHO did not follow it, so the login did not finish.` It holds only the
+HTTP status. Tests: `tests/test_connectors_redirect_rule_by_request_kind.py`,
+`tests/test_connectors_http_change_redirect.py`,
+`tests/test_operations_redirect_on_change_dispatch.py`.
+
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream
 response (`result_connector_error` for an `httpx.HTTPStatusError`, the

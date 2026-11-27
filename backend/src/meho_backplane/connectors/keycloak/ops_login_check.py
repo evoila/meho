@@ -51,6 +51,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
+from meho_backplane.connectors._shared.login_mark import login_request
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors.keycloak._paths import _LOGOUT_PATH, _TOKEN_PATH, fill_path
 from meho_backplane.connectors.keycloak.connector import _OAUTH2_TOKEN_ERROR_CODES
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
@@ -273,13 +275,17 @@ async def _end_session(
         return False
     client = await self._http_client(target)
     try:
-        resp = await client.post(
-            logout_path,
-            data={"client_id": client_id, "refresh_token": refresh_token},
-            headers=_FORM_HEADERS,
-            extensions=self._request_extensions(target),
-        )
-    except httpx.HTTPError as exc:
+        # The end of the session that the login check opened is part of the login.
+        with login_request():
+            resp = await client.post(
+                logout_path,
+                data={"client_id": client_id, "refresh_token": refresh_token},
+                headers=_FORM_HEADERS,
+                extensions=self._request_extensions(target),
+            )
+    except (httpx.HTTPError, SessionLoginRedirectError) as exc:
+        # The login was already accepted: a failed logout, also one that ends
+        # on a redirect MEHO does not follow, keeps that answer.
         _log.warning(
             "keycloak_check_login_logout_failed", target=target.name, error=type(exc).__name__
         )
@@ -308,17 +314,18 @@ async def keycloak_user_check_login(
     password = await _read_password_from_vault(operator, target, params)
 
     client = await self._http_client(target)
-    resp = await client.post(
-        fill_path(_TOKEN_PATH, {"realm": realm}),
-        data={
-            "grant_type": "password",
-            "client_id": client_id,
-            "username": username,
-            "password": password,
-        },
-        headers=_FORM_HEADERS,
-        extensions=self._request_extensions(target),
-    )
+    with login_request():
+        resp = await client.post(
+            fill_path(_TOKEN_PATH, {"realm": realm}),
+            data={
+                "grant_type": "password",
+                "client_id": client_id,
+                "username": username,
+                "password": password,
+            },
+            headers=_FORM_HEADERS,
+            extensions=self._request_extensions(target),
+        )
     answer: dict[str, Any] = {
         "result": "error",
         "http_status": resp.status_code,

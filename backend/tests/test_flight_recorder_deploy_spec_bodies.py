@@ -46,6 +46,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -65,6 +66,7 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.flight_recorder import AGENT_TRACE_HANDLE_EXTRA_KEY, agent_read
+from meho_backplane.flight_recorder.capture import FilledPath
 from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import reset_handler_cache
@@ -86,11 +88,16 @@ _SPEC_VALIDATE_OP_ID = "specdeploy.spec.validate"
 _SPEC_APPLY_OP_ID = "specdeploy.spec.apply"
 _DEPOT_SET_OP_ID = "specdeploy.depot.set"
 _PROXY_SET_OP_ID = "specdeploy.proxy.set"
+_KEY_SET_OP_ID = "specdeploy.key.set"
+_STORE_SET_OP_ID = "specdeploy.store.set"
+_ITEM_SET_OP_ID = "specdeploy.item.set"
 
 #: Made-up values. The test fails if one of them shows up in a trace.
 _PASSWORD = "Made-Up-Pass-4c1e-not-real"
 _LICENCE_KEY = "FAKE0-AAAAA-BBBBB-CCCCC-4C1E0"
 _SECRETS = (_PASSWORD, _LICENCE_KEY)
+#: A made-up value of a path parameter of an operation that sends a secret.
+_KEY_NAME = "made-up-key-name-4c1e"
 
 
 def _deploy_spec() -> dict[str, Any]:
@@ -126,6 +133,7 @@ class _DeployConnector(HttpConnector):
     product = _PRODUCT
     version = _VERSION
     impl_id = _IMPL_ID
+    accepts_ingested_operations = True
 
     async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
         return {"Authorization": "Bearer spec-trace-session"}
@@ -177,6 +185,49 @@ class _DeployConnector(HttpConnector):
         }
         return await self._post_json(
             target, "/v1/settings/proxy", operator=operator, verb="PATCH", json=body
+        )
+
+    async def key_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Set a key; its name is in the path and its value in the body."""
+        return await self._post_json(
+            target,
+            f"/v1/keys/{params['key_name']}",
+            operator=operator,
+            verb="PUT",
+            json={"value": _PASSWORD},
+        )
+
+    async def store_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Fill the store name into the path from a template; the body may carry it too."""
+        name = params["name"]
+        bodies: dict[str, dict[str, Any]] = {
+            "value": {"value": name},
+            "key": {"key": name, "description": "plain"},
+            "fields": {"fields": [{"name": "PASSWORD", "value": name}]},
+        }
+        return await self._post_json(
+            target,
+            FilledPath(f"/v1/stores/{name}", "/v1/stores/{name}"),
+            operator=operator,
+            verb="PUT",
+            json=bodies[params["form"]],
+        )
+
+    async def item_set(
+        self, operator: Operator, target: Any, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Put the item name into the path; the query stays the same after a redirect."""
+        return await self._post_json(
+            target,
+            f"/v1/items/{params['item']}",
+            operator=operator,
+            verb="PUT",
+            params={"mode": "full"},
+            json={"note": "plain"},
         )
 
 
@@ -340,12 +391,15 @@ def _operator() -> Operator:
 
 
 async def _register_operations(session: AsyncSession) -> None:
-    """Register the four write operations; turn the tenant's recorder on."""
+    """Register the seven write operations; turn the tenant's recorder on."""
     handlers = {
         _SPEC_VALIDATE_OP_ID: (_DeployConnector.spec_validate, False),
         _SPEC_APPLY_OP_ID: (_DeployConnector.spec_apply, True),
         _DEPOT_SET_OP_ID: (_DeployConnector.depot_set, True),
         _PROXY_SET_OP_ID: (_DeployConnector.proxy_set, True),
+        _KEY_SET_OP_ID: (_DeployConnector.key_set, True),
+        _STORE_SET_OP_ID: (_DeployConnector.store_set, True),
+        _ITEM_SET_OP_ID: (_DeployConnector.item_set, True),
     }
     for op_id, (handler, requires_approval) in handlers.items():
         await register_typed_operation(
@@ -501,3 +555,272 @@ async def test_without_the_tag_the_trace_would_hold_the_body(
     assert "[REDACTED:param_name]" in _as_text(spans)
     assert _PASSWORD not in _as_text(spans)
     assert _PASSWORD not in await _agent_copy(result)
+
+
+@pytest.mark.parametrize("redirected", [False, True], ids=["plain", "after-a-307"])
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_path_value_of_an_operation_that_sends_a_secret(
+    redirected: bool, session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    await _register_operations(session)
+    path = f"/v1/keys/{_KEY_NAME}"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        if redirected:
+            mock.put(path).respond(307, headers={"Location": f"{path}/"})
+            mock.put(f"{path}/").respond(200, json={"ok": True})
+        else:
+            mock.put(path).respond(200, json={"ok": True})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_KEY_SET_OP_ID,
+            target=_Target(),
+            params={"key_name": _KEY_NAME},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/keys/[redacted]"
+    # Each entry names the address MEHO asked for, also after the 307.
+    assert urls == ([masked, masked] if redirected else [masked])
+    agent_copy = await _agent_copy(result)
+    assert masked in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert _KEY_NAME not in text, f"the path value is in {label}"
+        _assert_no_made_up_value(label, text)
+
+
+#: An ingested write whose path puts a key name inside a segment. Its fixed
+#: segment ``proxy`` equals the value of a body parameter of the call.
+_INGESTED_KEY_OP_ID = "PUT:/v1/proxy/keys/{key_name}:rotate"
+
+
+async def _register_ingested_key_operation(session: AsyncSession) -> None:
+    session.add(
+        EndpointDescriptor(
+            tenant_id=_TENANT_ID,
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            source_kind="ingested",
+            method="PUT",
+            path="/v1/proxy/keys/{key_name}:rotate",
+            summary="Synthetic ingested key rotation.",
+            description="Synthetic ingested write; it sends a secret.",
+            tags=[_TAG],
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "key_name": {"type": "string", "x-meho-param-loc": "path"},
+                    "label": {"type": "string", "x-meho-param-loc": "body"},
+                },
+            },
+            safety_level="dangerous",
+            requires_approval=True,
+            is_enabled=True,
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.parametrize(
+    ("key_name", "sent_forms"),
+    [
+        ("made/up-key-4c1e", ("made/up-key-4c1e", "made%2Fup-key-4c1e")),
+        ("zq7", ("zq7",)),
+    ],
+    ids=["value-with-a-slash", "short-value-inside-a-segment"],
+)
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_path_value_where_the_template_puts_it(
+    key_name: str,
+    sent_forms: tuple[str, ...],
+    session: AsyncSession,
+    result_store: MemoryResultStore,
+) -> None:
+    await _register_operations(session)
+    await _register_ingested_key_operation(session)
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        route = mock.put(path__regex=r"^/v1/proxy/keys/.+:rotate$").respond(200, json={"ok": 1})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            target=_Target(),
+            params={"key_name": key_name, "label": "proxy"},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+    assert route.call_count == 1
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/proxy/keys/[redacted]"
+    assert urls == [masked]
+    agent_copy = await _agent_copy(result)
+    assert masked in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        for form in sent_forms:
+            assert form not in text, f"the path value is in {label}"
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_in_another_letter_case_still_masks_the_path_value(
+    session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """A followed 307 to the same path in upper case keeps the value masked."""
+    await _register_operations(session)
+    await _register_ingested_key_operation(session)
+    upper = "/V1/PROXY/KEYS/ZQ7:ROTATE"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        first = mock.put("/v1/proxy/keys/zq7:rotate").respond(307, headers={"Location": upper})
+        second = mock.put(upper).respond(200, json={"ok": 1})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_INGESTED_KEY_OP_ID,
+            target=_Target(),
+            params={"key_name": "zq7", "label": "proxy"},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+    assert (first.call_count, second.call_count) == (1, 1)
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    # Both entries name the address MEHO asked for.
+    assert urls == [f"https://{_HOST}/v1/proxy/keys/[redacted]"] * 2
+    agent_copy = await _agent_copy(result)
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert "zq7" not in text.lower(), f"the path value is in {label}"
+        assert f"https://{_HOST}/v1/proxy/keys/[redacted]" in text, label
+
+
+@pytest.mark.parametrize("redirected", [False, True], ids=["plain", "after-a-307"])
+@pytest.mark.asyncio
+async def test_a_typed_operation_keeps_a_fixed_segment_equal_to_a_body_value(
+    redirected: bool, session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """The proxy user name ``proxy`` goes into the body, so ``/v1/settings/proxy`` stays."""
+    await _register_operations(session)
+    path = "/v1/settings/proxy"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        if redirected:
+            mock.patch(path).respond(307, headers={"Location": f"{path}/"})
+            mock.patch(f"{path}/").respond(202, json=_TASK)
+        else:
+            mock.patch(path).respond(202, json=_TASK)
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_PROXY_SET_OP_ID,
+            target=_Target(),
+            params={
+                "host": "proxy.test.invalid",
+                "username": "proxy",
+                "password_secret_ref": "kv/proxy",
+            },
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    sent = f"https://{_HOST}{path}"
+    assert urls == ([sent, sent] if redirected else [sent])
+    agent_copy = await _agent_copy(result)
+    assert sent in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert "[redacted]" not in text, f"a fixed segment is masked in {label}"
+        _assert_no_made_up_value(label, text)
+
+
+#: A made-up store name. The typed handler fills it into the path and the
+#: body carries it too.
+_STORE_NAME = "mrk-store-name-8f"
+
+
+@pytest.mark.parametrize("form", ["value", "key", "fields"])
+@pytest.mark.parametrize("sent", ["plain", "after-a-307", "network-error"])
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_filled_path_value_that_the_body_carries_too(
+    form: str, sent: str, session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """The handler filled the name into the path, so the trace masks it there.
+
+    This holds wherever in the body the same value stands. The fixed segments
+    ``v1`` and ``stores`` stay.
+    """
+    await _register_operations(session)
+    path = f"/v1/stores/{_STORE_NAME}"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        if sent == "network-error":
+            mock.put(path).mock(side_effect=httpx.ConnectError("refused"))
+        elif sent == "after-a-307":
+            mock.put(path).respond(307, headers={"Location": f"{path}/"})
+            mock.put(f"{path}/").respond(200, json={"ok": True})
+        else:
+            mock.put(path).respond(200, json={"ok": True})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_STORE_SET_OP_ID,
+            target=_Target(),
+            params={"name": _STORE_NAME, "form": form},
+            _approved=True,
+        )
+    assert (result.status == "ok") is (sent != "network-error"), result.error
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/stores/[redacted]"
+    assert urls == ([masked, masked] if sent == "after-a-307" else [masked])
+    agent_copy = await _agent_copy(result)
+    assert masked in agent_copy
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert _STORE_NAME not in text, f"the path value is in {label}"
+
+
+#: A made-up item name with capital letters.
+_ITEM_NAME = "MrkItemName4D"
+
+
+@pytest.mark.asyncio
+async def test_the_trace_masks_a_path_value_after_a_redirect_to_lower_case(
+    session: AsyncSession, result_store: MemoryResultStore
+) -> None:
+    """A followed 307 to the same path in lower case keeps the value masked."""
+    await _register_operations(session)
+    lower = f"/v1/items/{_ITEM_NAME.lower()}"
+    async with respx.mock(base_url=f"https://{_HOST}", assert_all_called=False) as mock:
+        first = mock.put(f"/v1/items/{_ITEM_NAME}").respond(
+            307, headers={"Location": f"{lower}?mode=full"}
+        )
+        second = mock.put(lower).respond(200, json={"ok": True})
+        result = await dispatch(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_ITEM_SET_OP_ID,
+            target=_Target(),
+            params={"item": _ITEM_NAME},
+            _approved=True,
+        )
+    assert result.status == "ok", result.error
+    assert (first.call_count, second.call_count) == (1, 1)
+
+    assert result.audit_id is not None
+    _, spans = await _stored_trace(result.audit_id)
+    urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
+    masked = f"https://{_HOST}/v1/items/[redacted]"
+    assert urls == [masked, masked]
+    agent_copy = await _agent_copy(result)
+    for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
+        assert _ITEM_NAME.lower() not in text.lower(), f"the path value is in {label}"

@@ -170,18 +170,12 @@ async def _send_json_abs(
 ) -> dict[str, Any]:
     """Send *method* (DELETE, PATCH) to an absolute GCP API URL.
 
-    On a 401 the token is refreshed once and the request sent again.
+    On a 401 the token is refreshed once and the request sent again
+    (:meth:`GcloudConnector._send_change_abs`).
     """
-    token = await connector._ensure_token(target, operator)
-    client = await connector._http_client(target)
-    resp = await client.request(
-        method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
+    resp = await connector._send_change_abs(
+        target, method, abs_url, operator=operator, json_body=json_body
     )
-    if resp.status_code == 401:
-        token = await connector.refresh_token(target)
-        resp = await client.request(
-            method, abs_url, json=json_body, headers={"Authorization": f"Bearer {token}"}
-        )
     resp.raise_for_status()
     return resp.json() if resp.content else {}
 

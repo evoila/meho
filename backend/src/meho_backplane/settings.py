@@ -1696,6 +1696,21 @@ class Settings(BaseModel):
         still no second ``approval.pending`` event. When off, the retry
         writes no audit row and the answer's ``audit_id`` is the first
         call's. Env ``APPROVAL_RETRY_OWN_AUDIT_ROW``.
+    redirect_on_change_result:
+        Off by default. It decides only the answer of a change (PUT, POST,
+        PATCH, DELETE) that ends on a redirect MEHO does not follow, and the
+        error of a named login that ends on such a redirect. When on, the
+        ``error`` text says what the HTTP code means (307 / 308: the target
+        asks for the call at another address; 303: the target directs MEHO
+        to another resource; 301 / 302: MEHO could not find out); after a 301, 302 or
+        303 an operation that may change the target also gets
+        ``execution_outcome``, ``retry`` and ``remediation``; a login gives
+        the ``SessionLoginRedirectError`` text. When off, the answer is the
+        generic ``connector_error`` answer for that status, and a login gives
+        its own error. Which requests follow which redirect is the same in
+        both modes, and so is the uncertain mark in the audit row after a
+        301, 302 or 303.
+        Env ``REDIRECT_ON_CHANGE_RESULT``.
     runner_checks_enabled:
         Off by default. When on, a check bound to a runner counts like a
         central check: the result a runner posts for its own check sets the
@@ -2720,6 +2735,7 @@ class Settings(BaseModel):
     mcp_approval_exit_code: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_same_call_reuse: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     approval_retry_own_audit_row: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    redirect_on_change_result: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_classification: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     audit_session_links: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     policy_engine_shadow: bool = False
@@ -3987,6 +4003,9 @@ def get_settings() -> Settings:
         ),
         approval_retry_own_audit_row=parse_bool_env(
             os.environ.get("APPROVAL_RETRY_OWN_AUDIT_ROW"),
+        ),
+        redirect_on_change_result=parse_bool_env(
+            os.environ.get("REDIRECT_ON_CHANGE_RESULT"),
         ),
         policy_classification=parse_bool_env(
             os.environ.get("POLICY_CLASSIFICATION"),

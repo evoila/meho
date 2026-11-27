@@ -3770,9 +3770,9 @@ for the old `v1` kinds), the kind, the namespace and the name, and:
   the cluster refuses or that fails gives `unknown` and a `state_note`; the
   card says "not known if it exists", never "new". MEHO reads the live
   object only when the login that asked has the role Operator or higher.
-  For any other login there is no read: `state` is `not_read`, the card
-  shows the badge "not read" and the line "The live object was not read:
-  the login that asked has a role below Operator."
+  A `k8s.apply` of a login with the Reader role is refused before an
+  approval card is made: the code `insufficient_role` and the Reader
+  sentence, and nothing is stored.
 - `other_writers`: the managers in the live object's `managedFields`,
   without `meho`. `null` when the live object was not read or could not be
   read.

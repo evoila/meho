@@ -51,4 +51,4 @@ async def test_the_stored_rows_of_the_delivery_calls_have_no_hard_to_undo() -> N
     assert {row.op_id for row in rows} == set(_CHANGES_RIGHTS)
     for row in rows:
         assert row.hard_to_undo is None, row.op_id
-        assert bool(row.changes_rights) is _CHANGES_RIGHTS[row.op_id], row.op_id
+        assert row.changes_rights is _CHANGES_RIGHTS[row.op_id], row.op_id

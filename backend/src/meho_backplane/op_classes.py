@@ -40,6 +40,7 @@ __all__ = [
     "declare_credential_capable",
     "declare_credential_capable_match",
     "declare_credential_check",
+    "declare_hidden_stored_map_values",
     "declare_hidden_stored_param",
     "declare_no_secret_value",
     "declare_op_classes",
@@ -50,6 +51,7 @@ __all__ = [
     "declare_wait_when_set",
     "declared_op_class",
     "declared_op_ids",
+    "hidden_stored_map_values",
     "hidden_stored_param",
     "is_credential_capable",
     "is_root_shell",
@@ -81,6 +83,7 @@ _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
+_HIDDEN_STORED_MAP_VALUES: dict[str, str] = {}
 
 
 def declare_op_classes(
@@ -376,6 +379,25 @@ def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
     return name if flagged else None
 
 
+def declare_hidden_stored_map_values(op_id: str, name: str) -> None:
+    """Hide each value of the map param *name* of a stored request of *op_id*.
+
+    At the moments MEHO hides a secret-named value of a stored request (the
+    run starts, or the request ends without a run), each value of the map
+    *name* that is not ``null`` is replaced with the marker. The key names
+    stay, and so does a ``null`` value. So a run again without params needs
+    the params, as for a request with a hidden password. For example the
+    ``extras_changes`` of ``targets.update``. A new entry for the same op id
+    replaces the old one.
+    """
+    _HIDDEN_STORED_MAP_VALUES[op_id] = name
+
+
+def hidden_stored_map_values(op_id: str) -> str | None:
+    """The map param of *op_id* that :func:`declare_hidden_stored_map_values` names, or ``None``."""
+    return _HIDDEN_STORED_MAP_VALUES.get(op_id)
+
+
 def declared_op_ids(op_class: str) -> frozenset[str]:
     """Return every op id declared with *op_class*."""
     return frozenset(op_id for op_id, known in _DECLARED.items() if known == op_class)
@@ -394,3 +416,4 @@ def _reset_declared_op_classes_for_testing() -> None:
     _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()
+    _HIDDEN_STORED_MAP_VALUES.clear()

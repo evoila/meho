@@ -59,6 +59,7 @@ from meho_backplane.connectors.targets.ops import (
     _parse_target_id,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.op_classes import declare_hidden_stored_map_values
 from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.operations.role_floors import register_role_floor
@@ -310,6 +311,11 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 # The policy gate checks the floor for a person on every path, and the
 # approval queue checks it for the approver.
 register_role_floor(TARGETS_UPDATE_OP_ID, TenantRole.TENANT_ADMIN)
+
+# A value of extras_changes can be secret only next to a stored key (a
+# stored "name": "password"), which the stored request does not show. So
+# when the request runs or ends, every value goes and the key names stay.
+declare_hidden_stored_map_values(TARGETS_UPDATE_OP_ID, "extras_changes")
 
 
 def _extras_or_extras_changes(params: dict[str, Any]) -> dict[str, Any] | None:

@@ -64,6 +64,7 @@ from meho_backplane.connectors.base import (
     ConnectorResourceNotFoundError,
     ConnectorUpstreamError,
 )
+from meho_backplane.operations._left_out import left_out_op
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
@@ -116,12 +117,14 @@ __all__ = [
     "result_denied",
     "result_handler_unreachable",
     "result_idempotency_key_conflict",
+    "result_if_left_out",
     "result_invalid_op_schema",
     "result_invalid_params",
     "result_license_read_off",
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_operation_left_out",
     "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_probe_pool_busy",
@@ -340,6 +343,50 @@ def result_connector_package_not_installed(
             "connector_id": connector_id,
             "package": package,
         },
+    )
+
+
+def result_operation_left_out(
+    op_id: str, connector_id: str, package: str | None, duration_ms: float
+) -> OperationResult:
+    """Registration left the op out at the start: its mark does not fit its risk level.
+
+    MEHO wrote and deleted nothing for the op, so a row an earlier start
+    stored stays, hidden, with the operator's settings on it. A later
+    start without the fault uses it again.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"operation_left_out: operation {op_id!r} of connector {connector_id!r} was "
+            "left out at the start: its mark does not fit its risk level. The MEHO log "
+            "line 'operation_left_out' names the reason. A fix of the connector code "
+            "brings the operation back at the next start."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "operation_left_out",
+            "connector_id": connector_id,
+            "package": package,
+        },
+    )
+
+
+def result_if_left_out(
+    *, product: str, version: str, impl_id: str, op_id: str, duration_ms: float
+) -> OperationResult | None:
+    """The ``operation_left_out`` answer when registration left *op_id* out, else ``None``.
+
+    For a path that finds no visible row to run: the connector shims call
+    it the way the dispatcher's miss answer does
+    (:mod:`meho_backplane.operations._op_miss`).
+    """
+    left_out = left_out_op(product=product, version=version, impl_id=impl_id, op_id=op_id)
+    if left_out is None:
+        return None
+    return result_operation_left_out(
+        op_id, f"{impl_id}-{version}", left_out.owner_package, duration_ms
     )
 
 

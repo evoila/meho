@@ -31,7 +31,7 @@ install's file, no runner, no agent or service with a kind that may
 approve, and no unknown category. The key ``limits`` is checked by
 :func:`~meho_backplane.policy.limits.limits_mistakes`: a file that holds it
 is refused, whatever its value, unless it is the install's file and the
-caller passes ``custom_policy=True``.
+caller passes ``custom_policy=True`` (the ``CUSTOM_POLICY`` switch is on).
 """
 
 from __future__ import annotations

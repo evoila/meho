@@ -104,6 +104,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
+from meho_backplane.auth.operator import TenantRole, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.tenancy import ensure_tenant
@@ -628,6 +629,11 @@ async def _persist_session_from_tokens(
             lifetime=lifetime,
             tenant_chosen=operator.tenant_chosen,
             can_switch_tenant=can_switch_tenant(operator),
+            # The menu's admin entries: a person with ``tenant_admin``, the
+            # same check as the pages (``revalidation.is_menu_admin``).
+            tenant_admin=(
+                operator.tenant_role is TenantRole.TENANT_ADMIN and is_human_principal(operator)
+            ),
         )
     # The push messages decide who may approve from these facts.
     await refresh_at_sign_in(operator)

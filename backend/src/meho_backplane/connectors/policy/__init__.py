@@ -18,7 +18,10 @@ The same holds for ``policy.apply``, the import of a whole policy file
 the plan of the import and who asked for it. Only a person asks, and
 only a platform admin asks for the install's policy; the policy gate
 refuses anyone else on every path. It also runs while a stored policy is not valid:
-it is the way to replace that policy.
+it is the way to replace that policy. The card of an install import names
+the tenants whose stored policy the file affects. Only a platform admin
+reads those parts
+(:mod:`meho_backplane.connectors.policy.apply_card_readers`).
 """
 
 from meho_backplane.auth.operator import TenantRole
@@ -29,6 +32,7 @@ from meho_backplane.connectors.policy.apply import (
     record_policy_apply_requester,
     register_policy_apply_operation,
 )
+from meho_backplane.connectors.policy.apply_card_readers import card_without_tenant_parts
 from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
     build_policy_classify_preview,
@@ -46,6 +50,7 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.op_policy import register_policy_repair_op
+from meho_backplane.operations.platform_admin_card import register_platform_admin_card_filter
 from meho_backplane.operations.rights_change_console import register_no_login_realm_op
 from meho_backplane.operations.role_floors import register_requester_check, register_role_floor
 from meho_backplane.operations.typed_register import register_typed_op_registrar
@@ -69,6 +74,7 @@ declare_per_call_approval([POLICY_APPLY_OP_ID])
 register_requester_check(POLICY_APPLY_OP_ID, policy_apply_requester_refusal)
 register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)
 register_permission_preflight(POLICY_APPLY_OP_ID, record_policy_apply_requester)
+register_platform_admin_card_filter(POLICY_APPLY_OP_ID, card_without_tenant_parts)
 register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)
 
 __all__ = [

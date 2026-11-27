@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "RequesterCheck",
+    "has_requester_check",
     "register_requester_check",
     "register_role_floor",
     "requester_check_denial",
@@ -103,6 +104,11 @@ def role_floor_denial(op_id: str, role: TenantRole) -> str | None:
 def register_requester_check(op_id: str, check: RequesterCheck) -> None:
     """Record *check*: who may ask for a call of *op_id* with given params."""
     _REQUESTER_CHECKS[op_id] = check
+
+
+def has_requester_check(op_id: str) -> bool:
+    """True when a check of who may ask is registered for *op_id*."""
+    return op_id in _REQUESTER_CHECKS
 
 
 def requester_check_denial(op_id: str, operator: Operator, params: dict[str, Any]) -> str | None:

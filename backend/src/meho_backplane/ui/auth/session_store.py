@@ -356,6 +356,7 @@ async def create_session(
     lifetime: timedelta,
     tenant_chosen: bool = True,
     can_switch_tenant: bool = False,
+    tenant_admin: bool | None = None,
 ) -> DecryptedSession:
     """Insert a fresh ``web_session`` row and return its decrypted view.
 
@@ -406,12 +407,10 @@ async def create_session(
         Plaintext view of the inserted row -- the caller uses
         ``str(result.id)`` as the ``meho_session`` cookie value.
 
-    The caller verified the access token through the JWT chain right
-    before this call, so creation also records the validation instant
-    for the read path's drift-gated revalidation
-    (:func:`~meho_backplane.ui.auth.revalidation.mark_session_validated`).
-    Without that record the first read of the new session would check
-    the token again.
+    The caller verified the access token right before this call, so
+    creation also records the validation instant for the read path
+    (:func:`~meho_backplane.ui.auth.revalidation.mark_session_validated`)
+    and the role of the token (*tenant_admin*, ``None`` if unknown).
     """
     # Imported here: the revalidation module imports the refresh module,
     # which imports this module.
@@ -434,7 +433,7 @@ async def create_session(
     )
     session.add(row)
     await session.flush()
-    mark_session_validated(row.id)
+    mark_session_validated(row.id, tenant_id=tenant_id, tenant_admin=tenant_admin)
     return DecryptedSession(
         id=row.id,
         operator_sub=row.operator_sub,

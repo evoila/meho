@@ -562,6 +562,17 @@ Two fields of `Operator` feed it:
   session (`runbooks/run_service.py::check_step_caller`). MEHO runs the
   step for the person, so a person's copy gets `personal_agent`.
 
+The audit row has a column for the kind: `audit_log.caller_kind`
+(migration `0191`). A database CHECK allows only the five kinds, or
+empty. Nothing writes or reads it yet, so every row keeps it empty. The
+five kinds are listed once in the code, as `CALLER_KINDS` in
+`meho_backplane/caller_kinds.py`. That module imports nothing from MEHO,
+so `db/models.py` builds its CHECK from it, and `auth/caller_kind.py`
+gives the same tuple. Migration `0191` writes the five kinds out, because
+a migration never imports the code.
+`tests/migrations/test_migration_0191_add_audit_log_caller_kind.py` fails
+when the migration and the model differ, or differ from `CALLER_KINDS`.
+
 The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
 `person` is any human login, by web or by token, and `Asker.via` tells
 them apart. `tests/test_caller_kind.py` pins how the two line up.
@@ -579,6 +590,7 @@ knows nobody behind the agent, only an admin may approve. See
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`
 - `meho_backplane/auth/caller_kind.py` — `caller_kind`, `CallerKind`
+- `meho_backplane/caller_kinds.py` — `CALLER_KINDS`, the one list of kinds
 - `meho_backplane/db/engine.py` — `get_sessionmaker`
 - `meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`
 - `meho_backplane/operations/_errors.py` — `result_denied`,

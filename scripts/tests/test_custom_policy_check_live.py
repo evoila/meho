@@ -24,6 +24,7 @@ from custom_policy_check_fixture import (
     C1_START,
     FAR_FUTURE,
     OPS,
+    POLICY_PARAMS,
     PROBE_KEYS,
     REMOVAL_NOT_CONFIRMED,
     WORK_REF,
@@ -200,6 +201,20 @@ class FullLiveRunTest(LiveTestCase):
             self.by_step(f"c7-{probe}")[-1]["auth"],
             token_hash(self.full_tokens["CPC_ADMIN_TOKEN"]),
         )
+
+    def test_the_policy_import_sends_its_four_params_to_the_policy_registry(self) -> None:
+        want = {"connector_id": "policy-registry-1.x", "op_id": "policy.apply",
+                "params": POLICY_PARAMS}  # fmt: skip
+        for step in ("c6-policy-agent", "c6-policy-operator", "c6-policy"):
+            with self.subTest(step=step):
+                self.assertEqual(self.body(step)["params"]["arguments"], want)
+        for key in PROBE_KEYS:
+            if "POLICY_CHANGE" not in key:
+                continue
+            with self.subTest(probe=key):
+                step = f"c7-{PROBE_KEYS.index(key) + 1}-preview"
+                self.assertEqual(self.body(step), want)
+        self.assertEqual(sorted(POLICY_PARAMS), ["based_on", "file", "file_sha256", "scope"])
 
     def test_check_1_searches_from_the_servers_time_of_the_person_step(self) -> None:
         for step in ("c1-edits", "c1-row"):
@@ -407,6 +422,10 @@ class StartTest(LiveTestCase):
         result = self.live.run(good_answers(), CPC_PARAMS_DELETE="[1]")
         self.assertEqual(result.returncode, 2)
         self.assertIn("CPC_PARAMS_DELETE is not a JSON object", result.stderr)
+        result = self.live.run(good_answers(), CPC_NO_RESULT_HISTORY="yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CPC_NO_RESULT_HISTORY must be 1 or not set", result.stderr)
+        self.assertEqual(self.live.calls(), [])
 
     def test_every_operation_setting_is_named(self) -> None:
         for name in OPS:

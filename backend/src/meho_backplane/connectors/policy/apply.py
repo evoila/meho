@@ -33,8 +33,10 @@ policy changed after the plan, it writes nothing and says so. The
 install's policy (``scope: install``) is imported only when a platform
 admin approves it. With the ``CUSTOM_POLICY`` switch on, the install's
 file may hold the outer limit (``limits``,
-:mod:`~meho_backplane.policy.limits`). The approval card records the
-switch; a run with the switch not the same as on the card writes nothing.
+:mod:`~meho_backplane.policy.limits`), and a tenant's file the personal
+agent rules (``agents``, :mod:`~meho_backplane.policy.agent_rules`). The
+approval card records the switch; a run with the switch not the same as on
+the card writes nothing.
 
 The operation exists only while the ``POLICY_CLASSIFICATION`` switch is
 on, like ``policy.classify``.
@@ -275,7 +277,7 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
     if scope == "install" and not operator.platform_admin:
         raise ValueError(INSTALL_NEEDS_PLATFORM_ADMIN)
     custom_policy = custom_policy_on(get_settings())
-    if scope == "install" and _card_switch_differs(custom_policy):
+    if _card_switch_differs(custom_policy):
         raise ValueError(POLICY_CHANGED)
     async with get_sessionmaker()() as session, session.begin():
         return await apply_policy(
@@ -294,8 +296,9 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
 def _card_switch_differs(custom_policy: bool) -> bool:
     """True when the approval card was planned with the other ``CUSTOM_POLICY`` value.
 
-    The switch decides whether the install's ``limits`` part is read, so a
-    run with the other value would store a plan the approver did not see. A
+    The switch decides whether the ``limits`` and ``agents`` parts are read,
+    so a run with the other value would store a plan the approver did not
+    see. A
     card without the record was planned with the switch off (also a card made
     before MEHO wrote the record). A run without an approval (an admin in the
     web console) has no card and plans with the switch now.
@@ -309,10 +312,10 @@ def _card_switch_differs(custom_policy: bool) -> bool:
 async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The plan on the approval card: what the file adds, changes and removes.
 
-    An install import planned with ``CUSTOM_POLICY`` on also holds
-    ``planned_with_custom_policy: true``; every other card has the keys it had
-    before the switch existed. Builds no plan for a caller who may not ask for
-    the import.
+    An import planned with ``CUSTOM_POLICY`` on also holds
+    ``planned_with_custom_policy: true``; a card planned with the switch off
+    has the keys it had before the switch existed. Builds no plan for a
+    caller who may not ask for the import.
     """
     params = ctx.params
     refusal = policy_apply_requester_refusal(ctx.operator, params)
@@ -337,7 +340,7 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
         "no_change": plan.no_change,
         "diff": plan.diff,
     }
-    if plan.scope == "install" and custom_policy:
+    if custom_policy:
         card["planned_with_custom_policy"] = True
     return card
 

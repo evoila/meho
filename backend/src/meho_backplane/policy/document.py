@@ -25,10 +25,14 @@ It holds:
   only while the ``CUSTOM_POLICY`` switch is on (the caller passes
   ``custom_policy=True``), and a tenant's file that holds it is always
   refused.
+* ``agents``: in a tenant's file only, the rules for personal agents
+  (:mod:`meho_backplane.policy.agent_rules`). A file may hold it only while
+  the ``CUSTOM_POLICY`` switch is on. The parser keeps its value as
+  written; :func:`~meho_backplane.policy.validate.check_document` checks it.
 
-The file reserves seven top-level keys: ``limits`` and six refused keys,
-``agents``, ``approvers``, ``role_bindings``, ``risk_levels``,
-``custom_roles`` and ``baseline``. A file that holds one of the six is
+The file reserves seven top-level keys: ``limits``, ``agents`` and five
+refused keys, ``approvers``, ``role_bindings``, ``risk_levels``,
+``custom_roles`` and ``baseline``. A file that holds one of the five is
 refused, whatever its value, with the sentence of
 :func:`~meho_backplane.policy.limits.not_read_mistake`.
 
@@ -66,6 +70,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     render_path,
 )
+from meho_backplane.policy.agent_rules import stored_agents
 from meho_backplane.policy.limits import PolicyLimits, not_read_mistake
 from meho_backplane.policy.store import _check_labels
 
@@ -127,9 +132,8 @@ BINDING_PRINCIPALS: Final[tuple[str, ...]] = ("person", "agent", "service", "run
 #: The one ``categories`` value of a binding that means every category.
 ALL_CATEGORIES: Final[str] = "*"
 
-#: The six reserved top-level keys that a file is refused for, whatever their value.
+#: The five reserved top-level keys that a file is refused for, whatever their value.
 _REFUSED_KEYS: Final[tuple[str, ...]] = (
-    "agents",
     "approvers",
     "role_bindings",
     "risk_levels",
@@ -137,8 +141,8 @@ _REFUSED_KEYS: Final[tuple[str, ...]] = (
     "baseline",
 )
 
-#: The seven reserved top-level keys: ``limits`` and the six refused keys.
-RESERVED_KEYS: Final[tuple[str, ...]] = ("limits", *_REFUSED_KEYS)
+#: The seven reserved top-level keys: ``limits``, ``agents`` and the five refused keys.
+RESERVED_KEYS: Final[tuple[str, ...]] = ("limits", "agents", *_REFUSED_KEYS)
 
 
 class _Strict(BaseModel):
@@ -321,6 +325,8 @@ class PolicyFile(_Strict):
     routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
     bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
     limits: PolicyLimits | None = None
+    # Checked with the switch and the outer limit: policy/agent_rules.py.
+    agents: Any = None
 
 
 @dataclass
@@ -446,6 +452,8 @@ def document_of(model: PolicyFile) -> dict[str, Any]:
         document["limits"] = (
             model.limits.model_dump(exclude_none=True) if model.limits is not None else {}
         )
+    if "agents" in model.model_fields_set:
+        document["agents"] = [] if model.agents is None else stored_agents(model.agents)
     return document
 
 
@@ -482,11 +490,12 @@ def canonical_sha256(document: dict[str, Any] | None) -> str:
     order of the classification entries or of the categories: the most
     specific entry wins, not the first one. The order of the ``routing``
     entries counts: the first entry that matches wins. The order of the
-    bindings does not count: every binding that matches a login counts.
+    bindings and of the ``agents`` rules does not count: every binding that
+    matches a login counts, and the rule that fits best counts.
     """
     meaning = normalise_document(document)
-    for key in ("classifications", "bindings"):
-        if key in meaning:
+    for key in ("classifications", "bindings", "agents"):
+        if isinstance(meaning.get(key), list):
             meaning[key] = sorted(meaning[key], key=_json)
     taxonomy = meaning.get("taxonomy")
     if isinstance(taxonomy, dict) and "categories" in taxonomy:

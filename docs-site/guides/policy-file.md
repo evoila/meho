@@ -357,6 +357,78 @@ limits:
     person who runs MEHO to turn the setting on." A limit stored while the
     setting was on is then ignored, and the export leaves it out.
 
+## Rules for personal agents
+
+A tenant's policy file can hold rules for personal agents. A personal
+agent is your own login used by a tool: the command line, REST or MCP. A
+call from the web console is not a personal agent, and a hosted agent run
+is not one either.
+
+```yaml
+policy: v1
+agents:
+  - name: admins-assistant
+    caller: personal_agent
+    roles: [Admin]                  # Reader, Operator, Admin
+    up_to: dangerous                # safe, caution or dangerous
+    connectors: [vmware-rest-9.0]   # optional
+    rights_changes: allow           # optional, only with connectors
+```
+
+- `name` names the rule. Each rule has its own name. MEHO names the rule
+  as `tenant_rule:<name>`.
+- `caller` is `personal_agent`. `person` and `service_agent` are refused:
+  they are not in this version of MEHO. Service agents keep their
+  standing grants.
+- `roles` says whose personal agents the rule is for. A platform admin
+  counts as `Admin`.
+- `up_to` is the highest risk level the rule may let run at once. A
+  `destructive` operation always waits, so `destructive` is not a value.
+- `up_to` can never be above the outer limit of the install (see the
+  next part). Such a rule is refused, and the message names the rule.
+- A personal agent never gets more than its person. A Reader's agent
+  counts up to `safe`, an Operator's up to `caution`, an Admin's up to
+  `dangerous`. What counts is the lowest of the rule, the outer limit and
+  this limit by role.
+- A rule with `connectors` counts only for those connectors, and wins
+  over a rule without `connectors`. Between two rules that fit equally,
+  the stricter one wins.
+- An operation that gives or takes rights in a target system waits. It
+  runs at once only under a rule with `connectors` and
+  `rights_changes: allow`, and only for those connectors.
+- The import plan (the preview and the approval card) shows, for each
+  role, the operations that would start to run at once (`runs_at_once`).
+  Operations that always wait are never in the list: a `destructive`
+  operation, a delete, an operation that is hard to undo, a credential
+  call, a call to an address the caller gives, a change of rights in
+  MEHO, a change of the policy, and an operation that must be approved
+  call by call.
+- Setting the rules is a change of the policy. In the web console an
+  Admin's import runs at once after a fresh sign-in. With a token it
+  waits until an Admin approves it in the web console. An agent, a
+  service login or a hosted agent run cannot ask for it.
+- `meho policy export` writes the `agents` part. An exported file imports
+  again with "No change.".
+- The install's file never holds `agents`. When a platform admin lowers
+  the outer limit, the install's import plan lists each tenant with a rule
+  above the new limit (`agents_above_limit`). Such a tenant's file is then
+  refused on its next import, also when it did not change: lower the rule
+  first.
+- If MEHO cannot read the stored rules, no rule counts, and MEHO logs one
+  warning. Import the tenant's file again to fix it.
+- In this version no call reads the rules yet: every call gets the same
+  answer as without them. A personal agent still runs only `safe`
+  operations at once.
+
+!!! note "Off by default"
+
+    The rules need the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`). While it is off, a file with `agents`
+    is refused: "`agents` needs CUSTOM_POLICY: personal agent rules count
+    only while the CUSTOM_POLICY setting is on. Remove the part, or ask the
+    person who runs MEHO to turn the setting on." Rules stored while the
+    setting was on are then ignored, and the export leaves them out.
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is

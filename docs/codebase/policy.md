@@ -106,11 +106,11 @@ routing:
 - The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
   sign-in and the routing at the click.
 - The file reserves seven top-level keys (`RESERVED_KEYS` in
-  `policy/document.py`): `limits`, and six refused keys, `agents`,
+  `policy/document.py`): `limits`, `agents`, and five refused keys,
   `approvers`, `role_bindings`, `risk_levels`, `custom_roles` and
-  `baseline`. A file that holds one of the six is refused, whatever its
+  `baseline`. A file that holds one of the five is refused, whatever its
   value, in a tenant's file and in the install's file, with one sentence:
-  "This version of MEHO does not read `agents` in a policy file; remove
+  "This version of MEHO does not read `approvers` in a policy file; remove
   it."
 - `limits` (the install's file only) is the outer limit of the tenants'
   policies: `limits.personal_agent_up_to` is the highest risk level
@@ -158,6 +158,59 @@ routing:
   `policy_limit_not_readable` names the stored place (`install:limits` or
   `install:limits.personal_agent_up_to`). No call decision reads the limit
   in this version.
+
+## Personal agent rules (`agents`)
+
+`policy/agent_rules.py` holds the rule shape, its checks and the rule
+match, as pure functions. `policy/agent_rules_plan.py` adds the rules to
+the import plan. The user guide is the part "Rules for personal agents"
+of `docs-site/guides/policy-file.md`.
+
+- The parser (`policy/document.py`) keeps the value of `agents` as
+  written; `document_of` stores the rules with only the keys that are set
+  (`stored_agents`), and `agents: null` as `[]`, so the checks still see
+  the key. The order of the rules does not count in `canonical_sha256`.
+- `agent_rules_mistakes`, called by `check_document`: with the switch off,
+  a file that holds the key `agents` is refused whatever its value
+  (`AGENTS_NEED_CUSTOM_POLICY`); the install's file never holds it
+  (`AGENTS_IN_INSTALL_FILE`); then the shape of each rule, with its place
+  (`agents[N].caller`, ...); `caller: person` and `caller: service_agent`
+  are "not in this version"; `rights_changes: allow` needs `connectors`;
+  a repeated name; and a rule whose `up_to` is above
+  `personal_agent_limit(install_document, ...)`.
+- A stored tenant file that is now above a lowered limit is refused on its
+  next import, also when it did not change: the checks run before "No
+  change." is decided. So the tenant admin must lower the rule; the file
+  does not import again as it is.
+- How a rule is read (`rule_for`, `allowed_level`, `rule_lets_run`): a
+  rule that names the connector wins over one without `connectors`;
+  between rules that match equally, the lower `up_to` wins, then the rule
+  without `rights_changes`. What counts is the lowest of the rule, the
+  outer limit and the role's limit (`ROLE_LIMITS`: Reader `safe`,
+  Operator `caution`, Admin `dangerous`). A `changes_rights` operation
+  runs only under a rule that names its connector with
+  `rights_changes: allow`. The rule id is `tenant_rule:<name>` (`rule_ref`).
+- `agents_plan` (switch on only): a tenant's plan gets `agents` (rules
+  added, changed, removed, by name) and `runs_at_once` (for each role, the
+  operations that start to run at once), both only when one side has a
+  rule. `runs_at_once` reads each enabled operation the tenant can call,
+  with the classification after the import. An operation is never listed
+  when it is `safe` (a token runs it at once today), or when a check that
+  no rule lowers makes it wait: `destructive` (by code or policy), "always
+  wait" or a classification conflict, `never_covered_reason` (credential,
+  per-call approval, caller address, delete sign), a MEHO change of rights
+  or of the policy, a root shell, `hard_to_undo`, a multi-step operation,
+  or `requires_approval` that is not the plain mark. An operation with the
+  plain mark (`has_plain_mark`) counts as `dangerous`. An install plan
+  gets `agents_above_limit` (each tenant with a stored rule above the
+  file's limit, one warning each) only when there is such a tenant.
+- `rules_from_document` reads the stored rules; a part MEHO cannot read
+  gives no rule and one warning `policy_agent_rules_not_readable`.
+- With the switch off, a stored `agents` part is ignored like `limits`:
+  the export leaves it out, the diff has no `agents` section, and the
+  planned document keeps the stored part.
+- No call decision reads the rules in this version: the call gate and
+  the evaluator come in a later change.
 
 ## The shipped "small team" file
 
@@ -493,17 +546,18 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
-- The approval card of a `scope: install` import planned with
-  `CUSTOM_POLICY` on holds `planned_with_custom_policy: true`, because the
-  switch decides whether the `limits` part of the install's file is read.
-  Every other card (a tenant import, or an import planned with the switch
-  off) has only the keys it had before the switch existed, also in
-  `meho_approvals_get` and `meho_approvals_list`. A card without the field
-  counts as planned with the switch off; so does a card that waited during
-  an upgrade. After the approval, a run of a `scope: install` import reads
-  the switch again. When it is not the same as on the card, the run writes
-  nothing and gives the same sentence. An admin's own run in the web
-  console has no card and plans with the switch as it is.
+- The approval card of an import planned with `CUSTOM_POLICY` on (of the
+  install's file or of a tenant's file) holds
+  `planned_with_custom_policy: true`, because the switch decides whether
+  the `limits` part of the install's file and the `agents` part of a
+  tenant's file are read. A card planned with the switch off has only the
+  keys it had before the switch existed, also in `meho_approvals_get` and
+  `meho_approvals_list`. A card without the field counts as planned with
+  the switch off; so does a card that waited during an upgrade. After the
+  approval, the run reads the switch again. When it is not the same as on
+  the card, the run writes nothing and gives the same sentence. An admin's
+  own run in the web console has no card and plans with the switch as it
+  is.
 - A run without an approval, or a run by the login that asked for it (for
   example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
   writes only for an admin in the web console. Any other such run writes

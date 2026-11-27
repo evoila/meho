@@ -44,6 +44,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
+from meho_backplane.policy.agent_rules_plan import agents_plan
 from meho_backplane.policy.bindings import routing_enabled, shipped_binding_documents
 from meho_backplane.policy.classification import (
     Classification,
@@ -399,10 +400,12 @@ async def build_plan(
     """Check *content* for *scope* and work out what it would change. Writes nothing.
 
     *custom_policy* says whether the ``CUSTOM_POLICY`` switch is on. With
-    it off, a file that holds ``limits`` is refused, and the stored
-    ``limits`` part is ignored: the diff has no ``limits`` section, a file
-    that equals the stored policy apart from that part is "No change.",
-    and the planned document keeps the stored part as it is.
+    it off, a file that holds ``limits`` or ``agents`` is refused, and the
+    stored parts are ignored: the diff has no ``limits`` or ``agents``
+    section, a file that equals the stored policy apart from those parts
+    is "No change.", and the planned document keeps the stored parts as
+    they are. With it on, the diff also shows the personal agent rules
+    (:func:`~meho_backplane.policy.agent_rules_plan.agents_plan`).
     """
     before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
@@ -448,8 +451,7 @@ async def build_plan(
         notes=plan.warnings,
         name=_stored_name(scope, tenant_id),
     )
-    if not custom_policy and before is not None and "limits" in before:
-        document["limits"] = before["limits"]
+    _keep_switched_parts(document, before, custom_policy=custom_policy)
     plan.document = document
     plan.no_change = canonical_sha256(document) == plan.based_on
     plan.diff = _build_diff(
@@ -464,7 +466,30 @@ async def build_plan(
     if scope == "install" and routing_enabled():
         plan.diff["routing_floor"] = await tenants_wider(session, document)
         plan.warnings.extend(floor_warnings(plan.diff["routing_floor"]))
+    sections, warnings = await agents_plan(
+        session,
+        scope=scope,
+        tenant_id=tenant_id,
+        before=before,
+        document=document,
+        install_document=install_document,
+        side=(new_side.entries, new_side.taxonomy),
+        custom_policy=custom_policy,
+    )
+    plan.diff.update(sections)
+    plan.warnings.extend(warnings)
     return plan
+
+
+def _keep_switched_parts(
+    document: dict[str, Any], before: dict[str, Any] | None, *, custom_policy: bool
+) -> None:
+    """With the switch off, keep the stored ``limits`` and ``agents`` parts as they are."""
+    if custom_policy or before is None:
+        return
+    for key in ("limits", "agents"):
+        if key in before:
+            document[key] = before[key]
 
 
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
@@ -477,6 +502,7 @@ def _summary(diff: dict[str, Any]) -> dict[str, int]:
             "routing",
             "bindings",
             "limits",
+            "agents",
         )
         if section in diff
         for kind in ("added", "changed", "removed")
@@ -625,9 +651,9 @@ async def export_policy(
 ) -> str:
     """The stored policy of *scope* as a ``policy: v1`` file (see :func:`_stored_document`).
 
-    The file holds the stored ``limits`` part only when *custom_policy*
-    says the ``CUSTOM_POLICY`` switch is on; with it off, the exported file
-    imports again.
+    The file holds the stored ``limits`` and ``agents`` parts only when
+    *custom_policy* says the ``CUSTOM_POLICY`` switch is on; with it off,
+    the exported file imports again.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
@@ -647,11 +673,13 @@ async def export_policy(
         if key in document:
             head[key] = document[key]
     routes = list(document.get("routing") or [])
-    bindings: dict[str, Any] = {}
+    end: dict[str, Any] = {}
     if document.get("bindings"):
-        bindings["bindings"] = list(document["bindings"])
+        end["bindings"] = list(document["bindings"])
     elif scope == "tenant" and routing_enabled():
-        bindings["bindings"] = shipped_binding_documents(get_settings())
+        end["bindings"] = shipped_binding_documents(get_settings())
+    if custom_policy and document.get("agents"):
+        end["agents"] = document["agents"]
     entries = list(document.get("classifications") or [])
     route_notes = (
         tenant_wider_notes(document, await _stored_document(session, "install", None))
@@ -660,14 +688,14 @@ async def export_policy(
     )
     if not entries and not route_notes:
         tail = {"routing": routes} if routes else {}
-        return _dump({**head, "classifications": [], **tail, **bindings})
+        return _dump({**head, "classifications": [], **tail, **end})
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
     parts = [_dump(head)]
     parts.append(_noted("classifications", entries, notes, "Has no effect"))
     if routes:
         parts.append(_noted("routing", routes, route_notes, "Has no effect where wider"))
-    if bindings:
-        parts.append(_dump(bindings))
+    if end:
+        parts.append(_dump(end))
     return "".join(parts)
 
 

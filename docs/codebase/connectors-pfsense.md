@@ -1254,7 +1254,8 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   and any name when it cannot read these files (`system_names_unreadable`):
   it changes nothing. Else it makes a 24-character password (letters and
   digits, `random_int`), sets it with `local_user_set_password()`, adds the
-  user to the group `all` and prints the new `uid` and the password once.
+  user to the group `all` and prints the new `uid`, the user name and the
+  password once. The undo takes the name and the `uid` from this answer.
   When the name was taken since the first read, it changes nothing and says
   so; the op answers `exists` and touches that user in no way. The handler
   writes the password to Vault first, with `cas` set to the version it read
@@ -1266,7 +1267,9 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   Vault write fails or the call is cancelled during it, the user is removed
   again, by name and `uid` (overrides with the name stay), and a cancel is
   raised again. The undo prints `MEHO_VPN_REMOVED` when it removed the user;
-  without it the error says the user was not removed. The Vault write runs
+  without it the error says the user was not removed. When the caller is
+  blocked while the call runs, the answer is the block refusal. It names the
+  user when the user was not removed. The Vault write runs
   in a thread and can still finish after a cancel: the password may then be
   stored at the path although the user was removed, and a new create at
   this path stops with `vault_field_exists`. The error of the cancel says so.

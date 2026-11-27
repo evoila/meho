@@ -111,15 +111,29 @@ reads the login that the dispatcher noted for the running call
 `checking_logins_for_steps`. It reads a copy of the list that is at most 5
 seconds old, so it reads the database at most once in 5 seconds per process.
 
-Each Vault call that an operation of the Vault and secret connectors makes
-for the caller passes this check right before MEHO starts it. These calls
-run a blocking library in a worker thread, so they go through
-`to_thread_checked` (`auth/send_check.py`): it runs the check on the event
-loop, notes the send, and then starts the thread. The Vault login and the
-HTTP client that reaches another instance's store do the same. Outside an
-operation the check does nothing. Clean-up calls always run: the end of
-MEHO's own Vault login, and the revoke of a new token that MEHO could not
-store.
+Each Vault request that MEHO sends for the caller passes this check right
+before it is sent: the requests of the Vault and secret operations, the
+Vault login, and the shared credential reader. These calls run a blocking
+library in a worker thread, so they go through `to_thread_checked`
+(`auth/send_check.py`). The worker runs the check on the event loop when it
+starts the call, so a call that waited for a free worker is checked when it
+can run. The Vault client then runs the check again right before each of its
+requests, so a call that reads and then writes stops before the write when
+the caller was blocked during the read. The HTTP client that reaches another
+instance's store does the same. Outside an operation the check does nothing.
+
+Clean-up calls run with no block check: the end of MEHO's own Vault login,
+and the removal of an account, user or token that the same run just made on
+a target and could not store. When such a clean-up fails, the answer and the
+audit row name what stays. One helper marks a clean-up
+(`cleanup_without_block_check` in `auth/principal_block_run.py`), and a test
+pins the places that use it (`tests/test_principal_block_cleanup_guard.py`).
+The clean-up takes the id of what it removes only from the target's answer to
+the create.
+
+When a call needs approval, its preview and its permission check run with
+the same check. A caller blocked while they run gets the block refusal, and
+no approval request is made.
 
 Once a check of a run refused, every later check of the same run refuses
 too, also when the list can be read again. The operation answers with the
@@ -135,9 +149,11 @@ The answer says what was sent (`execution_outcome`):
 - `uncertain`: an earlier step or request of the same operation was sent,
   also in the run before an approval. The text says that a part of the
   operation may have run, and not to run it again before the target is
-  checked. A request counts as sent when the HTTP connector base sends it.
-  A step on another kind of connector (SSH, a vendor library) counts from
-  its start.
+  checked. A request counts as sent when the HTTP connector base or the
+  Vault client sends it. A step on another kind of connector (SSH, another
+  vendor library) counts from its start.
+- When a clean-up could not remove what the run made, the text names it and
+  says that it stays, and `not_removed` lists it.
 
 When a target session ends and the dispatcher sends a step again, a refusal
 before the second try is the same answer as on the first try.

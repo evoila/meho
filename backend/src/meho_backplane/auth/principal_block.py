@@ -389,7 +389,9 @@ async def block_principal(
             )
             await session.commit()
     except SQLAlchemyError as exc:
-        _log.warning("principal_block_write_failed", exc_info=True)
+        _log.warning(
+            "principal_block_write_failed", operation="block", error_type=type(exc).__name__
+        )
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     reset_block_cache()
     return BlockedPerson(sub, scope, reason, operator.sub, now)
@@ -550,7 +552,9 @@ async def unblock_principal(
             )
             await session.commit()
     except SQLAlchemyError as exc:
-        _log.warning("principal_unblock_write_failed", exc_info=True)
+        _log.warning(
+            "principal_unblock_write_failed", operation="unblock", error_type=type(exc).__name__
+        )
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     reset_block_cache()
     return len(removed)

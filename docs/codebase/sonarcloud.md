@@ -187,8 +187,8 @@ the `python-coverage` artifact **is** there, every shard job is green, and the
 Quality Gate run shows no error annotation.
 
 **What it means.** One or more coverage shards uploaded data without the
-file of a test worker. Each shard's pytest runs with `-n 3` (`-n 1` until
-#7103): the pytest main process only starts the workers and prints results;
+file of a test worker. Each shard's pytest runs with `-n 3`: the pytest
+main process only starts the workers and prints results;
 the workers run the tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
 writes a process's data file when that process exits. If the worker never
 exits normally, its file is never written, and the shard only contributes
@@ -210,20 +210,17 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    reports "finished". Pinned by `backend/tests/test_ci_coverage_shards.py`.
 2. **The shard hits its pytest step limit (45 minutes since #5642).** Then all of its processes are
    killed and every data file of that shard is lost (the shard uploads an
-   empty or missing artifact). With 5 shards on the 7 GiB heavy runner, a
-   shard with about 4,500 tests ran up to 29 minutes. **Fix:** the sweep runs
-   as 8 shards (about 2,700 tests each). Raise the shard count again before
-   any shard gets near the limit; the matrix, `TOTAL`, and the combine job's
-   download steps must move together, and the same test pins that lockstep.
-   **Again in November 2026 (#7103):** with the C tracer of the test map
-   (#5642) a serial shard ran 35 to more than 45 minutes, and from 20 to
-   26 Nov nearly every shard hit the limit. **Fix:** each shard runs three
-   test workers (`-n 3`), like the unit shards, and the sweep runs as
-   10 shards. The heavy runner has a limit of 7 CPUs and 7 GiB; a serial
-   shard used only about 2 GiB of program memory. With three workers and
-   8 shards, pytest took 17 to 37 minutes and 3.4 to 3.8 GiB of program
-   memory. A fourth worker would leave too little memory, so the shard
-   count went to 10 for room below the 45-minute limit.
+   empty or missing artifact). The sweep runs as 10 shards, each with
+   three test workers (`-n 3`), like the unit shards. The heavy runner has
+   a limit of 7 CPUs and 7 GiB. The C tracer of the test map makes each
+   test slower. Measured in November 2026: a serial shard ran 35 to more
+   than 45 minutes and used about 2 GiB of program memory. With three
+   workers and 8 shards, pytest took 17 to 37 minutes and 3.4 to 3.8 GiB
+   of program memory. A fourth worker would leave too little memory, so
+   10 shards give room below the 45-minute limit. Raise the shard count
+   before any shard gets near the limit; the matrix, `TOTAL`, and the
+   combine job's download steps must move together, and the same test
+   pins that lockstep.
 
 **Where to look.**
 

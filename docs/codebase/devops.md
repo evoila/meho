@@ -2530,11 +2530,11 @@ run, not a broken `main`.
   makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
   so the coverage data records which test function ran each line. That
   needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
-  coverage pytest step may take 45 minutes. Since #7103 the sweep runs in
-  10 shards with three test workers each (`-n 3`): 8 serial shards needed
-  more than 45 minutes by November 2026, so no map was made. `.coveragerc.ci` leaves out files in
-  pytest temp folders: a test that imports a package from its temp folder
-  made `coverage xml` fail with "No source for code". Each coverage shard also writes
+  coverage pytest step may take 45 minutes. The sweep runs in 10 shards
+  with three test workers each (`-n 3`). `.coveragerc.ci` leaves out files
+  in pytest temp folders: some tests import a package from their temp
+  folder, and that folder is gone when the combine job writes
+  `coverage.xml`. Each coverage shard also writes
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
   (kept 8 days). It does this only on the `schedule` run, and only when all

@@ -56,4 +56,4 @@ def mark_as_login(request: Any) -> None:
 
 def is_login(request: Any) -> bool:
     """Whether the pooled client sent *request* (an ``httpx.Request``) as a login."""
-    return bool(request.extensions.get(_LOGIN_EXTENSION))
+    return request.extensions.get(_LOGIN_EXTENSION) is True

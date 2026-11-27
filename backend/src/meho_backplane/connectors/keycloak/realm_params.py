@@ -30,28 +30,39 @@ master, the target's admin realm and MEHO's own login realm.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import httpx
 
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
-from meho_backplane.operations._park_check import ParkCheck, register_park_check
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.operations._park_check import ParkCheck, note_refusal, register_park_check
 from meho_backplane.operations._validate import (
     ParamsCheck,
     params_problem,
     register_params_check,
 )
+from meho_backplane.settings import get_settings
 from meho_backplane.targets.required_extras import check_realm_name, realm_name_problem
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
     from meho_backplane.operations._preview import PreviewContext
 
 __all__ = [
     "FENCED_OPS",
     "REALM_PARAM_OPS",
+    "answer_names_managed_realm",
     "check_answered_realm",
     "check_realm_params",
     "is_plain_realm_name",
+    "is_realm_answer_mismatch",
     "new_realm_problem",
+    "read_answered_realm",
+    "read_answered_realm_or_none",
+    "read_realm_held",
     "realm_fence_park_check",
     "realm_fence_problem",
     "realm_param",
@@ -150,25 +161,140 @@ def realm_param(
     return name
 
 
-def check_answered_realm(op_id: str, answer: Any, target: KeycloakTargetLike) -> None:
-    """Refuse a realm that Keycloak answers with another name than the managed realm.
+_MISMATCH_MARK: Final = "_meho_realm_answer_mismatch"
+
+
+def is_realm_answer_mismatch(exc: BaseException) -> bool:
+    """Whether *exc* is the refusal of :func:`check_answered_realm` (a :class:`ValueError`)."""
+    return getattr(exc, _MISMATCH_MARK, False) is True
+
+
+def answer_names_managed_realm(
+    answer: Any, target: KeycloakTargetLike, expected: str | None = None
+) -> bool:
+    """Whether *answer* is an object whose ``realm`` is exactly the realm that was read.
+
+    That realm is *expected* when given, else the target's managed realm.
+    """
+    name = expected if expected is not None else resolve_realm_config(target).managed_realm
+    return isinstance(answer, dict) and answer.get("realm") == name
+
+
+def check_answered_realm(
+    op_id: str, answer: Any, target: KeycloakTargetLike, expected: str | None = None
+) -> None:
+    """Refuse a realm that Keycloak answers with another name than the realm that was read.
 
     A Keycloak database can match a realm name without letter case or
     accents, so ``GET /admin/realms/{realm}`` can answer with another realm.
-    The answer's ``realm`` must be exactly the target's managed realm, with
-    the same letters, case and accents. Any other name, no name, or an
-    answer that is not an object raises :class:`ValueError`. The text names
-    the managed realm only. Every operation that reads the realm's settings
-    calls it on the answer, and
+    The answer's ``realm`` must be exactly the target's managed realm (or
+    *expected*), with the same letters, case and accents. Any other name, no
+    name, or an answer that is not an object raises :class:`ValueError`
+    (:func:`is_realm_answer_mismatch` tells it apart). The text names the
+    realm that was read only. Every operation that reads the realm's
+    settings calls it on the answer (:func:`read_answered_realm`), and
     :class:`~meho_backplane.connectors.keycloak.managed_realm_check.ManagedRealmChecks`
-    calls it before a request inside the realm.
+    calls it before a request inside the realm. While an approval card is
+    built, a wrong answer also refuses the call
+    (:func:`~meho_backplane.operations._park_check.note_refusal`), also when
+    the card goes on without that read, and MEHO sends no more requests to
+    Keycloak for that card.
     """
-    managed = resolve_realm_config(target).managed_realm
-    if not isinstance(answer, dict) or answer.get("realm") != managed:
-        raise ValueError(
-            f"{op_id}: Keycloak did not answer with the realm {managed!r}, so MEHO "
-            "returns and changes nothing. Check the managed realm of the target."
+    if not answer_names_managed_realm(answer, target, expected):
+        name = expected if expected is not None else resolve_realm_config(target).managed_realm
+        text = (
+            f"{op_id}: Keycloak did not answer with the realm {name!r}, so MEHO "
+            "returns and changes nothing. Check the 'managed_realm' of the target."
         )
+        note_refusal(text)
+        error = ValueError(text)
+        setattr(error, _MISMATCH_MARK, True)
+        raise error
+
+
+def _asked_url(connector: KeycloakConnector, target: KeycloakTargetLike, path: str) -> Any:
+    """The address MEHO asks for at *path*, as the HTTP client builds it; ``None`` if unknown."""
+    try:
+        return httpx.URL(f"{connector._base_url(target)}/{path.lstrip('/')}")
+    except (AttributeError, KeyError, TypeError, ValueError, httpx.InvalidURL):
+        return None
+
+
+async def read_realm_held(
+    connector: KeycloakConnector,
+    target: KeycloakTargetLike,
+    path: str,
+    *,
+    operator: Operator,
+    expected: str | None = None,
+) -> Any:
+    """GET the realm at *path* and return Keycloak's answer as it is.
+
+    The flight recorder keeps the whole call only when the answer names
+    the realm that was read (:func:`answer_names_managed_realm`). A call
+    that fails, or answers with another realm, keeps its status only, so
+    the stored trace and the agent copy hold only bodies that passed the
+    check. A try before an answer that passed (Keycloak answered only on a
+    retry) keeps its headers and body; with ``KEYCLOAK_TRACE_RETRY_STATUS_ONLY``
+    on, it keeps its status only. A span with its status only names the
+    address MEHO asked for, also when Keycloak answered through a redirect.
+    The caller decides what a wrong answer means.
+    """
+    with flight_recorder_capture.held(_asked_url(connector, target, path)) as spans:
+        try:
+            answer = await connector._get_admin_json(target, path, operator=operator)
+        except BaseException:
+            spans.release_status()
+            raise
+        if answer_names_managed_realm(answer, target, expected):
+            spans.release(
+                earlier_status_only=spans.recording
+                and get_settings().keycloak_trace_retry_status_only
+            )
+        else:
+            spans.release_status()
+    return answer
+
+
+async def read_answered_realm(
+    connector: KeycloakConnector,
+    op_id: str,
+    target: KeycloakTargetLike,
+    path: str,
+    *,
+    operator: Operator,
+    expected: str | None = None,
+) -> dict[str, Any]:
+    """GET the realm at *path* and check the answer with :func:`check_answered_realm`.
+
+    *expected* is the realm name that was read (default: the target's
+    managed realm). The trace keeps the call as :func:`read_realm_held` says.
+    """
+    answer = await read_realm_held(connector, target, path, operator=operator, expected=expected)
+    check_answered_realm(op_id, answer, target, expected)
+    return cast("dict[str, Any]", answer)
+
+
+async def read_answered_realm_or_none(
+    connector: KeycloakConnector,
+    op_id: str,
+    target: KeycloakTargetLike,
+    path: str,
+    *,
+    operator: Operator,
+    expected: str | None = None,
+) -> dict[str, Any] | None:
+    """Like :func:`read_answered_realm`, but ``None`` when Keycloak answers 404."""
+    try:
+        answer = await read_realm_held(
+            connector, target, path, operator=operator, expected=expected
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        raise
+    check_answered_realm(op_id, answer, target, expected)
+    return cast("dict[str, Any]", answer)
 
 
 def is_plain_realm_name(name: str) -> bool:

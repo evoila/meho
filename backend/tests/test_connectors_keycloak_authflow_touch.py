@@ -546,6 +546,32 @@ async def test_op_waits_for_approval_and_the_card_names_client_and_flow(
 # ---------------------------------------------------------------------------
 
 
+class _OtherRealmAfterPut(FakeKeycloak):
+    """After the realm PUT, a read of the realm answers with another realm."""
+
+    def _realm(self, request: httpx.Request) -> httpx.Response:
+        realm_puts = [w for w in self.writes if w[0] == "PUT" and w[1] == _ADMIN]
+        if request.method == "GET" and realm_puts:
+            return httpx.Response(200, json={"realm": "Example", "displayName": "other-marker"})
+        return super()._realm(request)
+
+
+async def test_a_level_map_read_back_of_another_realm_says_the_change_was_sent(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _OtherRealmAfterPut(client=_client(), loa_map='{"meho-approve":2}')
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        out = await _run({})
+    dumped = json.dumps(out, default=str)
+    assert out["status"] == "error", out
+    assert "check_failed" in dumped
+    assert "could not check the change" in dumped
+    assert "changes nothing" not in dumped
+    assert "other-marker" not in dumped
+    assert [w[0] for w in fake.writes if w[1] == _ADMIN] == ["PUT"]
+
+
 async def test_realm_without_the_flow_gets_all_of_it_and_a_second_run_changes_nothing(
     kc: KeycloakConnector,
 ) -> None:

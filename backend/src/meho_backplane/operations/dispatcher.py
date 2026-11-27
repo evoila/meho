@@ -404,6 +404,7 @@ from meho_backplane.operations._errors import (
     result_invalid_params,
     result_license_read_off,
     result_no_connector,
+    result_park_check_refused,
     result_preview_binding_required,
     result_preview_hash_mismatch,
     result_probe_pool_busy,
@@ -438,7 +439,12 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._op_miss import op_miss_result
-from meho_backplane.operations._park_check import park_check_refusal
+from meho_backplane.operations._park_check import (
+    gate_check_refusal,
+    park_check_refusal,
+    refusal_scope,
+    sent_reads_only,
+)
 from meho_backplane.operations._preview import (
     BLAST_RADIUS_KEY,
     PreviewContext,
@@ -1951,88 +1957,21 @@ async def _run_branch_with_error_handling(
             audit_id=audit_id,
             started=started,
         )
-    except httpx.ConnectError as conn_exc:
-        # #1782 (Initiative #1774 T3): a ConnectError carries no
-        # ``.response``, so it skips the HTTPStatusError arm above and used
-        # to flatten into the generic ``connector_error: ConnectError``
-        # below -- discarding the SSL cause, so an operator hitting a
-        # self-signed / internal-CA appliance saw only
-        # ``[SSL: CERTIFICATE_VERIFY_FAILED]`` with no guidance. When the
-        # ConnectError is a TLS-verify failure, emit the structured
-        # ``connector_tls_verify_failed`` instead (names the host + both
-        # remediations per docs/codebase/error-message-shape.md). The arm
-        # sits ahead of the generic ``except Exception`` so the structured
-        # shape wins; ``httpx.ConnectError`` (TransportError) and the
-        # earlier arms' exception types are disjoint, so no prior
-        # classification is perturbed.
-        #
-        # The connectors' shared ``HttpConnector._retryable`` already
-        # retried this ConnectError on idempotent verbs, so by here the
-        # retries are exhausted -- a TLS-verify failure is deterministic
-        # and never resolves on replay.
-        #
-        # Narrowing: a TLS-verify failure surfaces as a ConnectError whose
-        # ``__cause__`` is an ``ssl.SSLCertVerificationError`` (verified
-        # against httpx 0.28.1: the transport raises ConnectError ``from``
-        # the underlying ssl error). The ``CERTIFICATE_VERIFY_FAILED``
-        # substring is a belt-and-suspenders fallback for the case the
-        # cause chain is ever empty. A non-SSL ConnectError (DNS failure,
-        # connection refused, connect timeout) matches neither and MUST
-        # fall through to ``result_connector_error`` -- never mislabelled
-        # as a TLS fault.
-        duration_ms = _elapsed_ms(started)
-        is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
-            "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
-        )
-        presented = (
-            await probe_presented_leaf(
-                getattr(target, "host", None) or "",
-                getattr(target, "port", None),
-                getattr(target, "tls_server_name", None),
-            )
-            if is_tls_verify_failure and getattr(target, "tls_ca_pin", None)
-            else None
-        )
-        conn_result = (
-            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms, presented)
-            if is_tls_verify_failure
-            else result_connector_error(op_id, conn_exc, duration_ms)
-        )
-        return await _audit_error_and_return(
-            conn_result,
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            duration_ms=duration_ms,
-        )
-    except httpx.TimeoutException as timeout_exc:
-        duration_ms = _elapsed_ms(started)
-        return await _audit_error_and_return(
-            result_connector_timeout(
-                op_id,
-                timeout_exc,
-                duration_ms,
-                changes_target=changes_target(descriptor.safety_level),
-            ),
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            duration_ms=duration_ms,
-        )
     except httpx.TransportError as transport_exc:
+        # A request that got no answer: a TLS-verify failure, another
+        # connection error, a timeout or another transport fault
+        # (:func:`transport_error_result`). The arm sits ahead of the generic
+        # ``except Exception`` so the structured shape wins.
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
-            result_connector_timeout(
+            await transport_error_result(
                 op_id,
                 transport_exc,
-                duration_ms,
-                changes_target=changes_target(descriptor.safety_level),
+                descriptor=descriptor,
+                target=target,
+                duration_ms=duration_ms,
+                # A check read of the handler (``_park_check.mark_reads_only``).
+                reads_only=sent_reads_only(transport_exc),
             ),
             audit_id=audit_id,
             operator=operator,
@@ -2397,6 +2336,61 @@ async def _audit_blocked_step_and_return(
         started=started,
     )
     return audited
+
+
+async def transport_error_result(
+    op_id: str,
+    exc: httpx.TransportError,
+    *,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    duration_ms: float,
+    reads_only: bool = False,
+) -> OperationResult:
+    """The result of a call whose request got no answer (*exc*).
+
+    A ConnectError carries no ``.response``.
+    When it is a TLS-verify failure, the result is the structured
+    ``connector_tls_verify_failed`` (names the host + both remediations per
+    docs/codebase/error-message-shape.md). A TLS-verify failure surfaces as
+    a ConnectError whose ``__cause__`` is an ``ssl.SSLCertVerificationError``
+    (verified against httpx 0.28.1: the transport raises ConnectError
+    ``from`` the underlying ssl error); the ``CERTIFICATE_VERIFY_FAILED``
+    substring is a fallback for the case the cause chain is ever empty. Any
+    other ConnectError (DNS failure, connection refused) is the generic
+    ``connector_error``, never mislabelled as a TLS fault. A timeout or any
+    other transport fault is ``connector_timeout``. With *reads_only* (the
+    call sent only reads, for example a check before the policy gate or the
+    handler's realm check), a timeout counts as a failed read, also for a
+    write, and the text of a write says that nothing was changed.
+
+    The connectors' shared ``HttpConnector._retryable`` already retried the
+    error on idempotent verbs, so by here the retries are exhausted.
+    """
+    if isinstance(exc, httpx.ConnectError):
+        is_tls_verify_failure = isinstance(exc.__cause__, ssl.SSLCertVerificationError) or (
+            "CERTIFICATE_VERIFY_FAILED" in str(exc)
+        )
+        if not is_tls_verify_failure:
+            return result_connector_error(op_id, exc, duration_ms)
+        presented = (
+            await probe_presented_leaf(
+                getattr(target, "host", None) or "",
+                getattr(target, "port", None),
+                getattr(target, "tls_server_name", None),
+            )
+            if getattr(target, "tls_ca_pin", None)
+            else None
+        )
+        return result_connector_tls_verify_failed(op_id, exc, target, duration_ms, presented)
+    may_change = changes_target(descriptor.safety_level)
+    return result_connector_timeout(
+        op_id,
+        exc,
+        duration_ms,
+        changes_target=not reads_only and may_change,
+        nothing_changed=reads_only and may_change,
+    )
 
 
 async def _audit_error_and_return(
@@ -4032,14 +4026,27 @@ async def _handle_needs_approval(
     # banner at park time instead of failing only after a four-eyes
     # approval. Fail-soft too: a probe fault degrades to no banner. When the
     # build raises, the request still stores the catalog risk level.
-    proposed_effect = await _build_park_effect(
-        op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    with refusal_scope() as noted:
+        proposed_effect = await _build_park_effect(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+    if noted:
+        # A read inside the card refused the call (``_park_check.note_refusal``),
+        # for example a Keycloak answer for another realm: nothing is stored.
+        return await _audit_denied_and_return(
+            result_park_check_refused(op_id, noted[0], duration_ms),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the
@@ -4641,23 +4648,74 @@ async def _dispatch_now(
         # Some params make a call wait for a person on every call.
         raise_descriptor_for_params(descriptor, params)
         if not _approved:
+            # The op's check before the gate (``register_gate_check``) runs
+            # before the policy gate reads the vendor to decide who must
+            # approve, and before an approval card is built. It runs only
+            # when the caller's rights do not refuse the call already.
+            refusal = await gate_check_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+                duration_ms=_elapsed_ms(started),
+            )
+            if refusal is not None and refusal.status == "error":
+                # The check's read got no answer: the error the call returns.
+                return await _audit_error_and_return(
+                    refusal,
+                    audit_id=uuid.uuid4(),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=refusal.duration_ms,
+                )
+            if refusal is not None:
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                return await _audit_denied_and_return(
+                    refusal,
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=refusal.duration_ms,
+                )
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
             # / deny). The call site signature is unchanged; the function now
             # awaits a DB read to load the principal's AgentPermission rows.
             # #4622: the preview hash and the params reach the gate so a
             # delete grant (sandbox mode) can check the binding before it
             # records the grant use. Every other path ignores them.
-            verdict, gate_reason = await policy_gate(
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                connector_id=connector_id,
-                preview_hash=preview_hash,
-                params=params,
-            )
+            with refusal_scope() as gate_noted:
+                verdict, gate_reason = await policy_gate(
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    connector_id=connector_id,
+                    preview_hash=preview_hash,
+                    params=params,
+                )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
             policy_rule_var.set(take_rule())
             console_run_sign_in = take_console_run_sign_in()
+            if gate_noted:
+                # A read that decides who must approve refused the call
+                # (``_park_check.note_refusal``), for example a Keycloak answer
+                # for another realm: nothing is stored and nothing more is sent.
+                policy_decision_var.set(PermissionVerdict.DENY.value)
+                return await _audit_denied_and_return(
+                    result_park_check_refused(op_id, gate_noted[0], _elapsed_ms(started)),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    duration_ms=_elapsed_ms(started),
+                )
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:

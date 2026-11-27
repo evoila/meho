@@ -591,7 +591,11 @@ async def grant_changed_since_request(
     Builds the approval card again against the live system
     (:func:`~meho_backplane.operations.approval_object_check.live_card`)
     and compares the login and the group it names with the ones the
-    approver saw. Returns :data:`GRANT_REASON_UNREADABLE` when the card
+    approver saw. Returns the reason of
+    :func:`~meho_backplane.operations.approval_object_check.card_refused_reason`
+    when a read of the card refused the call (for example Keycloak did not
+    answer with the realm the target manages),
+    :data:`GRANT_REASON_UNREADABLE` when the card
     does not build, names no login or group, or cannot say who is in the
     group, :data:`GRANT_REASON_OLD_CARD` when the approved card has no
     :data:`HARMLESS_KEYS_ONLY` fact that its operation needs,
@@ -611,15 +615,22 @@ async def grant_changed_since_request(
     if request.op_id in _HARMLESS_KEYS_RULE_OPS and HARMLESS_KEYS_ONLY not in _stamp(request):
         _log.warning("approval_resume_grant_old_card", **log_fields)
         return GRANT_REASON_OLD_CARD
-    from meho_backplane.operations.approval_object_check import live_card
+    from meho_backplane.operations.approval_object_check import (
+        card_refused_reason,
+        live_card_checked,
+    )
 
-    card = await live_card(
+    built = await live_card_checked(
         operator,
         connector_id=request.connector_id,
         op_id=request.op_id,
         target=target,
         params=params,
     )
+    if built.refusal is not None:
+        _log.warning("approval_resume_grant_refused", **log_fields)
+        return card_refused_reason(built.refusal)
+    card = built.card
     preview = card.get("preview") if isinstance(card, dict) else None
     live = preview.get("grant") if isinstance(preview, dict) else None
     if not isinstance(live, dict):

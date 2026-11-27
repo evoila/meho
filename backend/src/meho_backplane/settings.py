@@ -2846,6 +2846,13 @@ class Settings(BaseModel):
     #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
     #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
     keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The call trace of a Keycloak realm read that Keycloak answered only on a
+    #: retry. On: a try before the answer that passed the realm check keeps its
+    #: status only, no header and no body
+    #: (:func:`meho_backplane.connectors.keycloak.realm_params.read_realm_held`).
+    #: Off: every try keeps its headers and body in the trace. Set via
+    #: ``KEYCLOAK_TRACE_RETRY_STATUS_ONLY``.
+    keycloak_trace_retry_status_only: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -4042,6 +4049,9 @@ def get_settings() -> Settings:
         ),
         keycloak_answer_realm=parse_bool_env(
             os.environ.get("KEYCLOAK_ANSWER_REALM"),
+        ),
+        keycloak_trace_retry_status_only=parse_bool_env(
+            os.environ.get("KEYCLOAK_TRACE_RETRY_STATUS_ONLY"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

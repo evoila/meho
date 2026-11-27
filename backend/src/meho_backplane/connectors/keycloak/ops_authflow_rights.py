@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.keycloak.realm_params import is_realm_answer_mismatch
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations._preview import (
     PermissionPreflight,
@@ -79,6 +80,7 @@ __all__ = [
     "RIGHTS_CHECKED_AT_CALL",
     "AccountRights",
     "KeycloakMissingRightsError",
+    "ReadBackNotCheckedError",
     "ReadBackRefusedError",
     "find_client_uuid",
     "flow_refused_error",
@@ -392,11 +394,19 @@ class ReadBackRefusedError(httpx.HTTPStatusError):
     """Keycloak refused (HTTP 403) to read back a change the step made."""
 
 
+class ReadBackNotCheckedError(RuntimeError):
+    """Keycloak answered the read back of a change with another realm than the managed realm."""
+
+
 @contextlib.contextmanager
 def reading_back() -> Iterator[None]:
     """Wrap the read back of a change: a 403 there becomes :class:`ReadBackRefusedError`.
 
-    The change was made, so the text of the stop must say so.
+    The change was made, so the text of the stop must say so. An answer for
+    another realm than the managed realm
+    (:func:`~.realm_params.is_realm_answer_mismatch`) becomes
+    :class:`ReadBackNotCheckedError`: the change was sent, and MEHO could
+    not check it.
     """
     try:
         yield
@@ -404,6 +414,14 @@ def reading_back() -> Iterator[None]:
         if exc.response.status_code != 403 or isinstance(exc, ReadBackRefusedError):
             raise
         raise ReadBackRefusedError(str(exc), request=exc.request, response=exc.response) from exc
+    except ValueError as exc:
+        if not is_realm_answer_mismatch(exc):
+            raise
+        raise ReadBackNotCheckedError(
+            "Keycloak took the change, but it answered the read back with another realm "
+            "than the managed realm, so MEHO could not check the change. Check the realm "
+            "in the Keycloak admin console."
+        ) from exc
 
 
 def read_or_write(exc: httpx.HTTPStatusError, step: str) -> str:

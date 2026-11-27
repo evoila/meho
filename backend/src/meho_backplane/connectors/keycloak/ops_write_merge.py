@@ -43,13 +43,14 @@ and says ``read_back_checked: false``.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import ResponseTooLargeError
 from meho_backplane.connectors.keycloak.connector import KeycloakAdminTokenError
+from meho_backplane.connectors.keycloak.realm_params import read_realm_held
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -134,6 +135,40 @@ def unrequested_changes(
     return changed
 
 
+#: The errors of a read-back that leave ``read_back_checked`` false.
+_READ_BACK_ERRORS: Final = (
+    httpx.HTTPError,
+    ResponseTooLargeError,
+    OSError,
+    ValueError,
+    KeycloakAdminTokenError,
+    CredentialsReadError,
+)
+
+
+async def _read_back_realm(
+    connector: KeycloakConnector,
+    target: KeycloakTargetLike,
+    path: str,
+    *,
+    operator: Operator,
+    realm: str,
+) -> Any:
+    """Read the realm back after a realm update; ``None`` unless it answers as *realm*.
+
+    The trace keeps the whole read only when Keycloak answers with exactly
+    that realm name (:func:`~.realm_params.read_realm_held`). A failed read
+    or another answer keeps its status only.
+    """
+    try:
+        after = await read_realm_held(connector, target, path, operator=operator, expected=realm)
+    except _READ_BACK_ERRORS:
+        return None
+    if not isinstance(after, dict) or after.get("realm") != realm:
+        return None
+    return after
+
+
 async def read_merge_write(
     connector: KeycloakConnector,
     operator: Operator,
@@ -144,6 +179,7 @@ async def read_merge_write(
     read_back_path: str | None = None,
     before: dict[str, Any] | None = None,
     read_back_into: dict[str, Any] | None = None,
+    read_back_realm: str | None = None,
 ) -> dict[str, Any]:
     """GET the object at *path*, merge *requested* on top, PUT it back, read it again.
 
@@ -156,7 +192,11 @@ async def read_merge_write(
     the fields the caller sent, the fields that changed without being sent,
     and whether the read-back ran. When *read_back_into* is given and the
     read-back ran, the object that was read back is put in it, so the caller
-    can report what Keycloak holds now.
+    can report what Keycloak holds now. With *read_back_realm* (a realm
+    update), the read-back counts only when Keycloak answers with exactly
+    that realm name. Any other answer leaves ``read_back_checked`` false and
+    reports no field of it. The flight recorder then keeps only the status
+    of that read, no header and no body, also when the read fails.
     """
     if before is None:
         before = await connector._get_admin_json(target, path, operator=operator)
@@ -169,19 +209,19 @@ async def read_merge_write(
         "unrequested_changes": [],
         "read_back_checked": False,
     }
-    try:
-        after = await connector._get_admin_json(target, read_back_path or path, operator=operator)
-    except (
-        httpx.HTTPError,
-        ResponseTooLargeError,
-        OSError,
-        ValueError,
-        KeycloakAdminTokenError,
-        CredentialsReadError,
-    ):
-        # The PUT already succeeded; a failed check must not report the
-        # write as failed. The caller sees read_back_checked=false.
-        return outcome
+    if read_back_realm is None:
+        try:
+            after = await connector._get_admin_json(
+                target, read_back_path or path, operator=operator
+            )
+        except _READ_BACK_ERRORS:
+            # The PUT already succeeded; a failed check must not report the
+            # write as failed. The caller sees read_back_checked=false.
+            return outcome
+    else:
+        after = await _read_back_realm(
+            connector, target, read_back_path or path, operator=operator, realm=read_back_realm
+        )
     if not isinstance(after, dict):
         return outcome
     outcome["read_back_checked"] = True

@@ -220,6 +220,7 @@ def test_every_op_that_takes_a_realm_is_fenced() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
 @pytest.mark.parametrize("op_id", _FENCED)
 async def test_another_realm_is_refused_before_approval(operator: Operator, op_id: str) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -238,16 +239,21 @@ async def test_another_realm_is_refused_before_approval(operator: Operator, op_i
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
 @pytest.mark.parametrize("op_id", _FENCED)
 async def test_preview_gives_the_same_refusal(operator: Operator, op_id: str) -> None:
-    envelope = await preview_dispatch(
-        operator=operator,
-        connector_id=_CONNECTOR_ID,
-        op_id=op_id,
-        target=await _target(operator),
-        params=_fenced_params(op_id, _OTHER),
-    )
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        envelope = await preview_dispatch(
+            operator=operator,
+            connector_id=_CONNECTOR_ID,
+            op_id=op_id,
+            target=await _target(operator),
+            params=_fenced_params(op_id, _OTHER),
+        )
     assert envelope["extras"]["error_code"] == "refused_before_approval"
+    assert "target that names that realm" in envelope["error"]
+    assert len(mock.calls) == 0
     assert await _approval_rows() == []
 
 
@@ -259,6 +265,7 @@ async def test_a_rename_in_the_representation_is_refused_too(operator: Operator)
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_keycloak_realm_check")
 @pytest.mark.parametrize("op_id", _FENCED)
 async def test_the_handler_refuses_another_realm_too(operator: Operator, op_id: str) -> None:
     """A call that is already approved still sends nothing to Keycloak."""

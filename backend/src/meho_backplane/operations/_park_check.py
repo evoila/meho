@@ -30,20 +30,44 @@ for approval, before anything is stored:
 
 A refusal is the ``refused_before_approval`` result
 (:func:`~meho_backplane.operations._errors.result_park_check_refused`).
+
+An op can also turn on a check that runs before the policy gate
+(:func:`register_gate_check`), for a check that must pass before MEHO reads
+anything of the vendor for the call. :func:`gate_check_refusal` runs it in
+the dispatcher right before the policy gate, so before the reads that decide
+who must approve and before any approval card is built, and
+``preview_operation`` runs it first. The caller's rights come first: when
+they refuse the call
+(:func:`~meho_backplane.operations._validate.rights_denial`), the check does
+not run, so MEHO reads nothing of the vendor and the policy gate gives its
+own refusal. The approved run skips it: the handler checks again.
+
+A read inside an approval card can also refuse the call
+(:func:`note_refusal`). The dispatcher and ``preview_operation`` collect
+such refusals while they build the card (:func:`refusal_scope`) and then
+refuse the call with the first one, before anything is stored. Once a
+refusal is noted, a connector sends no more requests for that card
+(:func:`refusal_noted`, :class:`CallRefusedError`).
 The check is fail-closed: a check that raises refuses the call, with a
 reason that names only the exception class. An expired login during the
-check is renewed once (:func:`_refresh_rejected_session`).
+check is renewed once (:func:`refresh_rejected_session`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
 
-from meho_backplane.operations._errors import is_auth_failed_status, result_park_check_refused
+from meho_backplane.operations._errors import (
+    is_auth_failed_status,
+    result_gate_check_refused,
+    result_park_check_refused,
+)
 from meho_backplane.operations._preview import PreviewContext
 
 if TYPE_CHECKING:
@@ -52,11 +76,22 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "CallRefusedError",
     "ParkCheck",
+    "gate_check_refusal",
+    "gate_check_registered",
+    "mark_reads_only",
+    "note_refusal",
     "park_check_refusal",
     "park_check_registered",
+    "refresh_rejected_session",
+    "refusal_noted",
+    "refusal_scope",
+    "register_gate_check",
     "register_park_check",
     "run_park_check",
+    "sent_reads_only",
+    "transport_cause",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -69,6 +104,9 @@ ParkCheck = Callable[[PreviewContext], Awaitable[str | None]]
 #: approval with its params as they are.
 _PARK_CHECKS: dict[str, ParkCheck] = {}
 
+#: ``op_id`` -> check that runs before the policy gate (:func:`register_gate_check`).
+_GATE_CHECKS: dict[str, ParkCheck] = {}
+
 
 def register_park_check(op_id: str, check: ParkCheck) -> None:
     """Register *check* as the check *op_id* runs before it waits for approval.
@@ -78,12 +116,92 @@ def register_park_check(op_id: str, check: ParkCheck) -> None:
     _PARK_CHECKS[op_id] = check
 
 
+def register_gate_check(op_id: str, check: ParkCheck) -> None:
+    """Register *check* as the check *op_id* runs before the policy gate.
+
+    Same shape and the same fail-closed run as a check before the wait for
+    approval. Registering again overwrites.
+    """
+    _GATE_CHECKS[op_id] = check
+
+
 def park_check_registered(op_id: str) -> bool:
     """Whether *op_id* has a check before the wait for approval."""
     return op_id in _PARK_CHECKS
 
 
-async def _refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
+def gate_check_registered(op_id: str) -> bool:
+    """Whether *op_id* has a check before the policy gate."""
+    return op_id in _GATE_CHECKS
+
+
+#: The refusals that reads inside an approval card noted (:func:`refusal_scope`).
+_NOTED_REFUSALS: ContextVar[list[str] | None] = ContextVar("park_noted_refusals", default=None)
+
+
+@contextmanager
+def refusal_scope() -> Iterator[list[str]]:
+    """Collect the refusals that the reads inside this block note (:func:`note_refusal`).
+
+    Inside another such block, the list is the outer block's list: a refusal
+    noted before stays the first one, and one noted inside reaches the outer
+    block too.
+    """
+    outer = _NOTED_REFUSALS.get()
+    noted: list[str] = outer if outer is not None else []
+    token = _NOTED_REFUSALS.set(noted)
+    try:
+        yield noted
+    finally:
+        _NOTED_REFUSALS.reset(token)
+
+
+def note_refusal(reason: str) -> None:
+    """Refuse the call whose approval card is being built, with *reason*.
+
+    A read inside the card calls it when the call must not wait for
+    approval, also when the card itself goes on without that read. The
+    *reason* must name no value of the vendor's answer. Outside
+    :func:`refusal_scope` it does nothing.
+    """
+    noted = _NOTED_REFUSALS.get()
+    if noted is not None:
+        noted.append(reason)
+
+
+def refusal_noted() -> str | None:
+    """The first refusal noted in the current :func:`refusal_scope`, or ``None``.
+
+    A connector reads it before each request it sends while a card is
+    built, and sends nothing more once the call is refused.
+    """
+    noted = _NOTED_REFUSALS.get()
+    return noted[0] if noted else None
+
+
+#: Set on a transport error of a request that only read (:func:`mark_reads_only`).
+_READS_ONLY_MARK = "_meho_sent_reads_only"
+
+
+def mark_reads_only(exc: BaseException) -> None:
+    """Mark *exc* as the error of a check read: the call sent only reads, so nothing changed.
+
+    The dispatcher then gives a timeout of a write the text of a failed read
+    (:func:`~meho_backplane.operations.dispatcher.transport_error_result`).
+    """
+    setattr(exc, _READS_ONLY_MARK, True)
+
+
+def sent_reads_only(exc: BaseException) -> bool:
+    """Whether *exc* was marked by :func:`mark_reads_only`."""
+    return getattr(exc, _READS_ONLY_MARK, False) is True
+
+
+class CallRefusedError(RuntimeError):
+    """A request was not sent: a read before it already refused the call (:func:`note_refusal`)."""
+
+
+async def refresh_rejected_session(ctx: PreviewContext, exc: httpx.HTTPStatusError) -> bool:
     """Drop the login the vendor rejected; ``True`` when the check can run again.
 
     A check can read the vendor with the connector's cached login. When
@@ -118,30 +236,55 @@ async def run_park_check(ctx: PreviewContext) -> str | None:
     refuses the call (fail-closed): the reason names the exception class
     only, so no param value and no vendor text reaches the caller.
     """
-    op_id = ctx.descriptor.op_id
-    check = _PARK_CHECKS.get(op_id)
+    return await _run_check(ctx, _PARK_CHECKS.get(ctx.descriptor.op_id))
+
+
+async def _run_check(
+    ctx: PreviewContext, check: ParkCheck | None, *, raise_no_answer: bool = False
+) -> str | None:
+    """Run *check* as :func:`run_park_check` describes.
+
+    When a read inside the check, or a read before it in the same
+    :func:`refusal_scope`, noted a refusal (:func:`note_refusal`), the first
+    refusal is the answer, also when the check raised or let the call wait.
+    A refusal noted before the check means the check does not run. With
+    *raise_no_answer*, an error of a request that got no answer
+    (:func:`transport_cause`) is raised, not turned into a refusal.
+    """
     if check is None:
         return None
-    try:
+    if (first := refusal_noted()) is not None:
+        # A read before this check already refused the call: send nothing more.
+        return first
+    with refusal_scope() as noted:
         try:
-            return await check(ctx)
-        except httpx.HTTPStatusError as exc:
-            if not await _refresh_rejected_session(ctx, exc):
+            reason = await _check_with_fresh_login(ctx, check)
+        except Exception as exc:
+            if raise_no_answer and not noted and transport_cause(exc) is not None:
                 raise
+            # The class name only: a traceback with locals could show a param
+            # value, a login header or a vendor text.
+            _log.warning(
+                "park_check_failed",
+                op_id=ctx.descriptor.op_id,
+                operator_sub=getattr(ctx.operator, "sub", None),
+                error_type=type(exc).__name__,
+            )
+            reason = (
+                "the check that runs before the wait for approval failed "
+                f"({type(exc).__name__}); call the operation again"
+            )
+    return noted[0] if noted else reason
+
+
+async def _check_with_fresh_login(ctx: PreviewContext, check: ParkCheck) -> str | None:
+    """Run *check*; once more after a fresh login when the vendor rejected the cached one."""
+    try:
         return await check(ctx)
-    except Exception as exc:
-        # The class name only: a traceback with locals could show a param
-        # value, a login header or a vendor text.
-        _log.warning(
-            "park_check_failed",
-            op_id=op_id,
-            operator_sub=getattr(ctx.operator, "sub", None),
-            error_type=type(exc).__name__,
-        )
-        return (
-            "the check that runs before the wait for approval failed "
-            f"({type(exc).__name__}); call the operation again"
-        )
+    except httpx.HTTPStatusError as exc:
+        if not await refresh_rejected_session(ctx, exc):
+            raise
+    return await check(ctx)
 
 
 async def park_check_refusal(
@@ -162,7 +305,119 @@ async def park_check_refusal(
     ``connector_instance=None``, and the check decides what that means.
     Writes nothing: the caller records the refusal.
     """
-    if not park_check_registered(descriptor.op_id):
+    return await _refusal(
+        _PARK_CHECKS.get(descriptor.op_id),
+        op_id=op_id,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        duration_ms=duration_ms,
+    )
+
+
+async def gate_check_refusal(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    duration_ms: float,
+) -> OperationResult | None:
+    """The ``refused_before_approval`` result when the op's check before the gate says no.
+
+    The same as :func:`park_check_refusal`, for the check of
+    :func:`register_gate_check`. The check runs only when the caller's
+    rights do not refuse the call; else ``None``, and the policy gate
+    refuses it. When a request of the check gets no answer (a connection,
+    TLS or timeout error, :func:`transport_cause`), the result is the error
+    the call itself would return for it, for example
+    ``connector_tls_verify_failed``
+    (:func:`~meho_backplane.operations.dispatcher.transport_error_result`).
+    A timeout counts as a failed read, also for a write: the check sends only
+    reads, so the write was not sent and the call can be sent again.
+    """
+    if not gate_check_registered(descriptor.op_id):
+        return None
+    # Imported lazily: the policy gate module imports the dispatcher's helpers.
+    from meho_backplane.operations._validate import rights_denial
+
+    denial = await rights_denial(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+    )
+    if denial is not None:
+        return None
+    try:
+        return await _refusal(
+            _GATE_CHECKS.get(descriptor.op_id),
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            duration_ms=duration_ms,
+            gate=True,
+        )
+    except Exception as exc:
+        cause = transport_cause(exc)
+        if cause is None:
+            raise
+        # Imported lazily: the dispatcher imports this module.
+        from meho_backplane.operations.dispatcher import transport_error_result
+
+        return await transport_error_result(
+            op_id,
+            cause,
+            descriptor=descriptor,
+            target=target,
+            duration_ms=duration_ms,
+            reads_only=True,
+        )
+
+
+def transport_cause(exc: BaseException) -> httpx.TransportError | None:
+    """The error of a request that got no answer (a connection, TLS or timeout error) in *exc*.
+
+    *exc* itself, or an exception it was raised from, for example a failed
+    login that wraps the connection error.
+    """
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            return None
+        if isinstance(seen, httpx.TransportError):
+            return seen
+        seen = seen.__cause__ or seen.__context__
+    return None
+
+
+async def _refusal(
+    check: ParkCheck | None,
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    duration_ms: float,
+    gate: bool = False,
+) -> OperationResult | None:
+    """Run *check* for the call; the refusal result, or ``None``.
+
+    With *gate* (a check before the policy gate), an error of a request
+    that got no answer is raised, and the refusal is
+    :func:`~meho_backplane.operations._errors.result_gate_check_refused`.
+    """
+    if check is None:
         return None
     # Imported lazily: the dispatcher imports this module.
     from meho_backplane.operations.dispatcher import _resolve_connector_instance
@@ -175,7 +430,7 @@ async def park_check_refusal(
         connector_instance, resolution_error = None, None
     if resolution_error is not None:
         connector_instance = None
-    reason = await run_park_check(
+    reason = await _run_check(
         PreviewContext(
             descriptor=descriptor,
             connector_instance=connector_instance,
@@ -183,8 +438,12 @@ async def park_check_refusal(
             target=target,
             params=params,
             connector_id=connector_id,
-        )
+        ),
+        check,
+        raise_no_answer=gate,
     )
     if reason is None:
         return None
+    if gate:
+        return result_gate_check_refused(op_id, reason, duration_ms)
     return result_park_check_refused(op_id, reason, duration_ms)

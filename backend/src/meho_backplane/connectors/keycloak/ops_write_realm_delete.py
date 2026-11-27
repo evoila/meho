@@ -70,6 +70,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+import httpx
+
 from meho_backplane.connectors.keycloak._paths import (
     _ADMIN_REALM_PATH,
     _CLIENTS_PATH,
@@ -80,14 +82,18 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.ops_write_delete import (
     ALREADY_ABSENT,
     IRREVERSIBLE,
+    KeycloakDeleteVerificationError,
     _delete_and_verify,
 )
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
     KeycloakDeleteRefusedError,
     KeycloakUnexpectedResponseError,
-    get_or_none,
 )
-from meho_backplane.connectors.keycloak.realm_params import realm_param
+from meho_backplane.connectors.keycloak.realm_params import (
+    answer_names_managed_realm,
+    read_realm_held,
+    realm_param,
+)
 from meho_backplane.connectors.keycloak.session import (
     DEFAULT_ADMIN_REALM,
     resolve_realm_config,
@@ -107,6 +113,7 @@ __all__ = [
     "check_realm_guards",
     "keycloak_realm_delete",
     "read_managed_realm",
+    "read_realm_or_none",
     "realm_blast_radius",
     "realm_name_param",
 ]
@@ -144,6 +151,34 @@ def _realm_path(realm: str) -> str:
     return fill_path(_ADMIN_REALM_PATH, {"realm": realm})
 
 
+async def read_realm_or_none(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    path: str,
+) -> dict[str, Any] | None:
+    """GET the realm at *path*; ``None`` only when Keycloak answers 404.
+
+    The same rules as :func:`~.ops_write_delete_lookup.get_or_none`: a 2xx
+    answer that is not a JSON object raises
+    :exc:`KeycloakUnexpectedResponseError`. The flight recorder keeps the
+    body only of an answer for the managed realm
+    (:func:`~.realm_params.read_realm_held`).
+    """
+    try:
+        rep: Any = await read_realm_held(connector, target, path, operator=operator)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        raise
+    if not isinstance(rep, dict):
+        raise KeycloakUnexpectedResponseError(
+            f"GET {path} answered with {type(rep).__name__} instead of a JSON object; "
+            "only a 404 counts as absent"
+        )
+    return rep
+
+
 async def read_managed_realm(
     connector: KeycloakConnector,
     operator: Operator,
@@ -157,15 +192,18 @@ async def read_managed_realm(
     :exc:`KeycloakDeleteRefusedError` (``realm_name_mismatch``). The message
     names the managed realm only.
 
+    The flight recorder keeps the body of the read only when it names the
+    managed realm (:func:`read_realm_or_none`).
+
     The answer's ``id`` must be a string that is not empty. Without it MEHO
     cannot compare the realm with the one on the approval card, so the
     delete is refused (``realm_id_missing``).
     """
-    rep = await get_or_none(connector, target, _realm_path(realm), operator)
+    rep = await read_realm_or_none(connector, operator, target, _realm_path(realm))
     if rep is None:
         return None
     managed = resolve_realm_config(target).managed_realm
-    if rep.get("realm") != managed:
+    if not answer_names_managed_realm(rep, target):
         raise KeycloakDeleteRefusedError(
             REALM_DELETE_OP,
             "realm_name_mismatch",
@@ -296,6 +334,26 @@ async def keycloak_realm_delete(
     if rep is None:
         return {**result, "deleted": False, "already_absent": True}
     _check_approved_id(rep)
+    path = _realm_path(realm)
+
+    async def read_again() -> Any:
+        # The trace keeps the body only of an answer for the managed realm.
+        again = await read_realm_or_none(self, operator, target, path)
+        if again is not None and not answer_names_managed_realm(again, target):
+            raise KeycloakDeleteVerificationError(
+                f"{REALM_DELETE_OP}: MEHO sent the DELETE for the realm {realm!r}, but "
+                "Keycloak answered the check read with another realm, so MEHO could not "
+                "verify the result. Check the realm in Keycloak and the managed realm of "
+                "the target."
+            )
+        return again
+
     return await _delete_and_verify(
-        self, operator, target, op_id=REALM_DELETE_OP, path=_realm_path(realm), result=result
+        self,
+        operator,
+        target,
+        op_id=REALM_DELETE_OP,
+        path=path,
+        result=result,
+        read_again=read_again,
     )

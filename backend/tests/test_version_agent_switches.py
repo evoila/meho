@@ -57,6 +57,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "kb_wiki_filtered_search",
         "kb_wiki_interleave",
         "keycloak_rights_change_cards",
+        "keycloak_trace_retry_status_only",
         "knowledge_upkeep_enabled",
         "mcp_approval_exit_code",
         "mcp_call_flow_guide",

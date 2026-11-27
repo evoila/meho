@@ -82,6 +82,30 @@ the standing-grant rule or the vendor error text (it is not in
 `SECRET_FAMILY_TAGS`). Use a secret tag when the vendor error text must be
 hidden too, and `destructive` only for a real delete.
 
+## Keeping a connector's own check read out of the trace
+
+A connector that makes a request only for its own check (not for the
+operation) runs it inside `with capture.paused():`
+(`flight_recorder/capture.py`). The trace gets no span for any call in that
+block, so the stored trace and the agent copy hold only the calls of the
+operation itself. Capture goes on after the block. The Keycloak realm check
+uses it (`docs/codebase/connectors-keycloak.md`).
+
+A call whose answer the connector must check first runs inside
+`with capture.held() as spans:`. Its spans stay out of the trace until the
+connector calls `spans.release()` after the check passed: every span goes in
+whole, as without the block. With `spans.release(earlier_status_only=True)`
+an earlier try (a failed try before a retry) keeps only its status; the
+Keycloak realm reads ask for this only while the off-by-default switch
+`KEYCLOAK_TRACE_RETRY_STATUS_ONLY` is on. When the call fails, or its answer
+fails the check, the connector calls `spans.release_status()`: each span
+keeps only its method, address, status, time and request id (and the error
+class of a request that got no answer), with no header, no body and no other
+text of the answer. With `capture.held(asked_url)`, such a span names
+`asked_url`, the address the connector asked for, in its name and in `url`,
+and not an address that a redirect on the same server named. Spans that are
+not released are dropped. The Keycloak reads of a realm's settings use it.
+
 ## Audit
 
 Every applied change is folded into the request's `audit_log` row via `audit_*`

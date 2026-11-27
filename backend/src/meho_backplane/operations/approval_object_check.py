@@ -55,10 +55,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
+from meho_backplane.operations._park_check import refusal_scope
 from meho_backplane.operations._preview import BLAST_RADIUS_KEY
 
 if TYPE_CHECKING:
@@ -72,8 +73,11 @@ __all__ = [
     "REASON_CHANGED",
     "REASON_UNREADABLE",
     "RECORD_VALUES_KEY",
+    "LiveCard",
     "card_object",
+    "card_refused_reason",
     "live_card",
+    "live_card_checked",
     "object_changed_since_request",
     "object_identity",
 ]
@@ -116,6 +120,26 @@ REASON_UNREADABLE: Final[str] = (
     "check that it is still the one on the approval card. The operation did "
     "not run. Send a new request."
 )
+
+
+class LiveCard(NamedTuple):
+    """The approval card built again (:func:`live_card_checked`)."""
+
+    #: The card, or ``None`` when it does not build or a read of it refused the call.
+    card: dict[str, Any] | None
+    #: The first refusal a read of the card noted, or ``None``.
+    refusal: str | None
+
+
+def card_refused_reason(refusal: str) -> str:
+    """Why a run was refused when a read of the live card refused the call.
+
+    *refusal* is the text the read noted
+    (:func:`~meho_backplane.operations._park_check.note_refusal`, for example
+    that Keycloak did not answer with the realm the target manages). It
+    names no value of the answer.
+    """
+    return f"{refusal} The operation did not run."
 
 
 def card_object(proposed_effect: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
@@ -230,7 +254,12 @@ async def live_card(
 
     Resolves the descriptor and the connector the same way the park did,
     so the card is the one the park would store now. A builder that
-    declines or fails leaves the card without an object block.
+    declines or fails leaves the card without an object block. When a read
+    of the card refuses the call
+    (:func:`~meho_backplane.operations._park_check.note_refusal`, for
+    example a Keycloak answer for another realm), the card counts as not
+    built, so the run is refused, and the card sends no more requests.
+    :func:`live_card_checked` also returns that refusal.
     """
     # The two helpers of the park path, so the live card has the exact
     # shape of the stored one. Imported late: both modules import from the
@@ -244,14 +273,41 @@ async def live_card(
     if isinstance(resolved, dict):
         return None
     descriptor, resolved_connector_id = resolved
-    return await _build_proposed_effect(
-        op_id=op_id,
-        connector_id=resolved_connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    with refusal_scope() as noted:
+        card = await _build_proposed_effect(
+            op_id=op_id,
+            connector_id=resolved_connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+    if noted:
+        _log.warning("approval_resume_card_refused", op_id=op_id, connector_id=connector_id)
+        return None
+    return card
+
+
+async def live_card_checked(
+    operator: Operator,
+    *,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+) -> LiveCard:
+    """:func:`live_card`, with the first refusal that a read of the card noted.
+
+    A run that such a refusal stops is refused with
+    :func:`card_refused_reason`.
+    """
+    with refusal_scope() as noted:
+        card = await live_card(
+            operator, connector_id=connector_id, op_id=op_id, target=target, params=params
+        )
+    if noted:
+        return LiveCard(None, noted[0])
+    return LiveCard(card, None)
 
 
 async def object_changed_since_request(
@@ -262,7 +318,8 @@ async def object_changed_since_request(
 ) -> str | None:
     """Why the run must be refused, or ``None`` when the object is the approved one.
 
-    Returns :data:`REASON_UNREADABLE` when the card does not build now, or
+    Returns :func:`card_refused_reason` when a read of the card refused
+    the call, :data:`REASON_UNREADABLE` when the card does not build now, or
     when a card has an object that is there but no id to compare,
     :data:`REASON_APPEARED` when the card said the object was absent and
     the live card names one, and :data:`REASON_CHANGED` when the live
@@ -275,15 +332,16 @@ async def object_changed_since_request(
     approved = card_object(request.proposed_effect)
     if approved is None:
         return None
-    live = card_object(
-        await live_card(
-            operator,
-            connector_id=request.connector_id,
-            op_id=request.op_id,
-            target=target,
-            params=params,
-        )
+    built = await live_card_checked(
+        operator,
+        connector_id=request.connector_id,
+        op_id=request.op_id,
+        target=target,
+        params=params,
     )
+    if built.refusal is not None:
+        return card_refused_reason(built.refusal)
+    live = card_object(built.card)
     log_fields = {
         "approval_request_id": str(request.id),
         "op_id": request.op_id,

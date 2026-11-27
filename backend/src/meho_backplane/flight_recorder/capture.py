@@ -57,8 +57,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
 
@@ -85,9 +87,12 @@ from meho_backplane.redaction.flight_recorder import redact_span
 __all__ = [
     "FIRST_REQUEST_URL_EXTENSION",
     "CaptureHandle",
+    "HeldSpans",
     "SpanStart",
     "begin_dispatch_capture",
     "end_dispatch_capture",
+    "held",
+    "paused",
     "record_jsonflux_reduction",
     "record_vendor_call",
     "record_vendor_call_error",
@@ -332,6 +337,127 @@ async def _persist(scope: _CaptureScope) -> None:
 # ---------------------------------------------------------------------------
 # Vendor-call span (the shared httpx seam)
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def paused() -> Iterator[None]:
+    """Record no span for the calls made inside this block.
+
+    A connector uses it for a request it makes only for its own check, so
+    the stored trace and the agent copy hold only the calls of the operation
+    itself. Capture goes on as before after the block.
+    """
+    token = _active_capture_var.set(None)
+    try:
+        yield
+    finally:
+        _active_capture_var.reset(token)
+
+
+#: The span attributes a span keeps when its answer did not pass its check
+#: (:meth:`HeldSpans.release_status`): which call it was and how it ended. No
+#: header, no body and no other text of the answer. The address is the one
+#: MEHO asked for (:func:`_status_only`).
+_STATUS_KEYS: Final = ("connector_id", "op_id", "method", "request_id", "phase")
+
+
+def _status_only(span: SpanInput, asked_url: str | None) -> SpanInput:
+    """*span* with only the call, its status and its time: no value of the answer.
+
+    The address in ``url`` and in the span name is *asked_url*, the address
+    MEHO asked for, and not the one a redirect named. Without *asked_url*,
+    the span keeps its own address and name.
+    """
+    attributes: dict[str, Any] = {
+        key: span.attributes[key] for key in _STATUS_KEYS if key in span.attributes
+    }
+    if asked_url is None:
+        if "url" in span.attributes:
+            attributes["url"] = span.attributes["url"]
+        name = span.name
+    else:
+        attributes["url"] = asked_url
+        name = f"{span.attributes.get('method')} {asked_url}"
+    if "exception_class" in span.attributes:
+        attributes["exception_class"] = span.attributes["exception_class"]
+    else:
+        attributes["body_recorded"] = False
+    return replace(span, name=name, attributes=attributes)
+
+
+class HeldSpans:
+    """The spans of a :func:`held` block, kept out of the trace until released."""
+
+    def __init__(
+        self, outer: _CaptureScope | None, buffer: _CaptureScope | None, asked_url: str | None
+    ) -> None:
+        self._outer = outer
+        self._buffer = buffer
+        self._asked_url = asked_url
+
+    @property
+    def recording(self) -> bool:
+        """Whether the calls of the block go into a trace at all."""
+        return self._outer is not None and self._buffer is not None
+
+    def release(self, *, earlier_status_only: bool = False) -> None:
+        """Add the spans held so far to the trace, after the answer passed its check.
+
+        Only the last span is the answer that was checked; it is added
+        whole. An earlier span (a failed try before a retry) is added whole
+        too, unless *earlier_status_only* is set: then it keeps its status
+        only (:meth:`release_status`).
+        """
+        self._add(full_last=True, full_earlier=not earlier_status_only)
+
+    def release_status(self) -> None:
+        """Add the spans held so far with their status only: no header and no body.
+
+        For a call that failed, or whose answer failed its check: the
+        trace shows that the call ran and how it ended.
+        """
+        self._add(full_last=False, full_earlier=False)
+
+    def _add(self, *, full_last: bool, full_earlier: bool) -> None:
+        if self._outer is None or self._buffer is None:
+            return
+        spans = self._buffer.spans
+        for index, span in enumerate(spans):
+            full = full_last if index == len(spans) - 1 else full_earlier
+            self._outer.add(span if full else _status_only(span, self._asked_url))
+        for kind, count in self._buffer.overflow.items():
+            self._outer.overflow[kind] = self._outer.overflow.get(kind, 0) + count
+        if full_last and self._buffer.redaction_uncertain:
+            self._outer.redaction_uncertain = True
+        self._buffer.spans.clear()
+        self._buffer.overflow.clear()
+        self._buffer.total_bytes = 0
+        self._buffer.redaction_uncertain = False
+
+
+@contextmanager
+def held(asked_url: Any = None) -> Iterator[HeldSpans]:
+    """Keep the spans of the calls made inside this block out of the trace until released.
+
+    A connector uses it for a call whose answer it must check first: only
+    after the check passes does it call :meth:`HeldSpans.release`. Spans that
+    are not released are dropped, so the stored trace and the agent copy
+    hold no answer that failed the check. A span added with its status only
+    names *asked_url* (an :class:`httpx.URL` or a text), the address the
+    connector asked for, with no query part, also when a redirect on the
+    same server answered. Capture goes on as before after the block.
+    """
+    outer = _active_capture_var.get()
+    buffer = (
+        _CaptureScope(audit_id=outer.audit_id, tenant_id=outer.tenant_id, target_id=outer.target_id)
+        if outer is not None
+        else None
+    )
+    token = _active_capture_var.set(buffer)
+    try:
+        yield HeldSpans(outer, buffer, safe_url(asked_url) if asked_url is not None else None)
+    finally:
+        _active_capture_var.reset(token)
 
 
 def span_start() -> SpanStart | None:

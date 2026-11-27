@@ -92,6 +92,7 @@ from meho_backplane.connectors.keycloak.ops_authflow_passkey import (
 )
 from meho_backplane.connectors.keycloak.ops_authflow_rights import (
     CLIENT_LOOKUP_ROLES,
+    ReadBackNotCheckedError,
     ReadBackRefusedError,
     find_client_uuid,
     flow_refused_error,
@@ -120,7 +121,7 @@ from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
 )
 from meho_backplane.connectors.keycloak.ops_write_merge import merge_representation
 from meho_backplane.connectors.keycloak.ops_write_preview import _managed_realm
-from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
+from meho_backplane.connectors.keycloak.realm_params import read_answered_realm
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 from meho_backplane.operations._preview import PreviewContext
 
@@ -358,8 +359,9 @@ async def _ensure_loa_map(
 ) -> bool:
     """Map ``meho-touch`` to level 3 in the realm; whether this run changed it."""
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
-    before = await connector._get_admin_json(target, realm_path, operator=operator)
-    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, before, target)
+    before = await read_answered_realm(
+        connector, ENSURE_APPROVAL_TOUCH_OP_ID, target, realm_path, operator=operator
+    )
     mapping = _loa_map(before)
     if TOUCH_ACR in mapping:
         if str(mapping[TOUCH_ACR]) != str(TOUCH_LEVEL):
@@ -378,8 +380,18 @@ async def _ensure_loa_map(
         json=merge_representation(before, {"attributes": {LOA_MAP_ATTRIBUTE: text}}),
         idempotent_conflict=False,
     )
-    with reading_back():
-        after = await connector._get_admin_json(target, realm_path, operator=operator)
+    try:
+        with reading_back():
+            after = await read_answered_realm(
+                connector, ENSURE_APPROVAL_TOUCH_OP_ID, target, realm_path, operator=operator
+            )
+    except ReadBackNotCheckedError as exc:
+        raise KeycloakTouchFlowError(
+            "check_failed",
+            f"MEHO wrote {TOUCH_ACR!r} at level {TOUCH_LEVEL} into the realm's ACR to LoA "
+            "mapping, but Keycloak did not read the realm back as the managed realm, so MEHO "
+            "could not check the change. The flow was not bound. Check the realm.",
+        ) from exc
     if str(_loa_map(after).get(TOUCH_ACR)) != str(TOUCH_LEVEL):
         raise KeycloakTouchFlowError(
             "check_failed", f"the realm does not read back with {TOUCH_ACR!r} at level 3"
@@ -399,8 +411,12 @@ async def _check_verification(
     without a PIN or fingerprint, and the touch would not prove the person.
     """
     try:
-        realm_rep = await connector._get_admin_json(
-            target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+        realm_rep = await read_answered_realm(
+            connector,
+            ENSURE_APPROVAL_TOUCH_OP_ID,
+            target,
+            fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+            operator=operator,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 403:
@@ -419,7 +435,6 @@ async def _check_verification(
             done="Keycloak refused (HTTP 403) to read the realm's passkey policy. "
             "Nothing was changed.",
         ) from exc
-    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     have = realm_rep.get(_POLICY_UV)
     if have != "required":
         raise KeycloakTouchFlowError(
@@ -528,10 +543,13 @@ async def _ensure_redirect(
     the text for that change into ``made[0]``, so a refused read back says
     the default was removed.
     """
-    realm_rep = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    realm_rep = await read_answered_realm(
+        connector,
+        ENSURE_APPROVAL_TOUCH_OP_ID,
+        target,
+        fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+        operator=operator,
     )
-    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     browser = str(realm_rep.get("browserFlow") or "browser")
     if browser == TOUCH_FLOW_ALIAS:
         return False
@@ -653,10 +671,13 @@ async def _bind(
     client with its own login flow is not bound, unless
     *replace_custom_login* is set; ``not_bound_reason`` then says why.
     """
-    realm_rep = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    realm_rep = await read_answered_realm(
+        connector,
+        ENSURE_APPROVAL_TOUCH_OP_ID,
+        target,
+        fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
+        operator=operator,
     )
-    check_answered_realm(ENSURE_APPROVAL_TOUCH_OP_ID, realm_rep, target)
     browser = str(realm_rep.get("browserFlow") or BUILT_IN_BROWSER_FLOW)
     client = await connector._get_admin_json(target, client_path, operator=operator)
     overrides = client.get("authenticationFlowBindingOverrides")

@@ -55,6 +55,7 @@ from meho_backplane.connectors.keycloak import (
     rights_changes,  # noqa: F401 -- registers the writes that are changes of rights
 )
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
+from meho_backplane.connectors.keycloak.realm_answer import register_realm_gate_checks
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -118,3 +119,7 @@ register_connector_v2(
 # so every connector subpackage has self-registered by the time the
 # runner iterates.
 register_typed_op_registrar(register_keycloak_typed_operations)
+
+# Every Keycloak operation checks which realm Keycloak answers with before
+# its policy gate, so before any approval card or preview reads Keycloak.
+register_realm_gate_checks(op.op_id for op in KeycloakConnector.operation_specs())

@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Final
 
 import structlog
@@ -87,6 +88,7 @@ __all__ = [
     "params_problem",
     "policy_gate",
     "register_params_check",
+    "rights_denial",
     "validate_params",
     "waits_only_for_token_call",
     "warn_if_params_hash_key_missing",
@@ -901,6 +903,23 @@ async def _service_read_scope_denial(*, operator: Operator, target: Any) -> str 
     return await read_scope_denial(operator=operator, target=target)
 
 
+async def _logged_read_scope_denial(
+    operator: Operator, descriptor: EndpointDescriptor, target: Any, target_id_str: str | None
+) -> str | None:
+    """:func:`_service_read_scope_denial`, logged when it refuses."""
+    denial = await _service_read_scope_denial(operator=operator, target=target)
+    if denial is not None:
+        _log.info(
+            "policy_gate_read_scope_denied",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=target_id_str,
+        )
+    return denial
+
+
 def _person_role_floor_denial(
     operator: Operator, descriptor: EndpointDescriptor, target_id_str: str | None
 ) -> str | None:
@@ -966,22 +985,16 @@ async def _non_agent_verdict(
     gate_reason = _non_agent_park_reason(
         operator, descriptor, is_service=is_service, decide_only=decide_only
     )
+    if gate_reason is not None and _RIGHTS_ONLY.get():
+        return PermissionVerdict.NEEDS_APPROVAL, gate_reason
     console = await _console_rights_verdict(
         operator, descriptor, target, connector_id, params, gate_reason
     )
     if console is not None:
         return console
     if gate_reason is None and is_service:
-        denial = await _service_read_scope_denial(operator=operator, target=target)
+        denial = await _logged_read_scope_denial(operator, descriptor, target, target_id_str)
         if denial is not None:
-            _log.info(
-                "policy_gate_read_scope_denied",
-                operator_sub=operator.sub,
-                tenant_id=str(operator.tenant_id),
-                op_id=descriptor.op_id,
-                safety_level=descriptor.safety_level,
-                target_id=target_id_str,
-            )
             return PermissionVerdict.DENY, denial
 
     if gate_reason is None:
@@ -1185,6 +1198,58 @@ async def policy_gate(
         params=params,
         decide_only=decide_only,
     )
+
+
+#: Set while :func:`rights_denial` runs: a call that would wait for approval
+#: is not looked at further, because the steps after that can read the vendor.
+_RIGHTS_ONLY: ContextVar[bool] = ContextVar("policy_gate_rights_only", default=False)
+
+
+async def rights_denial(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str | None,
+    params: dict[str, Any] | None,
+) -> str | None:
+    """Why the caller's rights refuse the call, found without a read of the vendor; else ``None``.
+
+    The checks of :func:`policy_gate` in the same order: a revoked agent
+    login, the requester check, the MCP profile, the role floor, an agent's grants and a service
+    login's read scope. A call that would wait for approval stops there:
+    the console check and a standing grant can read the vendor, so they
+    are left to the policy gate. Writes nothing and runs no shadow
+    comparison. The dispatcher and ``preview_operation`` run it before an
+    op's check before the gate
+    (:func:`~meho_backplane.operations._park_check.gate_check_refusal`), so
+    a call the caller may not make reads nothing of the vendor.
+    """
+    revoked = await _revoked_agent_denial(operator)
+    if revoked is not None:
+        return revoked
+    requester = _requester_denial(operator, descriptor, params)
+    if requester is not None:
+        return requester
+    profile = await _profile_denial(operator, descriptor, connector_id, target)
+    if profile is not None:
+        return profile
+    token = _RIGHTS_ONLY.set(True)
+    try:
+        verdict, reason = await _today_verdict(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            preview_hash=None,
+            params=params,
+            decide_only=True,
+        )
+    finally:
+        _RIGHTS_ONLY.reset(token)
+    if verdict is PermissionVerdict.DENY:
+        return reason or "denied by policy"
+    return None
 
 
 async def _revoked_agent_denial(operator: Operator) -> str | None:

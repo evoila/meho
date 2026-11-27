@@ -1495,6 +1495,31 @@ def real_similar_check() -> None:
     """Opt out of :func:`_no_similar_kb_entries`: run the real similar-entries search."""
 
 
+@pytest.fixture
+def real_keycloak_realm_check() -> None:
+    """Marker fixture: a test that lists it runs the real Keycloak realm answer check."""
+
+
+@pytest.fixture(autouse=True)
+def _skip_keycloak_realm_check(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the extra realm read out of tests that mock single Keycloak routes.
+
+    The check has its own tests (``test_keycloak_realm_answer_check.py``),
+    which ask for ``real_keycloak_realm_check``.
+    """
+    if "real_keycloak_realm_check" in request.fixturenames:
+        return
+
+    async def _no_check(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.keycloak.realm_answer.check_realm_answer", _no_check
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_runner_refused_memory() -> Iterator[None]:
     """Start every test with an empty memory of refused runner results.

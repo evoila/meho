@@ -39,6 +39,7 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
 from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -63,8 +64,9 @@ def _realm_path(target: KeycloakTargetLike) -> str:
 async def _read_realm(
     connector: KeycloakConnector, target: KeycloakTargetLike, operator: Operator, path: str
 ) -> Any:
-    """Keycloak's answer for the realm."""
-    return await connector._get_json(target, path, operator=operator)
+    """Keycloak's answer for the realm. The trace records no span for this check read."""
+    with flight_recorder_capture.paused():
+        return await connector._get_json(target, path, operator=operator)
 
 
 class ManagedRealmChecks:
@@ -78,6 +80,13 @@ class ManagedRealmChecks:
             yield
         finally:
             _RUN_CHECKS.reset(token)
+
+    def note_passed(self, target: KeycloakTargetLike) -> None:
+        """Count a check of *target* that passed in this run, so the next request reads no more."""
+        passed = _RUN_CHECKS.get()
+        if passed is not None:
+            key = (target_cache_key(target), resolve_realm_config(target).managed_realm)
+            passed[key] = time.monotonic() + CHECK_SECONDS
 
     def forget(self, target: KeycloakTargetLike) -> None:
         """Drop every passed check of *target*; the next request checks again."""

@@ -14,6 +14,7 @@ JSONFlux, and full-dispatch F7 coverage lives in
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -447,6 +449,178 @@ def test_trace_byte_cap_collapses_overflow() -> None:
     scope.finalize(datetime.now(UTC))
     collapsed = [s for s in scope.spans if s.attributes.get("collapsed")]
     assert collapsed[0].attributes["collapsed_count"] == 2
+
+
+def test_paused_block_records_no_span_and_capture_goes_on_after_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.paused():
+            assert capture.span_start() is None
+            capture.record_vendor_call(
+                capture.SpanStart(started_at=datetime.now(UTC), monotonic=0.0),
+                method="GET",
+                request_headers={},
+                response=SimpleNamespace(status_code=200),
+            )
+        assert scope.spans == []
+        assert capture.span_start() is not None
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def _fail_inside_the_block() -> None:
+    raise RuntimeError("raised inside the paused block")
+
+
+def test_paused_block_puts_capture_back_after_an_error_inside_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with pytest.raises(RuntimeError), capture.paused():
+            _fail_inside_the_block()
+        start = capture.span_start()
+        assert start is not None
+        capture.record_vendor_call(
+            start,
+            method="POST",
+            request_headers={},
+            response=SimpleNamespace(status_code=201),
+        )
+        assert len(scope.spans) == 1
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def _record_get(status: int) -> None:
+    capture.record_vendor_call(
+        capture.span_start(),
+        method="GET",
+        request_headers={},
+        response=SimpleNamespace(status_code=status),
+    )
+
+
+@pytest.mark.parametrize("released", [True, False], ids=["released", "not-released"])
+def test_held_spans_reach_the_trace_only_when_released(released: bool) -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.held() as spans:
+            _record_get(200)
+            assert scope.spans == []
+            if released:
+                spans.release()
+        assert len(scope.spans) == (1 if released else 0)
+        _record_get(201)
+        assert [span.status for span in scope.spans][-1] == "201"
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def test_held_block_puts_capture_back_after_an_error_inside_it() -> None:
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with pytest.raises(RuntimeError), capture.held():
+            _fail_inside_the_block()
+        _record_get(200)
+        assert len(scope.spans) == 1
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+_HELD_MARKER = "held-body-marker"
+
+
+def _record_get_with_body(status: int) -> None:
+    capture.record_vendor_call(
+        capture.span_start(),
+        method="GET",
+        request_headers={"Accept": "application/json"},
+        response=httpx.Response(
+            status, request=httpx.Request("GET", "https://kc.test.invalid/admin/realms/example")
+        ),
+        response_body={"note": _HELD_MARKER},
+    )
+
+
+def _held_spans(*statuses: int, release: str) -> list[Any]:
+    """Record *statuses* in a held block; *release* is ``status``, ``all`` or ``last``."""
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.held() as spans:
+            for status in statuses:
+                _record_get_with_body(status)
+            if release == "status":
+                spans.release_status()
+            else:
+                spans.release(earlier_status_only=release == "last")
+        return list(scope.spans)
+    finally:
+        capture._active_capture_var.reset(token)
+
+
+def test_a_failed_held_call_keeps_only_its_status() -> None:
+    (span,) = _held_spans(500, release="status")
+    assert span.status == "500"
+    assert span.name.startswith("GET ")
+    assert _HELD_MARKER not in json.dumps(span.attributes, default=str)
+    assert "response_headers" not in span.attributes
+    assert span.attributes["body_recorded"] is False
+
+
+def test_a_failed_held_call_keeps_no_text_of_its_media_type() -> None:
+    """A body that is not JSON adds a redaction reason that names the media type."""
+    scope = capture._CaptureScope(audit_id=uuid.uuid4(), tenant_id=uuid.uuid4(), target_id=None)
+    token = capture._active_capture_var.set(scope)
+    try:
+        with capture.held() as spans:
+            capture.record_vendor_call(
+                capture.span_start(),
+                method="GET",
+                request_headers={"Accept": "application/json"},
+                response=httpx.Response(
+                    500,
+                    content=b"not json",
+                    headers={"content-type": f"text/x-{_HELD_MARKER}"},
+                    request=httpx.Request("GET", "https://kc.test.invalid/admin/realms/example"),
+                ),
+            )
+            spans.release_status()
+    finally:
+        capture._active_capture_var.reset(token)
+    (span,) = scope.spans
+    assert span.status == "500"
+    assert _HELD_MARKER not in json.dumps([span.name, span.attributes], default=str)
+    assert set(span.attributes) <= {"connector_id", "op_id", "method", "url", "body_recorded"}
+
+
+def test_a_retry_that_passed_keeps_every_try_in_full() -> None:
+    failed, checked = _held_spans(503, 200, release="all")
+    assert failed.status == "503"
+    assert checked.status == "200"
+    # Both tries keep every attribute the capture recorded for them.
+    for span in (failed, checked):
+        assert {"request_headers", "response_headers", "response_body"} <= set(span.attributes)
+
+
+def test_a_retry_that_passed_keeps_the_body_of_the_last_try_only_when_asked() -> None:
+    failed, checked = _held_spans(503, 200, release="last")
+    assert failed.status == "503"
+    assert _HELD_MARKER not in json.dumps(failed.attributes, default=str)
+    assert "response_body" not in failed.attributes
+    assert checked.status == "200"
+    # The last try keeps every attribute the capture recorded for it.
+    assert {"request_headers", "response_headers", "response_body"} <= set(checked.attributes)
+
+
+def test_held_block_without_capture_records_nothing() -> None:
+    with capture.held() as spans:
+        _record_get(200)
+        spans.release()
+    assert capture._active_capture_var.get() is None
 
 
 # ---------------------------------------------------------------------------

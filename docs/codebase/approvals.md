@@ -4476,6 +4476,67 @@ field, so an op can turn on its own check.
 
 Tests: `backend/tests/test_operations_park_check.py`.
 
+### A check before the policy gate
+
+An op can also register a check that runs before the policy gate:
+`_park_check.register_gate_check(op_id, check)`. It has the same shape, the
+same fail-closed run and the same `refused_before_approval` error code as the
+check above. Its refusal text is the check's reason only
+(`_errors.result_gate_check_refused`): it does not ask to fix the call, and
+it says nothing about a wait for approval, because the check also runs for a
+call that runs at once. It is for a check that must pass before MEHO reads anything of
+the vendor for the call.
+
+- **Where it runs.** `_park_check.gate_check_refusal` runs it in the
+  dispatcher right before the policy gate, so before the reads that decide
+  who must approve and before any approval card is built. It runs for every
+  call of the op, also one that would run at once. The run after an
+  approval skips it, so the handler checks again. `preview_operation` runs it
+  first, when the params pass the schema, and a refusal there says
+  `policy_verdict: deny` without running the gate. With
+  `POLICY_ENGINE_SHADOW` on, that preview answer still has `policy_rule`
+  (`null`: no rule was matched) and `approvers` (empty).
+- **Rights first.** The check runs only when the caller's rights do not
+  refuse the call already (`_validate.rights_denial`: a revoked agent
+  login, the requester check,
+  the MCP profile, the role floor, an agent's grants and a service login's
+  read scope). It reads nothing of the vendor. So a call the caller may not
+  make reads nothing of the vendor, and the caller gets the policy gate's
+  own refusal.
+- **No answer at all.** When a request of the check gets no answer (a
+  connection, TLS or timeout error, `_park_check.transport_cause`), the
+  call stops with the error it would return for it, for example
+  `connector_tls_verify_failed` (`dispatcher.transport_error_result`). A
+  timeout there counts as a failed read, also for a write
+  (`reads_only=True`): the check sends only reads, so the result is a plain
+  `connector_timeout` with no `execution_outcome: uncertain`. The
+  dispatcher writes an `error` audit row for it, and `preview_operation`
+  answers with the same error. Nothing is stored.
+- **A refusal from inside the card.** A read inside an approval card can
+  refuse the call with `_park_check.note_refusal(reason)`, also when the
+  card goes on without that read. The dispatcher collects these while the
+  policy gate decides who must approve and while it builds the card
+  (`_park_check.refusal_scope`), and then refuses the call with
+  `refused_before_approval` and the first reason. Nothing is stored.
+  `preview_operation` does the same, and so does a check before the wait
+  for approval whose read noted a refusal. A `refusal_scope` inside another
+  one shares its list, so the first refusal stays first, and a check before
+  the wait for approval does not run when a read before it already noted a
+  refusal. The run after an approval rebuilds the card
+  (`approval_object_check.live_card`) inside its own `refusal_scope`: a
+  noted refusal makes the card count as not built, so the run is refused.
+  `approval_object_check.live_card_checked` returns that refusal too, and
+  the object, grant and state checks of the run give it as the reason
+  (`card_refused_reason`), so the caller learns, for example, that Keycloak
+  did not answer with the realm the target manages. Once a refusal is noted, a
+  connector can send no more requests for the call: the Keycloak connector
+  checks `_park_check.refusal_noted()` before each request and raises
+  `CallRefusedError`.
+- **A refusal** writes one `denied` audit row through
+  `_audit_denied_and_return`.
+- **Used by** every Keycloak operation (the realm answer check,
+  `docs/codebase/connectors-keycloak.md`).
+
 ## Permission preflight hook (#1504)
 
 The generic `proposed_effect` *preview* above is suppressed for

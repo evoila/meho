@@ -323,6 +323,30 @@ async def test_realm_still_readable_after_delete_is_an_error(kc: KeycloakConnect
     assert result["extras"]["exception_class"] == "KeycloakDeleteVerificationError"
 
 
+async def test_another_realm_after_delete_says_the_delete_was_sent_but_not_verified(
+    kc: KeycloakConnector,
+) -> None:
+    """After the DELETE, the read of the realm answers with another realm's object."""
+    other = {**_realm_rep(), "realm": "other-realm", "displayName": "other-realm-value"}
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_token(mock)
+        del_route = mock.delete(_REALM_PATH).respond(204)
+        mock.get(_REALM_PATH).mock(
+            side_effect=lambda _request: httpx.Response(
+                200, json=other if del_route.called else _realm_rep()
+            )
+        )
+        result = await _run({"realm": _REALM})
+    assert result["status"] == "error", result
+    assert result["extras"]["exception_class"] == "KeycloakDeleteVerificationError"
+    assert del_route.call_count == 1
+    dumped = json.dumps(result)
+    assert "MEHO sent the DELETE" in dumped
+    assert "could not verify the result" in dumped
+    assert "was not removed" not in dumped
+    assert "other-realm-value" not in dumped
+
+
 # A 2xx answer whose body is not a realm object. ``null`` has to be sent as
 # raw content: ``httpx.Response(json=None)`` means "no body".
 _NOT_A_REALM = [

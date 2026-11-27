@@ -80,7 +80,12 @@ from meho_backplane.connectors.keycloak.ops_write_platform_reach import (
     login_has_platform_admin,
     platform_fields,
 )
-from meho_backplane.connectors.keycloak.realm_params import is_plain_realm_name
+from meho_backplane.connectors.keycloak.realm_params import (
+    check_answered_realm,
+    is_plain_realm_name,
+    read_answered_realm,
+    read_realm_held,
+)
 from meho_backplane.connectors.keycloak.session import DEFAULT_ADMIN_REALM, resolve_realm_config
 from meho_backplane.core.keycloak import ADMIN_GROUPS
 from meho_backplane.operations._preview import (
@@ -284,18 +289,22 @@ async def login_realm_facts(ctx: PreviewContext) -> tuple[bool, bool]:
     realm (``GET /admin/realms/{realm}``), not the text stored on the
     target: a Keycloak database can match a realm name without letter case
     or with a space at the end. When the read fails, both are ``True``.
+    An answer that names another realm than the managed realm also
+    refuses the call (:func:`~.realm_params.check_answered_realm`).
     """
     connector = _live_connector(ctx)
     if connector is None:
         return True, True
     try:
         stored = resolve_realm_config(ctx.target).managed_realm.strip()
-        answer = await connector._get_admin_json(
+        answer = await read_answered_realm(
+            connector,
+            ctx.descriptor.op_id,
             ctx.target,
             fill_path(_ADMIN_REALM_PATH, {"realm": stored}),
             operator=ctx.operator,
         )
-        name = _text(answer.get("realm")) if isinstance(answer, dict) else None
+        name = _text(answer.get("realm"))
         if name is None:
             return True, True
         return (
@@ -325,7 +334,9 @@ async def named_realm_is_protected(
     ``True`` when the read fails or its answer has no name. With *new* (a
     realm that ``keycloak.realm.create`` makes), a realm that Keycloak does
     not know (HTTP 404) is judged by the name as typed, and only a plain
-    name (:func:`is_plain_realm_name`) counts as unprotected.
+    name (:func:`is_plain_realm_name`) counts as unprotected. An answer
+    that names another realm than *realm* counts as protected and refuses
+    the call (:func:`~.realm_params.check_answered_realm`).
     """
     import httpx
 
@@ -335,17 +346,21 @@ async def named_realm_is_protected(
     connector = connector if connector is not None else _live_connector(ctx)
     if connector is None or target is None:
         return True
+    keycloak_target = cast("KeycloakTargetLike", target)
     try:
-        answer = await connector._get_admin_json(
-            cast("KeycloakTargetLike", target),
+        answer = await read_realm_held(
+            connector,
+            keycloak_target,
             fill_path(_ADMIN_REALM_PATH, {"realm": realm}),
             operator=ctx.operator,
+            expected=realm,
         )
+        check_answered_realm(ctx.descriptor.op_id, answer, keycloak_target, realm)
     except httpx.HTTPStatusError as exc:
         return not (new and exc.response.status_code == 404 and is_plain_realm_name(realm))
     except Exception:
         return True
-    name = _text(answer.get("realm")) if isinstance(answer, dict) else None
+    name = _text(answer.get("realm"))
     return name is None or is_login_realm_name(name, target)
 
 

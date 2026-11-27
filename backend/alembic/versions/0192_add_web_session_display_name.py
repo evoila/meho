@@ -3,8 +3,8 @@
 
 """Keep the person's display name on ``web_session``.
 
-Revision ID: 0191
-Revises: 0190
+Revision ID: 0192
+Revises: 0191
 Create Date: 2026-11-26
 
 Why
@@ -42,8 +42,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0191"
-down_revision: str | None = "0190"
+revision: str = "0192"
+down_revision: str | None = "0191"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

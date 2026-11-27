@@ -5,7 +5,7 @@
 
 The user menu used to show the ``sub`` twice: as the avatar initials
 (``sub[:2] | upper``) and as the label and its ``title``. The session row
-had no name, so there was nothing else to show. Since migration ``0191``
+had no name, so there was nothing else to show. Since migration ``0192``
 the login callback stores the token's ``name`` claim on the session,
 Fernet-encrypted like the tokens, and the pages show that.
 

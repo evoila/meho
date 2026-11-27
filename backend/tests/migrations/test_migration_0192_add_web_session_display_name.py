@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``0191_add_web_session_display_name``.
+"""Behavioural tests for ``0192_add_web_session_display_name``.
 
 The migration adds a nullable ``display_name`` column to ``web_session``.
 A session row from before the upgrade keeps working and has no
 name; the downgrade drops the column again.
 
-Every step targets this migration's own revision (``0191``) and its
-``down_revision`` (``0190``), never ``head``.
+Every step targets this migration's own revision (``0192``) and its
+``down_revision`` (``0191``), never ``head``.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0191"
-_DOWN_REVISION = "0190"
+_REVISION = "0192"
+_DOWN_REVISION = "0191"
 _SESSION_ID = "c" * 32
 _TENANT_ID = "d" * 32
 _TS = "2026-11-26 12:00:00.000000"
@@ -36,7 +36,7 @@ _TS = "2026-11-26 12:00:00.000000"
 
 @pytest.fixture
 def alembic_cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[Config, str]]:
-    db_path = tmp_path / "migration_0191.db"
+    db_path = tmp_path / "migration_0192.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")

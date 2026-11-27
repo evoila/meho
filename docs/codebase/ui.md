@@ -213,7 +213,7 @@ upcoming T4 login flow writes to:
   since migration `0133` (#5240) `tenant_chosen` and
   `can_switch_tenant` (see "Current tenant, picker and switch"),
   since migration `0176` (#6282) `approval_token` (bytea, Fernet
-  ciphertext, nullable), and since migration `0191`
+  ciphertext, nullable), and since migration `0192`
   `display_name` (see "Person's name on the session" below).
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
@@ -233,7 +233,7 @@ upcoming T4 login flow writes to:
     the token had no `name` claim.
   - **Written at login only.** A token refresh keeps the stored
     name. A person renamed in Keycloak sees the new name after the
-    next sign-in. Sessions from before migration `0191` have no name
+    next sign-in. Sessions from before migration `0192` have no name
     until the person signs in again.
   - **Kept as long as the tokens.** Nothing deletes `web_session`
     rows today (`revoked_at` is a soft delete; the `expires_at` index

@@ -61,7 +61,7 @@
           {% if session_display_name %}
           <dd class="truncate text-sm" data-field="display-name" title="{{ session_display_name }}">{{ session_display_name }}</dd>
           {% else %}
-          {#- True both for a session from before migration 0191 and for a
+          {#- True both for a session from before migration 0192 and for a
               login token without a ``name`` claim. -#}
           <dd class="text-sm text-subtle" data-field="display-name">No name on this session. If your login has one, it shows after your next sign-in.</dd>
           {% endif %}

@@ -365,6 +365,12 @@ async def register_harbor_robot_operations(
     Test seam: ``embedding_service`` lets fixtures inject a stub so
     chassis tests don't load the ONNX model.
     """
+    await _register_harbor_robot_create(embedding_service)
+    await _register_harbor_robot_delete(embedding_service)
+
+
+async def _register_harbor_robot_create(embedding_service: EmbeddingService | None) -> None:
+    """Upsert ``harbor.robot.create``."""
     from meho_backplane.connectors.harbor.connector import HarborConnector
     from meho_backplane.operations.typed_register import register_typed_operation
 
@@ -404,9 +410,17 @@ async def register_harbor_robot_operations(
         # four-eyes bypass #128 set out to close. Flip to True so the dispatch
         # parks at ``awaiting_approval`` and a second operator must approve.
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=_HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
+
+
+async def _register_harbor_robot_delete(embedding_service: EmbeddingService | None) -> None:
+    """Upsert ``harbor.robot.delete``."""
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
 
     await register_typed_operation(
         product="harbor",
@@ -448,6 +462,8 @@ async def register_harbor_robot_operations(
         # deliberate contrast with credential_mint ``robot.create``), so the
         # broadcast contrast the credential_mint tests pin still holds.
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions=_HARBOR_ROBOT_DELETE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

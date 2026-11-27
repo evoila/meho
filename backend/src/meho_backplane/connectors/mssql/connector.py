@@ -367,6 +367,8 @@ class MssqlConnector(Connector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
         _log.info(

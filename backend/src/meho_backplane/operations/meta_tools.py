@@ -112,6 +112,7 @@ from meho_backplane.operations._lookup import (
     enabled_for_tenant_clause,
     group_visible_for_tenant_clause,
     installed_owner_clause,
+    package_missing_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -1271,7 +1272,7 @@ async def _missing_package_of_connector(
         return None
     stmt = (
         select(EndpointDescriptor.owner_package)
-        .where(*connector_rows, ~installed_owner_clause())
+        .where(*connector_rows, package_missing_clause())
         .order_by(EndpointDescriptor.owner_package)
         .limit(1)
     )

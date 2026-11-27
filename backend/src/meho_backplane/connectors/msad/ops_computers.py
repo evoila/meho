@@ -419,6 +419,8 @@ COMPUTER_OPS: tuple[MsadOp, ...] = (
         tags=("write", "computer", "delete"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Delete an AD computer account. Irreversible; approval-gated — "

@@ -67,21 +67,99 @@ is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
-The stored request of a `k8s.apply` of a Secret, or of a manifest with a
-secret-looking value, keeps its manifest only in the encrypted one-time
-handoff of the run, as a credential write does. Such a call needs
-`APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
-(`manifest_holds_credential` in `op_classes.py`) when:
+The card of a `k8s.apply` also has, for a person only, a short summary
+of each object (`object_summary`, built by `ops_write_apply_summary.py`):
+whether it is new or exists already, which other writers own fields of it,
+and its risky fields after the apply, read only from the places that
+Kubernetes defines. MEHO reads the live object only when the login that
+asked has the role Operator or higher; for any other login the card says
+"not read". It changes no approval rule. When the dry run fails, the card
+of a person still shows the manifest and the subject line, and names the
+document the dry run stopped at. See `approvals.md`. A manifest that
+is not valid YAML or JSON is refused before the wait, with the document
+number, the line and the column, and one fixed phrase for the kind of
+problem (see "`k8s.apply` manifest form" below). So no card is made for it.
+The storage rule of a `k8s.apply` (`manifest_holds_credential` in
+`op_classes.py`) decides when the stored request keeps the manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The card hides a command line as the Job previews do, and it also hides
+every command-line value the storage rule counts. So a command-line value
+that makes MEHO keep a request only in the encrypted hand-off never shows
+on the card. For each item of `command` and `args`, the card joins the two
+answers (`_hide_command_line` with `apply_card=True` in
+`ops_write_preview.py`): when they are equal, or only one of them changed
+the item, the card shows that answer; when both changed the item in
+different ways, the card shows the whole item as one hidden mark. The card
+also hides every `env` and `httpHeaders` value, a whole map or list under
+a secret name, and the `kubectl.kubernetes.io/last-applied-configuration`
+annotation.
+The run after approval applies the manifest the caller sent, unchanged.
+The manifest is kept only in the handoff when:
 
-- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
-  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
-  example a ConfigMap;
-- an `env` entry at any depth (the object itself, the containers and init
-  containers of a pod template) has a secret name and a value of its own; an entry that
-  reads its value from a Secret (`valueFrom`) does not count;
-- a text at any depth has a secret shape of its own: the rule of
-  `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
-  token with a known vendor prefix).
+- it holds a Secret object, at the top or at any depth, for example as a
+  template: a map with the kind `Secret` and either its own `metadata` or
+  a `data`, `stringData` or `binaryData` field. A reference to a Secret
+  does not count: for example an entry of a ServiceAccount's `secrets`,
+  with an `apiVersion`, a `kind` and a `name`;
+- a key of a `data`, `stringData` or `binaryData` field has a secret name
+  (the name rule of `scrub_secret_named_values` in `broadcast/events.py`),
+  in any kind, for example a ConfigMap;
+- a key with a secret name at any depth holds a text, a number, a yes/no
+  value or a date (`password: x`, `spec.password: 123456` in a custom
+  kind), and so does the `value` of a `{name, value}` pair whose name is
+  a secret name. `automountServiceAccountToken` does not count: the card
+  shows it;
+- an `env` entry at any depth has a value of its own and a name that
+  holds PASS, PWD, SECRET, TOKEN, KEY, CREDENTIAL or AUTH, or that the
+  name rule marks (`PGPASSWORD`, `API_TOKEN`, also `SSH_AUTH_SOCK` and
+  `PASSWORD_MIN_LENGTH`). An entry that reads its value from a Secret
+  (`valueFrom`) does not count. The card hides every `env` value, with
+  any name;
+- the `command` and `args` of a map at any depth, read as one command
+  line, hold one of these values (`hide_command_secrets` with
+  `p_after_programs=True`). Inside one list item the rule reads words that
+  a space or a line continuation separates, and a new line ends a command
+  for it, as in a shell script:
+  - the value after `NAME=` or `--name=` whose name holds one of the
+    words above (`PGPASSWORD=x`, `--auth-mode=rbac`,
+    `KEYCLOAK_URL=...`);
+  - the value of a flag whose name holds one of these words
+    (`--password x`, `--token-ttl 60`, `--secret-name x`,
+    `--passthrough on`): when the flag is the last word of its list item
+    and no new line follows it, the next list item, whatever it starts
+    with and also when YAML reads it as a number; otherwise the next word
+    after the flag in the same list item (also in the item after `sh -c`,
+    `-ec` or `-lc`), when only white space without a new line, or a line
+    continuation, stands between them and that word does not start with
+    a dash;
+  - the argument after `-p` only in a command of a program that takes a
+    password there: `sshpass`, a word that starts with `mysql`,
+    `mariadb` or `mongo`, or the word `login` (the rule of
+    `hide_shell_script` in `redaction/command_line.py`). There a value
+    glued to `-p` (`-pVALUE`) counts too. `mkdir -p /data`, `-p 8080`,
+    `nc -l -p 8080`, `psql -p 5432` and `ssh -p 22` do not count: such a
+    call waits for approval with its params on the row, also without the
+    key. The card still hides the argument after `-p` there, as the Job
+    previews do, so it shows `mkdir -p` and then the hidden mark;
+  - the password of `user:password` after `-u` or `--user`, also glued
+    to `-u` (`curl -uroot:x`);
+- a text at any depth has a secret shape: a password in a URL, a token
+  with a known vendor prefix (`hide_in_text` in
+  `redaction/command_line.py`), or a value the shared redaction hides
+  with its default rules (for example `Authorization: Bearer ...`);
+- MEHO cannot read the manifest: it is not text, it is not valid YAML
+  or JSON, a document has no kind, or it has more than
+  `MAX_CHECKED_OBJECTS` objects.
+
+This needs `APPROVAL_HANDOFF_ENCRYPTION_KEY`. On an install without it,
+MEHO refuses such a `k8s.apply` at once with this text
+(`HANDOFF_KEY_REFUSAL`): "MEHO cannot keep this request: MEHO keeps this
+manifest only in the encrypted hand-off, because it holds a secret value
+or MEHO cannot read it, and the hand-off needs a key. Set
+APPROVAL_HANDOFF_ENCRYPTION_KEY on the MEHO server (in the Helm chart:
+approvalHandoff), then send the call again." Every other `k8s.apply`
+waits for approval with its params on the row, also without the key.
+Other operations keep their own refusal.
 
 The check reads each value of the manifest once, and the names of each
 `data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
@@ -748,6 +826,64 @@ its value comes from a `*_secret_ref`. Labels and annotations are not
 secret: the approval preview shows all of them. Any other unknown key is
 rejected (`additionalProperties: false`). `k8s.secret.update` keeps the
 labels and annotations of an existing Secret as they are.
+
+**`k8s.apply` manifest form.** One text, with the documents split by
+`---`. Each document is a mapping with a `metadata` mapping, and its
+`apiVersion`, `kind` and `metadata.name` are texts that are not empty.
+Before the call waits for approval, a check (`_apply_park_check` in
+`ops_write_preview.py`) runs `_parse_manifest` (in `_apply_manifest.py`),
+the same function the run uses, on the text only. Any other form is
+refused at once: nothing waits, no approval request is made and nothing
+goes to the cluster. Examples are a JSON array, a YAML list of documents,
+a document without `kind`, `apiVersion` or `metadata.name`, a `metadata`
+that is plain text, a `kind` or `metadata.name` that is not a text, a
+text with no documents, and text that is not valid YAML. A
+`metadata.name` that YAML reads as a number, a date or true or false (for
+example `2026-11-26` or `2024` without quotes) is refused, and the refusal
+says to put the name in quotes. Before the wait, a document is refused
+as a list object when its `apiVersion` is `v1` and its `kind` is `List`,
+or when its top-level `items` field is a list. Any other document passes
+this check to the wait.
+
+A manifest that is not valid YAML or JSON is refused before the wait with
+"document N is not valid YAML or JSON (KIND, line L, column C)". L and C
+are the line and the column where the YAML reader stopped, counted from
+the start of the whole text. KIND is one fixed phrase that MEHO picks by
+the class of the error:
+
+- "a token YAML refuses" (a scanner error, for example a tab before a key);
+- "a structure YAML refuses" (a parser error, for example a flow mapping
+  that is not closed);
+- "an alias or anchor YAML refuses" (a composer error, for example an
+  alias that is not defined);
+- "a tag or value YAML cannot build" (a constructor error, for example an
+  unknown tag);
+- "a value YAML cannot build" (any other error, for example a date that
+  is not in the calendar, or a `!!bool` tag with a text).
+
+An error with no line and column gives "document N is not valid YAML or
+JSON (KIND)". The refusal holds no text of the manifest and no text of the
+YAML reader, and neither does the audit row or a log.
+
+The refusal names the document by its number, counted from 1 (the first
+document is document 1; an empty document between two `---` lines counts
+too). Two refusals name no document: "the text has no documents", and
+"the text has a character that YAML does not allow, for example a control
+character". The second names no document because the YAML reader checks
+the whole text for such a character (for example a vertical tab or a zero
+byte) before it reads document 1. The refusal names the field that is
+wrong, and shows the document's `apiVersion` and `kind` only when each
+has the shape Kubernetes allows: a `kind` that is a DNS-1035 label of
+at most 63 characters (any case), and an `apiVersion` that is a DNS-1035
+version with an optional group that is a DNS-1123 subdomain of at most
+253 characters. Any other value shows as `(not shown)`, in the refusal, the audit row and the logs. The refusal
+shows no YAML error text and no other value of the manifest. It is at
+most 256 characters. When it would be longer, the line and the column
+are left out first, then a long `apiVersion` or `kind` gives way to
+`(not shown)`, so the sentence about the form is never cut.
+`preview_operation` gives the same refusal. The run's own parse error
+uses the same numbers. When the cluster refuses one document of the text,
+the documents before it stay applied.
 
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without

@@ -27,17 +27,9 @@ Other code that tells callers apart its own way
 from __future__ import annotations
 
 from meho_backplane.auth.operator import CallerKind, Operator, PrincipalKind
+from meho_backplane.caller_kinds import CALLER_KINDS
 
 __all__ = ["CALLER_KINDS", "CallerKind", "caller_kind", "token_login_kind"]
-
-#: Every kind :func:`caller_kind` can give.
-CALLER_KINDS: tuple[CallerKind, ...] = (
-    "person",
-    "personal_agent",
-    "service_agent",
-    "runner",
-    "system",
-)
 
 
 def caller_kind(operator: Operator, actor_sub: str | None) -> CallerKind:

@@ -80,6 +80,8 @@ from meho_backplane.policy.service import (
     list_history,
 )
 from meho_backplane.policy.store import InvalidStoredPolicyError, classification_enabled
+from meho_backplane.policy.switches import custom_policy_on
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -210,6 +212,18 @@ def _plan_response(
     )
 
 
+async def _plan(
+    session: AsyncSession, operator: Operator, scope: PolicyScope, content: bytes
+) -> PolicyPlan:
+    return await build_plan(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        content=content,
+        custom_policy=custom_policy_on(get_settings()),
+    )
+
+
 def _bind_audit(op_id: str, op_class: str) -> None:
     structlog.contextvars.bind_contextvars(audit_op_id=op_id, audit_op_class=op_class)
 
@@ -224,9 +238,7 @@ async def validate(
     """Check the file: its shape, its categories and levels, and the floors. Writes nothing."""
     _bind_audit("policy.file.validate", "read")
     _check_scope(operator, scope)
-    plan = await build_plan(
-        session, scope=scope, tenant_id=operator.tenant_id, content=await _read_file(request)
-    )
+    plan = await _plan(session, operator, scope, await _read_file(request))
     return PolicyValidateResponse(
         ok=not plan.mistakes, scope=scope, mistakes=plan.mistakes, warnings=plan.warnings
     )
@@ -282,13 +294,13 @@ async def import_policy(
     content = await _read_file(request)
     if preview:
         _bind_audit("policy.file.preview", "read")
-        plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+        plan = await _plan(session, operator, scope, content)
         return _plan_response(plan, preview=True, message=NO_CHANGE if plan.no_change else None)
 
     _bind_audit("policy.file.import", "write")
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SWITCH_OFF_IMPORT)
-    plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+    plan = await _plan(session, operator, scope, content)
     if plan.mistakes:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -315,7 +327,12 @@ async def export(
     """The stored policy of *scope* as a ``policy: v1`` file."""
     _bind_audit("policy.file.export", "read")
     _check_scope(operator, scope)
-    text = await export_policy(session, scope=scope, tenant_id=operator.tenant_id)
+    text = await export_policy(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        custom_policy=custom_policy_on(get_settings()),
+    )
     return Response(
         content=text,
         media_type="application/yaml",
@@ -450,12 +467,7 @@ async def _file_document(
     _check_scope(operator, body.scope)
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FILE_NEEDS_CLASSIFICATION)
-    plan = await build_plan(
-        session,
-        scope=body.scope,
-        tenant_id=operator.tenant_id,
-        content=body.file.encode("utf-8"),
-    )
+    plan = await _plan(session, operator, body.scope, body.file.encode("utf-8"))
     # The plan only read; end that transaction before explain opens its own.
     await session.rollback()
     if plan.mistakes:

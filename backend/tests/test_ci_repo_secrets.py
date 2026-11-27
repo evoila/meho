@@ -264,6 +264,8 @@ def test_ci_reads_the_secrets_in_each_job_that_uses_them() -> None:
         "python-coverage",
         "python-integration-shard",
         "python-migration-tests",
+        "python-timing-tests",
+        "redaction-compare",
     }
     text = json.dumps(_ci_jobs())
     for job_id, job in _ci_jobs().items():
@@ -307,7 +309,7 @@ def test_ci_test_images_use_the_proxy_and_hide_it(job_id: str, tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     assert exported, job_id
     for key, image in exported.items():
-        assert key.startswith("MEHO_TEST_") and key.endswith("_IMAGE")
+        assert key.endswith("_IMAGE") and key.startswith(("MEHO_TEST_", "RYUK_CONTAINER_"))
         assert image.startswith(PROXY + "/"), (key, image)
     assert PROXY in masks
     assert "proxy.example.test" in masks
@@ -346,8 +348,11 @@ def test_ci_test_images_fall_back_to_docker_hub_in_another_repository(
     assert result.returncode == 0, result.stdout + result.stderr
     assert masks == []
     for key, image in exported.items():
-        if key == "MEHO_TEST_KEYCLOAK_IMAGE":
-            # No public fallback: an empty image makes the Keycloak test skip.
+        if key in {"MEHO_TEST_KEYCLOAK_IMAGE", "MEHO_TEST_CORE_KEYCLOAK_IMAGE"}:
+            # No Docker Hub fallback for the large Keycloak image. An empty
+            # MEHO_TEST_KEYCLOAK_IMAGE makes the live Keycloak test skip. An
+            # empty MEHO_TEST_CORE_KEYCLOAK_IMAGE makes the core Keycloak
+            # tests use the chart's image, by the chart's digest.
             assert image == ""
         else:
             assert image.split("/", 1)[0] == "docker.io", (key, image)
@@ -503,7 +508,13 @@ def test_every_expression_with_the_names_reads_the_secrets_context(name: str) ->
 
 
 _SENTINELS = {name: f"value-of-{name.lower()}/x" for name in SECRETS}
-_STEPS_THAT_READ = {_READ_STEP, "Derive the proxy values", "Configure kubectl (OIDC mode)"}
+_HIDE_STEP = "Hide the proxy name in the test reports"
+_STEPS_THAT_READ = {
+    _READ_STEP,
+    _HIDE_STEP,
+    "Derive the proxy values",
+    "Configure kubectl (OIDC mode)",
+}
 
 
 @pytest.mark.parametrize("name", _workflows())
@@ -524,6 +535,148 @@ def test_secret_values_reach_only_the_steps_that_need_them(name: str) -> None:
         for step in job.get("steps") or []:
             if shows_a_value(step.get("env")):
                 assert step.get("name") in _STEPS_THAT_READ, (name, job_id, step.get("name"))
+
+
+# --- ci.yml: the proxy name in the test reports that CI uploads ---------
+
+# The test reports each job uploads. The coverage data files (.coverage.*)
+# are uploaded too, but they hold no test text and stay as they are.
+_REPORTS = {
+    "python-unit-shard": ("pytest-unit-shard.xml",),
+    "python-coverage": ("pytest-coverage-junit-3.xml", "pytest-coverage.log"),
+    "python-integration-shard": ("pytest-integration-shard.xml",),
+}
+_REPORT_NAMES = (
+    "pytest-unit-shard.xml",
+    "pytest-coverage-junit-",
+    "pytest-coverage.log",
+    "pytest-integration-shard.xml",
+)
+_PASSED = "steps.hide-proxy-name.outcome == 'success'"
+
+# A made-up proxy name, with a port, under the reserved .invalid domain.
+_FAKE_PROXY = "cache.ci-proxy.invalid:8443/mirror/hub"
+_FAKE_HOST = "cache.ci-proxy.invalid"
+_SAMPLE = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="3">
+<testcase classname="tests.integration.test_db" name="test_up[{P}/postgres:16]" time="0.1"/>
+<testcase classname="tests.integration.test_db" name="test_skip" time="0.0">
+<skipped message="cannot start {P}/library/postgres:16: pull access denied"/></testcase>
+<testcase classname="tests.integration.test_db" name="test_fail" time="0.2">
+<failure message="dial tcp: lookup {H}: no such host">ConnectionError at {HP}</failure></testcase>
+<testcase classname="tests.integration.test_db" name="test_error" time="0.3">
+<error message="404 for url http+docker://localhost/v1.47/images/{E}%2Fmongo%3A8/json">
+also {e}%2fvalkey%3a8 and the text cacheXci-proxyXinvalid stays</error></testcase>
+</testsuite></testsuites>
+"""
+
+
+def _sample(proxy: str, host: str, host_port: str) -> str:
+    encoded = proxy.replace(":", "%3A").replace("/", "%2F")
+    return _SAMPLE.format(
+        P=proxy,
+        H=host,
+        HP=host_port,
+        E=encoded,
+        e=encoded.replace("%3A", "%3a").replace("%2F", "%2f"),
+    )
+
+
+def _hide_step(job_id: str) -> tuple[int, dict[str, Any]]:
+    steps = _ci_jobs()[job_id]["steps"]
+    found = [(i, s) for i, s in enumerate(steps) if s.get("name") == _HIDE_STEP]
+    assert len(found) == 1, f"{job_id} needs one step {_HIDE_STEP!r}"
+    return found[0]
+
+
+def _report_uploads(job_id: str) -> list[tuple[int, dict[str, Any]]]:
+    return [
+        (i, step)
+        for i, step in enumerate(_ci_jobs()[job_id]["steps"])
+        if "upload-artifact" in str(step.get("uses", ""))
+        and any(n in str(step.get("with", {}).get("path", "")) for n in _REPORT_NAMES)
+    ]
+
+
+@pytest.mark.parametrize("job_id", sorted(_REPORTS))
+def test_ci_hide_step_takes_the_proxy_name_out_of_the_reports(job_id: str, tmp_path: Path) -> None:
+    _, step = _hide_step(job_id)
+    expected = _sample("PROXY", "PROXY", "PROXY")
+    for name in _REPORTS[job_id]:
+        (tmp_path / name).write_text(_sample(_FAKE_PROXY, _FAKE_HOST, _FAKE_HOST + ":8443"))
+    env = _env(step["env"], **_contexts(THIS_REPO, {"CI_IMAGE_PROXY": _FAKE_PROXY}))
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**env, "GITHUB_WORKSPACE": str(_REPO_ROOT), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ci-proxy" not in result.stdout + result.stderr
+    for name in _REPORTS[job_id]:
+        text = (tmp_path / name).read_text()
+        assert "ci-proxy.invalid" not in text.lower(), name
+        assert "mirror%2fhub" not in text.lower(), name
+        assert text == expected, name
+
+
+@pytest.mark.parametrize("job_id", sorted(_REPORTS))
+def test_ci_hide_step_changes_nothing_without_the_secret(job_id: str, tmp_path: Path) -> None:
+    _, step = _hide_step(job_id)
+    sample = _sample(_FAKE_PROXY, _FAKE_HOST, _FAKE_HOST)
+    for name in _REPORTS[job_id]:
+        (tmp_path / name).write_text(sample)
+    env = _env(step["env"], **_contexts(FORK, {}))
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**env, "GITHUB_WORKSPACE": str(_REPO_ROOT), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in _REPORTS[job_id]:
+        assert (tmp_path / name).read_text() == sample
+
+
+@pytest.mark.parametrize("job_id", sorted(_REPORTS))
+def test_ci_report_uploads_wait_for_the_hide_step(job_id: str) -> None:
+    index, step = _hide_step(job_id)
+    assert step.get("if") == "always()"
+    assert step.get("id") == "hide-proxy-name"
+    assert set(step.get("env", {})) == {"CI_IMAGE_PROXY"}
+    uploads = _report_uploads(job_id)
+    assert uploads, job_id
+    uploaded = " ".join(str(s["with"]["path"]) for _, s in uploads)
+    for name in _REPORT_NAMES:
+        if name in uploaded:
+            assert name in step["run"], (job_id, name)
+    for upload_index, upload in uploads:
+        assert upload_index > index, (job_id, upload.get("name"))
+        assert _PASSED in str(upload.get("if", "")), (job_id, upload.get("name"))
+
+
+def test_hide_script_reads_the_value_as_text(tmp_path: Path) -> None:
+    report = tmp_path / "r.xml"
+    report.write_text("a.b.c/d and aXbXc/d and aXb.c")
+    result = subprocess.run(
+        [
+            "python3",
+            "-I",
+            str(_REPO_ROOT / "scripts" / "ci" / "hide_proxy_name.py"),
+            str(report),
+            str(tmp_path / "missing.xml"),
+        ],
+        env={"CI_IMAGE_PROXY": "a.b.c/d", "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert report.read_text() == "PROXY and aXbXc/d and aXb.c"
 
 
 # --- security-scan.yml: the scan image ----------------------------------

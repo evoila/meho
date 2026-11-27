@@ -53,7 +53,7 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import host_names_in_text, redirect_status_text
+from meho_backplane.connectors._shared.log_host import redirect_status_text
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -1674,8 +1674,7 @@ def result_connector_error(
     :func:`_add_attached_upstream_fault`).
 
     A 3xx answer gets the text of :func:`redirect_status_text`, with
-    host names only. Its ``upstream_message`` names each address in the
-    vendor's text only by its host name (:func:`host_names_in_text`).
+    host names only.
     """
     msg = _sanitize_free_text(redirect_status_text(exc) or str(exc))
     extras: dict[str, Any] = {
@@ -1690,9 +1689,7 @@ def result_connector_error(
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
-        extras["upstream_message"] = _http_upstream_message(
-            exc.response, hosts_only=300 <= exc.response.status_code < 400
-        )
+        extras["upstream_message"] = _http_upstream_message(exc.response)
         _add_upstream_fault(extras, exc.response)
     elif isinstance(exc, ConnectorUpstreamError):
         extras["http_status"] = exc.http_status
@@ -2150,7 +2147,7 @@ _HTTP_403_ECHOED_HEADERS: tuple[str, ...] = (
 )
 
 
-def _http_upstream_message(response: httpx.Response, *, hosts_only: bool = False) -> str | None:
+def _http_upstream_message(response: httpx.Response) -> str | None:
     """Best-effort extraction of the upstream's human error message.
 
     GitHub (and most REST APIs that bother) returns a JSON body with a
@@ -2177,18 +2174,7 @@ def _http_upstream_message(response: httpx.Response, *, hosts_only: bool = False
     callers that reach an unread streamed response should still turn it into a
     clean error before it gets here (the guest file-transfer GET does), but the
     guard keeps this helper total for every arm that shares it.
-
-    With ``hosts_only``, each address in the text shows only its host name
-    (:func:`host_names_in_text`, with the ``Location`` header of the answer),
-    before the text clean.
     """
-    location = response.headers.get("Location") if hosts_only else None
-
-    def clean(text: str) -> str:
-        if hosts_only:
-            text = host_names_in_text(text, location)
-        return _sanitize_free_text(text, cap=_UPSTREAM_MESSAGE_CAP)
-
     try:
         body = response.json()
     except (ValueError, UnicodeDecodeError):
@@ -2198,14 +2184,14 @@ def _http_upstream_message(response: httpx.Response, *, hosts_only: bool = False
     if isinstance(body, dict):
         message = body.get("message")
         if isinstance(message, str) and message.strip():
-            return clean(message)
+            return _sanitize_free_text(message, cap=_UPSTREAM_MESSAGE_CAP)
     try:
         text = (response.text or "").strip()
     except httpx.StreamError:
         return None
     if not text:
         return None
-    return clean(text)
+    return _sanitize_free_text(text, cap=_UPSTREAM_MESSAGE_CAP)
 
 
 def _vi_json_fault(response: httpx.Response) -> tuple[str, str | None] | None:

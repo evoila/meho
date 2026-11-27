@@ -375,17 +375,9 @@ same origin), so `extras.exception_message` holds only the status code and
 the host names, for example `Redirect response 302 from vc.example.com to
 other.example.com, not followed.` A 3xx without a `Location` header says
 `with no Location header.` A host name that cannot be read is the fixed
-mark `<unparseable-location>`. `extras.http_status` stays as for every
-other status. `extras.upstream_message` holds the vendor's body text, with
-each address in it shown only by its host name, by the same rule
-(`host_names_in_text`): an address with a scheme, an address that starts
-with `//`, and the `Location` value as the vendor sent it (also a relative
-one, or its part from the path on), also written with `&amp;` for `&` or
-with percent-encoded characters. The words around each address stay. Then
-the usual text clean runs. The answer and the audit row hold the same text.
-The `upstream_message` of an answer that is not a 3xx keeps its addresses.
-The text comes from `redirect_status_text` in
-`connectors/_shared/log_host.py`. The
+mark `<unparseable-location>`. `extras.http_status` and
+`extras.upstream_message` stay as for every other status. The text comes
+from `redirect_status_text` in `connectors/_shared/log_host.py`. The
 Proxmox fingerprint uses it too, so `proxmox.about` names only host names
 when the ticket login gets a redirect. When httpx cannot read the
 `Location` address, the HTTP client raises an error of the exact class

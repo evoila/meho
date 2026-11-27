@@ -384,6 +384,7 @@ IDENTITY_OIDC_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_IDENTITY_OIDC_ROLE_DELETE_PARAMETER_SCHEMA,
         "response_schema": VAULT_IDENTITY_OIDC_ROLE_DELETE_RESPONSE_SCHEMA,
+        "changes_rights": True,
         "llm_instructions": VAULT_IDENTITY_OIDC_ROLE_DELETE_LLM_INSTRUCTIONS,
     },
     {

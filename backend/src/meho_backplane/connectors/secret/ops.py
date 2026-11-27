@@ -298,6 +298,7 @@ async def register_secret_broker_operations(
         safety_level="dangerous",
         requires_approval=True,
         hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=_SECRET_MOVE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

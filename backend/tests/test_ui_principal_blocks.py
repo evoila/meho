@@ -25,7 +25,7 @@ from meho_backplane.api.v1 import principal_blocks as rest_principal_blocks
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     PrincipalBlockUnavailableError,
@@ -829,6 +829,50 @@ def test_after_a_role_change_the_page_follows_at_once_and_the_menu_after_the_che
     assert (_PAGE in start.text) is was_admin
     assert (_PAGE in early.text) is was_admin
     assert (_PAGE in late.text) is (not was_admin)
+
+
+class _OtherTabSwitchesTenant:
+    """A token check during which another tab moves the session to tenant B."""
+
+    async def __call__(self, decrypted: Any, *, expected_audience: str) -> tuple[Any, Any]:
+        await save_session_tenant(
+            decrypted.id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
+        )
+        operator = SimpleNamespace(
+            tenant_role=TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.USER
+        )
+        return dataclasses.replace(decrypted, tenant_id=_TENANT_B), operator
+
+
+@pytest.mark.parametrize("blocked_in_b", [False, True], ids=["not-blocked", "blocked-in-b"])
+def test_a_refresh_that_finds_another_tenant_names_and_checks_that_tenant(
+    monkeypatch: pytest.MonkeyPatch, blocked_in_b: bool
+) -> None:
+    _tenants()
+    if blocked_in_b:
+        _seed_blocks((_OP_A, str(_TENANT_B), "blocked in b"))
+    admin_in_both = {
+        "meho_tenants": [f"{_TENANT_A}:tenant-a:Admins", f"{_TENANT_B}:tenant-b:Admins"]
+    }
+    client, mock, _csrf = _client(extra_claims=admin_in_both)
+    try:
+        # The next request checks the token again; the check finds the session in tenant B.
+        revalidation.reset_read_revalidation_cache_for_testing()
+        monkeypatch.setattr(
+            revalidation, "verify_access_token_with_refresh", _OtherTabSwitchesTenant()
+        )
+        page = client.get(_PAGE)
+    finally:
+        mock.stop()
+    if blocked_in_b:
+        assert page.status_code == 403, page.text
+        assert page.text == PRINCIPAL_BLOCKED_MESSAGE
+        return
+    assert page.status_code == 200, page.text
+    assert "Tenant tenant-b" in page.text
+    assert "Tenant tenant-a" not in page.text
+    assert f'name="meho_tenant" value="{_TENANT_B}"' in page.text
+    assert f'name="meho_tenant" value="{_TENANT_A}"' not in page.text
 
 
 def _signed_in(kind: str, sub: str, claims: dict[str, Any] | None) -> tuple[Any, Any, Any]:

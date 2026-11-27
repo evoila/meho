@@ -134,7 +134,11 @@ from meho_backplane.ui.auth.tenant import (
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy import Row
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.ui.auth.session_store import DecryptedSession
 
 __all__ = [
     "AUTH_PREFIX",
@@ -419,6 +423,27 @@ async def _send_text(send: Send, status_code: int, text: str) -> None:
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
+async def _tenant_row(session: AsyncSession, tenant_id: uuid.UUID) -> Row[tuple[str, str]] | None:
+    """The slug and the name of the tenant, or ``None`` when the row is gone."""
+    query = select(Tenant.slug, Tenant.name).where(Tenant.id == tenant_id)
+    return (await session.execute(query)).one_or_none()
+
+
+async def _refuse_blocked(decrypted: DecryptedSession, path: str) -> None:
+    """Raise :class:`PrincipalBlockedError` when a block holds the login of the session.
+
+    The admin block list is read on every request (a few seconds old at
+    most), not only at the drift-gated token check. A block in the
+    session's tenant does not hold on the tenant picker and switch, so a
+    person with several tenants can move to a tenant where no block
+    holds; the switch checks the tenant it moves to.
+    """
+    works_in_tenant = decrypted.tenant_chosen and path not in _TENANT_CHOICE_PATHS
+    block_tenant = decrypted.tenant_id if works_in_tenant else None
+    if await is_principal_blocked(decrypted.operator_sub, block_tenant):
+        raise PrincipalBlockedError
+
+
 async def _load_session_context(cookie_value: str | None, *, path: str) -> UISessionContext | None:
     """Load the session row named by the cookie, or ``None`` for "no session".
 
@@ -445,25 +470,19 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         decrypted = await load_session(session, cookie_id)
         if decrypted is None:
             return None
-        tenant_row = (
-            await session.execute(
-                select(Tenant.slug, Tenant.name).where(Tenant.id == decrypted.tenant_id),
-            )
-        ).one_or_none()
-    # The admin block list is read on every request (a few seconds old at
-    # most), not only at the drift-gated token check below. A block in the
-    # session's tenant does not hold on the tenant picker and switch, so a
-    # person with several tenants can move to a tenant where no block
-    # holds; the switch checks the tenant it moves to.
-    works_in_tenant = decrypted.tenant_chosen and path not in _TENANT_CHOICE_PATHS
-    block_tenant = decrypted.tenant_id if works_in_tenant else None
-    if await is_principal_blocked(decrypted.operator_sub, block_tenant):
-        raise PrincipalBlockedError
+        tenant_row = await _tenant_row(session, decrypted.tenant_id)
+    await _refuse_blocked(decrypted, path)
     # ``None`` means the stored token failed the JWT chain terminally;
     # collapse to the same redirect-to-login as a missing session.
     revalidated = await revalidate_read_session(decrypted)
     if revalidated is None:
         return None
+    if revalidated.tenant_id != decrypted.tenant_id:
+        # A token refresh reads the row again, and another tab may have
+        # switched its tenant in the meantime: name and check that tenant.
+        async with sessionmaker() as session:
+            tenant_row = await _tenant_row(session, revalidated.tenant_id)
+        await _refuse_blocked(revalidated, path)
     if tenant_row is None:
         # Session row references a tenant_id with no tenant row -- the
         # tenant was deleted out from under the operator's session.

@@ -51,7 +51,6 @@ _PER_KIND: dict[str, tuple[str, str | None, int, bool]] = {
     "write_caution": _RUNS_AT_ONCE,
     "write_dangerous": _WAITS,
     "rights_change": _WAITS,
-    "credential_write": _RUNS_AT_ONCE,
     "multi_step": _RUNS_AT_ONCE,
     "delete_no_preview": _NO_PREVIEW,
 }

@@ -15,8 +15,8 @@ the same cases give on a MEHO without the Reader rule.
   ``test_reader_change_controls_console.py``.
 * Kinds (stand-in operations that count their runs): a write at ``safe``
   with no approval flag, a write at ``caution``, a write at
-  ``dangerous``, a change of rights, a credential write, a multi-step
-  operation at ``caution`` and a delete without a preview. The table
+  ``dangerous``, a change of rights, a multi-step operation at
+  ``caution`` and a delete without a preview. The table
   ``KINDS`` names the risk level and the approval flag of each one.
 * Ways in: the real ``dispatch``, the REST call route and the MCP tool
   ``call_operation``.
@@ -69,7 +69,6 @@ KINDS: dict[str, tuple[str, str, bool]] = {
     "write_caution": ("vault.control.write_caution", "caution", False),
     "write_dangerous": ("vault.control.write_dangerous", "dangerous", False),
     "rights_change": ("vault.control.rights_change", "safe", False),
-    "credential_write": ("vault.control.credential_write", "safe", False),
     "multi_step": ("vault.control.multi_step", "caution", False),
     "delete_no_preview": ("vault.control.delete", "destructive", True),
 }
@@ -95,9 +94,7 @@ async def multi_step_composite(operator: Operator, target: Any, params: dict[str
 async def register_stand_ins(embedding: Any, module: str = __name__) -> None:
     """One stand-in operation per kind, and the target they run on."""
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    declare_op_classes(
-        credential_write=[KINDS["credential_write"][0]], write=[KINDS["write_safe"][0]]
-    )
+    declare_op_classes(write=[KINDS["write_safe"][0]])
     register_rights_change_op(KINDS["rights_change"][0])
     for kind, (op_id, level, needs_approval) in KINDS.items():
         if kind == "multi_step":
@@ -272,28 +269,24 @@ EXPECTED: dict[tuple[str, str], tuple[str, str | None, int, bool]] = {
     ("person_operator", "write_caution"): _WAITS,
     ("person_operator", "write_dangerous"): _WAITS,
     ("person_operator", "rights_change"): _WAITS,
-    ("person_operator", "credential_write"): _RUNS_AT_ONCE,
     ("person_operator", "multi_step"): _WAITS,
     ("person_operator", "delete_no_preview"): _NO_PREVIEW,
     ("person_admin", "write_safe"): _RUNS_AT_ONCE,
     ("person_admin", "write_caution"): _WAITS,
     ("person_admin", "write_dangerous"): _WAITS,
     ("person_admin", "rights_change"): _WAITS,
-    ("person_admin", "credential_write"): _RUNS_AT_ONCE,
     ("person_admin", "multi_step"): _WAITS,
     ("person_admin", "delete_no_preview"): _NO_PREVIEW,
     ("agent", "write_safe"): _WAITS,
     ("agent", "write_caution"): _WAITS,
     ("agent", "write_dangerous"): _WAITS,
     ("agent", "rights_change"): _WAITS,
-    ("agent", "credential_write"): _WAITS,
     ("agent", "multi_step"): _WAITS,
     ("agent", "delete_no_preview"): _NO_PREVIEW,
     ("service", "write_safe"): _RUNS_AT_ONCE,
     ("service", "write_caution"): _WAITS,
     ("service", "write_dangerous"): _WAITS,
     ("service", "rights_change"): _WAITS,
-    ("service", "credential_write"): _WAITS,
     ("service", "multi_step"): _WAITS,
     ("service", "delete_no_preview"): _NO_PREVIEW,
 }

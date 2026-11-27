@@ -2585,7 +2585,7 @@ def _classify_http_status_error(
     rejected (``reestablished``). Only the auth-class branch consumes it.
     """
     status_code = http_exc.response.status_code
-    if get_settings().redirect_on_change_result and is_redirect_on_change(http_exc):
+    if is_redirect_on_change(http_exc) and get_settings().redirect_on_change_result:
         # MEHO did not follow a redirect after a change. With the switch on,
         # the answer says what the code means. With it off, the answer is the
         # generic one below for that status.

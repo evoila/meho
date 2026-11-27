@@ -6,10 +6,12 @@
 Two products, ``cowx`` and ``cowy``, each have ``wild.thing.run``
 (``safe``, group ``compute``) with no implementation id and no version.
 With ``CUSTOM_POLICY`` off, the policy names such a connector ``-`` and an
-entry for the product ``cowx`` does not match it. Each test compares the
+entry for the product ``cowx`` does not match it. The tests of the
+overrides report, a call, the preview and the approval card compare the
 answer with the answer of the same set-up on the code before the product
-form existed; that answer is recorded in the test. All names and values
-are made up.
+form existed; that answer is recorded in the test. The carry-over dry run
+reads no switch: it answers for the product form with every switch state.
+All names and values are made up.
 """
 
 from __future__ import annotations
@@ -152,8 +154,8 @@ async def test_case_9_the_overrides_report_row_is_as_before(
     assert row == MAIN_OVERRIDE_ROW
 
 
-#: Case 10 on the code before the product form: the whole dry run.
-MAIN_DRY_RUN: dict[str, Any] = {
+#: Case 10: the dry run of an entry by the product ``cowx``, with every switch state.
+PRODUCT_DRY_RUN: dict[str, Any] = {
     "scope": "tenant",
     "sandbox_mode": False,
     "settings": [
@@ -161,8 +163,8 @@ MAIN_DRY_RUN: dict[str, Any] = {
             "source": "policy_file",
             "scope": "tenant",
             "ref": "tenant:classifications[0]",
-            "match": {"op": OP},
-            "operations": [{"connector_id": "-", "op_id": OP, "step_of": []}],
+            "match": {"connector": "cowx"},
+            "operations": [{"connector_id": "cowx", "op_id": OP, "step_of": []}],
             "warnings": [
                 "As `destructive`, a call needs a matching preview first. "
                 "A call without one is refused."
@@ -172,20 +174,31 @@ MAIN_DRY_RUN: dict[str, Any] = {
     "message": "Dry run: nothing was changed.",
 }
 
+#: (case, switches on, the call of ``cowx``)
+_DRY_RUN_SWITCHES: list[tuple[str, tuple[str, ...], str]] = [
+    ("10a", (), "ok"),
+    ("10b", ("POLICY_CLASSIFICATION",), "ok"),
+    ("10c", ("CUSTOM_POLICY",), "awaiting_approval"),
+    ("10d", ("POLICY_CLASSIFICATION", "CUSTOM_POLICY"), "awaiting_approval"),
+]
+
 
 @pytest.mark.asyncio
-async def test_case_10_the_dry_run_is_as_before(
+async def test_case_10_the_dry_run_answers_for_the_product_with_every_switch_state(
     client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _switches(monkeypatch)
     await _register(embedding)
-    await policy(TENANT, [{"match": {"op": OP}, "always_wait": True}])
+    await policy(TENANT, [{"match": {"connector": "cowx"}, "always_wait": True}])
     key = make_rsa_keypair("kid-cnvoff-10")
 
-    resp = dry_run(client, key)
+    for case, on, status in _DRY_RUN_SWITCHES:
+        _switches(monkeypatch, *on)
+        resp = dry_run(client, key)
+        call = _post(client, key, "/api/v1/operations/call", "cowx")
 
-    assert resp.status_code == 200, resp.text
-    assert resp.json() == MAIN_DRY_RUN
+        assert resp.status_code == 200, (case, resp.text)
+        assert resp.json() == PRODUCT_DRY_RUN, case
+        assert call["status"] == status, (case, call)
 
 
 @pytest.mark.asyncio

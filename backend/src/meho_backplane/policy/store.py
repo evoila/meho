@@ -133,7 +133,7 @@ def _dashed_id(row: ConnectorRow) -> str:
     return f"{row.impl_id}-{row.version}"
 
 
-def connector_id_of(row: ConnectorRow) -> str:
+def connector_id_of(row: ConnectorRow, *, product_form: bool | None = None) -> str:
     """The connector id of *row* in the policy.
 
     ``<impl_id>-<version>``. With ``CUSTOM_POLICY`` on
@@ -141,21 +141,28 @@ def connector_id_of(row: ConnectorRow) -> str:
     version is named by its ``<product>`` instead, the id a call uses
     (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). Every
     reader of the policy names a connector with this function.
+    *product_form* ``True`` names such a connector by its product whatever
+    the switch says; ``None`` reads the switch.
     """
-    if (row.impl_id and row.version) or not product_form_on():
+    if product_form is None:
+        product_form = product_form_on()
+    if (row.impl_id and row.version) or not product_form:
         return _dashed_id(row)
     return row.product
 
 
-def coordinates_of(row: OperationRow, group_key: str | None) -> OpCoordinates:
+def coordinates_of(
+    row: OperationRow, group_key: str | None, *, product_form: bool | None = None
+) -> OpCoordinates:
     """What a policy entry matches for the operation of *row*, in group *group_key*.
 
     When :func:`connector_id_of` names the connector by its product, the
     coordinates also hold the form ``<impl_id>-<version>``. The operation is
     then classified once per form, and the stricter result counts
     (:func:`~meho_backplane.policy.classification.classify`).
+    *product_form* is passed on to :func:`connector_id_of`.
     """
-    connector_id = connector_id_of(row)
+    connector_id = connector_id_of(row, product_form=product_form)
     dashed = _dashed_id(row)
     return OpCoordinates(
         connector_id, group_key, row.op_id, dashed if dashed != connector_id else None

@@ -16,7 +16,10 @@ The carry-over reads such a setting as a raise to ``destructive``.
 :func:`carry_over_dry_run` lists every saved setting of one scope and
 shows what changes for each setting if MEHO reads it as ``destructive``.
 It only reads: it changes no row and no answer of the gate, so it reads
-no switch.
+no switch. It names a connector with no version by its product
+(``product_form=True`` of :func:`~meho_backplane.policy.store.connector_id_of`)
+and lists each operation under every entry that makes it wait, in the
+form with the dash or by the product.
 
 Per setting it says:
 
@@ -214,7 +217,7 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
         )
         if scope == "tenant" and await row_code_missing(session, tenant_id=tenant_id, row=row):
             continue
-        found.add(coordinates_of(row, group_key))
+        found.add(coordinates_of(row, group_key, product_form=True))
     return sorted(found, key=lambda c: (c.connector_id, c.op_id, c.group_key or ""))
 
 
@@ -245,7 +248,7 @@ def _steps_by_op() -> tuple[dict[_StepKey, list[str]], dict[_StepKey, EndpointDe
                 row = EndpointDescriptor(
                     product=product, version=version, impl_id=impl_id, op_id=step
                 )
-                key = (connector_id_of(row), step)
+                key = (connector_id_of(row, product_form=True), step)
                 if step != composite:
                     runs.setdefault(key, set()).add(composite)
                     rows.setdefault(key, row)
@@ -317,8 +320,8 @@ async def _override_settings(
     )
     settings: list[CarryOverSetting] = []
     for row in (await session.execute(stmt)).scalars():
-        connector_id = connector_id_of(row)
-        operation = _operation(coordinates_of(row, None), steps)
+        connector_id = connector_id_of(row, product_form=True)
+        operation = _operation(coordinates_of(row, None, product_form=True), steps)
         settings.append(
             CarryOverSetting(
                 source="override",
@@ -361,7 +364,10 @@ def _step_coordinates(
     if scope == "install":
         runs = [None, *groups.tenants_with_own_row(row)]
     found = {groups.group_of(row, run) for run in runs}
-    return [coordinates_of(row, group) for group in sorted(found, key=lambda g: g or "")]
+    return [
+        coordinates_of(row, group, product_form=True)
+        for group in sorted(found, key=lambda g: g or "")
+    ]
 
 
 async def _file_settings(

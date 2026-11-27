@@ -970,19 +970,34 @@ With the switch on, a step keeps its own approval when one of these holds:
   mark).
 
 The step gate asks these rules with the stored facts of the step's
-operation, when a row is stored (`step_rule_row`): its parameter schema,
-HTTP verb, tags, class and `hard_to_undo`. They go only into a copy of the
-step's row. The gate, the card and the approval request use the step's
-declared values.
+operation, when a row is stored (`step_rule_rows`): its parameter schema,
+HTTP verb, tags, class and `hard_to_undo`. When both a built-in row and a
+row of the caller's tenant are stored, the rules are asked once for each
+row, so a fact counts when either row holds it. The facts go only into
+copies of the step's row. The gate, the card and the approval request use
+the step's declared values. With the switch off, no stored row is read.
 
 In a run that goes on after a person's approval, these rules hold also
 when a step's policy answer lets it run at once
-(`step_waits_after_approval`): the step or child call then waits for its
-own approval. A `deny` stays a deny. Outside such a run nothing changes.
+(`step_wait_reason_after_approval`): the step or child call then waits for
+its own approval. A `deny` stays a deny. Outside such a run nothing
+changes. The reason MEHO stores for such a wait (the `wait_reason` of the
+step's `approval.request` audit row) names the rule:
+`run_step_keeps_own_approval: a step of a run after an approval keeps its
+own approval (floor:rights_change_waits)`. A fixed rule is named as
+`floor:<rule id>`; otherwise the reason ends in `(requires_approval)` or
+`(no_run_approval_covers_it)`.
+
+One exception: a credential read that the run sent at once before the
+wait, and that a resume sends again, is sent again with no new wait, so
+the run can finish. A re-sent read whose policy makes it wait is still
+refused with `composite_resume_read_not_sent`.
 
 Tests: `backend/tests/test_custom_policy_run_steps.py`,
-`backend/tests/test_custom_policy_run_steps_routes.py` and
-`backend/tests/test_custom_policy_run_steps_console_rights.py`.
+`backend/tests/test_custom_policy_run_steps_routes.py`,
+`backend/tests/test_custom_policy_run_steps_console_rights.py` and
+`backend/tests/test_custom_policy_run_steps_resend.py`. The switch-off
+answers in these tests are fixed values recorded from a run on main.
 
 ## A credential call always waits for a person
 

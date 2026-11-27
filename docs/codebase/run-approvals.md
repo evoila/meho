@@ -178,8 +178,10 @@ these holds (`operations/run_step_rules.py`):
 `fixed_rule_for` alone is not enough: it has no root-shell rule. A step
 with only the plain "always ask" mark goes ahead under the run's approval.
 These rules hold for a step of the step gate, which reads the stored facts
-of the step's operation, and for a child call. In a run after an approval
-they hold also when the step's policy answer lets it run at once.
+of the step's operation (the built-in row and the caller's tenant's row
+both count), and for a child call. In a run after an approval they hold
+also when the step's policy answer lets it run at once, and the stored
+reason of the wait names the rule.
 Details: [approvals.md](approvals.md#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
 
 ## Never covered: a call a person approves one by one

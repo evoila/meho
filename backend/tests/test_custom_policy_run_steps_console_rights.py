@@ -13,8 +13,10 @@ it, and reaches the change of rights through the step gate and as a child
 call, against a stand-in of the identity system.
 
 With ``CUSTOM_POLICY`` on, the step is not the Admin's own change: it waits
-for its own approval, and nothing is written to the identity system. With
-the switch off, the test asserts the answer of the code with the switch off.
+for its own approval, and nothing is written to the identity system. The
+change's own ``approval.request`` audit row names the step rule as the
+reason of the wait. With the switch off, the test asserts the fixed outcome
+of :data:`_OFF_ON_MAIN`, recorded from a run on main.
 
 All names and values are made up.
 """
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -71,6 +74,27 @@ _STEP_RUN = "vault.composite.probe_rights_step"
 _CHILD_RUN = "vault.composite.probe_rights_child"
 _RIGHTS_CHANGE_OPS = grant_approval._RIGHTS_CHANGE_OPS
 _PUT_URL = f"{_KC_BASE_URL}/admin/realms/{_REALM}/users/{_USER}/groups/{_GROUP}"
+_RIGHTS_RULE_WAIT = c.STEP_RULE_WAIT.format("floor:rights_change_waits")
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """What happens to the change of rights after the Admin's approval of the run."""
+
+    waits: bool
+    write_sent: bool
+
+
+#: Switch on: the change waits for its own approval and nothing is written.
+_ON = _Outcome(waits=True, write_sent=False)
+#: Switch off: the outcome per Admin and path, recorded from a run of this
+#: test on main, where the step rule did not exist.
+_OFF_ON_MAIN: dict[tuple[str, str], _Outcome] = {
+    ("admin-probe-5", "step"): _Outcome(waits=False, write_sent=True),
+    ("admin-probe-5", "child-call"): _Outcome(waits=False, write_sent=True),
+    ("platform-probe-6", "step"): _Outcome(waits=False, write_sent=True),
+    ("platform-probe-6", "child-call"): _Outcome(waits=False, write_sent=True),
+}
 
 
 async def _target() -> Any:
@@ -252,8 +276,10 @@ async def test_an_admin_s_console_approval_of_the_run_does_not_run_the_change_of
         put = _mount(mock)
         await c.approve_in_console(request_id, admin.model_copy(update={"sid": str(uuid.uuid4())}))
 
-    if on:
-        assert not put.called
+    path = "child-call" if child else "step"
+    expected = _ON if on else _OFF_ON_MAIN[(admin.sub, path)]
+    assert put.called is expected.write_sent
+    if expected.waits:
         assert c.ran == [h.STEP_A]
         _, own = await c.requests()
         assert own.op_id == _ADD.op_id
@@ -262,8 +288,9 @@ async def test_an_admin_s_console_approval_of_the_run_does_not_run_the_change_of
         assert last.status_code == 202
         assert last.payload["result_status"] == "awaiting_approval"
         assert last.payload["error"]["approval_request_id"] == str(own.id)
+        # The change's own ``approval.request`` row: it names the step rule, and
+        # no text on it says that the change runs at once.
+        c.assert_own_request_row(await c.own_request_row(own), own, wait_reason=_RIGHTS_RULE_WAIT)
     else:
-        # The code with the switch off: the step runs under the Admin's approval.
-        assert put.called
         assert c.ran == [h.STEP_A, _ADD.op_id]
         assert len(await c.requests()) == 1

@@ -549,7 +549,7 @@ from meho_backplane.operations.rights_change_console import (
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.run_step_rules import (
     step_keeps_own_approval,
-    step_waits_after_approval,
+    step_wait_reason_after_approval,
 )
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import (
@@ -4707,14 +4707,18 @@ async def _dispatch_now(
             # (``step_keeps_own_approval``) waits for it in a run that goes on
             # after an approval, also when its policy answer lets it run at
             # once (for example an Admin's change of rights in the web
-            # console). With the switch off nothing more is asked.
+            # console). The stored reason of the wait names the rule. A read
+            # that this run sent at once before the wait is sent again with
+            # no new wait: an approval request for it alone cannot finish
+            # the run. With the switch off nothing more is asked.
             if (
                 verdict is PermissionVerdict.AUTO_EXECUTE
                 and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
-                and await step_waits_after_approval(descriptor, operator)
+                and not child_read_sent_again(op_id)
+                and (step_wait := await step_wait_reason_after_approval([descriptor], operator))
             ):
                 _log.info("composite_child_keeps_own_approval_after_approval", op_id=op_id)
-                verdict = PermissionVerdict.NEEDS_APPROVAL
+                verdict, gate_reason = PermissionVerdict.NEEDS_APPROVAL, step_wait
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):

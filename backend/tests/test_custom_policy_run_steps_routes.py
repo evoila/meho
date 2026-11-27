@@ -18,8 +18,11 @@ With ``CUSTOM_POLICY`` on:
   a root-shell step and a delete name, both ``safe``. A plain ``safe``
   step runs at once.
 
-With the switch off, each test asserts the answer of the code with the
-switch off. All names and values are made up.
+With the switch off, each test asserts the fixed answer of
+:data:`_OFF_WAITS_ON_MAIN`, recorded from a run on main. Each waiting step's
+own ``approval.request`` audit row names the step and its request, and the
+stored reason of a wait the step rule makes names the rule. All names and
+values are made up.
 """
 
 from __future__ import annotations
@@ -102,22 +105,42 @@ async def _approved_with_token(
     return status
 
 
-def _expected_wait(on: bool, answers: list[bool]) -> bool:
-    """Switch on: the step waits. Switch off: the answer of the rule with the switch off.
+#: With the switch off: does the step wait for its own approval? One entry per
+#: approve route, step and path. Recorded from a run of these tests on main,
+#: where the step rule did not exist; no entry comes from the rule under test.
+_OFF_WAITS_ON_MAIN: dict[tuple[str, str, str], bool] = {
+    ("console", c.RIGHTS.op_id, "step"): False,
+    ("console", c.RIGHTS.op_id, "child-call"): True,
+    ("console", c.POLICY.op_id, "step"): False,
+    ("console", c.POLICY.op_id, "child-call"): True,
+    ("token", c.RIGHTS.op_id, "step"): False,
+    ("token", c.RIGHTS.op_id, "child-call"): True,
+    ("token", c.POLICY.op_id, "step"): False,
+    ("token", c.POLICY.op_id, "child-call"): True,
+    ("token", c.SNAPSHOT_SAVE.op_id, "step"): False,
+    ("token", c.SNAPSHOT_SAVE.op_id, "child-call"): False,
+    ("token", _DELETE_OLD.op_id, "step"): False,
+    ("token", _DELETE_OLD.op_id, "child-call"): False,
+    ("token", _VIEW.op_id, "step"): False,
+    ("token", _VIEW.op_id, "child-call"): False,
+}
 
-    With the switch off, ``step_keeps_own_approval`` gives the row's
-    ``requires_approval``: the declared flag of a step-gate step, the
-    stored row's flag of a child call.
-    """
+
+def _expected_wait(route: str, step: Step, *, child: bool, on: bool, waits_on: bool) -> bool:
+    """Switch on: *waits_on*. Switch off: the fixed answer of :data:`_OFF_WAITS_ON_MAIN`."""
     if on:
-        return True
-    assert answers, "the rule was not asked"
-    return answers[-1]
+        return waits_on
+    return _OFF_WAITS_ON_MAIN[(route, step.op_id, "child-call" if child else "step")]
 
 
-async def _assert(step: Step, *, child: bool, waits: bool) -> None:
+def _rule_reason(on: bool, rule: str) -> str | None:
+    """The stored reason of a wait the step rule makes; ``None`` with the switch off."""
+    return c.STEP_RULE_WAIT.format(rule) if on else None
+
+
+async def _assert(step: Step, *, child: bool, waits: bool, wait_reason: str | None = None) -> None:
     if waits:
-        await c.assert_waits(step, child=child)
+        await c.assert_waits(step, child=child, wait_reason=wait_reason)
     else:
         await c.assert_went_ahead(step, child=child)
 
@@ -138,13 +161,13 @@ async def test_a_change_of_rights_after_an_approval_in_the_web_console(
 ) -> None:
     c.switch(monkeypatch, on=on)
     c.console_env(monkeypatch)
-    answers = c.record_rule_answers(monkeypatch)
     await c.register(session, stub_embedding_service, step, child=child)
     request_id = await c.start_run(c.run_op(child=child))
 
     await c.approve_in_console(request_id, c.console_person())
 
-    await _assert(step, child=child, waits=_expected_wait(on, answers))
+    waits = _expected_wait("console", step, child=child, on=on, waits_on=True)
+    await _assert(step, child=child, waits=waits)
 
 
 @_RIGHTS_STEPS
@@ -160,9 +183,8 @@ async def test_a_change_of_rights_after_an_approval_with_a_token(
     child: bool,
 ) -> None:
     c.switch(monkeypatch, on=on)
-    answers = c.record_rule_answers(monkeypatch)
     status = await _approved_with_token(client, session, stub_embedding_service, step, child=child)
-    waits = _expected_wait(on, answers)
+    waits = _expected_wait("token", step, child=child, on=on, waits_on=True)
     assert status == ("awaiting_approval" if waits else "ok")
     await _assert(step, child=child, waits=waits)
 
@@ -171,8 +193,12 @@ async def test_a_change_of_rights_after_an_approval_with_a_token(
 
 
 @pytest.mark.parametrize(
-    ("step", "waits_on"),
-    [(c.SNAPSHOT_SAVE, True), (_DELETE_OLD, True), (_VIEW, False)],
+    ("step", "waits_on", "rule"),
+    [
+        (c.SNAPSHOT_SAVE, True, "no_run_approval_covers_it"),
+        (_DELETE_OLD, True, "floor:delete_waits"),
+        (_VIEW, False, None),
+    ],
     ids=["root-shell", "delete-name", "plain"],
 )
 @_BOTH_STATES
@@ -184,11 +210,14 @@ async def test_a_safe_step_after_an_approval_with_a_token(
     session: AsyncSession,
     step: Step,
     waits_on: bool,
+    rule: str | None,
     on: bool,
     child: bool,
 ) -> None:
     c.switch(monkeypatch, on=on)
-    waits = on and waits_on
+    waits = _expected_wait("token", step, child=child, on=on, waits_on=waits_on)
     status = await _approved_with_token(client, session, stub_embedding_service, step, child=child)
     assert status == ("awaiting_approval" if waits else "ok")
-    await _assert(step, child=child, waits=waits)
+    # The step's own ``approval.request`` row names the step rule as the reason of the wait.
+    reason = _rule_reason(on, rule) if rule is not None else None
+    await _assert(step, child=child, waits=waits, wait_reason=reason)

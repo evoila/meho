@@ -16,6 +16,7 @@ All names and values are made up.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -43,12 +44,7 @@ from meho_backplane.db.models import (
     OperationRunStatus,
     Tenant,
 )
-from meho_backplane.operations import (
-    dispatcher,
-    grant_approval,
-    reset_dispatcher_caches,
-    run_step_rules,
-)
+from meho_backplane.operations import grant_approval, reset_dispatcher_caches
 from meho_backplane.operations.composite import (
     DispatchChild,
     composite_resume_state,
@@ -77,6 +73,12 @@ APPROVER_SUB = "person-probe-3"
 _AT_STEP = {"at": "step"}
 _MODULE = __name__
 _RESOLVE_OPERATOR = "meho_backplane.ui.routes.approvals.routes._resolve_operator"
+#: The words of a reason that lets a call run at once; never on a waiting step's row.
+RUNS_AT_ONCE = "runs at once"
+#: The stored reason of a wait the step rule makes; ``{}`` is the rule.
+STEP_RULE_WAIT = (
+    "run_step_keeps_own_approval: a step of a run after an approval keeps its own approval ({})"
+)
 
 
 @dataclass(frozen=True)
@@ -176,22 +178,6 @@ def switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
     get_settings.cache_clear()
 
 
-def record_rule_answers(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Record the answers of ``step_keeps_own_approval`` for the step under test."""
-    answers: list[bool] = []
-    real = run_step_rules.step_keeps_own_approval
-
-    async def _spy(descriptor: EndpointDescriptor, caller: Operator) -> bool:
-        answer = await real(descriptor, caller)
-        if descriptor.op_id != h.STEP_A:
-            answers.append(answer)
-        return answer
-
-    monkeypatch.setattr(run_step_rules, "step_keeps_own_approval", _spy)
-    monkeypatch.setattr(dispatcher, "step_keeps_own_approval", _spy)
-    return answers
-
-
 def token_approver() -> Operator:
     """The person who approves with a token (no web console)."""
     return Operator(
@@ -272,28 +258,57 @@ def run_op(*, child: bool) -> str:
     return CHILD_RUN if child else STEP_RUN
 
 
-async def assert_went_ahead(step: Step, *, child: bool) -> None:
+async def assert_went_ahead(step: Step, *, child: bool, run_op_id: str | None = None) -> None:
     """The step ran under the run's approval: no second request, its row is ``ok``.
 
     The row of a child call is on the child's path; a step-gate step has
-    its row on the run's path.
+    its row on the run's path (*run_op_id*, by default the run of :func:`run_op`).
     """
     assert ran == [h.STEP_A, step.op_id]
     assert len(await requests()) == 1
-    last = (await h.rows(step.op_id if child else run_op(child=child)))[-1]
+    last = (await h.rows(step.op_id if child else run_op_id or run_op(child=child)))[-1]
     assert last.payload["result_status"] == "ok"
 
 
-async def assert_waits(step: Step, *, child: bool) -> ApprovalRequest:
-    """The step waits for its own approval: it did not run; its request and wait row exist."""
+async def assert_waits(
+    step: Step, *, child: bool, wait_reason: str | None = None, run_op_id: str | None = None
+) -> ApprovalRequest:
+    """The step waits for its own approval: it did not run; its request and audit rows exist.
+
+    The run's own row names the waiting request. The step's own
+    ``approval.request`` row (``own.request_audit_id``) names the step's
+    operation and the request, and says nowhere that the call runs at once.
+    With *wait_reason*, its stored ``wait_reason`` is that text.
+    """
     assert ran == [h.STEP_A]
     _, own = await requests()
     assert own.op_id == step.op_id
-    last: AuditLog = (await h.rows(run_op(child=child)))[-1]
+    last: AuditLog = (await h.rows(run_op_id or run_op(child=child)))[-1]
     assert last.status_code == 202
     assert last.payload["result_status"] == "awaiting_approval"
     assert last.payload["error"]["approval_request_id"] == str(own.id)
+    assert_own_request_row(await own_request_row(own), own, wait_reason=wait_reason)
     return own
+
+
+async def own_request_row(own: ApprovalRequest) -> AuditLog:
+    """The ``approval.request`` audit row of the step's own request."""
+    assert own.request_audit_id is not None
+    found = await h.row(own.request_audit_id)
+    assert found is not None
+    return found
+
+
+def assert_own_request_row(
+    found: AuditLog, own: ApprovalRequest, *, wait_reason: str | None = None
+) -> None:
+    """The row names the step's operation and its request; no text says it runs at once."""
+    assert found.path == "approval.request"
+    assert found.payload["op_id"] == own.op_id
+    assert found.payload["approval_request_id"] == str(own.id)
+    assert RUNS_AT_ONCE not in json.dumps(found.payload, default=str)
+    if wait_reason is not None:
+        assert found.payload["wait_reason"] == wait_reason
 
 
 # -- the approve routes -------------------------------------------------------------

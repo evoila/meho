@@ -562,6 +562,14 @@ Two fields of `Operator` feed it:
   session (`runbooks/run_service.py::check_step_caller`). MEHO runs the
   step for the person, so a person's copy gets `personal_agent`.
 
+The audit row has a column for the kind: `audit_log.caller_kind`
+(migration `0191`). A database CHECK allows only the five kinds, or
+empty. Nothing writes or reads it yet, so every row keeps it empty. The
+model and the migration write the five kinds out, because `db/models.py`
+cannot import the `auth` package (that package imports `db/models.py`).
+`tests/migrations/test_migration_0191_add_audit_log_caller_kind.py` fails
+when they differ from `CALLER_KINDS`.
+
 The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
 `person` is any human login, by web or by token, and `Asker.via` tells
 them apart. `tests/test_caller_kind.py` pins how the two line up.

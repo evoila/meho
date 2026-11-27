@@ -190,10 +190,10 @@ Quality Gate run shows no error annotation.
 file of a test worker. Each shard's pytest runs with `-n 3`: the pytest
 main process only starts the workers and prints results;
 the workers run the tests. Coverage measures every process through `COVERAGE_PROCESS_START` and
-writes a process's data file when that process exits. If the worker never
-exits normally, its file is never written, and the shard only contributes
-the code that runs at start-up (about 400 source files instead of about
-1,000). The combine job merges whatever is there and reports a low number.
+writes a process's data file when that process exits. If a worker never
+exits normally, its file is never written, and the shard loses the coverage
+of the tests that this worker ran. The shard keeps the data of its other
+workers. The combine job merges whatever is there and reports a low number.
 Nothing turns red because the coverage jobs are non-blocking by design.
 
 **Why the worker does not exit normally.** Two causes, seen in October 2026
@@ -225,12 +225,12 @@ Nothing turns red because the coverage jobs are non-blocking by design.
 **Where to look.**
 
 1. Download `python-coverage-data-shard-N` from the CI run (kept 1 day). The
-   shard must hold one file of about 250 KB for the worker; the pytest main
-   process file is about 230 KB, and helper processes leave files of about
-   50 KB. To check one file, run in `backend/`:
+   shard must hold one data file for each of its three workers. It also
+   holds smaller files of the pytest main process and of helper processes.
+   To check one file, run in `backend/`:
    `uv run coverage report --rcfile=.coveragerc.ci --data-file=<file>`.
-   The worker file alone reports about 60% for its shard; the main process
-   file reports under 20%.
+   A worker file reports much more than the main process file, because only
+   the workers run the tests.
 2. The shard's `coverage-pytest-log-shard-N` artifact (kept 7 days): a
    `KeyboardInterrupt` after the last test, or a step that stopped at the
    45-minute limit, means the shard lost its worker data.

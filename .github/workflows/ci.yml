@@ -2856,7 +2856,7 @@ jobs:
             --commit "${GITHUB_SHA}" --out unit-test-map.json "${junit[@]}"
 
       - name: Upload the unit test map
-        # Pull requests use a map for at most 7 days, so keep it for 8.
+        # Pull requests pick tests with a map for at most 2 days, and the tool reads a map up to 7 days old to warn about its age, so keep it for 8.
         if: always() && steps.test-map.outcome == 'success' && hashFiles('backend/unit-test-map.json') != ''
         continue-on-error: true
         timeout-minutes: 2

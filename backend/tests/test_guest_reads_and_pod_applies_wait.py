@@ -654,10 +654,9 @@ async def test_a_container_named_twice_by_an_alias_is_listed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = (
-        "apiVersion: v1\nkind: List\nmetadata: {name: l}\n"
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: a}\n"
         "x: &c {name: web, image: registry.example.test/web:1}\n"
-        "items:\n"
-        "  - {apiVersion: v1, kind: Pod, metadata: {name: a}, spec: {containers: [*c, *c]}}\n"
+        "spec: {containers: [*c, *c]}\n"
     )
     effect = await _apply_preview(monkeypatch, manifest, agent=False)
     assert [entry["container"] for entry in effect["preview"][RUN_COMMANDS_KEY]] == ["web"]

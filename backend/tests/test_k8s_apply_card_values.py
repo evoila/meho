@@ -16,8 +16,8 @@ stand-in Kubernetes API server of ``test_k8s_apply_card_through_dispatch``.
 * The ``binaryData`` of a Secret inside another object is hidden on the card.
 * A ServiceAccount that only names a Secret waits for approval without the
   key of the encrypted handoff.
-* A manifest that is not valid YAML tells every reader what the parser found,
-  with no text of the manifest.
+* A manifest that is not valid YAML is refused before the wait, with the
+  place the YAML reader stopped at and no text of the manifest.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from tests.test_k8s_apply_card_through_dispatch import (
     _login,
     _made_up_name,
     _park,
+    _refuse,
     _setup,
     _StandInServer,
     _views,
@@ -189,16 +190,18 @@ def test_a_service_account_that_names_a_secret_waits_without_the_handoff_key(
     assert row.execution_handle is None
 
 
-def test_an_unreadable_manifest_tells_every_reader_what_the_parser_found(
+def test_an_unreadable_manifest_is_refused_with_the_place_the_reader_stopped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
 
-    row = _park(_login("person-token"), "a: [b")
+    result = _refuse(_login("person-token"), "a: [b")
 
-    for name, view in _views(row).items():
-        assert view["preview_unavailable"] is True, name
-        assert "expected ',' or ']'" in view["preview_error"], name
-        assert "(line 1, column 6)" in view["preview_error"], name
-        assert "a: [b" not in view["preview_error"], name
+    reason = result.extras["reason"]
+    assert reason.startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(a structure YAML refuses, line 1, column 6). "
+    )
+    assert "a: [b" not in reason
+    assert server.requests == []

@@ -2094,6 +2094,7 @@ class KubernetesConnector(Connector):
         from meho_backplane.db.models import EndpointDescriptor
         from meho_backplane.operations._errors import (
             result_connector_error,
+            result_if_left_out,
             result_invalid_params,
             result_unknown_op,
         )
@@ -2101,6 +2102,7 @@ class KubernetesConnector(Connector):
             import_handler,
             is_unbound_method,
         )
+        from meho_backplane.operations._left_out import left_out_row_clause
         from meho_backplane.operations._lookup import count_known_ops
         from meho_backplane.operations._validate import validate_params
 
@@ -2124,11 +2126,21 @@ class KubernetesConnector(Connector):
                     EndpointDescriptor.impl_id == self.impl_id,
                     EndpointDescriptor.op_id == op_id,
                     EndpointDescriptor.is_enabled.is_(True),
+                    left_out_row_clause(),
                 )
             )
             descriptor = result.scalar_one_or_none()
 
         if descriptor is None:
+            left_out = result_if_left_out(
+                product=self.product,
+                version=self.version,
+                impl_id=self.impl_id,
+                op_id=op_id,
+                duration_ms=_elapsed(),
+            )
+            if left_out is not None:
+                return left_out
             known_op_count = await count_known_ops(
                 tenant_id=None,  # operator-less chassis path: global rows only
                 product=self.product,

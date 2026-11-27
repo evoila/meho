@@ -8,8 +8,12 @@
   ``CUSTOM_POLICY`` switch as the run. With the switch off, the card has no
   ``limits`` section. After the click the stored policy holds what the card
   showed.
-* The card records whether the switch was on. When the switch at the run is
-  not the same, the run stores nothing and asks for a new preview.
+* An install import planned with the switch on holds
+  ``planned_with_custom_policy: true``. Every other card has the keys it had
+  before the switch existed, also in ``meho_approvals_get`` and
+  ``meho_approvals_list``. A card without the field was planned with the
+  switch off. When the switch at the run is not the same as on the card, the
+  run stores nothing and asks for a new preview.
 
 Every case asks with a token (``POST /api/v1/policy/import?scope=install``)
 and approves with a click in the web console
@@ -30,6 +34,7 @@ from sqlalchemy import func, select
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PolicyRevision
+from meho_backplane.mcp.tools.approvals import _get_handler, _list_handler
 from meho_backplane.policy.service import POLICY_CHANGED
 from meho_backplane.settings import get_settings
 
@@ -79,9 +84,11 @@ async def _revisions() -> int:
         return int((await session.execute(select(func.count(PolicyRevision.id)))).scalar_one())
 
 
-async def _ask(client: TestClient, key: Any, content: str) -> tuple[uuid.UUID, dict[str, Any]]:
+async def _ask(
+    client: TestClient, key: Any, content: str, scope: str = "install"
+) -> tuple[uuid.UUID, dict[str, Any]]:
     """A platform admin asks by token; return the request and its card."""
-    asked = post(client, "import", token(key, sub="admin-a"), content, scope="install")
+    asked = post(client, "import", token(key, sub="admin-a"), content, scope=scope)
     assert asked.status_code == 202, asked.text
     (request,) = await pending_requests()
     assert str(request.id) == asked.json()["approval_request_id"]
@@ -176,7 +183,64 @@ async def test_with_the_switch_off_the_card_has_no_limits_section(
         mock_discovery_and_jwks(r, public_jwks(key))
         _request_id, card = await _ask(client, key, _EDIT)
     assert "limits" not in card["diff"]
-    assert card["planned_with_custom_policy"] is False
+    assert "planned_with_custom_policy" not in card
+
+
+# ---------------------------------------------------------------------------
+# The keys of the card, also as an agent reads it
+# ---------------------------------------------------------------------------
+
+_RELEASED_KEYS = {
+    "scope",
+    "file_sha256",
+    "based_on",
+    "planned_against_current",
+    "mistakes",
+    "warnings",
+    "no_change",
+    "diff",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "on", "field"),
+    [
+        pytest.param("tenant", False, None, id="15-tenant-off"),
+        pytest.param("install", False, None, id="16-install-off"),
+        pytest.param("install", True, True, id="17-install-on"),
+        pytest.param("tenant", True, None, id="18-tenant-on"),
+    ],
+)
+async def test_only_an_install_card_planned_with_the_switch_on_holds_the_field(
+    client: TestClient,
+    embedding: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str,
+    on: bool,
+    field: bool | None,
+) -> None:
+    _switch(monkeypatch, on)
+    await setup_ops(embedding)
+    key = make_rsa_keypair("kid-card-keys")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        request_id, card = await _ask(client, key, FILE_P, scope=scope)
+
+    expected = _RELEASED_KEYS if field is None else _RELEASED_KEYS | {"planned_with_custom_policy"}
+    reader = person("admin-b")
+    got = (await _get_handler(reader, {"approval_request_id": str(request_id)}))["proposed_effect"][
+        "preview"
+    ]
+    listed = await _list_handler(reader, {"status": "pending"})
+    (in_list,) = [
+        item["proposed_effect"]["preview"]
+        for item in listed["items"]
+        if item["id"] == str(request_id)
+    ]
+    for shown in (card, got, in_list):
+        assert set(shown) == expected
+        assert shown.get("planned_with_custom_policy") is field
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +252,9 @@ async def test_with_the_switch_off_the_card_has_no_limits_section(
 @pytest.mark.parametrize(
     ("at_ask", "at_run", "card_limits", "stores", "after"),
     [
-        pytest.param(False, True, None, False, {"personal_agent_up_to": "dangerous"}, id="5"),
+        pytest.param(
+            False, True, None, False, {"personal_agent_up_to": "dangerous"}, id="5-and-20"
+        ),
         pytest.param(
             True,
             False,
@@ -199,7 +265,7 @@ async def test_with_the_switch_off_the_card_has_no_limits_section(
             },
             False,
             {"personal_agent_up_to": "dangerous"},
-            id="6",
+            id="6-and-21",
         ),
         pytest.param(
             True,
@@ -211,9 +277,11 @@ async def test_with_the_switch_off_the_card_has_no_limits_section(
             },
             True,
             None,
-            id="7",
+            id="7-and-22",
         ),
-        pytest.param(False, False, None, True, {"personal_agent_up_to": "dangerous"}, id="8"),
+        pytest.param(
+            False, False, None, True, {"personal_agent_up_to": "dangerous"}, id="8-and-19"
+        ),
     ],
 )
 async def test_the_run_stores_nothing_when_the_switch_is_not_the_same_as_on_the_card(
@@ -236,7 +304,9 @@ async def test_the_run_stores_nothing_when_the_switch_is_not_the_same_as_on_the_
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         request_id, card = await _ask(client, key, _EDIT)
-        assert card["planned_with_custom_policy"] is at_ask
+        # A card planned with the switch off has no field, like a card that
+        # waited during an upgrade to this MEHO.
+        assert card.get("planned_with_custom_policy") is (True if at_ask else None)
         assert card["diff"].get("limits") == card_limits
         _switch(monkeypatch, at_run)
         clicked = await console_approve(client, key, request_id, sub="admin-b")

@@ -296,20 +296,23 @@ def _card_switch_differs(custom_policy: bool) -> bool:
 
     The switch decides whether the install's ``limits`` part is read, so a
     run with the other value would store a plan the approver did not see. A
-    card without the record counts as different. A run without an approval
-    (an admin in the web console) has no card and plans with the switch now.
+    card without the record was planned with the switch off (also a card made
+    before MEHO wrote the record). A run without an approval (an admin in the
+    web console) has no card and plans with the switch now.
     """
     card = approved_preview(POLICY_APPLY_OP_ID)
     if card is None:
         return False
-    return card.get("planned_with_custom_policy") is not custom_policy
+    return (card.get("planned_with_custom_policy") is True) is not custom_policy
 
 
 async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The plan on the approval card: what the file adds, changes and removes.
 
-    ``planned_with_custom_policy`` records the switch the plan was made with. Builds no
-    plan for a caller who may not ask for the import.
+    An install import planned with ``CUSTOM_POLICY`` on also holds
+    ``planned_with_custom_policy: true``; every other card has the keys it had
+    before the switch existed. Builds no plan for a caller who may not ask for
+    the import.
     """
     params = ctx.params
     refusal = policy_apply_requester_refusal(ctx.operator, params)
@@ -324,9 +327,8 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
             content=str(params["file"]).encode("utf-8"),
             custom_policy=custom_policy,
         )
-    return {
+    card: dict[str, Any] = {
         "scope": plan.scope,
-        "planned_with_custom_policy": custom_policy,
         "file_sha256": plan.file_sha256,
         "based_on": plan.based_on,
         "planned_against_current": plan.based_on == params.get("based_on"),
@@ -335,6 +337,9 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
         "no_change": plan.no_change,
         "diff": plan.diff,
     }
+    if plan.scope == "install" and custom_policy:
+        card["planned_with_custom_policy"] = True
+    return card
 
 
 async def register_policy_apply_operation(

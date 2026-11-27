@@ -493,13 +493,17 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
-- The approval card of an import records whether `CUSTOM_POLICY` was on
-  when it was planned (`planned_with_custom_policy`), because the switch
-  decides whether the `limits` part of the install's file is read. After the
-  approval, a run of a `scope: install` import reads the switch again.
-  When it is not the same as on the card (or the card has no record), the
-  run writes nothing and gives the same sentence. An admin's own run in
-  the web console has no card and plans with the switch as it is.
+- The approval card of a `scope: install` import planned with
+  `CUSTOM_POLICY` on holds `planned_with_custom_policy: true`, because the
+  switch decides whether the `limits` part of the install's file is read.
+  Every other card (a tenant import, or an import planned with the switch
+  off) has only the keys it had before the switch existed, also in
+  `meho_approvals_get` and `meho_approvals_list`. A card without the field
+  counts as planned with the switch off; so does a card that waited during
+  an upgrade. After the approval, a run of a `scope: install` import reads
+  the switch again. When it is not the same as on the card, the run writes
+  nothing and gives the same sentence. An admin's own run in the web
+  console has no card and plans with the switch as it is.
 - A run without an approval, or a run by the login that asked for it (for
   example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
   writes only for an admin in the web console. Any other such run writes

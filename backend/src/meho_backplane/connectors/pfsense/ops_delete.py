@@ -2176,6 +2176,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "nat", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         changes_rights=True,
         llm_instructions=_NAT_DELETE_LLM_INSTRUCTIONS,
     ),
@@ -2204,6 +2205,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "alias", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_ALIAS_DELETE_LLM_INSTRUCTIONS,
     ),
     PfSenseOp(
@@ -2231,6 +2233,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "routing", "static-route", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_ROUTE_DELETE_LLM_INSTRUCTIONS,
     ),
     PfSenseOp(
@@ -2261,6 +2264,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "routing", "gateway", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_GATEWAY_DELETE_LLM_INSTRUCTIONS,
     ),
     PfSenseOp(

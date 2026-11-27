@@ -32,8 +32,10 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from sqlalchemy import select, update
 
 from meho_backplane.api.v1.approvals import _view as _approval_view
@@ -96,12 +98,17 @@ from meho_backplane.operations.service_grants import (
 from meho_backplane.redaction.flight_recorder.families import classify_body_exclusion
 from meho_backplane.reflex.adoption import WRITE_OP_CLASSES as ADOPTION_WRITE_OP_CLASSES
 from meho_backplane.settings import get_settings
+from meho_backplane.ui.auth import SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.session_store import create_session, reset_fernet_cache_for_testing
+from meho_backplane.ui.templating import reset_templating_for_testing
 from tests._secret_class_standins import (  # noqa: F401 -- standin_ops is a fixture
     NOTE,
     STANDIN_OPS,
     made_up_value,
     standin_ops,
 )
+from tests.test_ui_approvals import _RESOLVE_OPERATOR as _RESOLVE_UI_OPERATOR
+from tests.test_ui_approvals import _build_app as _build_console_app
 
 from .broadcast_admission_helpers import seed_announcement
 
@@ -814,3 +821,74 @@ async def test_a_waiting_plain_step_keeps_the_parent_params_off_the_row(op_class
     assert ran.status == "ok", ran
     assert _STEPS_RAN == [_PLAIN_STEP]
     assert _PARENT_PARAMS_SEEN[-1] == parent_params
+
+
+# ---------------------------------------------------------------------------
+# The approval card in the web console names what the call does
+# ---------------------------------------------------------------------------
+
+_USE_CARD_TEXT = "This call uses a credential; its values are intentionally"
+_WRITE_CARD_TEXT = "This is a credential-class write; its values are intentionally"
+
+
+@pytest.fixture
+def _console_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The settings the web console needs to render a page."""
+    monkeypatch.setenv("BACKPLANE_URL", "https://backplane.test")
+    monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_ID", "meho-web")
+    monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
+    get_settings.cache_clear()
+    reset_fernet_cache_for_testing()
+    reset_templating_for_testing()
+    yield
+    get_settings.cache_clear()
+    reset_fernet_cache_for_testing()
+    reset_templating_for_testing()
+
+
+async def _card_of(request_id: uuid.UUID) -> str:
+    """The approval card of *request_id*, as the web console renders it."""
+    reviewer = _operator("admin-web", role=TenantRole.TENANT_ADMIN, web_session=True)
+    async with get_sessionmaker()() as session, session.begin():
+        web_session = await create_session(
+            session,
+            operator_sub=reviewer.sub,
+            tenant_id=_TENANT,
+            access_token="access-token-plaintext",
+            refresh_token="refresh-token-plaintext",
+            lifetime=timedelta(hours=1),
+        )
+    with patch(_RESOLVE_UI_OPERATOR, new_callable=AsyncMock, return_value=reviewer):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_build_console_app()),
+            base_url="https://testserver",
+            cookies={SESSION_COOKIE_NAME: str(web_session.id)},
+        ) as client:
+            response = await client.get(f"/ui/approvals/{request_id}")
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+@pytest.mark.usefixtures("_console_env")
+@pytest.mark.parametrize(
+    ("op_class", "shown", "not_shown"),
+    [
+        ("credential_use", _USE_CARD_TEXT, "credential-class write"),
+        ("credential_write", _WRITE_CARD_TEXT, "This call uses a credential"),
+    ],
+    ids=["credential_use", "credential_write"],
+)
+async def test_the_approval_card_names_what_a_waiting_call_of_the_class_does(
+    op_class: str, shown: str, not_shown: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(_DECLARED, _SAFE_OP, op_class)
+
+    result = await _agent(_SAFE_OP)
+
+    assert result.status == "awaiting_approval", result
+    (request,) = await _requests()
+    card = " ".join((await _card_of(request.id)).split())
+    assert shown in card
+    assert not_shown not in card
+    assert _SECRET not in card

@@ -106,6 +106,7 @@ __all__ = [
     "INTERNAL_EFFECT_KEYS",
     "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
+    "PREVIEW_REASON_CREDENTIAL_USE_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "SWITCHED_EFFECT_KEYS",
     "PreviewContext",
@@ -151,6 +152,11 @@ _SENSITIVE_CLASSES: frozenset[str] = CREDENTIAL_OP_CLASSES
 #: populated a preview" so the approval surface can style it as
 #: elevated-risk rather than merely incomplete.
 PREVIEW_REASON_CREDENTIAL_REDACTED = "credential_write_redacted"
+
+#: The reason code for the same collapsed envelope when the op is of class
+#: ``credential_use``: the call uses a credential, so the card says that in
+#: place of "credential-class write".
+PREVIEW_REASON_CREDENTIAL_USE_REDACTED = "credential_use_redacted"
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default for a *non*-credential op —
@@ -969,6 +975,8 @@ def describe_preview_provenance(
       - :data:`PREVIEW_REASON_CREDENTIAL_REDACTED` when the op is a
         credential class (its preview is intentionally suppressed absent a
         bespoke builder).
+      - :data:`PREVIEW_REASON_CREDENTIAL_USE_REDACTED` in place of it when
+        that class is ``credential_use``.
       - :data:`PREVIEW_REASON_NOT_POPULATED` otherwise (no builder /
         nothing to echo).
 
@@ -986,7 +994,10 @@ def describe_preview_provenance(
     # Collapsed to the identifier-only default: name WHY so the approver
     # sees a deliberately-redacted credential write distinctly from a
     # connector that simply never populated a preview.
-    if resolve_op_class(op_id, stored_op_class) in _SENSITIVE_CLASSES:
+    op_class = resolve_op_class(op_id, stored_op_class)
+    if op_class == "credential_use":
+        return False, PREVIEW_REASON_CREDENTIAL_USE_REDACTED
+    if op_class in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
 

@@ -265,6 +265,7 @@ TIME_OPS: tuple[WinsrvOp, ...] = (
         tags=("write", "time", "ntp"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
         llm_instructions={
             "when_to_call": (
                 "Call while building a server, for example the first domain controller, "

@@ -307,6 +307,7 @@ DOMAIN_CONFIG_OPS: tuple[MsadOp, ...] = (
         tags=("write", "domain", "password-policy"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_call": (
@@ -357,6 +358,7 @@ DOMAIN_CONFIG_OPS: tuple[MsadOp, ...] = (
         tags=("write", "domain", "join-limit"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_call": (

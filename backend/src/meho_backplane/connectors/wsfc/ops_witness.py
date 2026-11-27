@@ -256,6 +256,7 @@ WITNESS_OPS: tuple[WsfcOp, ...] = (
         tags=("write", "witness", "quorum"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
         llm_instructions={
             "when_to_use": (
                 "Reconfigure the quorum witness (disk / file-share / node "

@@ -244,6 +244,20 @@ class NoTerminalTest(LiveTestCase):
         ):
             self.assertIn(line, lines)
 
+    def test_check_10_sends_no_second_call_when_the_first_state_read_fails(self) -> None:
+        answers = good_answers()
+        answers["c10-first-request"] = {"code": 500, "body": {"detail": "boom"}}
+        result = self.live.run(answers)
+        why = "not run: the state of the first request req-c10-web could not be read (HTTP 500)"
+        lines = result_lines(result.stdout)
+        for who in (
+            "the Operator's AI tool, a personal agent, MCP",
+            "the Operator, a person, command line",
+        ):
+            self.assertIn(f"[skip] check 10 ({who}): {why}", lines)
+        self.assertIn("c10-first-request", self.steps(self.live.calls()))
+        self.assertNotIn("c10-cli", [c["step"] for c in self.live.calls()])
+
     def test_a_stopped_run_withdraws_its_requests(self) -> None:
         result = self.live.run(good_answers(), CPC_STUB_STOP_AT="c6-rights")
         self.assertEqual(result.returncode, STOPPED, result.stdout + result.stderr)

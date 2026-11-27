@@ -75,8 +75,10 @@ What it does:
   request given back that is on this run's list is this run's. One that is
   not on the list waited before this run: the check fails, and the script
   never asks anyone to approve that request and never withdraws it. Check
-  10 makes its second call only after its first request is decided, and
-  prints [skip] while that request still waits.
+  10 makes its second call only when it read the state of its first
+  request (HTTP 200) and that state is not pending. While the first request
+  still waits, or when its state could not be read, both parts of the
+  second call print [skip] and no second call is sent.
 
   Each call sends a work reference of its own: the run's reference and the
   step, for example custom-policy-check-<run>-c6-delete-person (the
@@ -1305,22 +1307,22 @@ check_8_console() {
     fi
     took_back_later override "an override of $(op_label CPC_OP_WRITE) (check 8)" CPC_OP_WRITE
     # The refused edit: a row of the Admin of CPC_ADMIN_TOKEN on the edit's own
-    # path with HTTP 400, the answer of the "Edit rejected" panel of a refused
-    # value (a 404, or a 403 or 401 for a login, is another reason), and no
-    # edit row of the operation. The row does not hold the text of the
-    # refusal, so the person says whether the panel showed it. For a caution
-    # write, MEHO refuses the lowering because the level is lower than the
-    # classification; the write rule has no reason of its own yet (#6966).
+    # path with HTTP 400 (a 404, or a 403 or 401 for a login, is another
+    # answer), and no edit row of the operation. The row does not hold the
+    # text of the refusal, so the person says whether the panel named the
+    # reason risk_level_below_classification. An empty edit or a value that
+    # is not valid also answers 400 with "Edit rejected", so only that reason
+    # is a yes. The write rule has no reason of its own yet (#6966).
     console_edit_rows c8-console-rows "$since" CPC_OP_WRITE
     edit_rows c8-edits "$since" CPC_OP_WRITE
     preview c8-level rest CPC_ADMIN_TOKEN CPC_OP_WRITE
-    ask c8-refusal "Did MEHO show \"Edit rejected\" and keep the risk level? The refusal that the level is lower than the classification is a yes. \"Not found\", a sign-in page and an error are a no."
+    ask c8-refusal "Did the \"Edit rejected\" panel say that the risk level is lower than the classification (MEHO's reason risk_level_below_classification)? Any other \"Edit rejected\" text is a no, for example an empty edit, a value that is not valid or a missing reason. \"Not found\", a sign-in page and an error are a no too."
     local refused admin_sub problems=()
     admin_sub="$(sub_of_token CPC_ADMIN_TOKEN || true)"
     refused="$(jq -r --arg u "$admin_sub" '[.[] | select($u != "" and .principal_sub == $u and .status_code == 400) | .id] | join(",")' <<<"$CONSOLE_EDITS")"
     [[ -n "$admin_sub" ]] || problems+=("the login of ADMIN_TOKEN could not be read at the start")
     [[ -n "$refused" ]] || problems+=("expected the audit row of the Admin's refused edit of $(op_label CPC_OP_WRITE) with HTTP 400")
-    [[ "$ANSWER" == yes ]] || problems+=("expected \"Edit rejected\" with the risk level kept")
+    [[ "$ANSWER" == yes ]] || problems+=("expected \"Edit rejected\" with the reason risk_level_below_classification")
     [[ "$EDITS" == "[]" ]] || problems+=("expected no edit of $(op_label CPC_OP_WRITE)")
     [[ "$(level_rank "$PREVIEW_LEVEL")" -ge 1 ]] || problems+=("expected the risk level to stay at least caution")
     report "check 8 (an Admin, a person, web console): risk level after the try ${PREVIEW_LEVEL:-none}, refused edit rows ${refused:-none}" ${problems[@]+"${problems[@]}"}
@@ -1416,15 +1418,20 @@ check_10() {
 
     local who="check 10 (the Operator, a person, command line)"
     # The second call sends a work reference of its own, so MEHO never gives
-    # the first request back for it. It runs only after the first request is
-    # decided; while that request still waits, both parts print [skip].
-    if [[ -n "$request_web" ]]; then
-        request_status c10-first-request "$request_web"
-        if [[ "$REQUEST_STATUS" == pending ]]; then
-            check_skip "check 10 (the Operator's AI tool, a personal agent, MCP): not run: the first request $request_web still waits"
-            check_skip "$who: not run: the first request $request_web still waits"
-            return
-        fi
+    # the first request back for it. It runs only when the state of the first
+    # request was read (HTTP 200) and is not pending. Otherwise both parts
+    # print [skip] and no second call is sent.
+    local agent_line="check 10 (the Operator's AI tool, a personal agent, MCP)" why=""
+    request_status c10-first-request "$request_web"
+    if [[ "$REQUEST_CODE" != 200 || "$REQUEST_STATUS" == unknown ]]; then
+        why="the state of the first request ${request_web:-<none>} could not be read (HTTP ${REQUEST_CODE:-none})"
+    elif [[ "$REQUEST_STATUS" == pending ]]; then
+        why="the first request $request_web still waits"
+    fi
+    if [[ -n "$why" ]]; then
+        check_skip "$agent_line: not run: $why"
+        check_skip "$who: not run: $why"
+        return
     fi
     call_op c10-cli mcp CPC_PERSON_TOKEN CPC_OP_OWN_AGENT
     request_cli="$CALL_REQUEST"

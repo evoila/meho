@@ -36,8 +36,12 @@ each time.
   that is on this run's list is this run's: the check goes on as usual. Any
   other request given back waited before the run. Then the check fails,
   nobody is asked to approve it, and the script never withdraws it.
-- Check 10 makes its second call only after its first request is decided.
-  While the first request still waits, it prints `[skip]`.
+- Check 10 makes its second call only when it read the state of its first
+  request (HTTP 200) and that state is not `pending`. While the first
+  request still waits, both parts of the second call print `[skip]`. When
+  the state cannot be read, both print `[skip] ... not run: the state of
+  the first request ... could not be read`. In both cases no second call
+  is sent.
 
 ## When it stops before any call
 
@@ -305,9 +309,11 @@ What makes a check pass:
   (`/ui/connectors/registry/<connector>/operations/<op>`) with HTTP 400,
   the answer of the "Edit rejected" panel, no edit row of the operation, a
   risk level read back of at least `caution`, and the person's word that
-  MEHO showed "Edit rejected" and kept the level. The refusal "the level
-  is lower than the classification" is a yes. "Not found", a sign-in page
-  and an error are a no. A 404, or a 403 or 401 for a login, does not
+  the "Edit rejected" panel said the risk level is lower than the
+  classification (MEHO's reason `risk_level_below_classification`). Every
+  other "Edit rejected" text is a no, for example an empty edit, a value
+  that is not valid or a missing reason. "Not found", a sign-in page and
+  an error are a no too. A 404, or a 403 or 401 for a login, does not
   count, and nor does a saved edit.
   Check 9 needs an edit row (`meho_connector_edit_op`) of the connector and
   operation that sets the level `dangerous`, followed by the row that

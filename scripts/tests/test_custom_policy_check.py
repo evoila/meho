@@ -1252,12 +1252,28 @@ class Check8ConsoleRowTest(DryRunTestCase):
             lines,
         )
 
-    def test_the_question_counts_the_refusal_below_the_classification_as_a_yes(self) -> None:
+    def test_the_question_asks_for_the_reason_below_the_classification_only(self) -> None:
         text = " ".join(SCRIPT.read_text().split())
         self.assertIn(
-            'Did MEHO show \\"Edit rejected\\" and keep the risk level? The refusal that the '
-            "level is lower than the classification is a yes.",
+            'Did the \\"Edit rejected\\" panel say that the risk level is lower than the '
+            "classification (MEHO's reason risk_level_below_classification)? Any other "
+            '\\"Edit rejected\\" text is a no, for example an empty edit, a value that is not '
+            "valid or a missing reason.",
             text,
+        )
+        docs = " ".join((ROOT / "docs/acceptance/custom-policy-check.md").read_text().split())
+        self.assertIn("(MEHO's reason `risk_level_below_classification`)", docs)
+
+    def test_a_yes_to_the_reason_passes(self) -> None:
+        self.answers["c8-refusal"] = {"code": 0, "body": "y"}
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        self.assertTrue(
+            any(
+                line.startswith("[ok]   check 8 (an Admin, a person, web console)")
+                for line in result_lines(result.stdout)
+            ),
+            result.stdout,
         )
 
     def test_a_no_fails(self) -> None:
@@ -1265,7 +1281,7 @@ class Check8ConsoleRowTest(DryRunTestCase):
         self.assert_one_fail(
             self.run_script(),
             "check 8 (an Admin, a person, web console)",
-            '"Edit rejected" with the risk level kept',
+            '"Edit rejected" with the reason risk_level_below_classification',
         )
 
 
@@ -1518,7 +1534,10 @@ class DocsPageTest(unittest.TestCase):
             "#7132 is merged",
             "Check 10 tests it while the switch is on.",
             "MEHO never gives the first request of check 10 back for its second call.",
-            "Check 10 makes its second call only after its first request is decided.",
+            "Check 10 makes its second call only when it read the state of its first "
+            "request (HTTP 200) and that state is not `pending`.",
+            "When the state cannot be read, both print `[skip] ... not run: the state of the "
+            "first request ... could not be read`. In both cases no second call is sent.",
             "An agent's policy import (`policy.apply`) is refused before anything waits",
             "An agent's policy import (`policy.apply`, check 6) passes only when MEHO refuses it",
             "exit code 3, or 1 when a check also failed",

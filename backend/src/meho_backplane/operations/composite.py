@@ -663,7 +663,7 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     return False
 
 
-def _covered_by_approved_run(descriptor: EndpointDescriptor, caller: Operator) -> bool:
+async def _covered_by_approved_run(descriptor: EndpointDescriptor, caller: Operator) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
     The run is approved when the dispatcher runs it with ``_approved=True``
@@ -688,7 +688,7 @@ def _covered_by_approved_run(descriptor: EndpointDescriptor, caller: Operator) -
         return False
     if credential_call_waits(descriptor.op_id, None):
         return False
-    if step_keeps_own_approval(descriptor, caller):
+    if await step_keeps_own_approval(descriptor, caller):
         return False
     return _runs_after_approval()
 
@@ -1346,7 +1346,7 @@ async def _gate_subop(
         verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
-    if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
+    if verdict is PermissionVerdict.NEEDS_APPROVAL and await _covered_by_approved_run(
         descriptor, operator
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)

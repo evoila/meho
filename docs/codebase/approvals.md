@@ -949,7 +949,9 @@ and by the dispatcher's rule for a child call):
 
 - A step whose operation has only the plain "always ask" mark
   (`op_policy.has_plain_mark`) no longer waits on its own. It goes ahead
-  under the run's approval. The owner decided this on 25 Nov 2026.
+  under the run's approval. The owner decided this on 25 Nov 2026. When
+  an override row of the operation sets the approval flag too, the step
+  still waits.
 - A step that a fixed rule covers (`fixed_rule_for`) waits for its own
   approval: a credential call, a change of rights or of the policy, a call
   to an address the caller gives, a `destructive` step and a delete.

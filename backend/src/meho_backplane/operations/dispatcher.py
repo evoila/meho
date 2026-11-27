@@ -4682,7 +4682,7 @@ async def _dispatch_now(
                     )
                 elif (
                     descriptor.safety_level != "destructive"
-                    and not step_keeps_own_approval(descriptor, operator)
+                    and not await step_keeps_own_approval(descriptor, operator)
                     and not descriptor_credential_waits(descriptor)
                 ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)

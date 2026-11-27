@@ -346,14 +346,7 @@ async def test_a_credential_step_waits_in_both_switch_states(
     await _assert_waits(result, _CREDENTIAL, _STEP_RUN)
 
 
-@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
-async def test_a_step_an_override_made_wait_still_waits(
-    monkeypatch: pytest.MonkeyPatch,
-    stub_embedding_service: AsyncMock,
-    session: AsyncSession,
-    on: bool,
-) -> None:
-    _switch(monkeypatch, on=on)
+async def _override(step: _Step, **fields: Any) -> None:
     async with get_sessionmaker()() as s, s.begin():
         s.add(
             OperationPolicyOverride(
@@ -361,10 +354,50 @@ async def test_a_step_an_override_made_wait_still_waits(
                 product="vault",
                 version="1.x",
                 impl_id="vault",
-                op_id=_OVERRIDDEN.op_id,
+                op_id=step.op_id,
                 set_by_sub="admin-a",
-                requires_approval=True,
+                **fields,
             )
         )
-    result = await _run_step(session, stub_embedding_service, _OVERRIDDEN)
-    await _assert_waits(result, _OVERRIDDEN, _STEP_RUN)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+@pytest.mark.parametrize("child", [False, True], ids=["step", "child-call"])
+async def test_a_step_an_override_made_wait_still_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+    child: bool,
+) -> None:
+    _switch(monkeypatch, on=on)
+    await _override(_OVERRIDDEN, requires_approval=True)
+    result = await _run_step(session, stub_embedding_service, _OVERRIDDEN, child=child)
+    await _assert_waits(result, _OVERRIDDEN, _CHILD_RUN if child else _STEP_RUN)
+
+
+@pytest.mark.parametrize("child", [False, True], ids=["step", "child-call"])
+async def test_on_a_plain_mark_step_with_an_override_flag_too_still_waits(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    child: bool,
+) -> None:
+    _switch(monkeypatch, on=True)
+    await _override(_PLAIN, requires_approval=True)
+    result = await _run_step(session, stub_embedding_service, _PLAIN, child=child)
+    await _assert_waits(result, _PLAIN, _CHILD_RUN if child else _STEP_RUN)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_child_call_an_override_raised_to_destructive_does_not_go_ahead(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+) -> None:
+    _switch(monkeypatch, on=on)
+    await _override(_OVERRIDDEN, safety_level="destructive")
+    result = await _run_step(session, stub_embedding_service, _OVERRIDDEN, child=True)
+    assert result.status != "ok", result
+    assert ran == [h.STEP_A]

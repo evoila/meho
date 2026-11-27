@@ -240,9 +240,11 @@ rejects a whitespace-only secret rather than setting an empty password.
   `reachable=False`). With `KEYCLOAK_ANSWER_REALM` on and a nonempty
   answered `realm` that is not the managed realm, `extras` also has
   `realm_name_differs`. A target read (`meho targets describe`, the target
-  list) leaves that line out of a Keycloak target's saved probe while the
-  switch is off (`shown_fingerprint` in `targets/keycloak_realm_warnings.py`).
-  The probe of a target of another product keeps its `extras` as they are.
+  list) leaves that line out of a saved Keycloak probe while the switch is
+  off (`shown_fingerprint` in `targets/keycloak_realm_warnings.py`). The
+  saved probe's own `product` decides this, not the target's current
+  product. A probe of another product keeps its `extras` as they are. The
+  measurement of this probe field and its switch is tracked in #6639.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,

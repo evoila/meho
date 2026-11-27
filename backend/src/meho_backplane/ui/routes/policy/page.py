@@ -57,14 +57,16 @@ _require_operator_dep = Depends(require_ui_operator)
 class _PolicySwitchRoute(APIRoute):
     """A route that matches only with the switch ``CUSTOM_POLICY`` on.
 
-    The switch is read on each request, so a change of the setting needs no
-    new router.
+    The switch is read on each request to this address, so a change of the
+    setting needs no new router. A request to any other address never reads
+    the settings here.
     """
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
-        if not custom_policy_on(get_settings()):
+        match, child_scope = super().matches(scope)
+        if match is Match.NONE or not custom_policy_on(get_settings()):
             return Match.NONE, {}
-        return super().matches(scope)
+        return match, child_scope
 
 
 async def _policy_page(

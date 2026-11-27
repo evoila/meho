@@ -24,6 +24,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from starlette.routing import Match
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
@@ -34,6 +35,7 @@ from meho_backplane.policy import fixed_rules
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.routes.policy import POLICY_NEEDS_ADMIN, build_policy_router
+from meho_backplane.ui.routes.policy import page as policy_page
 from tests._oidc_jwt_helpers import make_rsa_keypair, mint_token, public_jwks
 from tests.test_ui_auth_flow import _mock_oidc_metadata, _patch_oauth_token_transport
 from tests.test_ui_connectors_registry_review import (  # noqa: F401 -- the autouse fixture applies by import
@@ -346,3 +348,17 @@ def test_first_line_names_both_lists_and_says_the_page_changes_nothing(
     assert first_line in words
     old_line = "The rules that decide which operations run at once and which wait for a person"
     assert old_line not in words
+
+
+def test_another_address_does_not_read_the_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The policy route reads the settings only for its own address."""
+
+    def _no_settings() -> None:
+        raise AssertionError("the policy route read the settings")
+
+    monkeypatch.setattr(policy_page, "get_settings", _no_settings)
+    (route,) = build_policy_router().routes
+    for path in ("/openapi.json", "/ui/no-such-page", "/api/v1/health"):
+        scope = {"type": "http", "method": "GET", "path": path, "root_path": ""}
+        match, _child = route.matches(scope)
+        assert match is Match.NONE, path

@@ -877,19 +877,27 @@ async def require_ui_operator_for_call(
 async def _reader_call_sentence(operator: Operator, request: Request) -> str | None:
     """The Reader sentence when the call form of *request* asks for a change.
 
+    Only a Reader's form is read; every other role gets ``None`` at once.
     FastAPI read the form before the dependencies run and the request keeps
     it. ``params`` is the JSON text of the form; text that is not a JSON
-    object counts as no params.
+    object counts as no params. ``params`` that this check cannot read (JSON
+    nested too deep for the parser) give ``None``: the plain ``403
+    operator_required`` of the door, never a server error.
     """
     import json
 
+    from meho_backplane.auth.operator import TenantRole
     from meho_backplane.operations.reader_call import reader_call_refusal
 
+    if operator.tenant_role is not TenantRole.READ_ONLY:
+        return None
     form = await request.form()
     try:
         params = json.loads(str(form.get("params") or "{}"))
     except ValueError:
         params = {}
+    except RecursionError:
+        return None
     arguments = {
         "connector_id": form.get("connector_id"),
         "op_id": form.get("op_id"),

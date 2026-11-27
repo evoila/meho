@@ -504,9 +504,17 @@ Where MEHO checks it:
     the code and the sentence. A `safe` read that needs no approval, an
     operation that cannot be found and a form that names no operation get
     `403 operator_required`.
-  - The REST call route reads a body that is not a JSON object (an empty
-    body, plain text, a form body) as a call that names no operation: a
-    Reader gets the plain `403 {"detail": "insufficient_role"}`.
+  - The REST call route reads a body that is not a JSON object as a call
+    that names no operation. An empty body, a form body and a `text/plain`
+    body that is not JSON name no operation: a Reader gets the plain
+    `403 {"detail": "insufficient_role"}`. A body with the content type
+    `application/json` that is not valid JSON gets `422` before the role
+    check runs.
+  - A body that the role check cannot read gets the plain 403 of the door,
+    never a server error: `403 {"detail": "insufficient_role"}` on the REST
+    call route and `403 {"detail": "operator_required"}` on the console
+    call form. MEHO stores nothing and runs nothing. The console role check
+    reads the call form only for a Reader.
 
 A walk test (`tests/test_reader_change_refused.py`,
 `tests/test_reader_change_refused_console.py`) calls every REST route and

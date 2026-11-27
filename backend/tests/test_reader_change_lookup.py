@@ -331,6 +331,8 @@ _NOT_A_JSON_OBJECT: dict[str, tuple[bytes, str | None]] = {
     "empty, no type": (b"", None),
     "plain text": (b"made-up words", "text/plain"),
     "form": (b"connector_id=made-up&op_id=made-up", "application/x-www-form-urlencoded"),
+    "plain text nested too deep to read": (b"[" * 200_000 + b"]" * 200_000, "text/plain"),
+    "plain text nested 2,000 levels": (b"[" * 2_000 + b"]" * 2_000, "text/plain"),
 }
 
 
@@ -360,4 +362,35 @@ async def test_the_rest_call_route_answers_a_body_that_is_not_a_json_object(
     assert reader.status_code == 403, reader.text
     assert reader.json() == _PLAIN_REST
     assert operator.status_code == 422, operator.text
+    await _assert_nothing_stored_or_run()
+
+
+#: Bodies of type ``application/json`` that FastAPI answers before the role
+#: check: (content, status for every role).
+_ANSWERED_BEFORE_THE_ROLE_CHECK: dict[str, tuple[bytes, int]] = {
+    "JSON that is not valid": (b'{"connector_id": ', 422),
+    "JSON nested too deep to read": (b"[" * 200_000 + b"]" * 200_000, 400),
+}
+
+
+@pytest.mark.parametrize("case", list(_ANSWERED_BEFORE_THE_ROLE_CHECK))
+@pytest.mark.usefixtures("safe_kinds")
+async def test_the_rest_call_route_answers_some_json_bodies_before_the_role_check(
+    client: tuple[httpx.AsyncClient, Any],  # noqa: F811
+    case: str,
+) -> None:
+    from tests.test_approved_run_rights import _token
+
+    ac, key = client
+    content, expected = _ANSWERED_BEFORE_THE_ROLE_CHECK[case]
+    type_header = {"Content-Type": "application/json"}
+
+    for headers in (
+        _reader_tokens(key)["person"],
+        _token(key, "operator-person", role=TenantRole.OPERATOR),
+    ):
+        response = await ac.post(
+            "/api/v1/operations/call", content=content, headers={**headers, **type_header}
+        )
+        assert response.status_code == expected, response.text
     await _assert_nothing_stored_or_run()

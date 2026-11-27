@@ -226,18 +226,24 @@ async def require_operator_for_call(
 
 
 async def _json_body_or_none(request: Request) -> object:
-    """The JSON body of *request*, or ``None`` when the body is not JSON.
+    """The JSON body of *request*, or ``None`` when the body names no operation.
 
-    An empty body, plain text and a form body name no operation. FastAPI read
-    the body before the dependencies run and the request keeps it, so this
-    read does not wait on the client.
+    An empty body, a form body and a ``text/plain`` body that is not JSON
+    name no operation: a Reader gets the plain ``403 {"detail":
+    "insufficient_role"}``. A body with the content type
+    ``application/json`` that is not valid JSON gets ``422`` before the role
+    check runs. A body that this check cannot read (its JSON is nested too
+    deep for the parser) also names no operation, so a Reader gets the plain
+    ``403`` of the door, never a server error. FastAPI read the body before
+    the dependencies run and the request keeps it, so this read does not
+    wait on the client.
     """
     raw = await request.body()
     if not raw:
         return None
     try:
         return json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 

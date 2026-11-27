@@ -33,6 +33,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
 from meho_backplane.main import app
+from meho_backplane.operations import grant_approval
 from meho_backplane.operations._preview import (
     _PREVIEW_BUILDERS,
     PreviewContext,
@@ -254,10 +255,15 @@ class _Row:
     token: tuple[bool, str] | None
 
 
-async def _rows(client: TestClient, key: Any) -> list[_Row]:
+async def _rows(
+    client: TestClient,
+    key: Any,
+    callers: tuple[_Caller, ...] = _CALLERS,
+    ops: tuple[str, ...] = _OPS,
+) -> list[_Row]:
     rows: list[_Row] = []
-    for caller in _CALLERS:
-        for level in _OPS:
+    for caller in callers:
+        for level in ops:
             body = caller.ask(client, key, _op(level))
             own = body.get("own_approval")
             if body["answer"] != "wait":
@@ -368,6 +374,26 @@ async def test_own_approval_follows_the_routing(
     assert "install:routing[0]" in operator["token_reason"]
     admin = by[("Admin, token", "caution")].own
     assert admin is not None and admin["web"] and admin["token"]
+
+
+@pytest.mark.asyncio
+async def test_own_approval_of_a_change_of_rights(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A change of rights: only an admin, and only with a click in the web console."""
+    _switches(monkeypatch, CUSTOM_POLICY="true", APPROVAL_ALLOW_SELF_APPROVAL="true")
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {_op("dangerous")})
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-ownappr-rights")
+    callers = tuple(c for c in _CALLERS if c.kind is PrincipalKind.USER and not c.web)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        rows = await _rows(client, key, callers, ("dangerous",))
+    assert _mismatches(rows) == []
+    by = {row.caller: row.own for row in rows}
+    admin, operator = by["Admin, token"], by["Operator, token"]
+    assert admin is not None and admin["web"] and not admin["token"]
+    assert operator is not None and not operator["web"] and not operator["token"]
 
 
 @pytest.mark.asyncio

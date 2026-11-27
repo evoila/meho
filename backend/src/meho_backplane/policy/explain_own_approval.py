@@ -29,7 +29,7 @@ from collections.abc import Sequence
 
 import structlog
 
-from meho_backplane.auth.delegation import ACTOR_SUB_KEY, resolve_actor_sub
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, EndpointDescriptor
 from meho_backplane.operations._validate import TOKEN_CALL_WAIT, waits_only_for_token_call
@@ -55,9 +55,10 @@ def request_of_call(
 
     The fields the approve checks read, set as the park sets them
     (:func:`~meho_backplane.operations.approval_queue.create_pending_request`).
-    *approvers* are the groups the routing gives the call; the park stores
-    them only while routing is on, and never for a change of rights. Call
-    it with the call's actor bound, as the call has it.
+    The call has no parameters, as every explain question. *approvers* are
+    the groups the routing gives the call; the park stores them only while
+    routing is on, and never for a change of rights. Call it with the
+    call's actor bound, as the call has it.
     """
     effect: dict[str, object] = {"safety_level": descriptor.safety_level}
     if waits_only_for_token_call(asker, descriptor):
@@ -68,13 +69,14 @@ def request_of_call(
         principal_kind=asker.principal_kind.value,
         op_id=descriptor.op_id,
         connector_id=connector_id,
+        params={},
         proposed_effect=effect,
         status=ApprovalRequestStatus.PENDING.value,
         rights_change=False,
     )
     if is_rights_change(request):
         request.rights_change = True
-        web = asker.web_session and is_human_principal(asker) and resolve_actor_sub() is None
+        web = asker.web_session and is_human_principal(asker)
         request.proposed_effect = {**effect, ASKED_IN_WEB_CONSOLE: web}
     elif routing_enabled():
         request.approver_roles = [group.removeprefix("MEHO-") for group in approvers.groups]

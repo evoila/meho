@@ -944,6 +944,7 @@
   "tests/test_operation_contract_rules.py": 16.57,
   "tests/test_operation_contracts.py": 1.87,
   "tests/test_operation_group_texts.py": 0.53,
+  "tests/test_operation_left_out_at_start.py": 3.0,
   "tests/test_operation_op_class.py": 0.72,
   "tests/test_operation_picks.py": 4.31,
   "tests/test_operation_policy_overrides.py": 6.01,

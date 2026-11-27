@@ -344,8 +344,18 @@ connector kit (kit 1.7 or higher).
 | `hard_to_undo` | `deletes`, `stops`, `overwrites`, or none (the default) | A call can delete, stop or overwrite something, and no later call of the same connector brings it back. |
 | `changes_rights` | yes or no (the default) | A call that changes who or what may reach or use something in the target system: a login, a group or role, an access list, a firewall rule. |
 
-- Registration refuses `hard_to_undo` on a `safe` operation, and any word
-  other than the three. The error names the operation and says why.
+- MEHO leaves an operation whose mark does not fit its risk level out at
+  registration, and the log line names it. Every other operation
+  registers, and the start goes on. The first such mark is
+  `hard_to_undo` on a `safe` operation. The operation gets no row (a row
+  of an earlier start is deleted), so a call answers as for an operation
+  that does not exist. The log line is `operation_left_out`, with the
+  operation, its connector (product, version, implementation and the
+  connector package, if any) and the reason. The checks are in
+  `_MARK_FIT_CHECKS` in `operations/typed_register.py`; a new check is
+  one more entry there.
+- Registration refuses any `hard_to_undo` word other than the three. The
+  error names the operation and says why, and the start stops.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
   (a CHECK allows only the three words) and
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.

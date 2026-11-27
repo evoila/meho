@@ -3,8 +3,9 @@
 
 """``hard_to_undo`` and ``changes_rights`` on an operation's own definition.
 
-The rules: registration refuses ``hard_to_undo`` on a ``safe`` operation and
-any word other than ``deletes``, ``stops`` and ``overwrites``; the stored row
+The rules: registration leaves out an operation that sets ``hard_to_undo`` on
+a ``safe`` level, refuses any word other than ``deletes``, ``stops`` and
+``overwrites``; the stored row
 carries both values, for a typed and a multi-step operation; and each start
 writes them from the code again.
 """
@@ -16,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,13 +122,26 @@ async def test_an_op_that_sets_neither_stores_no_and_no(
 
 
 @pytest.mark.asyncio
-async def test_registration_refuses_hard_to_undo_on_a_safe_op(
+async def test_registration_leaves_out_hard_to_undo_on_a_safe_op(
     session: AsyncSession, embedding: AsyncMock
 ) -> None:
-    with pytest.raises(ValueError, match=r"undo-demo\.widget\.safe.*safe") as caught:
+    with structlog.testing.capture_logs() as logs:
         await _register(session, embedding, "undo-demo.widget.safe", hard_to_undo="deletes")
-    assert "cannot be hard to undo" in str(caught.value)
     assert await _row(session, "undo-demo.widget.safe") is None
+    [line] = [e for e in logs if e["event"] == "operation_left_out"]
+    assert line["op_id"] == "undo-demo.widget.safe"
+    assert "cannot be hard to undo" in line["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_left_out_op_loses_the_row_an_earlier_start_wrote(
+    session: AsyncSession, embedding: AsyncMock
+) -> None:
+    op_id = "undo-demo.widget.purge"
+    await _register(session, embedding, op_id)
+    assert await _row(session, op_id) is not None
+    await _register(session, embedding, op_id, hard_to_undo="deletes")
+    assert await _row(session, op_id) is None
 
 
 @pytest.mark.asyncio
@@ -161,7 +176,7 @@ async def test_each_start_writes_both_fields_from_the_code_again(
 
 
 @pytest.mark.asyncio
-async def test_a_multi_step_op_carries_both_fields_and_refuses_a_safe_one(
+async def test_a_multi_step_op_carries_both_fields_and_leaves_out_a_safe_one(
     session: AsyncSession, embedding: AsyncMock
 ) -> None:
     common: dict[str, Any] = {
@@ -184,14 +199,15 @@ async def test_a_multi_step_op_carries_both_fields_and_refuses_a_safe_one(
     assert row is not None
     assert (row.source_kind, row.hard_to_undo, row.changes_rights) == ("composite", "stops", True)
 
-    with pytest.raises(ValueError, match=r"undo-demo\.composite\.view.*safe"):
-        await register_composite_operation(
-            op_id="undo-demo.composite.view",
-            safety_level="safe",
-            requires_approval=False,
-            hard_to_undo="deletes",
-            **common,
-        )
+    await register_composite_operation(
+        op_id="undo-demo.composite.view",
+        safety_level="safe",
+        requires_approval=False,
+        hard_to_undo="deletes",
+        **common,
+    )
+    await session.commit()
+    assert await _row(session, "undo-demo.composite.view") is None
 
 
 @pytest.mark.asyncio

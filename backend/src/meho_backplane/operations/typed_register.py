@@ -139,7 +139,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import structlog
 from sqlalchemy import delete, insert, select, update
@@ -425,6 +425,12 @@ async def run_typed_op_registrars(
     dispatch. Operators reading the traceback see the connector's
     own module path in the registrar identity, which points at the
     failing op directly.
+
+    One exception: an operation whose mark does not fit its risk level
+    (for example ``hard_to_undo`` on a ``safe`` op) does not fail its
+    registrar. Registration leaves that one op out with one
+    ``operation_left_out`` log line, and the start goes on
+    (:data:`_MARK_FIT_CHECKS`).
 
     The ``embedding_service`` parameter is the test seam: production
     callers leave it ``None`` and each registrar resolves the
@@ -1003,25 +1009,82 @@ def _validate_safety_level(safety_level: str) -> str:
     return safety_level
 
 
-def _validate_hard_to_undo(op_id: str, *, hard_to_undo: str | None, safety_level: str) -> None:
-    """Refuse a ``hard_to_undo`` value MEHO does not know, or one on a ``safe`` op.
-
-    A ``safe`` operation changes nothing, so it cannot delete, stop or
-    overwrite anything. The message names the op and says why.
-    """
-    if hard_to_undo is None:
-        return
-    if hard_to_undo not in _HARD_TO_UNDO_KINDS:
+def _validate_hard_to_undo(op_id: str, *, hard_to_undo: str | None) -> None:
+    """Refuse a ``hard_to_undo`` value MEHO does not know. The message names the op."""
+    if hard_to_undo is not None and hard_to_undo not in _HARD_TO_UNDO_KINDS:
         raise ValueError(
             f"op {op_id!r}: hard_to_undo must be one of {sorted(_HARD_TO_UNDO_KINDS)} "
             f"or None (received {hard_to_undo!r})"
         )
-    if safety_level == "safe":
-        raise ValueError(
-            f"op {op_id!r} declares hard_to_undo={hard_to_undo!r} but safety_level='safe'; "
-            "a safe operation changes nothing, so it cannot be hard to undo. "
-            "Give it a higher safety_level or leave hard_to_undo out"
-        )
+
+
+class _Marks(NamedTuple):
+    """The risk level of an operation and the marks it sets in its code."""
+
+    safety_level: str
+    hard_to_undo: str | None
+    changes_rights: bool
+
+
+def _hard_to_undo_on_safe(marks: _Marks) -> str | None:
+    if marks.hard_to_undo is None or marks.safety_level != "safe":
+        return None
+    return (
+        f"hard_to_undo={marks.hard_to_undo!r} on a 'safe' operation; a safe operation "
+        "changes nothing, so it cannot be hard to undo. Give it a higher safety_level "
+        "or leave hard_to_undo out"
+    )
+
+
+#: The checks of an operation's marks against its risk level. Each returns
+#: why the marks do not fit, or ``None``. An operation that fails one is
+#: left out at registration (:func:`_left_out_for_misfit`), and the start
+#: goes on. A new check is one more entry here.
+_MARK_FIT_CHECKS: tuple[Callable[[_Marks], str | None], ...] = (_hard_to_undo_on_safe,)
+
+
+async def _left_out_for_misfit(
+    session: AsyncSession | None,
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+    handler_ref: str,
+    marks: _Marks,
+) -> bool:
+    """Leave *op_id* out when a mark does not fit its risk level; ``True`` when left out.
+
+    A left-out op gets no row: a row an earlier start wrote for it is
+    deleted, so no call reaches it. One log line names the op, its
+    connector and the reason. Every other op registers as before.
+    """
+    reason = next((r for check in _MARK_FIT_CHECKS if (r := check(marks)) is not None), None)
+    if reason is None:
+        return False
+    structlog.get_logger(__name__).error(
+        "operation_left_out",
+        op_id=op_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        connector_package=connector_package_of(handler_ref),
+        reason=reason,
+    )
+    remove = delete(EndpointDescriptor).where(
+        EndpointDescriptor.tenant_id.is_(None),
+        EndpointDescriptor.product == product,
+        EndpointDescriptor.version == version,
+        EndpointDescriptor.impl_id == impl_id,
+        EndpointDescriptor.op_id == op_id,
+    )
+    if session is not None:
+        await session.execute(remove)
+        return True
+    async with get_sessionmaker()() as owned_session:
+        await owned_session.execute(remove)
+        await owned_session.commit()
+    return True
 
 
 def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
@@ -1439,7 +1502,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
-    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1455,6 +1518,16 @@ async def register_typed_operation(
 
     if session is None:
         session = _CATALOG_SESSION.get()
+    if await _left_out_for_misfit(
+        session,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        handler_ref=handler_ref,
+        marks=_Marks(safety_level, hard_to_undo, changes_rights),
+    ):
+        return
     if session is not None:
         await _register_in_session(
             session,
@@ -1651,7 +1724,7 @@ async def register_composite_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
-    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1667,6 +1740,16 @@ async def register_composite_operation(
 
     if session is None:
         session = _CATALOG_SESSION.get()
+    if await _left_out_for_misfit(
+        session,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        handler_ref=handler_ref,
+        marks=_Marks(safety_level, hard_to_undo, changes_rights),
+    ):
+        return
     if session is not None:
         await _register_in_session(
             session,

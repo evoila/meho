@@ -216,7 +216,12 @@ The inputs of `register_typed_operation`:
   - `hard_to_undo` is `"deletes"`, `"stops"` or `"overwrites"` when a
     call can delete, stop or overwrite something, and no later call of
     your connector brings it back. Leave it out (`None`) otherwise. MEHO
-    refuses it on a `safe` operation, and refuses any other word.
+    refuses any other word.
+    MEHO leaves an operation whose mark does not fit its risk level out at
+    registration, and the log line names it. Every other operation
+    registers, and the start goes on. For example, an operation with
+    `hard_to_undo` on a `safe` level is left out: look for the log line
+    `operation_left_out`.
   - `changes_rights=True` when a call gives or takes rights, a login or
     an access policy in the target system. The default is `False`.
 

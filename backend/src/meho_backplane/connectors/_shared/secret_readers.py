@@ -90,13 +90,13 @@ from meho_backplane.connectors._shared.system_operator import is_system_operator
 __all__ = ["SecretReaders", "caller_id"]
 
 #: The kind of a caller: how it logs in to Vault.
-CallerKind = Literal["operator", "check-runner"]
+SecretReaderKind = Literal["operator", "check-runner"]
 
 #: A caller, and the secret reference their read passed for.
-_ReadKey = tuple[str, tuple[CallerKind, str]]
+_ReadKey = tuple[str, tuple[SecretReaderKind, str]]
 
 
-def caller_id(operator: Operator) -> tuple[CallerKind, str]:
+def caller_id(operator: Operator) -> tuple[SecretReaderKind, str]:
     """Return ``(kind, sub)``: who *operator* is for a secret read.
 
     The check runner (``check_runner_dispatch``) reads with its own token
@@ -104,7 +104,7 @@ def caller_id(operator: Operator) -> tuple[CallerKind, str]:
     its own kind. Everything else is a person or machine login reading with
     its own token.
     """
-    kind: CallerKind = "check-runner" if operator.check_runner_dispatch else "operator"
+    kind: SecretReaderKind = "check-runner" if operator.check_runner_dispatch else "operator"
     return (kind, operator.sub)
 
 
@@ -191,7 +191,7 @@ class SecretReaders:
         """Forget every reader of every target."""
         self._callers.clear()
 
-    def callers(self, target: TenantScopedTargetLike) -> frozenset[tuple[CallerKind, str]]:
+    def callers(self, target: TenantScopedTargetLike) -> frozenset[tuple[SecretReaderKind, str]]:
         """Who read the present secret of *target*, as ``(kind, sub)`` (for tests)."""
         ref = _secret_ref(target)
         reads = self._callers.get(target_cache_key(target), ())

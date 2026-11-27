@@ -4217,11 +4217,24 @@ meho pfsense version [flags]
 
 ## `meho policy`
 
-Manage the policy file (validate / diff / import / export / history / explain)
+Manage the policy file (validate / diff / import / export / history / explain / carry-over)
 
 ```
 meho policy
 ```
+
+### `meho policy carry-over`
+
+List every saved "always wait" and what changes if MEHO reads it as destructive
+
+```
+meho policy carry-over --dry-run [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — list the settings; change nothing (required)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
 ### `meho policy diff`
 

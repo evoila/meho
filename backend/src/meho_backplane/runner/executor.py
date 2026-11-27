@@ -494,4 +494,6 @@ def _build_operator(item: RunnerWorkItem) -> Operator:
         tenant_id=principal.tenant_id,
         tenant_role=principal.tenant_role,
         principal_kind=principal.principal_kind,
+        # It runs on the runner; the central gate already decided the call.
+        in_code_kind="runner",
     )

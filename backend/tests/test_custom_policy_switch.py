@@ -14,7 +14,8 @@
   of ``CUSTOM_POLICY`` the same way.
 * No code outside :mod:`meho_backplane.policy.switches` and the settings
   reads the four switches directly. The settings file holds only the
-  definition of ``CUSTOM_POLICY``, also when a read is split over lines.
+  definition of ``CUSTOM_POLICY``, also when a read is split over lines,
+  and the search reads the whole settings file.
 * Each file that reads a settings field by a name it gets while the code
   runs is on a fixed list.
 """
@@ -386,6 +387,42 @@ def test_settings_allow_only_the_definition_of_custom_policy() -> None:
     assert _custom_policy_reads(f"{definition}\non = self.custom_policy", allowed) == [4]
 
 
+def _files_searched_for_custom_policy() -> dict[str, str]:
+    """The text of each file the search for reads of ``CUSTOM_POLICY`` reads,
+    by its path under the package.
+    """
+    return {
+        path.relative_to(_SRC).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(_SRC.rglob("*.py"))
+        if path != _SRC / "policy" / "switches.py"
+    }
+
+
+def _custom_policy_reads_in(files: dict[str, str]) -> list[str]:
+    """``<path>:<line>`` of each read of ``CUSTOM_POLICY`` in *files*."""
+    return [
+        f"{name}:{number}"
+        for name, text in files.items()
+        for number in _custom_policy_reads(text, _CUSTOM_POLICY_ALLOWED.get(name, ()))
+    ]
+
+
+def test_the_search_finds_a_second_read_in_settings() -> None:
+    """The search reads all of ``settings.py``, not only the definition."""
+    files = _files_searched_for_custom_policy()
+    assert "settings.py" in files, "the search must read settings.py"
+    text = files["settings.py"]
+    end = text.count("\n")
+    files["settings.py"] = (
+        f'{text}\ncustom_policy=parse_bool_env(\n    os.environ.get("CUSTOM_POLICY"),\n)'
+        '\non = os.getenv("CUSTOM_POLICY")\n'
+    )
+
+    found = [read for read in _custom_policy_reads_in(files) if read.startswith("settings.py:")]
+
+    assert found == [f"settings.py:{end + 3}", f"settings.py:{end + 5}"]
+
+
 def test_no_code_reads_the_switches_directly() -> None:
     sources = sorted(_SRC.rglob("*.py"))
     found = [
@@ -395,15 +432,7 @@ def test_no_code_reads_the_switches_directly() -> None:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
         if _DIRECT_READ.search(line)
     ]
-    found += [
-        f"{path.relative_to(_SRC)}:{number}"
-        for path in sources
-        if path != _SRC / "policy" / "switches.py"
-        for number in _custom_policy_reads(
-            path.read_text(encoding="utf-8"),
-            _CUSTOM_POLICY_ALLOWED.get(path.relative_to(_SRC).as_posix(), ()),
-        )
-    ]
+    found += _custom_policy_reads_in(_files_searched_for_custom_policy())
     assert found == [], "ask meho_backplane.policy.switches instead"
 
 

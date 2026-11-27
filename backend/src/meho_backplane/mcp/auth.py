@@ -54,7 +54,7 @@ from meho_backplane.auth.conventions_drift_login import (
     SCOPE_VIOLATION as CONVENTIONS_DRIFT_SCOPE_VIOLATION,
 )
 from meho_backplane.auth.current_tenant import TENANT_HEADER, bind_tenant_role_source
-from meho_backplane.auth.jwt import header_value, verify_jwt_for_audience
+from meho_backplane.auth.jwt import header_value, mark_token_checked, verify_jwt_for_audience
 from meho_backplane.auth.machine_logins import note_machine_login
 from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
@@ -177,7 +177,7 @@ async def verify_mcp_jwt(
     settings = get_settings()
     expected_audience = mcp_resource_uri(settings)
     try:
-        return await verify_jwt_for_audience(
+        operator = await verify_jwt_for_audience(
             authorization,
             expected_audience=expected_audience,
             requested_tenant=header_value(meho_tenant),
@@ -186,6 +186,7 @@ async def verify_mcp_jwt(
             # takes it only at ``?profile=`` with the same name.
             allow_mcp_profile=True,
         )
+        return mark_token_checked(operator)
     except HTTPException as exc:
         if exc.status_code != 401:
             raise

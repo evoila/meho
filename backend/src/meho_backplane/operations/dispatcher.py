@@ -2560,13 +2560,13 @@ def _classify_http_status_error(
 
     * ``403`` -> :func:`result_connector_http_403` (#1649) -- the credential
       authenticated but lacks the op's required scope.
-    * a redirect after a change (301, 302, 303, 307, 308) -> with the switch
-      ``redirect_on_change_result`` on,
+    * a redirect after a change (301, 302, 303, 307, 308), only with the
+      switch ``redirect_on_change_result`` on ->
       :func:`result_connector_redirect_on_change`, worded by what the code
-      means and marked uncertain when the operation may change the target;
-      with it off, :func:`result_connector_redirect_generic`, the generic
-      ``connector_error`` answer. The redirect address is left out when the
-      operation sends a secret (*op_sends_secret*).
+      means, and marked uncertain after a 301, 302 or 303 when the operation
+      may change the target. The redirect address is left out when the
+      operation sends a secret (*op_sends_secret*). With the switch off, the
+      redirect gets the generic ``connector_error`` answer below.
     * ``410`` -> :func:`result_connector_http_410` -- the product version
       removed the API.
     * ``422`` -> :func:`result_connector_http_422` (#1649) -- the upstream

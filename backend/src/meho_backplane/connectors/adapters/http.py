@@ -1304,10 +1304,10 @@ class HttpConnector(Connector):
         builds it identically via :meth:`_ephemeral_http_client`. Callers own
         the SSRF pre-check.
 
-        The client follows a redirect only on the same origin. The
-        operation's own change request follows only a 307 or 308 to the same
-        path; every other request, a read or a login, follows the same-origin
-        redirects of :class:`_SameOriginRedirectClient`.
+        The client follows a redirect only on the same origin. Its
+        ``change_rule`` comes from :meth:`uses_change_rule`: when it is on, a
+        request that is neither a read nor a named login follows only a 307
+        or 308 to the same path (see :class:`_SameOriginRedirectClient`).
         """
         verify_tls = bool(getattr(target, "verify_tls", True))
         ca_pin = getattr(target, "tls_ca_pin", None)

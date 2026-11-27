@@ -2201,23 +2201,20 @@ See [approvals.md](approvals.md#1-send-an-idempotency_key-so-a-retry-gets-the-sa
 
 An eighth switch changes an answer: `REDIRECT_ON_CHANGE_RESULT` (off by
 default). It decides only the answer of a change (PUT, POST, PATCH,
-DELETE) that ends on a redirect MEHO does not follow. With it off, the
-answer has the keys and the `error` text of the generic `connector_error`
-answer for that status, and each value read from the redirect body is
-empty. With
-it on, the `error` text says what the HTTP code means (307 / 308: the target
-did not run the call; 303: the target says the change ran; 301 / 302: MEHO
-could not find out), and an operation that may change the target also gets
-`execution_outcome`, `retry` and `remediation`. Which redirects a request
-follows is the same in both modes: the operation's own change request
-follows only a 307 or 308 to the same path (at most two sends), and every
-other request, a read or a login, follows a redirect on the same origin. A
-login that ends on a redirect to another origin gets a plain error in both
-modes: the login got a redirect, MEHO did not follow it, with the HTTP
-status. The block check and the trace are the same in both modes, and both
-modes hide the same values. No tool and no input
-changes. The issue "measure the switch REDIRECT_ON_CHANGE_RESULT and decide
-its default" tracks the measurement. See the `HttpConnector` row in
+DELETE) that ends on a redirect MEHO does not follow, and the error of a
+login that ends on such a redirect. With it off, the answer is the generic
+`connector_error` answer for that status, and a login gives its own error.
+With it on, the `error` text says what the HTTP code means (307 / 308: the
+target asks for the call at another address; 303: the target says the
+change ran; 301 / 302: MEHO could not find out), and after a 301, 302 or
+303 an operation that may change the target also gets `execution_outcome`,
+`retry` and `remediation`. A login that ends on such a redirect gets a
+fixed sentence: the login got a redirect, MEHO did not follow it, with the
+HTTP status. Which redirects a request follows is the same in both modes.
+The audit row of a 301, 302 or 303 after a change has
+`execution_outcome: uncertain` in both modes. No tool and no input changes.
+The issue "measure the switch REDIRECT_ON_CHANGE_RESULT and decide its
+default" tracks the measurement. See the `HttpConnector` row in
 [backend.md](backend.md).
 
 ## Getting an approved secret value on MCP (`MCP_REVEAL_FETCH`, off by default)

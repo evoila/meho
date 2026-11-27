@@ -31,7 +31,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.broadcast import events
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission, EndpointDescriptor, Tenant
+from meho_backplane.db.models import AgentPermission, ApprovalRequest, EndpointDescriptor, Tenant
 from meho_backplane.main import app
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -407,3 +407,179 @@ async def test_the_product_form_only_adds_a_wait_or_raises_a_level(
     for product, status in calls.items():
         assert _call(client, key, product, op_id, OPERATOR) == status, (case, product)
     assert _listed(client, key, scope) == listed
+
+
+# ---------------------------------------------------------------------------
+# Cases 22 to 25: a tenant entry that weakens an install entry in either form
+# ---------------------------------------------------------------------------
+
+_WAIT_REFUSAL = (
+    "sets `always_wait: false` on `wild.thing.run`, but `install:classifications[0]` makes it "
+    "always wait for the whole install. A tenant can make more operations wait, not fewer."
+)
+_RISK_REFUSAL = (
+    "`classifications[0]` sets `risk: caution`, but `install:classifications[0]` sets "
+    "`wild.thing.run` to `dangerous` for the whole install"
+)
+
+
+def _send_file(client: TestClient, key: Any, path: str, entry: dict[str, Any]) -> dict[str, Any]:
+    match = ", ".join(f"{k}: {v!r}" for k, v in entry["match"].items())
+    rest = ", ".join(f"{k}: {str(v).lower()}" for k, v in entry.items() if k != "match")
+    content = f"policy: v1\nclassifications:\n  - {{match: {{{match}}}, {rest}}}\n"
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            f"/api/v1/policy/{path}",
+            params={"preview": "true"} if path == "import" else None,
+            content=content.encode(),
+            headers={**auth(token(key)), "Content-Type": "application/yaml"},
+        )
+    assert resp.status_code == 200, resp.text
+    body: dict[str, Any] = resp.json()
+    return body
+
+
+def _edit_preview(client: TestClient, key: Any, entry: dict[str, Any]) -> dict[str, Any]:
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/policy/classification/preview", json=entry, headers=auth(token(key))
+        )
+    assert resp.status_code == 200, resp.text
+    body: dict[str, Any] = resp.json()
+    return body
+
+
+#: (case, the install's entry, the tenant's entry)
+_FLOOR_WAIT_CASES: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
+    (
+        "22",
+        {"match": {"connector": "-"}, "always_wait": True},
+        {"match": {"connector": "cowx"}, "always_wait": False},
+    ),
+    (
+        "23",
+        {"match": {"connector": "*-*"}, "always_wait": True},
+        {"match": {"connector": "cowx"}, "always_wait": False},
+    ),
+    (
+        "24",
+        {"match": {"connector": "cowx"}, "always_wait": True},
+        {"match": {"connector": "-"}, "always_wait": False},
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "install", "tenant"),
+    _FLOOR_WAIT_CASES,
+    ids=[f"case-{c[0]}" for c in _FLOOR_WAIT_CASES],
+)
+async def test_a_tenant_entry_cannot_end_an_install_wait_of_the_other_form(
+    client: TestClient,
+    embedding: AsyncMock,
+    case: str,
+    install: dict[str, Any],
+    tenant: dict[str, Any],
+) -> None:
+    await _register(embedding, RUN)
+    await policy(None, [install])
+    key = make_rsa_keypair(f"kid-cpf-floor-{case}")
+
+    validated = _send_file(client, key, "validate", tenant)
+    imported = _send_file(client, key, "import", tenant)
+    edit = _edit_preview(client, key, tenant)
+    await policy(TENANT, [tenant])
+    status = _call(client, key, "cowx", RUN, OPERATOR)
+
+    for answer in (validated, imported):
+        assert answer["ok"] is False, (case, answer)
+        assert answer["mistakes"] == [
+            f"`classifications[0]` {_WAIT_REFUSAL} Remove `always_wait: false` from the tenant "
+            "entry; its other fields can stay."
+        ], case
+    assert edit["conflict"] == (f"This edit {_WAIT_REFUSAL} Do not send `always_wait: false`."), (
+        case
+    )
+    assert status == WAIT, case
+
+
+@pytest.mark.asyncio
+async def test_a_tenant_entry_cannot_lower_an_install_level_of_the_other_form(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    # Case 25. A single edit sets no risk level, so only the file is checked.
+    await _register(embedding, RUN)
+    await policy(None, [{"match": {"connector": "*-*"}, "risk": "dangerous"}])
+    key = make_rsa_keypair("kid-cpf-floor-25")
+    tenant = {"match": {"connector": "cowx"}, "risk": "caution"}
+
+    validated = _send_file(client, key, "validate", tenant)
+    imported = _send_file(client, key, "import", tenant)
+    await policy(TENANT, [tenant])
+
+    for answer in (validated, imported):
+        assert answer["ok"] is False, answer
+        (mistake,) = answer["mistakes"]
+        assert mistake.startswith(_RISK_REFUSAL), mistake
+    assert _explain(client, key, "cowx", RUN)["risk_level"] == "dangerous"
+    # A person's call of a `dangerous` operation waits for approval.
+    assert _call(client, key, "cowx", RUN, OPERATOR) == WAIT
+
+
+# ---------------------------------------------------------------------------
+# Cases 26 and 27: explain and the approval card name the entry that decided
+# ---------------------------------------------------------------------------
+
+
+def _wait_rule(client: TestClient, key: Any, product: str) -> dict[str, Any]:
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/policy/explain",
+            json={"connector_id": product, "op_id": RUN, "me": True},
+            headers=auth(token(key)),
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["answer"] == "wait", body
+    (rule,) = [rule for rule in body["evaluator"]["rules"] if rule["rule_id"] == "always_wait"]
+    return dict(rule)
+
+
+@pytest.mark.asyncio
+async def test_case_26_explain_names_the_entry_that_makes_the_call_wait(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _register(embedding, RUN)
+    await policy(TENANT, _DASH_WAITS)
+    key = make_rsa_keypair("kid-cpf-explain-26")
+
+    assert _wait_rule(client, key, "cowx")["path"] == "tenant:classifications[0]"
+
+
+@pytest.mark.asyncio
+async def test_case_27_the_card_names_the_entry_of_its_category(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _register(embedding, RUN)
+    await policy(
+        TENANT,
+        [
+            {"match": {"connector": "*-*"}, "category": "storage"},
+            {"match": {"connector": "cowx"}, "always_wait": True},
+        ],
+    )
+    key = make_rsa_keypair("kid-cpf-card-27")
+
+    status = _call(client, key, "cowx", RUN, OPERATOR)
+    async with get_sessionmaker()() as session:
+        (request,) = (await session.execute(select(ApprovalRequest))).scalars()
+    card = request.proposed_effect
+
+    assert status == WAIT
+    assert card["category"] == "storage", card
+    assert card["classification_rule"] == "tenant:classifications[0]", card
+    assert _wait_rule(client, key, "cowx")["path"] == "tenant:classifications[1]"

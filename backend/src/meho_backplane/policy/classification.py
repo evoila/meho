@@ -63,7 +63,6 @@ __all__ = [
     "Taxonomy",
     "check_no_conflict",
     "classify",
-    "each_form",
     "entries_from_document",
     "has_wildcard",
     "install_floor_texts",
@@ -150,11 +149,6 @@ class OpCoordinates:
             OpCoordinates(self.dashed_connector_id, self.group_key, self.op_id),
             OpCoordinates(self.connector_id, self.group_key, self.op_id),
         )
-
-
-def each_form(coords: Iterable[OpCoordinates]) -> list[OpCoordinates]:
-    """Every form of every operation in *coords* (:meth:`OpCoordinates.forms`)."""
-    return [form for one in coords for form in one.forms()]
 
 
 class ClassificationConflictError(ValueError):
@@ -341,16 +335,20 @@ def install_wait_undone(
 
     Returns ``(op_id, install_ref)`` for the first operation in *coords*
     that *entry* sets to ``always_wait: false`` while an install entry in
-    *entries* makes it always wait. ``None`` when there is none.
+    *entries* makes it always wait. For an operation with two forms of its
+    connector id, *entry* may match one form and the install entry the
+    other: the install's entries make the operation wait when they make
+    either form wait. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.always_wait is not False:
         return None
-    for one in each_form(coords):
+    for one in coords:
         if not entry.matches(one):
             continue
-        install = _scope_wait([e for e in entries if e.matches(one)], "install")
-        if install is not None:
-            return one.op_id, install.ref
+        for form in one.forms():
+            install = _scope_wait([e for e in entries if e.matches(form)], "install")
+            if install is not None:
+                return one.op_id, install.ref
     return None
 
 
@@ -399,23 +397,35 @@ def install_risk_lowered(
     operation in *coords* that *entry* matches, where *entry* decides the
     tenant's level and an install entry sets a higher one. A more specific
     tenant entry that sets the install's level or higher decides that
-    operation instead, so it is not returned. ``None`` when there is none.
+    operation instead, so it is not returned. For an operation with two
+    forms of its connector id, the install's level is the higher of the
+    two forms, whichever form *entry* matches; the returned coordinates
+    are the form that *entry* matches. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.risk is None:
         return None
-    for one in each_form(coords):
+    for one in coords:
         if not entry.matches(one):
             continue
-        matched = [e for e in entries if e.matches(one)]
-        install = _scope_risk(matched, "install")
+        forms = one.forms()
+        matched = {form: [e for e in entries if e.matches(form)] for form in forms}
+        picked = [_scope_risk(matched[form], "install") for form in forms]
+        install = max(
+            (e for e in picked if e is not None),
+            key=lambda e: RISK_LEVELS.index(e.risk or "safe"),
+            default=None,
+        )
         if install is None:
             continue
-        tenant_level = _tenant_risk_decided_by(entry, matched)
         install_level = install.risk or "safe"
-        if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
-            install_level
-        ):
-            return one, install.ref, install_level
+        for form in forms:
+            if not entry.matches(form):
+                continue
+            tenant_level = _tenant_risk_decided_by(entry, matched[form])
+            if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
+                install_level
+            ):
+                return form, install.ref, install_level
     return None
 
 
@@ -499,18 +509,16 @@ def _stricter(dashed: Classification, product: Classification) -> Classification
     The wait and the risk level are the stricter of the two, and a
     conflict of either form counts. The category and the labels are those
     of the form with the dash, so the product form never changes who
-    approves. ``rule_ref`` names the product form's entry only when it
-    made the operation wait or raised its level.
+    approves. ``rule_ref`` is that of the form with the dash too: it names
+    the entry that gave the category and the labels. The entry that makes
+    the operation wait is the one ``meho policy explain`` names.
     """
-    product_stricter = (product.always_wait and not dashed.always_wait) or _risk_index(
-        product.risk
-    ) > _risk_index(dashed.risk)
     return Classification(
         category=dashed.category,
         labels=dashed.labels,
         risk=max((dashed.risk, product.risk), key=_risk_index),
         always_wait=dashed.always_wait or product.always_wait,
-        rule_ref=product.rule_ref if product_stricter else dashed.rule_ref,
+        rule_ref=dashed.rule_ref,
         conflict=dashed.conflict or product.conflict,
         install_category=dashed.install_category,
     )

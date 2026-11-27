@@ -46,9 +46,10 @@ func newLoginCmd() *cobra.Command {
 		Short: "Authenticate against the MEHO backplane via Keycloak device-code flow",
 		Long: "login starts the OAuth 2.0 Device Authorization Grant (RFC 8628) " +
 			"against the backplane's configured Keycloak realm.\n\n" +
-			"The CLI prints a verification URL and a short user_code. " +
+			"The CLI prints an address and a short code. " +
 			"Open the address on any device with a browser, enter the code, " +
-			"and sign in. No browser opens on the machine where the CLI runs. " +
+			"and sign in. If the page asks you to grant access, click Yes. " +
+			"No browser opens on the machine where the CLI runs. " +
 			"login then stores the resulting access token in the " +
 			"OS keyring (Keychain on macOS, Secret Service on Linux, Wincred " +
 			"on Windows) and falls back to a 0600-mode credentials file at " +

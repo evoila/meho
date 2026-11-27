@@ -425,7 +425,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
     Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
-    call instead of letting it wait.
+    call instead of letting it wait. A `k8s.apply` gets its own refusal
+    text, which says what to set (`declare_hidden_stored_param(...,
+    refusal=...)`).
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
@@ -3004,27 +3006,31 @@ second `approval.request` row:
   has `payload.request_state`, the state of the request it found, and a
   status code that fits it:
 
-  | `request_state` | Meaning | `status_code` |
-  |---|---|---|
-  | `waiting` | The request waits for approval. | 202 |
-  | `approved_not_started` | Approved, and the run has not started. | 200 |
-  | `approved_started` | Approved, and the run has started without a stored result. | 200 |
-  | `approved_executed` | Approved, and the run ended ok. | 200 |
-  | `approved_failed` | Approved, and the run failed. | 200 |
-  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 |
+  | `request_state` | Meaning | `status_code` | Shown as (`result_status`, console label) |
+  |---|---|---|---|
+  | `waiting` | The request waits for approval. | 202 | `pending`, "Awaiting approval" |
+  | `approved_not_started` | Approved, and the run has not started. | 200 | `pending`, "Approved, not run yet" |
+  | `approved_started` | Approved, and the run has started without a stored result. | 200 | `pending`, "Approved, run started, no result yet" |
+  | `approved_executed` | Approved, and the run ended ok. | 200 | `ok`, "Approved, run OK" |
+  | `approved_failed` | Approved, and the run failed. | 200 | `error`, "Approved, run failed" |
+  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 | `error`, "Approved, result unknown: check the target before you run it again" |
 
-  An audit read shows an `approval.reuse` row by its status code. A row
-  with 202 reads as `pending`, and a row with 200 reads as `ok` in the
-  audit query (REST, CLI, MCP) and as "OK" in the web console
-  (`_derive_result_status` in `audit_query/query.py`, `resolve_status` in
-  `ui/references.py`). On this row, `ok` means that the retry got a request
-  a person approved. It does not say that the run went well:
-  `payload.request_state` holds the run state (for example
-  `approved_failed` or `approved_uncertain`).
+  An audit read shows an `approval.reuse` row by its `request_state`, not by
+  its status code. The table is `REUSE_STATES` in `audit_query/query.py`. The
+  audit query (REST, CLI, MCP) and its `result_status` filter use it, and so
+  does the web console (`ui/references.py`: the label, the colour and the
+  "what happened" line). The row says the state at the time of the retry, not
+  the state now: `pending` means the request had not finished then. The
+  "what happened" line of the drawer does not say "ran": the retry ran
+  nothing.
 
   The row of a call that gets the waiting request of the same call
   (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
-  `request_state` and its status code is 202.
+  `request_state` and its status code is 202. It reads `pending`, and the
+  console shows "Awaiting approval". Its "what happened" line in the drawer
+  (`_build_what_happened`) is: "<who> asked again for <operation> on
+  <target>. At that time the same call was waiting for approval, and this
+  call got that request." It does not say "ran".
 - `payload.params_hash` is the hash of this call's params
   (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the
@@ -3540,6 +3546,23 @@ The per-op preview is opt-in via a builder registry in
   `credential_wait`, the line that says why a credential call waits), and
   for `linux.script.run` and `k8s.apply` it gives the same view as the MCP
   tools (`api/v1/approvals.py::_proposed_effect_for`).
+- `register_platform_admin_card_filter(op_id, filter)`
+  (`operations/platform_admin_card.py`, core only) names the parts of a
+  card that only a platform admin who is a person reads, in a call of
+  their own. Every view of a stored card passes it through
+  `card_for_reader`: the REST approvals API, the MCP tools
+  `meho_approvals_get` and `meho_approvals_list`, and the console pages.
+  Every other reader gets the card as the filter gives it back. So does
+  a call that runs with an acting agent (`actor_delegation`, for example
+  a hosted agent run a platform admin started), and a view that does not
+  say who reads. The stored card stays whole, so the run after an
+  approval is the same. The approval card of an install policy import
+  (`policy.apply`, `connectors/policy/apply_card_readers.py`) uses it.
+  Every reader gets the same keys as the stored card. For a reader who is
+  not a platform admin, `diff.routing_floor` and `diff.agents_above_limit`
+  are empty lists and the warnings that start with `Tenant <id>:` are left
+  out; every other key and value is as stored. A card with no tenant data
+  reads as stored for every reader.
 - `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
   every preview the builder of `op_id` returns, whatever module
   registered the builder and when. A step that raises makes the preview
@@ -3721,6 +3744,114 @@ each container runs" block under the warning that the preview failed
 (`approvals/_modal.html`). An agent never reads `run_commands`: its own
 preview has no such key, and the stored request it reads (MCP tools and
 the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
+
+For a person the `k8s.apply` preview also has `object_summary`: one short
+entry per object of the manifest, built by
+`connectors/kubernetes/ops_write_apply_summary.py`. It is information
+only. It changes no approval rule. Each entry has the API group (`core`
+for the old `v1` kinds), the kind, the namespace and the name, and:
+
+- `state`: `new` or `exists`, from one read of the live object. A read that
+  the cluster refuses or that fails gives `unknown` and a `state_note`; the
+  card says "not known if it exists", never "new". MEHO reads the live
+  object only when the login that asked has the role Operator or higher.
+  For any other login there is no read: `state` is `not_read`, the card
+  shows the badge "not read" and the line "The live object was not read:
+  the login that asked has a role below Operator."
+- `other_writers`: the managers in the live object's `managedFields`,
+  without `meho`. `null` when the live object was not read or could not be
+  read.
+- `risky_fields`: found in the object as the dry run returns it, so they
+  include what the workload already has and the manifest does not send.
+  MEHO reads only the places that Kubernetes defines, from one list
+  (`_PLACES` in `ops_write_apply_summary.py`): the pod spec of a Pod, a
+  PodTemplate, a ReplicationController, a Deployment, a ReplicaSet, a
+  StatefulSet, a DaemonSet, a Job and a CronJob; the `secrets` and
+  `imagePullSecrets` of a ServiceAccount; the volume source of a
+  PersistentVolume; the `spec` of a Service; the `spec.tls` of an Ingress;
+  and the `roleRef` of a RoleBinding and a ClusterRoleBinding. In a pod
+  spec these are the service account, the image pull Secrets, each volume
+  that names a Secret (also a CSI, projected or other volume with a
+  `secretRef`), each `secretKeyRef` and `secretRef` of a container, and
+  host access: `hostPath`, `hostNetwork`, `hostPID`, `hostIPC`, `hostPort`,
+  and "a container asks for full access to its host" (the flag of its
+  `securityContext` that gives it that access). A Service of type `NodePort` or `LoadBalancer`
+  or with external IPs is named too. No free-form field is read: not the
+  `data` or `binaryData` of a ConfigMap, not the `spec` of a kind outside
+  the Kubernetes groups, not the labels or annotations of a pod template.
+  A Secret object is named ("a Secret object (its values are not shown)")
+  and never read. `null` when the dry run returned no object.
+- `built_in`: `true` only for a kind that Kubernetes itself defines in that
+  API group. The group and the kind are always read together.
+  `cluster_wide`: `true` for a kind that is not in a namespace.
+
+The entries show names, and a name shows only when it passes its check;
+else the card shows "(name not shown)". A role name that starts with
+`system:` shows when each part between the colons passes the same check.
+The kind of a `roleRef` shows only as `Role` or `ClusterRole`. On purpose
+the summary also shows the path of a `hostPath` volume, a host port number
+and the manager names of the other writers of the live object, because the
+person needs them to decide. A manager name shows only when it has
+letters, digits, `.`, `-`, `_` and `/`, at most 63 characters, and its
+`operation` only as `Apply` or `Update` (else "(not shown)"). The summary
+never shows a Secret value, an `env` value or a command line, and it runs
+through the same redaction as the manifest echo. MEHO reads the whole live
+object once, with the target's login, and uses only its `managedFields`.
+Nothing else of it is kept or shown. The console card shows the list in a
+"What each object is" block (`approvals/_modal.html`), with the sentence
+"This is what the cluster held when the request was made. The run does not
+check it again." An agent never reads `object_summary`: its own preview
+has no such key and makes no extra read, and the stored request it reads
+leaves it out.
+
+When the dry run of a `k8s.apply` fails, the stored request has the
+`preview_unavailable` marker and no `object_summary`. For a person, it
+still has the `manifest` echo and the `subject` line, built from the
+manifest text with the same hiding as on a preview that worked
+(`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
+line and `dry_run_stop` take the names from the documents after that
+hiding, in their own shape, so a redaction rule for a field path such as
+`manifest.*.metadata.name` hides the name in both too. The error of the
+dry run (`preview_error`, for a person and for agents) names each object
+the same way: MEHO writes each object label and name in it as the card
+shows it (`names_as_on_card` in `ops_write_preview.py`). Before anything is
+hidden or measured, each value that YAML does not read as text becomes
+plain text (`card_documents` in `ops_write_preview.py`): a date or time
+becomes its ISO text, `.nan` and `.inf` become that YAML text, and
+`!!binary` becomes its base64 text. A null character in a text (`"\0"` in
+YAML) becomes the two characters `\0`. So each filter hides such a value
+as text, and the stored request holds only values the database accepts. In
+a Secret, also one inside another object, the card hides each value of
+`data`, `stringData` and `binaryData`: the same fields that make the
+stored request keep the manifest only in the encrypted handoff. In any
+object, a number or a yes/no value under a secret name (`password:
+123456`) is hidden, and so is the argument after a secret flag on a
+command line (`--password 123456`), whatever type YAML gives it. The
+field `automountServiceAccountToken` keeps its yes/no value. For a
+manifest of more than one
+document, `dry_run_stop` names the document the dry run stopped at and
+says that the documents after it had no dry run. A caller that is not a
+person (the agent REST view and the MCP approvals tools) reads the
+`preview_unavailable` marker and the `preview_error` text, without these
+keys.
+The console card shows these in a "What the apply sends" block, and from
+the `preview_unavailable` mark the sentence "The summary of the objects
+could not be made, because the dry run failed." A key that cannot be built
+(for example from a manifest that is not valid YAML) is left out; the mark
+and that sentence stay.
+
+When MEHO cannot read the manifest text (it is not valid YAML or JSON),
+the call is refused before the wait: no approval request is stored and no
+card is made. The refusal is "document N is not valid YAML or JSON (KIND,
+line L, column C)", with one fixed phrase for KIND and no text of the
+manifest or of the YAML reader (see "`k8s.apply` manifest form" in
+`connectors-kubernetes.md`). The same text is in the answer of
+`preview_operation`, and the audit row and the logs quote no value of the
+manifest.
+
+In every `preview_error` (of any operation), a null character becomes
+the two characters `\0`, because PostgreSQL cannot store it in the row
+(`preview_failure_reason` in `operations/_preview.py`).
 
 ## Credential writes: what the approver sees (#4850)
 
@@ -4955,8 +5086,21 @@ columns are **never** projected onto any UI view, the badge, or a
 broadcast frame: the `render.project_request_to_view` projection omits
 them by construction. Live updates ride the app-shell bell's body-wide
 `meho:approval-bump` / `meho:approval-decided` events — the history list
-re-fetches its active tab on them, so a decision made elsewhere drops out
-of the open Pending tab without a reload. The decision **reason** lives on
+re-fetches its active tab on them, so a decision made in the open page
+drops out of its Pending tab without a reload. A new request, or a
+decision made by another person, does not re-fetch the list (that would
+drop its "Load more" pages). The Pending and For you lists have a
+new-requests line (`data-approvals-new-notice`, `_history.html`). Every
+answer that draws one of these lists (the full page and each list fetch)
+takes the bell's count with `_badge_count`, the function the bell badge
+uses, before it reads the rows, and draws it as `data-baseline`. A request
+that arrives between the count and the rows can show the line once too
+often, never too seldom. This costs one count query per list draw; the
+"Load more" rows send none and have no line. When a later bell badge swap
+brings another count, `approvals-bell.js` shows "N new requests." or "The
+waiting list changed." with a "Show" button that re-fetches the list like
+a tab. The script keeps no count of its own and sends no request of its
+own. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).
@@ -6129,6 +6273,12 @@ service`). A person's call follows its own rule (`_person_park_reason`,
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
+With the switch `CUSTOM_POLICY` on, the setting
+`SERVICE_GRANT_DELETE_SHAPED_PATTERNS` only adds names to the built-in
+delete names. An empty setting, or one that lists other names, never
+removes a built-in one. So a call by a service login of an operation with
+a built-in delete name waits for a person: a standing grant does not
+cover it.
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
 
 ## Sandbox mode (#4622)
@@ -6154,7 +6304,9 @@ group rules (only a MEHO-Admin approves their own delete).
   so a refused call leaves no `approval.decision` row. The grant-use row
   stores the hash and the blast radius in `payload`.
 - A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
-  a delete name, a delete step) runs under a delete grant with no hash;
+  a delete name, a delete step, or, with the switch `CUSTOM_POLICY` on,
+  `hard_to_undo` on the operation's own definition) runs under a delete
+  grant with no hash;
   its grant-use row stores the proposed effect.
 - A `destructive` step gate or child call stays refused: it cannot carry a
   preview hash (`preview_binding_required`, as today).

@@ -65,6 +65,16 @@ A platform admin's way back:
   the realm role).
 - When the block list or the table cannot be read, the unblock answers 503
   `principal_block_check_unavailable`, like every other route.
+- The console never removes a block on the admin's own login. A platform
+  admin removes a block on their own login with
+  `meho principal unblock <sub> --reason <text>`, run in the tenant of that
+  block, with a fresh sign-in. It removes only the block of that tenant. A
+  block in every tenant stays until another platform admin removes it. A
+  tenant admin cannot remove a block on their own login. Another tenant
+  admin of that tenant removes a block of that tenant, and a platform admin
+  with `tenant_admin` in the current tenant removes every block of another
+  login, on the Blocked people page or with `meho principal unblock`. Only
+  a platform admin removes a block in every tenant.
 
 To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
@@ -230,21 +240,45 @@ with the blocks in the table before it removes anything. When the set
 changed in between (a block was added, removed, or set again with a new
 reason, admin or time), MEHO removes nothing, shows the confirm page
 again with the new blocks and a note, and asks again. The audit row
-`principal.unblock` names only the removed blocks. The page never unblocks the admin's own login (403
-`own_login`), and it shows no button on that row. The hint on that row
-names the tenant of the block. A platform admin removes a block on their
-own login with `meho principal unblock <sub> --reason <text>`, run in
-the tenant of that block, with a fresh sign-in. On their own login, MEHO
-removes only the block of the current tenant. A block in every tenant
-stays until another platform admin removes it. When MEHO cannot read the blocks, the page and
+`principal.unblock` names only the removed blocks. The page shows no
+button on the admin's own login row, and the unblock form answers 403
+`own_login` for it. The console never removes a block on the admin's own
+login. A platform admin removes a block on their own login with
+`meho principal unblock <sub> --reason <text>`, run in the tenant of that
+block, with a fresh sign-in. It removes only the block of that tenant. A
+block in every tenant stays until another platform admin removes it. A
+tenant admin cannot remove a block on their own login. Another tenant
+admin of that tenant removes a block of that tenant, and a platform admin
+with `tenant_admin` in the current tenant removes every block of another
+login, on the Blocked people page or with `meho principal unblock`. Only
+a platform admin removes a block in every tenant. The own-login hint of
+the page says the rule for the role of the viewer. When MEHO cannot read the blocks, the page and
 both steps of an unblock answer 503 `principal_block_check_unavailable`. Every form is a plain
 `POST` form with the CSRF token and the page's tenant (`meho_tenant`)
 in hidden fields, so it works without JavaScript, and a form from a page
 of another tenant answers 409. A done form answers 303 back to the page. A refused block
 answers 422 and shows the page with the message next to its field. Each
 block and unblock writes one audit row (`principal.block` or
-`principal.unblock`); the request row of the form keeps its own
-`http.post:` name.
+`principal.unblock`). The row of a page action names the console route
+(`POST /ui/blocked-people`, `POST /ui/blocked-people/unblock`); the rows of
+REST calls name the REST method and path. The request row of the form keeps
+its own `http.post:` name. The menu entry "Blocked people" shows only for a
+person with `tenant_admin`; a service, runner or agent login with that role
+does not see it, the same as the page refuses it. The entry follows the role
+of the read-path token check (`ui/auth/revalidation.py`, kept per session
+and tenant on the server, never read from the request). That check runs at
+sign-in, after a tenant switch, and on the first page view after
+`UI_SESSION_READ_REVALIDATION_SECONDS` (default 300 seconds). So after a
+change of role the entry follows within that time, while the page itself
+answers by the new role at once. The check keeps the role under the tenant
+it ran in, also when a token refresh finds the session in another tenant,
+or finds that a tenant was chosen for a session that waited for a choice.
+Then the page names that tenant, and the block check runs again for it.
+The page and both forms keep their own 403. When the database answers the
+write of a block with an error, the block answers 503
+`principal_block_check_unavailable` and writes nothing. When the block list
+or the table cannot be read or written, an unblock answers 503 and changes
+nothing.
 
 Block and unblock of one login at the same moment: an unblock reads the
 blocks of the login with a row lock (`SELECT ... FOR UPDATE`, in the order

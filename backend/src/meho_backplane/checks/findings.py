@@ -246,6 +246,7 @@ def investigator_operator(tenant_id: uuid.UUID) -> Operator:
         raw_jwt="",
         tenant_id=tenant_id,
         tenant_role=TenantRole.TENANT_ADMIN,
+        in_code_kind="system",
     )
 
 

@@ -68,8 +68,10 @@ CHECKED_TEXT_COLUMNS: Final[frozenset[str]] = INDEXED_TEXT_COLUMNS | {"path", "s
 #: code (:mod:`meho_backplane.policy.evaluate`). ``secret_read_as`` is a login
 #: id that :func:`~meho_backplane.auth.secret_read_as.record_secret_read_as`
 #: cuts to printable characters and a fixed length before it is kept.
+#: ``caller_kind`` is one of the five kinds of
+#: :data:`~meho_backplane.auth.caller_kind.CALLER_KINDS`, limited by its CHECK.
 FIXED_TEXT_COLUMNS: Final[frozenset[str]] = frozenset(
-    {"method", "event_class", "policy_decision", "policy_rule", "secret_read_as"}
+    {"method", "event_class", "policy_decision", "policy_rule", "secret_read_as", "caller_kind"}
 )
 
 #: JSON columns checked before the call: every text in them (keys and values).

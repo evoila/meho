@@ -113,6 +113,7 @@ from cryptography.fernet import Fernet
 from meho_backplane.policy.switches import (
     approver_routing_on,
     classification_on,
+    custom_policy_on,
     engine_shadow_on,
 )
 from meho_backplane.sandbox_mode import sandbox_mode_label
@@ -585,7 +586,7 @@ def _policy_block(settings: Settings) -> dict[str, Any]:
     notes = [CATEGORY_WITHOUT_CLASSIFICATION] if approver_routing and not classification else []
     return {
         "configured": True,
-        "custom_policy": settings.custom_policy,
+        "custom_policy": custom_policy_on(settings),
         "classification": classification,
         "engine_shadow": engine_shadow_on(settings),
         "approver_routing": approver_routing,

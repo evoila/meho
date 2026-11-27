@@ -11,7 +11,10 @@ on one extra route OUTSIDE the ``/ui/`` prefix (so the middleware never
 sees it):
 
     GET /dev/login  →  inserts a real ``web_session`` row (dev operator,
-                       fixed dev tenant, dummy tokens), sets the
+                       fixed dev tenant, dummy tokens, the display name
+                       "Dev Operator" -- ``?name=Ada%20Lovelace`` picks
+                       another, ``?name=`` gives a session with no name,
+                       like a login token without a ``name`` claim), sets the
                        ``__Host-meho_session`` cookie, 303-redirects to
                        /ui/. The ``__Host-`` prefix needs ``Secure``, so
                        use a browser that counts http://localhost as a
@@ -44,6 +47,7 @@ from meho_backplane.ui.auth.session_cookie import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import create_session
 
 DEV_OPERATOR_SUB = "dev-operator"
+DEV_DISPLAY_NAME = "Dev Operator"
 # The ``rdc-internal`` tenant migration 0018 seeds into every fresh DB —
 # using it means tenant-scoped UI queries resolve a real tenant row.
 DEV_TENANT_ID = uuid.UUID("71cd1935-1017-4601-9fd2-cd21b83497f1")
@@ -71,7 +75,7 @@ async def _dev_login_instead_of_keycloak(
 
 
 @app.get("/dev/login", include_in_schema=False)
-async def dev_login(return_to: str = "/ui/") -> RedirectResponse:
+async def dev_login(return_to: str = "/ui/", name: str = DEV_DISPLAY_NAME) -> RedirectResponse:
     maker = get_sessionmaker()
     async with maker() as session, session.begin():
         sess = await create_session(
@@ -81,6 +85,7 @@ async def dev_login(return_to: str = "/ui/") -> RedirectResponse:
             access_token="dev-access-token",
             refresh_token="dev-refresh-token",
             lifetime=timedelta(days=30),
+            display_name=name or None,
         )
     if not return_to.startswith("/ui/"):
         return_to = "/ui/"

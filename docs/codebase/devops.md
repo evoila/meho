@@ -2153,11 +2153,11 @@ prints `df -h /` right after the build step. On the first hosted run
 (#4626, step 3) the build waited 3 seconds, took 2 minutes 20 seconds
 with a warm cache, and left 85 GB free.
 
-Each `python-unit-shard` carries a 20-minute
+Each `python-unit-shard` carries a 35-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
-~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
-monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=1200` for all six shards; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
+~17-21 min: ~2 min setup + ~15-19 min pytest on busy runners; it was
+30 minutes until 2026-11-27); a per-shard
+perf-budget-guard step (`budget_s=1500` for all six shards; 1200 s until 2026-11-27; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
 from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
@@ -2245,7 +2245,31 @@ shape (deterministic file-level matrix + fan-in):
   Measured in that merge-queue run: 765, 915, 873, 850, 805 and 854 s,
   which is 64 to 76 percent of 1200 s, so every shard stays under 80
   percent. The gate stays on. A seventh shard was not added: it changes
-  the required check names. To change the count, edit the
+  the required check names. On 2026-11-27 a merge-queue run failed only
+  on time: shard 3 took 1212 s, with every test passing (#7160). In four
+  green merge-queue runs the shards took 907-1123 s, and in five pull
+  request runs 827-1136 s, so every shard was near 1200 s. Fresh file
+  times do not help: they were refreshed on 2026-11-26 (#7033), and the
+  split already gives each shard about 2,248 s of test time. A seventh
+  shard needs a seventh runner in the merge-queue runner set, which is
+  sized outside this repository. So all six shards now have a budget of
+  1500 s. The slowest measured shard (1212 s) uses 81 percent of it,
+  and the average shard (about 1040 s) about 70 percent. The time check
+  stays on as an early warning: it still fails a shard that runs longer
+  than 1500 s. The job limit is 35 minutes, and setup plus 1500 s fits
+  under it. So a shard whose tests end after 1500 s but before the job
+  limit fails on the time check with its measured time. A shard whose
+  tests still run at the job limit is stopped by the job limit, and the
+  time check does not run. A fixture timing run of shard 3 of 6
+  (`MEHO_FIXTURE_TIMING_FILE` and `MEHO_LIFESPAN_TIMING`, `-n 3 --dist
+  loadscope`, a local run on 2026-11-27, all tests passed) shows the top
+  five fixtures: `kc` 334 setups 743.6 s, `_audit_db_url` 15 setups
+  351.3 s, `keycloak` 139 setups 232.4 s, `client_with_operator` 135
+  setups 215.8 s and `registered` 33 setups 108.8 s. The top three
+  start-up steps: `operation_catalog_write` 206 calls 47.1 s,
+  `_preload_embedding_model` 206 calls 6.9 s and
+  `_eager_import_connectors` 211 calls 0.3 s.
+  To change the count, edit the
   matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a
@@ -2257,7 +2281,7 @@ shape (deterministic file-level matrix + fan-in):
   per-test hang guard, `--timeout=180 --timeout-method=signal` (#4270):
   a test that stops making progress fails on its own after 180 s with
   its name and a stack dump of every thread, instead of sitting silent
-  until the 20-minute job cap (the shards print one dot per test, so a
+  until the 35-minute job cap (the shards print one dot per test, so a
   hang left no test name in the log). `signal`, not `thread`, because
   the thread method calls `os._exit()`, which xdist reads as a worker
   crash. The `tests/integration` /
@@ -2760,6 +2784,118 @@ repository secrets instead:
   `CI_IMAGE_PROXY` and `SPEC_SHELF_REPOSITORY` must be set there too.
 - `backend/tests/test_ci_repo_secrets.py` checks all of this, and that
   no workflow reads these names from `vars`.
+
+### Test images come through the image proxy
+
+A test must not pull from Docker Hub, quay.io or another outside registry
+while it runs. Docker Hub answers "429 Too Many Requests" when too many pulls
+come from one address, and the self-hosted runners share one address. A
+required check that fails this way can throw a ready pull request out of the
+merge queue.
+
+The rule:
+
+- A CI test job pulls or builds from an image only through the CI image proxy
+  cache (the secret `CI_IMAGE_PROXY`), or from the organisation's own
+  registry where a job cannot reach the proxy.
+- Each image that a test uses has a variable `MEHO_TEST_<NAME>_IMAGE` with a
+  public default in the test file (`os.environ.get("MEHO_TEST_X_IMAGE",
+  "<default>")`). A test never names an image in plain text.
+- A Dockerfile that a test builds takes its base image from a build argument
+  (`ARG DEBIAN_IMAGE=...` and `FROM ${DEBIAN_IMAGE}`). The test passes the
+  variable as the build argument.
+- CI sets each variable with `PROXY/<image>` (or `PROXY_ONLY/<image>` for a
+  large image) in the image block of the step "Read the CI repository
+  secrets", in every job that runs the test. Official Docker Hub images
+  need the `library/` part: `PROXY/library/mongo:8`.
+- The proxy serves Docker Hub images and quay.io images (Keycloak,
+  OpenBao).
+- The Docker daemon of a runner has no registry mirror. So the testcontainers
+  library would pull its Ryuk clean-up helper from Docker Hub.
+  `RYUK_CONTAINER_IMAGE` in the same block names it through the proxy.
+- The core Keycloak and OpenBao images (`MEHO_TEST_CORE_KEYCLOAK_IMAGE`,
+  `MEHO_TEST_CORE_OPENBAO_IMAGE`) name the digest that the chart pins in the
+  subchart's `values.yaml`, not the tag: a tag can move to another build. With
+  an empty variable the core tests use the chart's own image.
+- A test that runs several versions has one variable for each version
+  (`MEHO_TEST_POSTGRES_16_IMAGE`, `MEHO_TEST_MONGODB_8_IMAGE`). The single
+  name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand. Each version run
+  has a fixed test id (`postgres-16`, `mongo-8`). A step before each upload
+  of a test report replaces the proxy name in it.
+- The k3s node inside a test container does not pull its busybox image from
+  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it
+  skip.
+- Packages that a Dockerfile installs at build time (the bind9 test images
+  run `apt-get`) come from the Debian package servers. They are a package
+  download, not an image pull, and stay outside the proxy.
+- When the proxy is down or has no copy of an image, the pull fails. CI does
+  not pull that image from Docker Hub instead. The test then fails, or skips
+  where its fixture skips when its container cannot start.
+- GitHub hides a secret in the job log only. So the unit shard, coverage and
+  integration shard jobs run the step "Hide the proxy name in the test
+  reports" before they upload their JUnit files and pytest log.
+  `scripts/ci/hide_proxy_name.py` replaces the proxy value and its host with
+  `PROXY`, also in URL-encoded form. Each upload of these reports runs only
+  when this step passed. The coverage data files stay as they are.
+
+`backend/tests/test_ci_test_images.py` pins the rule, with the reader in
+`backend/tests/_ci_image_check.py`. It finds the test jobs in `ci.yml` itself:
+each job with a pytest step (`uv run pytest`, `uv run python -m pytest` or
+`python -m pytest`), and the test files that step runs (its `find` and
+`grep -rl` lists, the list of `tests/_outside_backend_tests.py`, and the
+paths on the pytest command line). It fails:
+
+- when a test file names an image in plain text, or has a `FROM` line with a
+  fixed name. It reads every file under `tests/integration` and
+  `tests/migrations`, and every other file that imports testcontainers or
+  the Docker SDK. In the image place of a container start (the first
+  argument of a testcontainers class that the file calls by its imported
+  name, or `image=` of any call), of a pod spec (the
+  `image` key) or of a client model (`image=`), any fixed text counts: a
+  bare name, a name without a tag, an f-string, a joined string, or a
+  constant with `DEFAULT` in its name. A testcontainers class with no image
+  argument fails too, because it starts its own default image;
+- when a job runs a test that reads an image variable, and does not set the
+  variable with `PROXY/` or `PROXY_ONLY/`. A test counts with its
+  `conftest.py` files and every helper module under `tests/` that it
+  imports (for example `tests/_pgvector_image.py`);
+- when a command of a test job in `ci.yml` or `chart.yml` pulls or builds
+  from an image, and names no image variable that the job sets through the
+  proxy. Each command counts on its own: `docker pull`, `docker run`,
+  `docker create`, `docker build`, `docker buildx build`, `docker compose`,
+  `docker-compose`, `kind create cluster`, and the actions `docker://...`,
+  `setup-kind` and `docker/build-push-action`. Comment lines do not count.
+  The check reads pull request runs and merge-queue runs.
+
+**The exception list** is `backend/tests/ci_test_image_exceptions.json`. Each
+entry has a reason. The test fails when an entry no longer applies, so the
+list does not grow old. It holds:
+
+- `redaction-compare` in `ci.yml`, for its pull request runs only. They run
+  on a GitHub-hosted runner, which cannot reach the proxy, and pull one
+  pinned Python image by digest. A merge-queue run of the job runs on the
+  self-hosted pool and takes the same image, by the same digest, through the
+  proxy (`MEHO_TEST_PYTHON_IMAGE`). The check fails when a merge-queue run
+  of a job on the list pulls from outside.
+- `python-outside-backend` in `ci.yml`: a GitHub-hosted runner on pull
+  requests. The merge queue runs the same tests in the unit shards, through
+  the proxy.
+- the four kind jobs in `chart.yml` (`helm-test`, `helm-test-byo`,
+  `rollback-drill`, `upgrade-from-release`): GitHub-hosted runners. kind
+  pulls its node image, and the jobs pull the images they load into kind.
+- variables that a job may leave unset, each with the jobs it holds for:
+  the single-image variables `MEHO_TEST_POSTGRES_IMAGE` and
+  `MEHO_TEST_MONGODB_IMAGE` in the integration shards (CI sets the
+  per-version ones), and `MEHO_TEST_KEYCLOAK_IMAGE` in the unit shards and
+  the coverage job (the acceptance tests import a helper from
+  `tests/integration/conftest.py` and never start Keycloak). Such an entry
+  fails when no listed job still runs a test that reads the variable, or
+  when the job sets it in the image block of the step "Read the CI
+  repository secrets".
+
+The jobs that set test images are `python-unit-shard`, `python-coverage`,
+`python-integration-shard`, `python-migration-tests`, `python-timing-tests`
+and, in merge-queue runs, `redaction-compare`.
 
 ### Why no image build job
 

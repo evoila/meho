@@ -283,6 +283,7 @@ ZONE_SETTINGS_OPS: tuple[WindowsDnsOp, ...] = (
         tags=("write", "zone", "settings"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call while building a DNS server to set who may update names in a zone, "

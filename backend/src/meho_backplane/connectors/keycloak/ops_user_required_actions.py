@@ -291,6 +291,7 @@ USER_REQUIRED_ACTION_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "otp", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_UPDATE,
             "when_to_call": (

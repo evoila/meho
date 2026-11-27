@@ -16,6 +16,8 @@ the call uses:
 * **The classification**: every classification entry that matches the
   operation, with its place in the policy (``tenant:classifications[2]``).
 * **Who may approve**: :mod:`meho_backplane.policy.who_approves`.
+* **May the person who asked approve their own request** (only with
+  ``CUSTOM_POLICY`` on): :mod:`meho_backplane.policy.explain_own_approval`.
 
 Who asks:
 
@@ -81,6 +83,7 @@ from meho_backplane.policy.explain_models import (
     ExplainToday,
     PolicyExplainResponse,
 )
+from meho_backplane.policy.explain_own_approval import own_approval_view
 from meho_backplane.policy.routing import (
     DEFAULT_RULE,
     RouteEntry,
@@ -117,7 +120,8 @@ __all__ = [
     "without_policy",
 ]
 
-#: The answer to ``file`` while the ``POLICY_CLASSIFICATION`` switch is off.
+#: The answer to ``file`` while classification is off: both
+#: ``POLICY_CLASSIFICATION`` and ``CUSTOM_POLICY`` are off.
 FILE_NEEDS_CLASSIFICATION: Final[str] = (
     "A policy file counts only while classification is on. Classification is off, so "
     "the file would change no answer. An admin can turn it on in one of two ways. The "
@@ -486,9 +490,18 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
     if refusal is not None:
         today_verdict, reason = PermissionVerdict.DENY, refusal
     answer = _FROM_TODAY[today_verdict]
-    approvers = None
+    approvers = own_approval = None
     if answer == "wait":
-        approvers = _approvers_view(await _approvers(question, descriptor, connector_id, routes))
+        found = await _approvers(question, descriptor, connector_id, routes)
+        approvers = _approvers_view(found)
+        own_approval = own_approval_view(
+            asker=question.asker,
+            me=question.me,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            approvers=found,
+            routes=routes,
+        )
     wait_path = _wait_path(matched)
     return PolicyExplainResponse(
         status="ok",
@@ -501,6 +514,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
         answer=answer,
         decided_by="today",
         approvers=approvers,
+        own_approval=own_approval,
         today=ExplainToday(
             verdict=answer,
             policy_verdict=today_verdict.value,
@@ -533,7 +547,9 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
     The entries of the policy and their places in it are left out: the
     matching classification entries with their category and labels, the
     place of each evaluator rule, and the routing entries (also the
-    install's floor) that name the approvers.
+    install's floor) that name the approvers. The reasons of
+    ``own_approval`` keep their sentence and the groups that may approve,
+    without the places of routing entries.
     """
     update: dict[str, Any] = {"approvers": _without_rule(response.approvers)}
     if response.classification is not None:
@@ -554,6 +570,8 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
         update["request"] = response.request.model_copy(
             update={"approvers": _without_rule(response.request.approvers)}
         )
+    if response.own_approval is not None:
+        update["own_approval"] = response.own_approval.without_place()
     return response.model_copy(update=update)
 
 

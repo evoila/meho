@@ -40,7 +40,7 @@ References
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.hyperv.ops import (
@@ -230,6 +230,7 @@ def _checkpoint_write_op(
     *,
     safety_level: str,
     requires_approval: bool,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
 ) -> HypervOp:
     """Build one identity-based checkpoint write op (revert / delete)."""
     note = (
@@ -256,6 +257,7 @@ def _checkpoint_write_op(
         tags=("write", "checkpoint", verb),
         safety_level=safety_level,  # type: ignore[arg-type]
         requires_approval=requires_approval,
+        hard_to_undo=hard_to_undo,
         llm_instructions={
             "when_to_use": (
                 f"{verb.capitalize()} a named VM checkpoint. {note} " + SSH_TRANSPORT_NOTE
@@ -357,6 +359,7 @@ CHECKPOINT_OPS: tuple[HypervOp, ...] = (
         "Restore-VMSnapshot",
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
     ),
     _checkpoint_write_op(
         "hyperv.checkpoints.delete",
@@ -365,5 +368,6 @@ CHECKPOINT_OPS: tuple[HypervOp, ...] = (
         "Remove-VMSnapshot",
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
     ),
 )

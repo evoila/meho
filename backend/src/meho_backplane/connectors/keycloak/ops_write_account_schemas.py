@@ -256,6 +256,7 @@ ACCOUNT_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "role-mapping", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_ACCOUNT_WRITE,
             "when_to_call": "When a person needs a client role, such as the admin console role.",
@@ -283,6 +284,7 @@ ACCOUNT_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "role-mapping", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_ACCOUNT_WRITE,
             "when_to_call": "When a person must lose a role of a client.",
@@ -311,6 +313,7 @@ ACCOUNT_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_ACCOUNT_WRITE,
             "when_to_call": "When a person's user name, email or name is wrong or has changed.",
@@ -347,6 +350,8 @@ ACCOUNT_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_ACCOUNT_WRITE,
             "when_to_call": "When a person lost a passkey or a phone with a one-time code app.",

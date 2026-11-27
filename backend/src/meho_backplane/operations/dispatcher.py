@@ -4015,9 +4015,10 @@ async def _handle_needs_approval(
     run_id = current_agent_run_id_var.get()
 
     # The op's own check, the preview and the permission check may send
-    # requests (for example a Vault login and a capabilities request). They
-    # run with the caller's block check, like the call itself. The block is
-    # checked once more before the request is saved. A caller who is blocked
+    # requests (for example a Vault login and a capabilities request), and so
+    # may the preview that a destructive call binds to. They run with the
+    # caller's block check, like the call itself. The block is checked once
+    # more right before the request is saved. A caller who is blocked
     # gets the block refusal, and no approval request is made.
     with tracking_run(
         is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
@@ -4072,6 +4073,25 @@ async def _handle_needs_approval(
                 params=params,
             )
             blocked = await _block_refusal_while_preparing(op_id, duration_ms)
+        if blocked is None and refusal is None and descriptor.safety_level == "destructive":
+            # #3197: the destructive tier refuses to park (fail-closed, no
+            # approval row) unless the caller presented a matching
+            # preview_hash and the blast-radius statement is present.
+            # Non-destructive ops skip this entirely. #4647: the refused
+            # attempt is still audited as a denial, like a policy denial.
+            # Its preview belongs to the preparation, so the block is
+            # checked once more after it, right before the request is saved.
+            refusal = await _destructive_binding_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                operator=operator,
+                target=target,
+                params=params,
+                preview_hash=preview_hash,
+                proposed_effect=proposed_effect,
+                duration_ms=duration_ms,
+            )
+            blocked = await _block_refusal_while_preparing(op_id, duration_ms)
     if blocked is not None:
         # ``denied`` for a blocked caller, ``error`` when MEHO cannot read
         # the block list: the same row as for a call that runs.
@@ -4095,33 +4115,6 @@ async def _handle_needs_approval(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
-
-    # #3197: the destructive tier refuses to park (fail-closed, no approval
-    # row) unless the caller presented a matching preview_hash and the
-    # blast-radius statement is present. Non-destructive ops skip this
-    # entirely and park exactly as before. #4647: the refused attempt is
-    # still audited as a denial, like a policy denial.
-    if descriptor.safety_level == "destructive":
-        refusal = await _destructive_binding_refusal(
-            op_id=op_id,
-            connector_id=connector_id,
-            operator=operator,
-            target=target,
-            params=params,
-            preview_hash=preview_hash,
-            proposed_effect=proposed_effect,
-            duration_ms=duration_ms,
-        )
-        if refusal is not None:
-            return await _audit_denied_and_return(
-                refusal,
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                duration_ms=duration_ms,
-            )
 
     # #3542: a preflight that says the write will be denied refuses the
     # park (no approval row written) instead of asking a person to approve

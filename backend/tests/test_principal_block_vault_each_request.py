@@ -24,6 +24,9 @@ The next request of the call is then not sent.
   check, an unreadable block list and a block check that takes too long
   refuse too. No approval request is made in any of them, and the audit row
   has the status of the answer.
+* ``vault.kv.metadata.delete`` (risk level ``destructive``) with a valid
+  ``preview_hash``: a caller blocked during the preview that the call binds
+  to gets the block refusal, and no approval request is made.
 
 The end of MEHO's own Vault login is a clean-up: it is always sent.
 """
@@ -508,3 +511,43 @@ async def test_preflight_of_a_call_that_waits_for_approval_runs_for_a_caller_not
     assert result.status == "awaiting_approval", (result.status, result.error)
     assert vault.sent("POST", "/v1/sys/capabilities-self") == 1
     assert vault.sent("POST", _DATA) == 0
+
+
+_DELETE = "vault.kv.metadata.delete"
+
+
+async def test_block_during_the_binding_preview_of_a_destructive_call_makes_no_approval_request(
+    vault: VaultStandIn, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    params = {"path": _ITEM}
+    preview = await dispatcher_module.preview_dispatch(
+        operator=_caller(), connector_id="vault-1.x", op_id=_DELETE, target=None, params=params
+    )
+    assert preview["status"] == "ok", preview
+    real = dispatcher_module.preview_dispatch
+    previews: list[str] = []
+
+    async def _block_then_preview(**kwargs: Any) -> Any:
+        previews.append(kwargs["op_id"])
+        await _block()
+        return await real(**kwargs)
+
+    monkeypatch.setattr(dispatcher_module, "preview_dispatch", _block_then_preview)
+
+    result = await dispatch(
+        operator=_caller(),
+        connector_id="vault-1.x",
+        op_id=_DELETE,
+        target=None,
+        params=dict(params),
+        preview_hash=preview["preview_hash"],
+        _approved=False,
+    )
+
+    assert previews == [_DELETE]
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert await _approval_requests() == []
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(select(AuditLog).where(AuditLog.path == _DELETE))
+        assert [r.status_code for r in rows.scalars()] == [403]

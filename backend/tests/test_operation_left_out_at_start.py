@@ -141,9 +141,7 @@ def embedding(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     service.encode_one.return_value = [0.1] * 384
     service.encode.return_value = [[0.1] * 384]
     service.dimension = 384
-    monkeypatch.setattr(
-        "meho_backplane.operations._search.get_embedding_service", lambda: service
-    )
+    monkeypatch.setattr("meho_backplane.operations._search.get_embedding_service", lambda: service)
     return service
 
 
@@ -303,9 +301,7 @@ async def _offered(*, tenant_id: uuid.UUID = _TENANT) -> tuple[set[str], set[str
     groups = await list_operation_groups(
         _operator(tenant_id), {"connector_id": _CONNECTOR_ID}, list_operations=True
     )
-    group_ops = {
-        op["op_id"] for group in groups["groups"] for op in group.get("operations") or []
-    }
+    group_ops = {op["op_id"] for group in groups["groups"] for op in group.get("operations") or []}
     return (
         {hit["op_id"] for hit in found["hits"]},
         group_ops,
@@ -461,9 +457,7 @@ async def test_case7_a_package_cannot_hide_a_built_in_op(embedding: AsyncMock) -
         groups = await list_operation_groups(
             operator, {"connector_id": connector_id}, list_operations=True
         )
-        listed = {
-            op["op_id"] for group in groups["groups"] for op in group.get("operations") or []
-        }
+        listed = {op["op_id"] for group in groups["groups"] for op in group.get("operations") or []}
         return (
             call.status,
             call.extras.get("error_code"),
@@ -684,9 +678,7 @@ async def test_a_left_out_op_with_an_unknown_switch_stops_the_start(
     embedding: AsyncMock, wipe: str
 ) -> None:
     with pytest.raises(ValueError, match="made_up_switch") as left_out:
-        await _start(
-            _widgets(wipe, parameter_schema=_UNKNOWN_SWITCH_SCHEMA), embedding=embedding
-        )
+        await _start(_widgets(wipe, parameter_schema=_UNKNOWN_SWITCH_SCHEMA), embedding=embedding)
     with pytest.raises(ValueError, match="made_up_switch") as good:
         await _start(
             _widgets("fixed", wipe_id=_LIST, parameter_schema=_UNKNOWN_SWITCH_SCHEMA),

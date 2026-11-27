@@ -383,6 +383,7 @@ async def register_targets_registry_operations(
         tags=["targets", "write", "registry", "delete"],
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_REMOVE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

@@ -38,8 +38,56 @@ All are frozen dataclasses.
 | `Asker` | Who asks: kind (`person`, `agent`, `service`, `runner`), sub, tenant, roles (the tenant role plus the flags `approver`, `sa_operator`, `platform_admin`), via (`web` or `token`), the acting agent of a hosted run. |
 | `Asked` | What is asked: connector id, op id, group key, category, risk level, "always wait" (the effective approval flag), labels, mutating, op class marks, caller address, target. |
 | `Lookups` | What the caller found in the database for this call: the matching agent grant (also of the hosted agent), a standing grant, a run approval, the read-scope refusal, sandbox mode, `AGENT_GRANT_REQUIRED`. The evaluator never reads the database itself. |
-| `RuleRef` | The rule that decided: source (`floor`, `tenant_rule`, `default`, `agent_grant`, `standing_grant`, `run_approval`, `read_scope`, `role_floor`), rule id, policy version (empty in part 1), text. |
+| `RuleRef` | The rule that decided: source (see [Rule sources](#rule-sources)), rule id, policy version (empty in part 1), text. |
 | `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), every step in order (`steps`, each a `Step` with its rule and verdict), and the same steps as text lines (`trace`). |
+
+### Rule sources
+
+A rule is named `<source>:<rule id>` (`RuleStamp.label` in
+`policy/stamp.py`), for example `default:rights_change.admin_in_web_console`.
+An Admin's change of the policy in the web console would be
+`default:policy_change.admin_in_web_console`.
+
+| Source | The rule comes from |
+|---|---|
+| `floor` | A fixed rule in the code (`policy/floors.py`). |
+| `tenant_rule` | A customer's rule. None in part 1. |
+| `default` | The shipped default for the kind of caller. |
+| `agent_grant` | An agent grant. |
+| `standing_grant` | A standing grant of a service login. |
+| `run_approval` | A person's approval of the operation list of a run. |
+| `read_scope` | The read limit of a service login. |
+| `role_floor` | The lowest role an operation needs. |
+| `gate` | Today's gate decided, and the evaluator gave another answer. Only for the audit row. |
+| `approval` | A person approved this call. Only for the audit row. |
+| `override` | An admin's edit of the operation (its risk level or approval). Only for the audit row. |
+
+The evaluator itself gives no rule with the sources `gate`, `approval`
+and `override` yet.
+
+### The code's own values and the plain mark (`operations/op_policy.py`)
+
+`apply_effective_policy` and `apply_step_policy` set the effective risk
+level and approval flag on the row (after admin edits, classification and
+floors). Before that they keep the code's own values in
+`row.code_safety_level` and `row.code_requires_approval`, and the stored
+parameter schema in `row.code_parameter_schema` (not columns). The shown
+schema then leaves out a field that a switch hides.
+
+`has_plain_mark(descriptor)` is true when the code (or the import) turns
+approval on and the operation has no other reason to wait: no credential
+call, no caller address, no change of rights, no "approve each call" and
+no delete sign. It reads the code's own values, so an admin's edit never
+looks like the code's mark. The caller-address check reads the stored
+schema, as the approval floor does, so a field that a switch hides still
+counts. A delete sign is the code's `destructive` level, the HTTP verb
+`DELETE`, the `destructive` tag or a delete name. It reads the delete
+names from the one setting `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, as
+every other reader of that setting does. With `CUSTOM_POLICY` on, the
+setting holds the built-in names and the install's own names. With the
+switch off, an install's own list takes the place of the built-in names.
+`has_plain_mark` is read only where `CUSTOM_POLICY` is on. It reads no
+database. Nothing decides on it yet.
 
 The op class marks of `Asked` come from the code: `root_shell`,
 `credential_read`, `per_call_approval`, `delete_shaped`,

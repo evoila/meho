@@ -42,6 +42,11 @@
 # The job also tests the scripts that CI jobs use to get their tools
 # (scripts/ci), with fake commands and no network.
 #
+# The custom policy check script (scripts/acceptance/custom-policy-check.sh)
+# is a trigger too: job test runs shellcheck on it, and job
+# custom-policy-check runs its tests against recorded answers and stand-in
+# curl and meho programs. They contact no install and use no secret.
+#
 # Advisory (non-required) and path-scoped, like plugin-test.yml: a required
 # check would need the `changes`-job + job-`if:` shape ci.yml uses.
 
@@ -60,6 +65,10 @@ on:
       - 'scripts/ci/fetch_with_retry.sh'
       - 'scripts/ci/retry.sh'
       - 'scripts/tests/test_ci_tool_scripts.py'
+      - 'scripts/acceptance/custom-policy-check.sh'
+      - 'scripts/tests/test_custom_policy_check.py'
+      - 'scripts/tests/test_custom_policy_check_live.py'
+      - 'scripts/tests/custom_policy_check_fixture.py'
   workflow_dispatch:
 
 permissions:
@@ -133,6 +142,7 @@ jobs:
               grep -rlE --exclude-dir=tests '^#!(/usr/bin/env |/bin/)(ba)?sh' deploy/linux-server deploy/appliance || true
             } | sort -u
           )
+          scripts+=(scripts/acceptance/custom-policy-check.sh)
           printf 'checking %s\n' "${scripts[@]}"
           shellcheck "${scripts[@]}"
 
@@ -234,3 +244,26 @@ jobs:
         env:
           MEHO_REQUIRE_APT_CHECK: '1'
         run: python -m unittest discover -s deploy/appliance/tests -v
+
+  custom-policy-check:
+    name: Run the tests of the custom policy check script
+    # Same runner choice as job test: a fork PR runs on a disposable
+    # GitHub-hosted runner. The tests start the script many times, so the
+    # job has more time than job test.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Check that jq is there
+        # The tests skip without jq, and a skipped test proves nothing.
+        run: jq --version
+
+      - name: Run the tests
+        run: python -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py' -v

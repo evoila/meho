@@ -283,6 +283,7 @@ OU_ACCESS_OPS: tuple[MsadOp, ...] = (
         tags=("write", "ou", "access-rule"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call while building a domain to let a group create computer accounts "
@@ -317,6 +318,7 @@ OU_ACCESS_OPS: tuple[MsadOp, ...] = (
         tags=("write", "ou", "access-rule"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to undo msad.ou.grant-create-child, for example when a group no "

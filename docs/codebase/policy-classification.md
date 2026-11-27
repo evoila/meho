@@ -342,7 +342,7 @@ connector kit (kit 1.7 or higher).
 | Field | Values | Means |
 |---|---|---|
 | `hard_to_undo` | `deletes`, `stops`, `overwrites`, or none (the default) | A call can delete, stop or overwrite something, and no later call of the same connector brings it back. |
-| `changes_rights` | yes or no (the default) | A call gives or takes rights, a login or an access policy in the target system. |
+| `changes_rights` | yes or no (the default) | A call that changes who or what may reach or use something in the target system: a login, a group or role, an access list, a firewall rule. |
 
 - Registration refuses `hard_to_undo` on a `safe` operation, and any word
   other than the three. The error names the operation and says why.
@@ -353,6 +353,10 @@ connector kit (kit 1.7 or higher).
   imported API spec leave both NULL.
 - No rule of MEHO reads the two fields. No call waits, runs or is refused
   because of them.
+- A delivery call of the Argo CD or Kubernetes connector (it deploys or
+  runs a workload) carries no `hard_to_undo` on the whole operation. Its
+  `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`
+  names these calls and checks their stored rows.
 
 ## Known limits
 

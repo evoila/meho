@@ -68,6 +68,10 @@ __all__ = [
 
 AskerKind = Literal["person", "agent", "service", "runner"]
 Via = Literal["web", "token"]
+#: Where a rule comes from. The table in ``docs/codebase/policy-evaluator.md``
+#: says what each source means. ``gate``, ``approval`` and ``override`` are
+#: for the audit row: today's gate decided, a person approved the call, or an
+#: admin's edit of the operation decided.
 RuleSource = Literal[
     "floor",
     "tenant_rule",
@@ -77,6 +81,9 @@ RuleSource = Literal[
     "run_approval",
     "read_scope",
     "role_floor",
+    "gate",
+    "approval",
+    "override",
 ]
 
 #: ``Decision.waits_because`` for a person's ``caution`` call that waits only

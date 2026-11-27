@@ -2450,6 +2450,64 @@
         }
       }
     },
+    "/api/v1/policy/carry-over/dry-run": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Carry Over",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
+        "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarryOverDryRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policy/explain": {
       "post": {
         "tags": [
@@ -20555,13 +20613,33 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Index",
-        "operationId": "_index_ui_blocked_people_get",
+        "summary": "Blocked People Page",
+        "operationId": "blocked_people_page_ui_blocked_people_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
                 "schema": {
                   "type": "string"
                 }
@@ -20574,13 +20652,13 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Block",
-        "operationId": "_block_ui_blocked_people_post",
+        "summary": "Block Person",
+        "operationId": "block_person_ui_blocked_people_post",
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/Body__block_ui_blocked_people_post"
+                "$ref": "#/components/schemas/Body_block_person_ui_blocked_people_post"
               }
             }
           }
@@ -20588,6 +20666,41 @@
         "responses": {
           "303": {
             "description": "Done. The answer sends the browser back to the page."
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The form comes from a page of another tenant. Reload the page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
           },
           "422": {
             "description": "The page again, with the error next to its field.",
@@ -20607,13 +20720,13 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Unblock",
-        "operationId": "_unblock_ui_blocked_people_unblock_post",
+        "summary": "Unblock Person",
+        "operationId": "unblock_person_ui_blocked_people_unblock_post",
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/Body__unblock_ui_blocked_people_unblock_post"
+                "$ref": "#/components/schemas/Body_unblock_person_ui_blocked_people_unblock_post"
               }
             }
           },
@@ -20634,7 +20747,7 @@
             }
           },
           "403": {
-            "description": "The login is the admin's own login.",
+            "description": "The login is the admin's own login (JSON), or the admin's own login is blocked in this tenant (plain text, from the session check).",
             "content": {
               "application/json": {
                 "schema": {
@@ -20644,6 +20757,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -20664,7 +20782,27 @@
             }
           },
           "503": {
-            "description": "MEHO cannot read the block list now.",
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The form comes from a page of another tenant. Reload the page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -30356,22 +30494,6 @@
         "title": "BlockRead",
         "description": "One block of the list."
       },
-      "Body__block_ui_blocked_people_post": {
-        "properties": {
-          "sub": {
-            "type": "string",
-            "title": "Sub",
-            "default": ""
-          },
-          "reason": {
-            "type": "string",
-            "title": "Reason",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "Body__block_ui_blocked_people_post"
-      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -30530,31 +30652,6 @@
         "type": "object",
         "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
       },
-      "Body__unblock_ui_blocked_people_unblock_post": {
-        "properties": {
-          "sub": {
-            "type": "string",
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Sub"
-          },
-          "confirm": {
-            "type": "string",
-            "title": "Confirm",
-            "default": ""
-          },
-          "shown": {
-            "type": "string",
-            "title": "Shown",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "sub"
-        ],
-        "title": "Body__unblock_ui_blocked_people_unblock_post"
-      },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {
           "from_name": {
@@ -30675,6 +30772,22 @@
           "work_ref"
         ],
         "title": "Body_approvals_in_order_run_ui_approvals_in_order_post"
+      },
+      "Body_block_person_ui_blocked_people_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_block_person_ui_blocked_people_post"
       },
       "Body_bulk_import_ui_topology_edges_bulk_post": {
         "properties": {
@@ -32450,6 +32563,31 @@
         "type": "object",
         "title": "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
       },
+      "Body_unblock_person_ui_blocked_people_unblock_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "default": ""
+          },
+          "shown": {
+            "type": "string",
+            "title": "Shown",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub"
+        ],
+        "title": "Body_unblock_person_ui_blocked_people_unblock_post"
+      },
       "Body_upload_agent_session_api_v1_sessions_post": {
         "properties": {
           "archive": {
@@ -33217,6 +33355,125 @@
         ],
         "title": "CapabilityRead",
         "description": "One persisted capability row, built from the ORM via ``model_validate``."
+      },
+      "CarryOverDryRun": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverSetting"
+            },
+            "type": "array",
+            "title": "Settings"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Dry run: nothing was changed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "sandbox_mode",
+          "settings"
+        ],
+        "title": "CarryOverDryRun",
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+      },
+      "CarryOverOperation": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "step_of": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "step_of"
+        ],
+        "title": "CarryOverOperation",
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once. It is empty when none does, or when the\nsetting makes only the direct call wait, not the step."
+      },
+      "CarryOverSetting": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "policy_file"
+            ],
+            "title": "Source"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Match"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverOperation"
+            },
+            "type": "array",
+            "title": "Operations"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "scope",
+          "ref",
+          "match",
+          "operations",
+          "warnings"
+        ],
+        "title": "CarryOverSetting",
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``."
       },
       "CatalogListResponse": {
         "properties": {

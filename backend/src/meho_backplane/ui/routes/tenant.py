@@ -285,6 +285,8 @@ async def _switch(request: Request, session_ctx: UISessionContext) -> Response:
             expected_audience=get_settings().keycloak_audience,
             requested_tenant=wanted,
         )
+        # The person chooses the tenant at the web console in this moment.
+        operator = operator.model_copy(update={"in_code_kind": "person"})
     except HTTPException as exc:
         if exc.status_code not in (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN):
             raise

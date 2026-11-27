@@ -85,6 +85,10 @@ class ArgoCdOp:
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None
+    #: What a call can do for good (``register_typed_operation``): delete,
+    #: stop or overwrite something, and whether it gives or takes rights.
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None
+    changes_rights: bool = False
 
 
 #: Curated ``when_to_use`` blurbs per group. ``register_typed_operation``

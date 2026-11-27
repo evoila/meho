@@ -399,6 +399,8 @@ LOCALUSER_OPS: tuple[WinsrvOp, ...] = (
         tags=("write", "localuser", "delete"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Delete a local user account. Irreversible; approval-gated — "

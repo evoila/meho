@@ -2763,26 +2763,37 @@ The rule:
 - A test that runs several versions has one variable for each version
   (`MEHO_TEST_POSTGRES_16_IMAGE`, `MEHO_TEST_MONGODB_8_IMAGE`). The single
   name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand. Each version run
-  has a fixed test id (`postgres-16`, `mongo-8`), so the test report that CI
-  uploads holds no proxy name.
+  has a fixed test id (`postgres-16`, `mongo-8`). A step before each upload
+  of a test report replaces the proxy name in it.
 - The k3s node inside a test container does not pull its busybox image from
   the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it
   skip.
 - Packages that a Dockerfile installs at build time (the bind9 test images
   run `apt-get`) come from the Debian package servers. They are a package
   download, not an image pull, and stay outside the proxy.
+- When the proxy is down or has no copy of an image, the pull fails. CI does
+  not pull that image from Docker Hub instead. The test then fails, or skips
+  where its fixture skips when its container cannot start.
+- GitHub hides a secret in the job log only. So the unit shard, coverage and
+  integration shard jobs run the step "Hide the proxy name in the test
+  reports" before they upload their JUnit files and pytest log.
+  `scripts/ci/hide_proxy_name.py` replaces the proxy value and its host with
+  `PROXY`, also in URL-encoded form. Each upload of these reports runs only
+  when this step passed. The coverage data files stay as they are.
 
 `backend/tests/test_ci_test_images.py` pins the rule, with the reader in
 `backend/tests/_ci_image_check.py`. It finds the test jobs in `ci.yml` itself:
-each job with a pytest step, and the test files that step runs (its `find`
-and `grep -rl` lists, the list of `tests/_outside_backend_tests.py`, and the
+each job with a pytest step (`uv run pytest`, `uv run python -m pytest` or
+`python -m pytest`), and the test files that step runs (its `find` and
+`grep -rl` lists, the list of `tests/_outside_backend_tests.py`, and the
 paths on the pytest command line). It fails:
 
 - when a test file names an image in plain text, or has a `FROM` line with a
   fixed name. It reads every file under `tests/integration` and
   `tests/migrations`, and every other file that imports testcontainers or
   the Docker SDK. In the image place of a container start (the first
-  argument or `image=` of a testcontainers class), of a pod spec (the
+  argument of a testcontainers class that the file calls by its imported
+  name, or `image=` of any call), of a pod spec (the
   `image` key) or of a client model (`image=`), any fixed text counts: a
   bare name, a name without a tag, an f-string, a joined string, or a
   constant with `DEFAULT` in its name. A testcontainers class with no image
@@ -2822,7 +2833,8 @@ list does not grow old. It holds:
   the coverage job (the acceptance tests import a helper from
   `tests/integration/conftest.py` and never start Keycloak). Such an entry
   fails when no listed job still runs a test that reads the variable, or
-  when the job sets it.
+  when the job sets it in the image block of the step "Read the CI
+  repository secrets".
 
 The jobs that set test images are `python-unit-shard`, `python-coverage`,
 `python-integration-shard`, `python-migration-tests`, `python-timing-tests`

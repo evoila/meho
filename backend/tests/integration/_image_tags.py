@@ -35,8 +35,8 @@ class ImageRun(NamedTuple):
 def image_param(label: str, image: str) -> ParameterSet:
     """A fixture parameter that runs *image* under the fixed test id *label*.
 
-    The id and the messages of the run name only *label*. CI names its images
-    through the image proxy, and the test report that CI uploads holds every
-    test id and every skip message.
+    The test id and the skip and wait messages of the fixture name only
+    *label*. CI names its images through the image proxy, and the test report
+    that CI uploads holds every test id and every skip message.
     """
     return pytest.param(ImageRun(label, image), id=label)

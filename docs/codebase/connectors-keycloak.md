@@ -240,8 +240,9 @@ rejects a whitespace-only secret rather than setting an empty password.
   `reachable=False`). With `KEYCLOAK_ANSWER_REALM` on and a nonempty
   answered `realm` that is not the managed realm, `extras` also has
   `realm_name_differs`. A target read (`meho targets describe`, the target
-  list) leaves that line out of the saved probe while the switch is off
-  (`shown_fingerprint` in `targets/keycloak_realm_warnings.py`).
+  list) leaves that line out of a Keycloak target's saved probe while the
+  switch is off (`shown_fingerprint` in `targets/keycloak_realm_warnings.py`).
+  The probe of a target of another product keeps its `extras` as they are.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,
@@ -2294,7 +2295,9 @@ check before an approved run) reads the realm first every time, so a call
 never uses a check of an earlier call. Every admin login with at least one
 `realm-management` role in the realm can read the name. When Keycloak
 refuses this read with 403, also the read that `realm.update` makes before
-its write, nothing more is sent and the result is the usual
+its write and the read that `events.list`, `admin_events.list` and
+`auth_flow.step.list` make before they ask for events or flow steps,
+nothing more is sent and the result is the usual
 `connector_http_403` result (`http_status` 403, `upstream_message`,
 `permission_headers`). Its `error` text starts with a fixed sentence: MEHO's
 read of the managed realm was refused, and the login needs at least one

@@ -3176,3 +3176,44 @@ async def test_a_saved_realm_name_note_shows_only_while_the_answer_realm_switch_
         for extras in _saved_extras():
             assert extras["realm_name_differs"] == note
     assert probes == 1
+
+
+@pytest.mark.asyncio
+async def test_another_product_keeps_its_realm_name_differs_key_while_the_switch_is_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe ``extras`` belong to each connector.
+
+    With the switch off, only a Keycloak target loses ``realm_name_differs``.
+    A target of another product keeps its own key of the same name in the
+    target read and the target list.
+    """
+    own = {"realm_name_differs": "a field of another connector", "other": 1}
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="example-other",
+        product="vault",
+        host="vault.example.invalid",
+        fingerprint={
+            "vendor": "hashicorp",
+            "product": "vault",
+            "version": "1.17.0",
+            "reachable": True,
+            "probed_at": datetime.now(UTC).isoformat(),
+            "probe_method": "GET /v1/sys/health",
+            "extras": own,
+        },
+    )
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_operator_token(key, tenant_id)}"}
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "false")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        detail = client.get("/api/v1/targets/example-other", headers=headers)
+        listed = client.get("/api/v1/targets", headers=headers)
+    assert detail.status_code == 200
+    assert listed.status_code == 200
+    (row,) = listed.json()["items"]
+    assert detail.json()["fingerprint"]["extras"] == own
+    assert row["fingerprint"]["extras"] == own

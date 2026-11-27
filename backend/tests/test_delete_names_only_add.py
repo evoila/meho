@@ -42,6 +42,7 @@ from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
 from meho_backplane.flight_recorder.capture import _op_context_from
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.operations._handler_resolve import _HANDLER_CACHE
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.governed_subops import classify_subop_grantability
 from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
@@ -55,7 +56,10 @@ from meho_backplane.operations.service_grants import (
     ServicePrincipalGrantService,
     never_covered_reason,
 )
-from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.operations.typed_register import (
+    clear_typed_op_snapshot,
+    register_typed_operation,
+)
 from meho_backplane.policy.fixed_rules import DELETE_WAITS, fixed_rule_for
 from meho_backplane.policy.shadow import asked_of
 from meho_backplane.redaction.flight_recorder.families import classify_body_exclusion
@@ -205,8 +209,13 @@ def handler_runs() -> Iterator[list[str]]:
 
 @pytest_asyncio.fixture
 async def _registered_ops(embedding: AsyncMock, handler_runs: list[str]) -> AsyncIterator[None]:
-    """The two ``caution`` operations, and the tenant of the service login."""
-    for op_id, handler in ((_DELETE_OP, _delete_handler), (_REBOOT_OP, _reboot_handler)):
+    """The two ``caution`` operations, and the tenant of the service login.
+
+    At the end the handler cache forgets the two handlers, so no later test
+    file in the same process finds them there.
+    """
+    handlers = (_delete_handler, _reboot_handler)
+    for op_id, handler in zip((_DELETE_OP, _REBOOT_OP), handlers, strict=True):
         await register_typed_operation(
             **_FIX,
             op_id=op_id,
@@ -221,7 +230,11 @@ async def _registered_ops(embedding: AsyncMock, handler_runs: list[str]) -> Asyn
         )
     async with get_sessionmaker()() as session, session.begin():
         session.add(Tenant(id=OPERATOR_TENANT_ID, slug="dn-tenant", name="Delete Names Tenant"))
-    yield
+    try:
+        yield
+    finally:
+        for handler in handlers:
+            _HANDLER_CACHE.pop(f"{handler.__module__}.{handler.__qualname__}", None)
 
 
 async def _delete_descriptor() -> EndpointDescriptor:
@@ -374,6 +387,13 @@ async def _grants(_registered_ops: None) -> AsyncIterator[dict[str, uuid.UUID]]:
 
 @pytest.fixture
 def _service_client() -> Iterator[TestClient]:
+    """The app, started with a service login.
+
+    The start keeps a copy of the typed operation rows for the process, and
+    the copy holds the made-up family of this file. At the end the copy is
+    dropped, so a later test file in the same process never sees the family.
+    """
+
     async def _fake_verify() -> Operator:
         return _service_operator()
 
@@ -383,6 +403,7 @@ def _service_client() -> Iterator[TestClient]:
             yield client
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        clear_typed_op_snapshot()
 
 
 def _call(client: TestClient, op_id: str) -> dict[str, Any]:

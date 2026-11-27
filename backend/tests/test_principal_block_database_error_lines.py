@@ -9,9 +9,10 @@ id and a made-up reason (or sign-in key), a refused connection, and a
 time-out. The lines are read as the production log setup writes them,
 after the request log context was merged into them. No made-up value is in
 any line, the line of the step holds the fields of the request log context
-and its own step (``operation``) and error type (``error_type``), and the
-call answers with the same status code as before. A failed block or unblock
-write ends in an error whose text, repr and chain hold no made-up value.
+and its own step (``operation``) and error type (``error_type``). The call
+answers 503, or 500 when a block or unblock write fails with an error that
+is not a database error. The error that then leaves the app holds no
+made-up value in its text, its repr or its chain.
 """
 
 from __future__ import annotations
@@ -33,11 +34,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.auth import principal_block
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.principal_block import (
     BlockedPerson,
+    PrincipalBlockUnavailableError,
+    PrincipalBlockWriteError,
+    block_principal,
     block_set_digest,
     reset_block_cache,
+    unblock_principal,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
@@ -65,22 +70,30 @@ _LINES = {
     "read_list": ("principal_block_read_failed", "read_list"),
     "read_blocks": ("principal_block_read_failed", "read_blocks"),
     "block": ("principal_block_write_failed", "block"),
-    "unblock": ("principal_block_write_failed", "unblock"),
+    "unblock": ("principal_unblock_write_failed", "unblock"),
     "sign_in_lock": ("principal_unblock_sign_in_check_failed", "sign_in_check"),
     "sign_in_scan": ("principal_unblock_sign_in_check_failed", "sign_in_check"),
 }
 
-#: (step, route) -> the status code of the call.
-_STATUS = {
-    ("read_list", "rest_block"): 503,
-    ("read_blocks", "rest_unblock"): 503,
-    ("block", "rest_block"): 500,
-    ("block", "console_block"): 500,
-    ("unblock", "rest_unblock"): 500,
-    ("unblock", "console_unblock"): 500,
-    ("sign_in_lock", "rest_own_unblock"): 503,
-    ("sign_in_scan", "rest_own_unblock"): 503,
-}
+#: The routes each step runs through.
+_CASES = [
+    ("read_list", "rest_block"),
+    ("read_blocks", "rest_unblock"),
+    ("block", "rest_block"),
+    ("block", "console_block"),
+    ("unblock", "rest_unblock"),
+    ("unblock", "console_unblock"),
+    ("sign_in_lock", "rest_own_unblock"),
+    ("sign_in_scan", "rest_own_unblock"),
+]
+
+_WRITES = ("block", "unblock")
+
+
+def _status(step: str, fault: str) -> int:
+    """The status code of the call: a write fails with 500 on an error that is no database error."""
+    return 500 if step in _WRITES and fault != "database" else 503
+
 
 #: Fault -> the type name the log line names.
 _ERROR_TYPES = {
@@ -126,9 +139,10 @@ def _fault(kind: str, login: str, value: str) -> Exception:
             {"sub": login, "reason": value},
             Exception(f"no row for {login}: {value}"),
         )
+    # The two other faults name the values too, so a chain to them shows.
     if kind == "refused":
-        return ConnectionRefusedError(111, "Connection refused")
-    return TimeoutError("timed out")
+        return ConnectionRefusedError(111, f"Connection refused ({login} {value})")
+    return TimeoutError(f"timed out ({login} {value})")
 
 
 def _make_fail(step: str, monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
@@ -238,7 +252,7 @@ def _chain(error: BaseException) -> Iterator[BaseException]:
 
 
 @pytest.mark.parametrize("fault", sorted(_ERROR_TYPES))
-@pytest.mark.parametrize(("step", "route"), sorted(_STATUS))
+@pytest.mark.parametrize(("step", "route"), _CASES)
 def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_only(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
@@ -273,7 +287,7 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
             )
     out = capfd.readouterr().out
 
-    assert response.status_code == _STATUS[step, route], response.text
+    assert response.status_code == _status(step, fault), response.text
     assert [value for value in made_up if value in out] == []
     lines = json_lines(out)
     event, operation = _LINES[step]
@@ -284,7 +298,7 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
     assert line["level"] == "warning"
     assert line["operation"] == operation
     assert line["error_type"] == _ERROR_TYPES[fault]
-    if step in ("block", "unblock"):
+    if _status(step, fault) == 500:
         assert len(recorder.errors) == 1
         for error in _chain(recorder.errors[0]):
             for value in made_up:
@@ -292,3 +306,36 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
                 assert value not in repr(error)
     else:
         assert recorder.errors == []
+
+
+@pytest.mark.parametrize("fault", sorted(_ERROR_TYPES))
+@pytest.mark.parametrize("step", _WRITES)
+def test_the_error_of_a_failed_block_or_unblock_write_has_the_error_type_only(
+    monkeypatch: pytest.MonkeyPatch, step: str, fault: str
+) -> None:
+    _seed_tenant(_TENANT, "block-table-errors")
+    login = f"login-{uuid.uuid4().hex}"
+    reason = f"moved to team {uuid.uuid4().hex}"
+    if step == "unblock":
+        _seed_block(login, reason)
+    _make_fail(step, monkeypatch, _fault(fault, login, reason))
+    admin = Operator(
+        sub=_CALLER,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+
+    async def _write() -> None:
+        if step == "block":
+            await block_principal(admin, login, reason)
+        else:
+            await unblock_principal(admin, login, reason=reason)
+
+    expected = PrincipalBlockUnavailableError if fault == "database" else PrincipalBlockWriteError
+    with pytest.raises(expected) as raised:
+        asyncio.run(_write())
+    assert str(raised.value) == _ERROR_TYPES[fault]
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None

@@ -419,14 +419,21 @@ class InstallFloor:
             raise ValueError(self.invalid)
         return _route_install(self.entries, request)
 
-    def refusal(self, operator: Operator, request: ApprovalRequest) -> str | None:
-        """One sentence when the install's routing does not let *operator* approve *request*."""
+    def refusal(
+        self, operator: Operator, request: ApprovalRequest, *, place: bool = True
+    ) -> str | None:
+        """One sentence when the install's routing does not let *operator* approve *request*.
+
+        With *place* ``False`` the sentence does not name the entries of the
+        routing or their places in the policy.
+        """
         try:
             found = self.check(request)
         except ValueError as exc:
+            why = f": {exc}" if place else "."
             return (
                 "The install's stored routing is not valid, so MEHO cannot check who may "
-                f"approve: {exc} Import a fixed policy file."
+                f"approve{why} Import a fixed policy file."
             )
         if found is None or found.rule == DEFAULT_RULE:
             return None
@@ -434,15 +441,16 @@ class InstallFloor:
             return _CATEGORY_NOT_KNOWN_REFUSAL
         if in_kinds(operator, found.kinds):
             return None
+        rule = f" (`{found.rule}`)" if place else ""
         if not found.kinds:
             return (
-                f"The install's routing (`{found.rule}`) lets no group approve this change, so "
-                "it waits until it expires."
+                f"The install's routing{rule} lets no group approve this change, so it waits "
+                "until it expires."
             )
         return (
-            f"The install's routing (`{found.rule}`) lets only {group_names(found.kinds)} "
-            f"approve this change. You are in MEHO-{kind_of(operator)}. A tenant's routing can "
-            "only narrow it."
+            f"The install's routing{rule} lets only {group_names(found.kinds)} approve this "
+            f"change. You are in MEHO-{kind_of(operator)}. A tenant's routing can only "
+            "narrow it."
         )
 
 

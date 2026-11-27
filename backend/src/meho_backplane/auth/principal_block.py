@@ -61,6 +61,7 @@ import structlog
 from sqlalchemy import Insert, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
@@ -107,6 +108,9 @@ BLOCK_SCOPE_ALL: Final[str] = "*"
 
 #: What a blocked person reads. It names no admin and no reason.
 PRINCIPAL_BLOCKED_MESSAGE: Final[str] = "This person is blocked in MEHO. Ask an admin."
+
+#: The path of the REST routes of the block list.
+_REST_ROUTE: Final[str] = "/api/v1/principals/blocked"
 
 #: Longest reason an admin can type.
 REASON_MAX_LENGTH: Final[int] = 500
@@ -175,22 +179,34 @@ _log = structlog.get_logger(__name__)
 
 
 async def _database_step[T](
-    step: Callable[[], Awaitable[T]], *, event: str, operation: str, error: type[Exception]
+    step: Callable[[], Awaitable[T]],
+    *,
+    event: str,
+    operation: str,
+    error: type[Exception],
+    other_error: type[Exception] | None = None,
+    keep: tuple[type[Exception], ...] = (),
 ) -> T:
-    """Run *step*; on any error, log it and raise *error* with the error type as its text.
+    """Run *step*; on any error, log it and raise an error with the error type as its text.
 
     The text of a database error holds the values of the statement (a
     login, a reason, a sign-in key). So the warning *event* holds only
     the step (*operation*) and the type of the error, and no traceback.
-    *error* is raised after the error was handled, so it carries no
-    chain to the database error.
+    The raised error is *error*; with *other_error*, an error that is not
+    a database error (:class:`~sqlalchemy.exc.SQLAlchemyError`) raises
+    *other_error*. It is raised after the error was handled, so it carries
+    no chain to the error of the step. An error of *keep* (an answer of
+    the step itself) is raised as it is, with no warning.
     """
     try:
         return await step()
+    except keep:
+        raise
     except Exception as exc:
         error_type = type(exc).__name__
+        raised = error if other_error is None or isinstance(exc, SQLAlchemyError) else other_error
         _log.warning(event, operation=operation, error_type=error_type)
-    raise error(error_type)
+    raise raised(error_type)
 
 
 def reset_block_cache() -> None:
@@ -357,8 +373,17 @@ def _scope_of(operator: Operator) -> str:
     return BLOCK_SCOPE_ALL if operator.platform_admin else str(operator.tenant_id)
 
 
-async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedPerson:
+async def block_principal(
+    operator: Operator,
+    sub: str,
+    reason: str,
+    *,
+    route: tuple[str, str] = ("POST", _REST_ROUTE),
+) -> BlockedPerson:
     """Block *sub*. The block row and its audit row commit together.
+
+    *route* is the method and path the audit row names. The default is the
+    REST route; the console page passes its own route.
 
     Blocking a login that is already blocked in the same scope updates
     the reason. The row is written in one statement (insert, or update
@@ -366,7 +391,10 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     the statement waits; when the unblock removed the row, the statement
     writes a new one. So a block is always written. Raises
     :class:`CannotBlockSelfError` for the admin's own login, and
-    :class:`PrincipalBlockWriteError` when the block cannot be written.
+    :class:`PrincipalBlockUnavailableError` (503
+    ``principal_block_check_unavailable``) when the database answers the
+    write with an error, and :class:`PrincipalBlockWriteError` when the
+    write fails with another error; then nothing is written.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError
@@ -380,42 +408,43 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
         "blocked_by_sub": operator.sub,
         "blocked_at": now,
     }
-    async with get_sessionmaker()() as session:
-        await _database_step(
-            lambda: _write_block(session, operator, values),
-            event="principal_block_write_failed",
-            operation="block",
-            error=PrincipalBlockWriteError,
-        )
+    await _database_step(
+        lambda: _write_block(operator, values, route),
+        event="principal_block_write_failed",
+        operation="block",
+        error=PrincipalBlockUnavailableError,
+        other_error=PrincipalBlockWriteError,
+    )
     reset_block_cache()
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
 
-async def _write_block(session: AsyncSession, operator: Operator, values: dict[str, Any]) -> None:
+async def _write_block(operator: Operator, values: dict[str, Any], route: tuple[str, str]) -> None:
     """Write the block row (insert, or update the row that is there) and its audit row."""
     changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
-    conn = await session.connection()
-    stmt: Insert
-    if conn.dialect.name == "postgresql":
-        pg = pg_insert(PrincipalBlock).values(**values)
-        stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-    else:
-        lite = sqlite_insert(PrincipalBlock).values(**values)
-        stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-    await session.execute(stmt)
-    add_audit_row(
-        session,
-        operator,
-        op_id="principal.block",
-        method="POST",
-        path="/api/v1/principals/blocked",
-        payload={
-            "blocked_sub": values["sub"],
-            "scope": values["scope"],
-            "reason": values["reason"],
-        },
-    )
-    await session.commit()
+    async with get_sessionmaker()() as session:
+        conn = await session.connection()
+        stmt: Insert
+        if conn.dialect.name == "postgresql":
+            pg = pg_insert(PrincipalBlock).values(**values)
+            stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+        else:
+            lite = sqlite_insert(PrincipalBlock).values(**values)
+            stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+        await session.execute(stmt)
+        add_audit_row(
+            session,
+            operator,
+            op_id="principal.block",
+            method=route[0],
+            path=route[1],
+            payload={
+                "blocked_sub": values["sub"],
+                "scope": values["scope"],
+                "reason": values["reason"],
+            },
+        )
+        await session.commit()
 
 
 def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
@@ -510,6 +539,7 @@ async def unblock_principal(
     reason: str | None = None,
     sign_in: dict[str, Any] | None = None,
     shown: str | None = None,
+    route: tuple[str, str] | None = None,
 ) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
@@ -521,22 +551,55 @@ async def unblock_principal(
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
     is none, and :class:`PrincipalBlockUnavailableError` when the table,
-    the lock of the sign-in or the audit rows cannot be read. *reason* and
-    *sign_in* (the proof of a fresh sign-in) go into the audit row when
-    they are given. A *sign_in* that an
-    ``approval.decision`` audit row already names is used up: the call
-    raises :class:`SignInAlreadyUsedError` and removes nothing. The scan
-    and the removal run under the advisory lock of the sign-in
-    (:mod:`meho_backplane.auth.sign_in_use`). When *shown* is given (the
-    :func:`block_set_digest` of the blocks the admin was shown), MEHO
-    removes the blocks only when they are still exactly those blocks, and
-    else raises :class:`BlockSetChangedError` and removes nothing. The
-    delete also removes a block only while it is still the block that
-    was read (same reason, admin and time). When one was changed in the
-    meantime, MEHO removes nothing and raises :class:`BlockSetChangedError`.
-    Raises :class:`PrincipalBlockWriteError` when the removal cannot be
-    written.
+    the lock of the sign-in or the audit rows cannot be read, or the table
+    cannot be written; then nothing is removed. *reason* and *sign_in*
+    (the proof of a fresh sign-in) go into the audit row when they are
+    given. A *sign_in* that an ``approval.decision`` audit row already
+    names is used up: the call raises :class:`SignInAlreadyUsedError` and
+    removes nothing. The scan and the removal run under the advisory lock
+    of the sign-in (:mod:`meho_backplane.auth.sign_in_use`). *route* is
+    the method and path the audit row names; the default is the REST
+    route. When *shown* is given (the :func:`block_set_digest` of the
+    blocks the admin was shown), MEHO removes the blocks only when they
+    are still exactly those blocks, and else raises
+    :class:`BlockSetChangedError` and removes nothing. The delete also
+    removes a block only while it is still the block that was read (same
+    reason, admin and time). When one was changed in the meantime, MEHO
+    removes nothing and raises :class:`BlockSetChangedError`. When the
+    removal fails with an error that is not a database error, it raises
+    :class:`PrincipalBlockWriteError`.
     """
+    removed = await _database_step(
+        lambda: _unblock_in_session(operator, sub, reason, sign_in, shown, route),
+        event="principal_unblock_write_failed",
+        operation="unblock",
+        error=PrincipalBlockUnavailableError,
+        other_error=PrincipalBlockWriteError,
+        keep=_UNBLOCK_ANSWERS,
+    )
+    reset_block_cache()
+    return removed
+
+
+#: The errors :func:`unblock_principal` answers with; they are no write failure.
+_UNBLOCK_ANSWERS: Final[tuple[type[Exception], ...]] = (
+    PrincipalBlockUnavailableError,
+    SignInAlreadyUsedError,
+    OwnBlockStaysError,
+    PrincipalNotBlockedError,
+    BlockSetChangedError,
+)
+
+
+async def _unblock_in_session(
+    operator: Operator,
+    sub: str,
+    reason: str | None,
+    sign_in: dict[str, Any] | None,
+    shown: str | None,
+    route: tuple[str, str] | None,
+) -> int:
+    """The body of :func:`unblock_principal`, in one session; returns how many were removed."""
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
     only_this_tenant = own_login or not operator.platform_admin
@@ -554,6 +617,9 @@ async def unblock_principal(
             raise PrincipalNotBlockedError
         if shown is not None and shown != block_set_digest(removed):
             raise BlockSetChangedError
+        if await _delete_read_blocks(session, removed) != len(removed):
+            await session.rollback()
+            raise BlockSetChangedError
         payload: dict[str, Any] = {
             "unblocked_sub": sub,
             "scopes": [b.scope for b in removed],
@@ -563,38 +629,16 @@ async def unblock_principal(
             payload["reason"] = reason
         if sign_in is not None:
             payload["sign_in"] = sign_in
-        written = await _database_step(
-            lambda: _write_unblock(session, operator, removed, payload),
-            event="principal_block_write_failed",
-            operation="unblock",
-            error=PrincipalBlockWriteError,
+        add_audit_row(
+            session,
+            operator,
+            op_id="principal.unblock",
+            method=route[0] if route else "DELETE",
+            path=route[1] if route else f"{_REST_ROUTE}/{sub}",
+            payload=payload,
         )
-    if not written:
-        raise BlockSetChangedError
-    reset_block_cache()
+        await session.commit()
     return len(removed)
-
-
-async def _write_unblock(
-    session: AsyncSession,
-    operator: Operator,
-    removed: list[BlockedPerson],
-    payload: dict[str, Any],
-) -> bool:
-    """Delete the read blocks and write the audit row; false when a block changed meanwhile."""
-    if await _delete_read_blocks(session, removed) != len(removed):
-        await session.rollback()
-        return False
-    add_audit_row(
-        session,
-        operator,
-        op_id="principal.unblock",
-        method="DELETE",
-        path=f"/api/v1/principals/blocked/{payload['unblocked_sub']}",
-        payload=payload,
-    )
-    await session.commit()
-    return True
 
 
 async def list_blocked(operator: Operator) -> list[BlockedPerson]:

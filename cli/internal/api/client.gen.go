@@ -13136,6 +13136,7 @@ type TraceView struct {
 type UISessionContext struct {
 	CanSwitchTenant *bool                   `json:"can_switch_tenant,omitempty"`
 	Client          *map[string]interface{} `json:"client"`
+	DisplayName     *string                 `json:"display_name"`
 	OperatorSub     string                  `json:"operator_sub"`
 	SessionId       openapi_types.UUID      `json:"session_id"`
 	TenantChosen    *bool                   `json:"tenant_chosen,omitempty"`

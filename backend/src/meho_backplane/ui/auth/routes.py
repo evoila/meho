@@ -629,6 +629,8 @@ async def _persist_session_from_tokens(
             lifetime=lifetime,
             tenant_chosen=operator.tenant_chosen,
             can_switch_tenant=can_switch_tenant(operator),
+            # The console's user menu shows this, never the sub.
+            display_name=operator.name,
             # The menu's admin entries: a person with ``tenant_admin``, the
             # same check as the pages (``revalidation.is_menu_admin``).
             tenant_admin=(

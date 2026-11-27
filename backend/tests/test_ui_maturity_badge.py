@@ -62,6 +62,7 @@ _AREA_LANDING_TEMPLATES = (
     "approvals/index.html",
     "audit/index.html",
     "settings/index.html",
+    "policy/index.html",
 )
 
 _INCLUDE_TAG = '{% include "_maturity_badge.html" %}'
@@ -70,9 +71,10 @@ _INCLUDE_TAG = '{% include "_maturity_badge.html" %}'
 def _sidebar_surface_keys() -> set[str]:
     """Extract the surface keys from ``base.html``'s ``nav_surfaces``."""
     src = (templates_dir() / "base.html").read_text()
-    match = re.search(r"nav_surfaces = \[(.*?)\] %}", src, re.S)
-    assert match is not None, "nav_surfaces registry not found in base.html"
-    keys = re.findall(r'\(\s*"([a-z-]+)"', match.group(1))
+    # The main list, and each entry a switch adds (``nav_surfaces + [...]``).
+    lists = re.findall(r"\{% set nav_surfaces = (.*?) %}", src, re.S)
+    assert lists, "nav_surfaces registry not found in base.html"
+    keys = [key for body in lists for key in re.findall(r'\(\s*"([a-z-]+)"', body)]
     assert keys, "no surface keys parsed from nav_surfaces"
     return set(keys)
 

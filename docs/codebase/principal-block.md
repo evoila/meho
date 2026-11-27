@@ -101,6 +101,24 @@ is 5 seconds old. A process that cannot read the table refuses the
 request (503 `principal_block_check_unavailable`); it never answers "not
 blocked" for an unknown state.
 
+When a read or a write of the block table fails, MEHO writes one warning.
+It holds the step (`operation`) and the type of the error (`error_type`),
+and no traceback and no text of the error, because that text holds the
+values of the statement (a login, a reason, a sign-in key):
+
+| Warning | `operation` | Answer |
+|---|---|---|
+| `principal_block_read_failed` | `read_list` (the cached list), `read_blocks` (the rows of one login) | 503 `principal_block_check_unavailable` |
+| `principal_unblock_sign_in_check_failed` | `sign_in_check` | 503 `principal_block_check_unavailable` |
+| `principal_block_write_failed` | `block`, `unblock` | 500 |
+
+A failed write ends with `PrincipalBlockWriteError`. Its text is the type
+of the error only, and it has no link to the database error, so the
+`request_failed` line and the line of the web server hold no statement
+values either. These warnings add no login field of their own. The
+fields of the request log context (`request_id`, `operator_sub`,
+`tenant_id`, ...) stay on them.
+
 Where the list is checked:
 
 | Place | What happens |

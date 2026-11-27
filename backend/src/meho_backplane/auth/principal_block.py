@@ -50,7 +50,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -69,7 +69,7 @@ from meho_backplane.auth.principal_block_run import (
     run_login,
     step_refused_in_run,
 )
-from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
+from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, SignInUse, earlier_sign_in_uses
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -83,6 +83,7 @@ __all__ = [
     "CannotBlockSelfError",
     "OwnBlockStaysError",
     "PrincipalBlockUnavailableError",
+    "PrincipalBlockWriteError",
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
     "SignInAlreadyUsedError",
@@ -113,6 +114,10 @@ REASON_MAX_LENGTH: Final[int] = 500
 
 class PrincipalBlockUnavailableError(Exception):
     """The block list could not be read, so MEHO cannot say if a login is blocked."""
+
+
+class PrincipalBlockWriteError(Exception):
+    """A block or an unblock could not be written. The text is the type of the error only."""
 
 
 class PrincipalBlockedStepError(Exception):
@@ -169,6 +174,25 @@ _cache: _Cache | None = None
 _log = structlog.get_logger(__name__)
 
 
+async def _database_step[T](
+    step: Callable[[], Awaitable[T]], *, event: str, operation: str, error: type[Exception]
+) -> T:
+    """Run *step*; on any error, log it and raise *error* with the error type as its text.
+
+    The text of a database error holds the values of the statement (a
+    login, a reason, a sign-in key). So the warning *event* holds only
+    the step (*operation*) and the type of the error, and no traceback.
+    *error* is raised after the error was handled, so it carries no
+    chain to the database error.
+    """
+    try:
+        return await step()
+    except Exception as exc:
+        error_type = type(exc).__name__
+        _log.warning(event, operation=operation, error_type=error_type)
+    raise error(error_type)
+
+
 def reset_block_cache() -> None:
     """Forget the cached list, so the next check reads the table."""
     global _cache
@@ -195,12 +219,13 @@ async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> frozenset[tuple[str,
         and 0 <= now - cached.loaded_at < max_age
     ):
         return cached.entries
-    try:
-        entries = await _load_entries(sessionmaker)
-    except Exception as exc:
-        _cache = None
-        _log.warning("principal_block_read_failed", exc_info=True)
-        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    _cache = None
+    entries = await _database_step(
+        lambda: _load_entries(sessionmaker),
+        event="principal_block_read_failed",
+        operation="read_list",
+        error=PrincipalBlockUnavailableError,
+    )
     _cache = _Cache(loaded_at=now, owner=sessionmaker, entries=entries)
     return entries
 
@@ -340,7 +365,8 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     when the row is there). While an unblock of the login holds the row,
     the statement waits; when the unblock removed the row, the statement
     writes a new one. So a block is always written. Raises
-    :class:`CannotBlockSelfError` for the admin's own login.
+    :class:`CannotBlockSelfError` for the admin's own login, and
+    :class:`PrincipalBlockWriteError` when the block cannot be written.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError
@@ -354,28 +380,42 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
         "blocked_by_sub": operator.sub,
         "blocked_at": now,
     }
-    changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
     async with get_sessionmaker()() as session:
-        conn = await session.connection()
-        stmt: Insert
-        if conn.dialect.name == "postgresql":
-            pg = pg_insert(PrincipalBlock).values(**values)
-            stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-        else:
-            lite = sqlite_insert(PrincipalBlock).values(**values)
-            stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
-        await session.execute(stmt)
-        add_audit_row(
-            session,
-            operator,
-            op_id="principal.block",
-            method="POST",
-            path="/api/v1/principals/blocked",
-            payload={"blocked_sub": sub, "scope": scope, "reason": reason},
+        await _database_step(
+            lambda: _write_block(session, operator, values),
+            event="principal_block_write_failed",
+            operation="block",
+            error=PrincipalBlockWriteError,
         )
-        await session.commit()
     reset_block_cache()
     return BlockedPerson(sub, scope, reason, operator.sub, now)
+
+
+async def _write_block(session: AsyncSession, operator: Operator, values: dict[str, Any]) -> None:
+    """Write the block row (insert, or update the row that is there) and its audit row."""
+    changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
+    conn = await session.connection()
+    stmt: Insert
+    if conn.dialect.name == "postgresql":
+        pg = pg_insert(PrincipalBlock).values(**values)
+        stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+    else:
+        lite = sqlite_insert(PrincipalBlock).values(**values)
+        stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+    await session.execute(stmt)
+    add_audit_row(
+        session,
+        operator,
+        op_id="principal.block",
+        method="POST",
+        path="/api/v1/principals/blocked",
+        payload={
+            "blocked_sub": values["sub"],
+            "scope": values["scope"],
+            "reason": values["reason"],
+        },
+    )
+    await session.commit()
 
 
 def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
@@ -405,11 +445,13 @@ async def _read_blocks(session: AsyncSession, sub: str) -> list[BlockedPerson]:
         .order_by(PrincipalBlock.scope)
         .with_for_update()
     )
-    try:
-        rows = (await session.execute(query)).scalars().all()
-    except Exception as exc:
-        _log.warning("principal_block_read_failed", exc_info=True)
-        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    result = await _database_step(
+        lambda: session.execute(query),
+        event="principal_block_read_failed",
+        operation="read_blocks",
+        error=PrincipalBlockUnavailableError,
+    )
+    rows = result.scalars().all()
     blocks = [BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows]
     return sorted(blocks, key=lambda b: b.scope)
 
@@ -443,18 +485,19 @@ async def _refuse_used_sign_in(
     from meho_backplane.operations import approval_queue
 
     key = str(sign_in["sign_in_key"])
-    try:
+
+    async def _lock_and_scan() -> list[SignInUse]:
         await approval_queue.take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
-        uses = await earlier_sign_in_uses(
+        return await earlier_sign_in_uses(
             session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
         )
-    except Exception as exc:
-        _log.warning(
-            "principal_unblock_sign_in_check_failed",
-            operation="sign_in_check",
-            error_type=type(exc).__name__,
-        )
-        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+
+    uses = await _database_step(
+        _lock_and_scan,
+        event="principal_unblock_sign_in_check_failed",
+        operation="sign_in_check",
+        error=PrincipalBlockUnavailableError,
+    )
     if any(use.kind == "approval" for use in uses):
         _log.warning("principal_unblock_sign_in_reused")
         raise SignInAlreadyUsedError
@@ -491,6 +534,8 @@ async def unblock_principal(
     delete also removes a block only while it is still the block that
     was read (same reason, admin and time). When one was changed in the
     meantime, MEHO removes nothing and raises :class:`BlockSetChangedError`.
+    Raises :class:`PrincipalBlockWriteError` when the removal cannot be
+    written.
     """
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
@@ -509,30 +554,47 @@ async def unblock_principal(
             raise PrincipalNotBlockedError
         if shown is not None and shown != block_set_digest(removed):
             raise BlockSetChangedError
-        if await _delete_read_blocks(session, removed) != len(removed):
-            await session.rollback()
-            raise BlockSetChangedError
-        removed_scopes = [b.scope for b in removed]
         payload: dict[str, Any] = {
             "unblocked_sub": sub,
-            "scopes": removed_scopes,
+            "scopes": [b.scope for b in removed],
             "removed_blocks": [{"scope": b.scope, "reason": b.reason} for b in removed],
         }
         if reason is not None:
             payload["reason"] = reason
         if sign_in is not None:
             payload["sign_in"] = sign_in
-        add_audit_row(
-            session,
-            operator,
-            op_id="principal.unblock",
-            method="DELETE",
-            path=f"/api/v1/principals/blocked/{sub}",
-            payload=payload,
+        written = await _database_step(
+            lambda: _write_unblock(session, operator, removed, payload),
+            event="principal_block_write_failed",
+            operation="unblock",
+            error=PrincipalBlockWriteError,
         )
-        await session.commit()
+    if not written:
+        raise BlockSetChangedError
     reset_block_cache()
     return len(removed)
+
+
+async def _write_unblock(
+    session: AsyncSession,
+    operator: Operator,
+    removed: list[BlockedPerson],
+    payload: dict[str, Any],
+) -> bool:
+    """Delete the read blocks and write the audit row; false when a block changed meanwhile."""
+    if await _delete_read_blocks(session, removed) != len(removed):
+        await session.rollback()
+        return False
+    add_audit_row(
+        session,
+        operator,
+        op_id="principal.unblock",
+        method="DELETE",
+        path=f"/api/v1/principals/blocked/{payload['unblocked_sub']}",
+        payload=payload,
+    )
+    await session.commit()
+    return True
 
 
 async def list_blocked(operator: Operator) -> list[BlockedPerson]:

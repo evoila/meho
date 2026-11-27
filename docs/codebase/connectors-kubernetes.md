@@ -130,10 +130,15 @@ The manifest is kept only in the handoff when:
   - the value after `NAME=` or `--name=` whose name holds one of the
     words above (`PGPASSWORD=x`, `--auth-mode=rbac`,
     `KEYCLOAK_URL=...`);
-  - the item after a flag whose name holds one of these words
+  - the value of a flag whose name holds one of these words
     (`--password x`, `--token-ttl 60`, `--secret-name x`,
-    `--passthrough on`), also when the item starts with a dash and also
-    when YAML reads it as a number;
+    `--passthrough on`): when the flag is the last word of its list item
+    and no new line follows it, the next list item, whatever it starts
+    with and also when YAML reads it as a number; otherwise the next word
+    after the flag in the same list item (also in the item after `sh -c`,
+    `-ec` or `-lc`), when only white space without a new line, or a line
+    continuation, stands between them and that word does not start with
+    a dash;
   - the argument after `-p` only in a command of a program that takes a
     password there: `sshpass`, a word that starts with `mysql`,
     `mariadb` or `mongo`, or the word `login` (the rule of
@@ -145,8 +150,6 @@ The manifest is kept only in the handoff when:
     previews do, so it shows `mkdir -p` and then the hidden mark;
   - the password of `user:password` after `-u` or `--user`, also glued
     to `-u` (`curl -uroot:x`);
-  - inside the item after `sh -c` (or `-ec`, `-lc`), the same rules,
-    read as a shell script;
 - a text at any depth has a secret shape: a password in a URL, a token
   with a known vendor prefix (`hide_in_text` in
   `redaction/command_line.py`), or a value the shared redaction hides

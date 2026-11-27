@@ -50,8 +50,9 @@ _LINES: list[tuple[list[Any], list[Any]]] = [
     (["prog-a", "--password"], [f"-{_V}"]),
     (["prog-a"], [f"-ureader:{_V}"]),
     (["sh", "-c"], [f"mysql -p{_V}"]),
-    (["sh", "-c"], [f"prog-a --password -{_V}"]),
     (["sh", "-c"], [f"prog-a -ureader:{_V}"]),
+    # A line for which both rules give the same answer.
+    (["sh", "-c"], [f"prog-a --password -{_V}"]),
     # Lines where nothing is hidden.
     (["prog-a", "--verbose", "list"], []),
     (["sh", "-c"], ["prog-b --count 3 && prog-a list"]),

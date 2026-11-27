@@ -2295,10 +2295,12 @@ shape (deterministic file-level matrix + fan-in):
   JavaScript in node) fail, not skip, if node is missing.
 - **Skip limit check.** A skipped test shows as green. So after pytest,
   each unit shard and each integration shard runs the step "Check the
-  skipped tests of this shard":
-  `uv run python tests/_skip_limit_check.py --lane unit pytest-unit-shard.xml`
-  (`--lane integration pytest-integration-shard.xml` in the integration
-  shards). It counts the skipped tests (xfail too) per test file in the
+  skipped tests of this shard". The unit step runs
+  `uv run python tests/_skip_limit_check.py --lane unit --selection "${RUNNER_TEMP}/unit-files.txt" [--without-secrets] pytest-unit-shard.xml`,
+  and the integration step runs
+  `uv run python tests/_skip_limit_check.py --lane integration [--without-secrets] pytest-integration-shard.xml`.
+  `--without-secrets` is added only in a run without the repository
+  secrets (see below). The step counts the skipped tests (xfail too) per test file in the
   shard's JUnit file. `backend/tests/_skip_limits.json` holds one allowed
   number per test file and lane. A file that is not in it may skip 0
   tests. The step fails when a file skips more than its number. A pull
@@ -2710,7 +2712,7 @@ on a secret:
   return `None` → the lanes
   `pytest.skip()`. The skip limit check then takes the `without_secrets`
   numbers of `backend/tests/_skip_limits.json`, so such a run passes, and a
-  skip of any other test still fails. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
+  test file that skips more tests than its number fails. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep. Full-ingest tests of a real vendor spec (minutes per

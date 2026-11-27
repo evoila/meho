@@ -731,9 +731,10 @@ jobs:
       # was skipped (secret absent — fork PRs, Dependabot runs,
       # not-yet-provisioned repos) the directory does not exist, the
       # resolver returns None, and the spec-backed tests skip. The step
-      # "Check the skipped tests of this shard" then checks the skips with
-      # the without_secrets numbers of tests/_skip_limits.json, so a run
-      # without the shelf passes, and a skip of any other test still fails.
+      # "Check the skipped tests of this shard" then takes the
+      # without_secrets numbers of tests/_skip_limits.json, so a run
+      # without the shelf passes, and a test file that skips more tests
+      # than its number fails.
       # When the checkout ran, the seconds-cheap reconcile lanes run for
       # real in this job and the check takes the with_secrets numbers.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs

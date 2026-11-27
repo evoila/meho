@@ -163,11 +163,16 @@ The rules are in `policy/classification.py` (`classify`, no database):
    group too; without it, the suggested entry ranks below the refused one.
    An entry that matches the op on two connectors counts as wide. With
    `CUSTOM_POLICY` on, an operation of a connector with no version has
-   its own text (`_product_risk_text`): it names each such operation the
-   entry lowers with its product, and suggests an entry for that product,
-   never for the form with the dash. It suggests a change of the entry
-   only when the entry matches that one operation alone, because two
-   products share the form with the dash. The single edit has no `risk` field, so it refuses only the
+   its own text (`_product_risk_text`): it names every operation the
+   entry lowers, also those of connectors with a version, each with its
+   connector (a connector with no version by its product), up to five and
+   a count of the rest. For each one it says to set `risk` on the tenant's
+   entry that already has exactly the match needed (`_exact_entry`), or
+   it suggests a new entry for that connector, never for the form with
+   the dash. A suggested entry quotes each value (`_entry_text`), so it
+   parses as written. It suggests a change of the refused entry only when
+   the entry matches that one operation alone, because two products
+   share the form with the dash. The single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for
    `always_wait` `true` wins. A different `category`, or a different value

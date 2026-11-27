@@ -399,22 +399,30 @@ refused, and the message names the entry and the operation.
   leave the operation out of the match. With such an entry, the file is
   accepted. The message names the operation and its connector. Put both
   in the new entry, for example
-  `{match: {connector: X, op: <op-id>}, risk: <level>}`. The same
+  `{match: {connector: "X", op: "<op-id>"}, risk: "<level>"}`. Put each
+  value in quotes: an operation id such as `GET:/widgets/{id}` holds
+  characters that YAML reads differently without them. The same
   operation id can exist on another connector, for example on another
   version of the product. An entry without the connector sets that
   operation's level too. When the refused entry names a group, the
   message names the group as well. Put it in the new entry too, for
-  example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
+  example `{match: {connector: "X", group: "<group>", op: "<op-id>"}, risk: "<level>"}`.
   Without the group, the new entry is less specific than the refused
   one, and the file is refused again.
 - With `CUSTOM_POLICY` on, a connector with no version is named by its
   product. Then the message names the operation with its product, for
   example `` `<op-id>` of `acmedb` ``, and suggests an entry for that
-  product: `{match: {connector: acmedb, op: <op-id>}, risk: <level>}`.
-  Two such products share the id `-`. So the message suggests a change
-  of the refused entry only when the entry matches that one operation
-  alone. Otherwise the entry can stay, and the message suggests one new
-  entry for each operation it names.
+  product: `{match: {connector: "acmedb", op: "<op-id>"}, risk: "<level>"}`.
+  Each value is in quotes, so you can paste the entry into the file as it
+  is. Two such products share the id `-`. So the message suggests a
+  change of the refused entry only when the entry matches that one
+  operation alone. Otherwise the entry can stay, and the message suggests
+  one new entry for each operation it names. When your file already has
+  an entry with exactly that match, the message names that entry and
+  says to set `risk` on it; its other fields can stay. One message names
+  every operation whose level the entry lowers, also those of connectors
+  with a version, each with its connector, up to five; it says how many
+  more there are.
 - Which install values make **every** call wait: `always_wait: true` and
   `risk: destructive`. With `risk: dangerous`, a call waits too, but
   two things can still let it run without a new approval: a standing

@@ -34,7 +34,7 @@ import functools
 import json
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.resources import files
 from typing import Any, Final
@@ -604,7 +604,8 @@ async def _no_effect_notes(
     parsed: dict[int, ClassificationEntry] = {}
     for index, raw in enumerate(entries):
         try:
-            parsed[index] = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
+            entry = entries_from_document({"classifications": [raw]}, scope="tenant")[0]
+            parsed[index] = replace(entry, ref=f"tenant:classifications[{index}]")
         except (ValueError, IndexError):
             continue
     both = [*install_entries, *parsed.values()]

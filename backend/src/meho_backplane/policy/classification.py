@@ -43,6 +43,7 @@ goes back to the code's value.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -544,23 +545,24 @@ def _product_risk_text(
     coords: Sequence[OpCoordinates],
     entries: Sequence[ClassificationEntry],
 ) -> str | None:
-    """The sentence of :func:`install_floor_texts` for operations named by their product.
+    """The sentence of :func:`install_floor_texts` when *entry* lowers a product's operation.
 
-    It names each such operation whose install level *entry* lowers, with
-    its product, and suggests an entry for that product. It suggests a
-    change of *entry* only when *entry* matches that one operation alone,
-    because *entry* can also match the operation of another product that
-    shares the form with the dash. ``None`` when *entry* lowers the level
-    of no such operation.
+    It names each operation whose install level *entry* lowers, of every
+    connector, each with its connector. For each one it says to set
+    ``risk`` on the tenant entry that already matches exactly that
+    operation (:func:`_exact_entry`), or it suggests a new entry. It
+    suggests a change of *entry* only when *entry* matches that one
+    operation alone, because *entry* can also match the operation of
+    another product that shares the form with the dash. ``None`` when
+    *entry* lowers the level of no operation named by its product.
     """
     risk = entry.risk or "safe"
     lowered = [
         (one, *found)
         for one in coords
-        if one.dashed_connector_id is not None
-        and (found := _risk_lowered_at(entry, one, entries)) is not None
+        if (found := _risk_lowered_at(entry, one, entries)) is not None
     ]
-    if not lowered:
+    if not any(one.dashed_connector_id is not None for one, _, _ in lowered):
         return None
     shown = lowered[:_MAX_NAMED_OPS]
     parts = [
@@ -577,20 +579,75 @@ def _product_risk_text(
     one, _, level = lowered[0]
     if len(lowered) == 1 and not any(entry.matches(o) for o in coords if o is not one):
         return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
+    return f"{head} This entry can stay. {_fix_text(entry, shown, entries)}"
+
+
+def _fix_text(
+    entry: ClassificationEntry,
+    shown: Sequence[tuple[OpCoordinates, str, str]],
+    entries: Sequence[ClassificationEntry],
+) -> str:
+    """The fix for each shown operation: ``risk`` on the tenant's exact entry, else a new entry."""
     with_group = entry.group is not None
-    suggested = ", ".join(
-        f"`{_entry_text(one, level, with_group=with_group)}`" for one, _, level in shown
-    )
-    what = "a tenant entry" if len(shown) == 1 else "a tenant entry for each operation"
-    return f"{head} This entry can stay. Add {what}, with this risk level or higher: {suggested}."
+    texts: list[str] = []
+    new: list[str] = []
+    for one, _, level in shown:
+        exact = _exact_entry(entry, one, entries, with_group=with_group)
+        if exact is None:
+            new.append(f"`{_entry_text(one, level, with_group=with_group)}`")
+            continue
+        texts.append(
+            f"Set `risk: {level}` or higher on `{exact.ref.removeprefix('tenant:')}`; "
+            "its other fields can stay."
+        )
+    if new:
+        what = "a tenant entry" if len(new) == 1 else "a tenant entry for each operation"
+        texts.append(f"Add {what}, with this risk level or higher: {', '.join(new)}.")
+    return " ".join(texts)
+
+
+def _exact_entry(
+    entry: ClassificationEntry,
+    one: OpCoordinates,
+    entries: Sequence[ClassificationEntry],
+    *,
+    with_group: bool,
+) -> ClassificationEntry | None:
+    """The tenant's own entry with the match that :func:`_entry_text` would suggest for *one*.
+
+    Its connector and op are exactly those of *one*, and so is its group
+    when it names one. When *with_group* is true, it must name the group:
+    a suggested entry then names it too. ``None`` when the tenant's file
+    has no such entry; the most specific one when it has more.
+    """
+    found = [
+        e
+        for e in entries
+        if e is not entry
+        and e.scope == "tenant"
+        and e.for_connector is None
+        and e.ref.startswith("tenant:classifications[")
+        and e.connector == one.connector_id
+        and e.op == one.op_id
+        and (e.group == one.group_key or (e.group is None and not with_group))
+    ]
+    return max(found, key=lambda e: e.rank) if found else None
 
 
 def _entry_text(coords: OpCoordinates, level: str, *, with_group: bool) -> str:
-    """A tenant entry for the one operation at *coords*, in the form of the policy file."""
-    group = f"group: {coords.group_key}, " if with_group and coords.group_key else ""
-    return (
-        f"{{match: {{connector: {coords.connector_id}, {group}op: {coords.op_id}}}, risk: {level}}}"
-    )
+    """A tenant entry for the one operation at *coords*, in the form of the policy file.
+
+    Each value is quoted (as JSON text, which YAML reads), so an op id
+    with ``{``, ``}``, ``:`` or ``/`` parses as written.
+    """
+    group = f"group: {_quoted(coords.group_key)}, " if with_group and coords.group_key else ""
+    connector, op = _quoted(coords.connector_id), _quoted(coords.op_id)
+    return f"{{match: {{connector: {connector}, {group}op: {op}}}, risk: {_quoted(level)}}}"
+
+
+def _quoted(value: str) -> str:
+    """*value* as a double-quoted YAML text."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _risk_index(risk: str | None) -> int:

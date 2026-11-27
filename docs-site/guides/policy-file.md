@@ -396,29 +396,47 @@ agents:
 - An operation that gives or takes rights in a target system waits. It
   runs at once only under a rule with `connectors` and
   `rights_changes: allow`, and only for those connectors.
+- The part holds at most 200 rules. A file with more is refused.
 - The import plan (the preview and the approval card) shows, for each
   role, the operations that would start to run at once (`runs_at_once`).
-  Operations that always wait are never in the list: a `destructive`
+  The list holds only what the import changes: an operation that already
+  runs at once under the stored rules is not in it. So a file that leaves
+  the rules as they are lists no operation.
+- The list uses the same values as a call by a login of the tenant: the
+  operations the tenant turned on or off for itself, an admin's edit of
+  one operation (its risk level, or approval for each call), and the
+  tenant's own copy of a connector in place of the built-in one.
+- Operations that always wait are never in the list: a `destructive`
   operation, a delete, an operation that is hard to undo, a credential
   call, a call to an address the caller gives, a change of rights in
-  MEHO, a change of the policy, and an operation that must be approved
-  call by call.
-- Setting the rules is a change of the policy. In the web console an
-  Admin's import runs at once after a fresh sign-in. With a token it
-  waits until an Admin approves it in the web console. An agent, a
-  service login or a hosted agent run cannot ask for it.
-- `meho policy export` writes the `agents` part. An exported file imports
-  again with "No change.".
+  MEHO, a change of the policy, an operation that must be approved call
+  by call, an operation that a classification sets to "always wait", a
+  root shell, and a multi-step operation. An operation that waits only
+  because its code asks for approval counts as `dangerous`: it is in the
+  list only under a rule that allows `dangerous`.
+- A person reads each role's whole list on the approval card. The MCP
+  approval tools, and an agent or a service login over REST, get for
+  each role the count, the first 50 operations, and "N more" when there
+  are more.
+- Setting the rules is a change of the policy. In the web console, an
+  Admin who signed in again just before runs the import in the Run
+  window, and it runs at once. With a token it waits until an Admin
+  approves it in the web console. An agent, a service login or a hosted
+  agent run cannot ask for it.
+- `meho policy export` writes the `agents` part. For a tenant with stored
+  bindings, an exported file imports again with "No change.".
+- `meho policy diff` prints each rule the file adds, changes or removes,
+  by name, and for each role the operations that start to run at once.
 - The install's file never holds `agents`. When a platform admin lowers
   the outer limit, the install's import plan lists each tenant with a rule
   above the new limit (`agents_above_limit`). Such a tenant's file is then
   refused on its next import, also when it did not change: lower the rule
   first.
 - If MEHO cannot read the stored rules, no rule counts, and MEHO logs one
-  warning. Import the tenant's file again to fix it.
-- In this version no call reads the rules yet: every call gets the same
-  answer as without them. A personal agent still runs only `safe`
-  operations at once.
+  warning. Import the tenant's file again to fix it: the plan shows each
+  stored rule it cannot read as removed.
+- Every call gets the same answer with or without the rules. A personal
+  agent runs only `safe` operations at once.
 
 !!! note "Off by default"
 
@@ -426,8 +444,11 @@ agents:
     `config.policy.customPolicy`). While it is off, a file with `agents`
     is refused: "`agents` needs CUSTOM_POLICY: personal agent rules count
     only while the CUSTOM_POLICY setting is on. Remove the part, or ask the
-    person who runs MEHO to turn the setting on." Rules stored while the
-    setting was on are then ignored, and the export leaves them out.
+    person who runs MEHO to turn the setting on." The answer holds this
+    sentence also when the file has other mistakes. Rules stored while the
+    setting was on are then ignored, and the export leaves them out. An
+    approval card shows no rule part while the setting is off, and a click
+    on a request asked while it was on stores nothing.
 
 ## Rules that no file can loosen
 

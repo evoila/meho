@@ -166,12 +166,18 @@ match, as pure functions. `policy/agent_rules_plan.py` adds the rules to
 the import plan. The user guide is the part "Rules for personal agents"
 of `docs-site/guides/policy-file.md`.
 
-- The parser (`policy/document.py`) keeps the value of `agents` as
-  written; `document_of` stores the rules with only the keys that are set
-  (`stored_agents`), and `agents: null` as `[]`, so the checks still see
-  the key. The order of the rules does not count in `canonical_sha256`.
+- The parser (`parse_policy_file(content, custom_policy=...)` in
+  `policy/document.py`): with the switch off, it refuses the key `agents`
+  like the five refused keys (`AGENTS_NEED_CUSTOM_POLICY`), so that
+  sentence comes back also when the file has other mistakes, and the
+  checks after the parse do not run. With the switch on, `agents` is a
+  list of at most 200 rules (`Field(max_length=200)`, like the other lists
+  of the file), each kept as written; `document_of` stores the rules with
+  only the keys that are set (`stored_agents`), and `agents: null` as
+  `[]`, so the checks still see the key. The order of the rules does not
+  count in `canonical_sha256`.
 - `agent_rules_mistakes`, called by `check_document`: with the switch off,
-  a file that holds the key `agents` is refused whatever its value
+  a document that holds the key `agents` is refused whatever its value
   (`AGENTS_NEED_CUSTOM_POLICY`); the install's file never holds it
   (`AGENTS_IN_INSTALL_FILE`); then the shape of each rule, with its place
   (`agents[N].caller`, ...); `caller: person` and `caller: service_agent`
@@ -191,28 +197,45 @@ of `docs-site/guides/policy-file.md`.
   runs only under a rule that names its connector with
   `rights_changes: allow`. The rule id is `tenant_rule:<name>` (`rule_ref`).
 - `agents_plan` (switch on only): a tenant's plan gets `agents` (rules
-  added, changed, removed, by name) and `runs_at_once` (for each role, the
-  operations that start to run at once), both only when one side has a
-  rule. `runs_at_once` reads each enabled operation the tenant can call,
-  with the classification after the import. An operation is never listed
-  when it is `safe` (a token runs it at once today), or when a check that
-  no rule lowers makes it wait: `destructive` (by code or policy), "always
-  wait" or a classification conflict, `never_covered_reason` (credential,
-  per-call approval, caller address, delete sign), a MEHO change of rights
-  or of the policy, a root shell, `hard_to_undo`, a multi-step operation,
-  or `requires_approval` that is not the plain mark. An operation is not
+  added, changed, removed, by name) and `runs_at_once`, both only when one
+  side has a rule. `agents_diff` keys a stored rule on its name; a stored
+  rule that is not a mapping, or whose `name` is not text, keys on its
+  whole text, so the plan shows it as removed and a valid file replaces it.
+- `runs_at_once` holds, for each role, the operations that run at once
+  under the file's rules and do not under the stored rules
+  (`runs_at_once_by_role(..., before=...)`). An edit that leaves the rules
+  the same lists none. `_rule_ops` reads the operations with the functions
+  dispatch uses (`lookup_descriptor`): `visible_scope_clause` (the
+  tenant's own copy of a connector in place of the built-in rows, so each
+  operation once), `enabled_for_tenant_clause` (the tenant's own on/off
+  choice), `installed_owner_clause` and `row_code_missing`. The values
+  are `policy_in_force` with the overrides of `load_overrides` (an admin's
+  per-operation risk level and approval) and the classification after the
+  import. An operation is never listed when it is `safe` (a token runs it
+  at once today), or when a check that no rule lowers makes it wait:
+  `destructive` (by code, edit or policy), "always wait" or a
+  classification conflict, `never_covered_reason` (credential, per-call
+  approval, caller address, delete sign), a MEHO change of rights or of
+  the policy, a root shell, `hard_to_undo`, a multi-step operation, or
+  approval in force that is not the plain mark. An operation is not
   listed for a role below its role floor (`role_floor_for`), because a
-  person of that role cannot call it at all. An operation with the
-  plain mark (`has_plain_mark`) counts as `dangerous`. An install plan
+  person of that role cannot call it at all. An operation with the plain
+  mark (`has_plain_mark`) in force counts as `dangerous`. An install plan
   gets `agents_above_limit` (each tenant with a stored rule above the
   file's limit, one warning each) only when there is such a tenant.
+- The command line (`printAgents` in `cli/internal/cmd/policy/file.go`):
+  `meho policy diff` and the import output print `+ agents: <name>`,
+  `~ agents: <name>` and `- agents: <name>` (a rule without a readable
+  name shows its whole text), and for each role
+  `runs at once for <role>: <connector> <op> (<risk>, <rule>)`. A file
+  that changes no rule prints no rule line.
 - `rules_from_document` reads the stored rules; a part MEHO cannot read
   gives no rule and one warning `policy_agent_rules_not_readable`.
 - With the switch off, a stored `agents` part is ignored like `limits`:
   the export leaves it out, the diff has no `agents` section, and the
   planned document keeps the stored part.
-- No call decision reads the rules in this version: the call gate and
-  the evaluator come in a later change.
+- No call decision reads the rules: every call gets the same answer with
+  or without them.
 
 ## The shipped "small team" file
 
@@ -557,7 +580,22 @@ it.
   `meho_approvals_list`. A card without the field counts as planned with
   the switch off; so does a card that waited during an upgrade. After the
   approval, the run reads the switch again. When it is not the same as on
-  the card, the run writes nothing and gives the same sentence. An admin's
+  the card, the run writes nothing and gives the same sentence.
+- How each reader sees a stored import card:
+  `connectors/policy/apply_card.py` (`policy_card_as_read`, registered
+  with `register_card_view` in `operations/_preview.py`). The REST
+  approval views, the console (`project_request_to_view`) and the MCP
+  approval tools (`proposed_effect_for_agent`) call it through
+  `card_as_read`; the stored row never changes. With `CUSTOM_POLICY` off,
+  every view shows the card without `agents`, `runs_at_once`,
+  `agents_above_limit` and its warnings, and `planned_with_custom_policy`.
+  With it on, a person over REST and in the console reads each role's
+  whole `runs_at_once` list; the MCP approval tools and an agent or
+  service login over REST get, for each role, `count`, the first 50
+  `items`, and `more` ("N more") when there are more. A runner login
+  reads no approval card. This is how the approvals tools hold the size
+  rule (no agent sees a big raw answer): an approval card is not an
+  operation result, so it has no result link. An admin's
   own run in the web console has no card and plans with the switch as it
   is.
 - A run without an approval, or a run by the login that asked for it (for

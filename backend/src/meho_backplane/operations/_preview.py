@@ -121,6 +121,7 @@ __all__ = [
     "has_permission_preflight",
     "has_preview_builder",
     "preview_failure_reason",
+    "preview_reads_target",
     "proposed_effect_for_agent",
     "register_agent_preview_filter",
     "register_card_warnings",
@@ -130,6 +131,7 @@ __all__ = [
     "register_preview_builder_switch",
     "register_preview_failure_keys",
     "register_preview_last_step",
+    "register_preview_target_read",
     "stored_requester_record",
     "without_internal_effect_keys",
     "without_person_only_effect_keys",
@@ -493,6 +495,10 @@ _PREVIEW_LAST_STEPS: dict[str, PreviewLastStep] = {}
 #: approval request a person reads always uses the builder.
 _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 
+#: ``op_id`` -> the switch that lets the builder read the target for the
+#: caller's own preview (:func:`register_preview_target_read`).
+_PREVIEW_TARGET_READ_SWITCHES: dict[str, Callable[[], bool]] = {}
+
 #: ``op_id`` -> the switch, and the keys its builder adds to the preview for
 #: the person only. Off, a caller reads the stored preview without them.
 _PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
@@ -542,6 +548,22 @@ def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> 
     already sees goes behind a switch this way.
     """
     _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
+
+
+def register_preview_target_read(op_id: str, enabled: Callable[[], bool]) -> None:
+    """Let the builder of *op_id* read the target for the caller's preview while ``enabled()``.
+
+    Off, ``preview_operation`` builds the plan with no connector, so it never
+    contacts the target. On, it gives the builder the target's connector
+    (``operations._composite_preview``). The builder must send no change.
+    """
+    _PREVIEW_TARGET_READ_SWITCHES[op_id] = enabled
+
+
+def preview_reads_target(op_id: str) -> bool:
+    """True when the caller's preview of *op_id* may read the target now."""
+    switch = _PREVIEW_TARGET_READ_SWITCHES.get(op_id)
+    return switch is not None and switch()
 
 
 def register_person_only_preview_keys(
@@ -1136,12 +1158,20 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     ``resourceVersion`` and no ``uid`` (#3876). For a person, that marker
     still holds the manifest, the subject line, the document the dry run
     stopped at and what each container runs (:func:`_k8s_apply_failure_keys`).
+
+    The caller's own preview (``agent_preview``) gets a connector only while
+    ``K8S_APPLY_PREVIEW_DRY_RUN`` is on. It then gets the dry run of every
+    document instead, which does not stop at a refused one
+    (``connectors/kubernetes/ops_write_apply_dry_run.py``).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
 
     from meho_backplane.auth.operator import TenantRole
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.kubernetes.ops_write_apply_dry_run import (
+        k8s_apply_agent_dry_run,
+    )
     from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
         ApplySummaries,
         apply_summaries_var,
@@ -1151,6 +1181,9 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
         return None
+    if ctx.agent_preview:
+        # The caller's own preview gets the dry run of every document.
+        return await k8s_apply_agent_dry_run(ctx)
 
     # Force the dry-run flag on regardless of what the caller passed:
     # the preview must never persist, even if the parked call itself was

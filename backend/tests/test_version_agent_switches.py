@@ -48,6 +48,7 @@ AGENT_FACING_SETTINGS: frozenset[str] = frozenset(
         "embedding_model_health_check",
         "group_listing_operations",
         "jsonflux_answer_ready",
+        "k8s_apply_preview_dry_run",
         "k8s_node_list_resources",
         "keycloak_answer_realm",
         "file_ref_params",

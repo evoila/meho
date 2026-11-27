@@ -127,8 +127,10 @@ from meho_backplane.operations._preview import (
     _redact_echoed_params,
     register_person_only_preview_keys,
     register_preview_builder,
+    register_preview_target_read,
 )
 from meho_backplane.redaction.command_line import HIDDEN
+from meho_backplane.settings import get_settings
 
 #: Put in place of a value the approver must not see.
 _HIDDEN = HIDDEN
@@ -872,12 +874,18 @@ async def _apply_park_check(ctx: PreviewContext) -> str | None:
     return None
 
 
+def _apply_preview_dry_run_on() -> bool:
+    """``preview_operation`` of ``k8s.apply`` sends a dry run to the cluster (the switch)."""
+    return get_settings().k8s_apply_preview_dry_run
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
     register_park_check("k8s.apply", _apply_park_check)
+    register_preview_target_read("k8s.apply", _apply_preview_dry_run_on)
     register_person_only_preview_keys(
         "k8s.apply",
         _run_commands_shown_to_agents,

@@ -45,28 +45,38 @@ target declines here, and its plan is built only at park time.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 import structlog
 
-from meho_backplane.auth.operator import Operator
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._preview import (
     _PARAM_REDACTED,
     PreviewContext,
     _redact_echoed_params,
     build_proposed_effect,
     describe_preview_provenance,
+    preview_reads_target,
 )
 from meho_backplane.operations._request_preview import (
     PARAMS_DIGEST_KEY,
     compute_preview_hash,
     is_credential_builder_op,
 )
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import compute_params_hash, policy_gate
 
-__all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview", "safe_params_view"]
+__all__ = [
+    "PLAN_NOT_SHOWN_NOTE",
+    "TARGET_READ_NOT_ALLOWED_NOTE",
+    "TARGET_READ_TIMEOUT_NOTE",
+    "TARGET_READ_TIMEOUT_SECONDS",
+    "build_composite_preview",
+    "safe_params_view",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -90,6 +100,88 @@ PLAN_NOT_SHOWN_NOTE: Final[str] = (
 )
 
 
+#: How long the preview waits for the target when its builder may read it
+#: (:func:`~meho_backplane.operations._preview.register_preview_target_read`).
+TARGET_READ_TIMEOUT_SECONDS: Final[float] = 10.0
+
+#: The note when the target did not answer in :data:`TARGET_READ_TIMEOUT_SECONDS`.
+TARGET_READ_TIMEOUT_NOTE: Final[str] = (
+    "This preview does not show what the operation will change: the target "
+    "did not answer the dry run in time. The rest of the preview is complete. "
+    "If the call waits for approval, the plan is shown on the approval "
+    "request before anyone approves it."
+)
+
+#: The note when the caller may not ask for the call, so the preview reads nothing.
+TARGET_READ_NOT_ALLOWED_NOTE: Final[str] = (
+    "This preview does not show what the operation will change. The dry run "
+    "on the target is only for a caller who may ask for this operation: the "
+    "role Operator or higher, and a call the policy does not refuse."
+)
+
+#: The note when the dry run did not check every part of the plan.
+_PLAN_NOT_COMPLETE_NOTE: Final[str] = (
+    "The dry run could not check every part of this call, so this preview "
+    "does not show the whole plan. See `proposed_effect.preview.not_checked` "
+    "and the `reason` of each part that was not checked."
+)
+
+#: The key of a preview that lists the parts the dry run could not check.
+_NOT_CHECKED_KEY: Final[str] = "not_checked"
+
+
+async def _target_read_connector(
+    *,
+    operator: Operator,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+) -> tuple[Connector | None, str | None]:
+    """The connector the preview builder may read the target with, or why there is none.
+
+    ``(None, None)``: the op does not read the target in a preview (its
+    switch is off), or there is no target or connector. ``(None, note)``:
+    the caller may not ask for the call, so nothing is read. A caller may
+    ask for it with the role Operator or higher, when the policy gate does
+    not refuse it (``decide_only``: nothing is written).
+    """
+    if target is None or not preview_reads_target(descriptor.op_id):
+        return None, None
+    if operator.tenant_role not in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
+        return None, TARGET_READ_NOT_ALLOWED_NOTE
+    verdict, _reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+        decide_only=True,
+    )
+    if verdict is PermissionVerdict.DENY:
+        return None, TARGET_READ_NOT_ALLOWED_NOTE
+    # Imported lazily: the dispatcher imports the preview modules.
+    from meho_backplane.operations.dispatcher import _resolve_connector_instance
+
+    try:
+        instance, resolution_error, _ = await _resolve_connector_instance(descriptor, target)
+    except Exception:
+        return None, None
+    return (None, None) if resolution_error is not None else (instance, None)
+
+
+def _failed_read_note(effect: dict[str, Any] | None) -> str | None:
+    """The note for a builder that read the target and failed, with its safe reason."""
+    if not isinstance(effect, dict) or effect.get("preview_unavailable") is not True:
+        return None
+    return (
+        "This preview does not show what the operation will change: the dry "
+        f"run on the target did not work ({effect.get('preview_error')}). If "
+        "the call waits for approval, the plan is shown on the approval "
+        "request before anyone approves it."
+    )
+
+
 async def _synthetic_proposed_effect(
     *,
     operator: Operator,
@@ -97,7 +189,7 @@ async def _synthetic_proposed_effect(
     descriptor: EndpointDescriptor,
     target: Any,
     params: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str | None]:
     """Reuse the park-time ``proposed_effect`` builder for a pre-dispatch preview (#3312).
 
     Runs :func:`~meho_backplane.operations._preview.build_proposed_effect` — the
@@ -110,20 +202,49 @@ async def _synthetic_proposed_effect(
     :func:`describe_preview_provenance`); a decline / credential suppression /
     fail-soft ``preview_unavailable`` marker yields ``None`` so the synthetic
     preview stays clean.
+
+    An op whose builder may read the target in a preview
+    (:func:`~meho_backplane.operations._preview.register_preview_target_read`,
+    for example the dry run of ``k8s.apply``) gets the target's connector
+    instead, for a caller who may ask for the call
+    (:func:`_target_read_connector`). The build then has
+    :data:`TARGET_READ_TIMEOUT_SECONDS`. The second value is the note that
+    says why there is no plan, or ``None`` for the default note.
     """
-    proposed_effect = await build_proposed_effect(
-        PreviewContext(
-            descriptor=descriptor,
-            connector_instance=None,
-            operator=operator,
-            target=target,
-            params=params,
-            connector_id=connector_id,
-            agent_preview=True,
-        )
+    connector, note = await _target_read_connector(
+        operator=operator,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        target=target,
+        params=params,
     )
+    ctx = PreviewContext(
+        descriptor=descriptor,
+        connector_instance=connector,
+        operator=operator,
+        target=target,
+        params=params,
+        connector_id=connector_id,
+        agent_preview=True,
+    )
+    if connector is None:
+        proposed_effect = await build_proposed_effect(ctx)
+    else:
+        try:
+            async with asyncio.timeout(TARGET_READ_TIMEOUT_SECONDS):
+                proposed_effect = await build_proposed_effect(ctx)
+        except TimeoutError:
+            _log.warning("preview_target_read_timeout", op_id=descriptor.op_id)
+            return None, TARGET_READ_TIMEOUT_NOTE
+        note = _failed_read_note(proposed_effect)
     populated, _reason = describe_preview_provenance(proposed_effect, op_id=descriptor.op_id)
-    return proposed_effect if populated else None
+    return (proposed_effect, None) if populated else (None, note)
+
+
+def _plan_complete(proposed_effect: dict[str, Any]) -> bool:
+    """False when the builder says that the dry run did not check every part."""
+    preview = proposed_effect.get("preview")
+    return not (isinstance(preview, dict) and preview.get(_NOT_CHECKED_KEY))
 
 
 def _hide_free_form_map_values(value: Any, schema: Any) -> Any:
@@ -251,7 +372,7 @@ async def build_composite_preview(
         PARAMS_DIGEST_KEY: compute_params_hash(params),
     }
     envelope["preview_hash"] = compute_preview_hash(envelope)
-    proposed_effect = await _synthetic_proposed_effect(
+    proposed_effect, note = await _synthetic_proposed_effect(
         operator=operator,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -260,8 +381,10 @@ async def build_composite_preview(
     )
     if proposed_effect is not None:
         envelope["proposed_effect"] = proposed_effect
-        envelope["plan_shown"] = True
+        envelope["plan_shown"] = _plan_complete(proposed_effect)
+        if not envelope["plan_shown"]:
+            envelope["plan_note"] = _PLAN_NOT_COMPLETE_NOTE
     else:
         envelope["plan_shown"] = False
-        envelope["plan_note"] = PLAN_NOT_SHOWN_NOTE
+        envelope["plan_note"] = note or PLAN_NOT_SHOWN_NOTE
     return envelope

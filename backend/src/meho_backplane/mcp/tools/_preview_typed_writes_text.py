@@ -8,7 +8,9 @@ previews a typed write that does not carry ``requires_approval``, and a
 credential write that has its own safe preview
 (:func:`~meho_backplane.operations._request_preview._is_previewable`). The
 tool text says so only while the switch is on. Off (the default), the tool
-shows its registered text, unchanged.
+shows its registered text, unchanged. With ``K8S_APPLY_PREVIEW_DRY_RUN`` on,
+the text also says that the plan of ``k8s.apply`` comes from a dry run on
+the cluster (:data:`K8S_APPLY_DRY_RUN_TEXT_SWAP`).
 
 :func:`preview_tool_for_settings` is the tool's ``for_settings`` function.
 It runs the team-knowledge step and the policy fields step
@@ -32,6 +34,7 @@ from meho_backplane.mcp.tools._short_tool_texts import PREVIEW_OPERATION_SHORT
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "K8S_APPLY_DRY_RUN_TEXT_SWAP",
     "PREVIEW_OPERATION_TYPED_WRITES_SHORT",
     "TYPED_WRITE_TEXT_SWAPS",
     "preview_tool_for_settings",
@@ -56,6 +59,16 @@ TYPED_WRITE_TEXT_SWAPS: Final[tuple[tuple[str, str], ...]] = (
         'write with no safe preview of its own stays `status="unavailable"`, unless '
         'it is destructive. A read-only typed op stays `status="unavailable"`. ',
     ),
+)
+
+#: The part of the registered description that changes while
+#: ``K8S_APPLY_PREVIEW_DRY_RUN`` is on, and the text that replaces it.
+K8S_APPLY_DRY_RUN_TEXT_SWAP: Final[tuple[str, str]] = (
+    "when the plan can be built without contacting the target; ",
+    "when the plan can be built without contacting the target, and for "
+    "`k8s.apply` from a dry run on the cluster (`dryRun=All`, nothing is "
+    "stored): each document says `create`, `change`, `refused` or "
+    "`not_checked`; ",
 )
 
 PREVIEW_OPERATION_TYPED_WRITES_SHORT: Final = ShortText(
@@ -84,6 +97,9 @@ def preview_tool_for_settings(definition: ToolDefinition, operator: Operator) ->
         for old, new in TYPED_WRITE_TEXT_SWAPS:
             description = description.replace(old, new)
         shown = shown.model_copy(update={"description": description})
+    if settings.k8s_apply_preview_dry_run:
+        old, new = K8S_APPLY_DRY_RUN_TEXT_SWAP
+        shown = shown.model_copy(update={"description": shown.description.replace(old, new)})
     if not short_texts_shown(operator):
         return shown
     short = (

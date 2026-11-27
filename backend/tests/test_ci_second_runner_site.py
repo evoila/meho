@@ -1173,7 +1173,7 @@ def test_smoke_reads_a_list_that_wraps_onto_a_new_line(tmp_path: Path) -> None:
     assert "address 1 of 3: exit code 28" in result.stdout
     assert "Address 2 of 3: exit code 7" in result.stdout
     assert "address 3 of 3: exit code 28" in result.stdout
-    assert calls[-1].endswith("https://third.example/")
+    assert calls[-1].split()[-1] == "https://third.example/"
     _assert_private(result, _ADDRESS, "second.example", "third.example")
 
 
@@ -1192,7 +1192,7 @@ def test_smoke_reach_check_follows_redirects_and_reads_the_status(tmp_path: Path
     assert result.returncode == 0, result.stdout
     assert f"reached {_REACH} (HTTP status 200)" in result.stdout
     reach_call = calls[0]
-    assert reach_call.endswith(_REACH)
+    assert reach_call.split()[-1] == _REACH
     assert "--location" in reach_call
     assert "%{http_code}" in reach_call
 

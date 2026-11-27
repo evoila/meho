@@ -113,8 +113,10 @@ func newUpdateCmd() *cobra.Command {
 			"type (a number, true or false, a list, a map), and " +
 			"`--unset-extra key` removes one key. Every other key keeps its " +
 			"value and its type, also a key that was added while the change " +
-			"waited for approval. The answer shows the `extras` after the " +
-			"change. They cannot be used with `--extra`.\n\n" +
+			"waited for approval. The answer of such a change names the keys " +
+			"that were set and removed, not their values. To see the values, " +
+			"read the target with `meho targets describe`. They cannot be " +
+			"used with `--extra`.\n\n" +
 			"`--alias` replaces the whole alias list, and `--extra " +
 			"key=value` replaces the whole `extras` map (pass every key " +
 			"you want to keep). `--clear <field>` (repeatable) removes a " +

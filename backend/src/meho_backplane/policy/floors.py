@@ -10,7 +10,9 @@ named on the floor itself: a delete grant made in the web console may run
 a ``destructive`` call of a service login while the instance is in
 sandbox mode (#4622).
 
-The floors come from the code, never from a file. They are:
+The floors come from the code, never from a file. The two floors that are
+fixed rules take their rule ids from :mod:`meho_backplane.policy.fixed_rules`
+(``destructive_waits`` and ``credential_waits``). They are:
 
 * **Role floor.** A person below the role an operation needs is denied
   (:mod:`meho_backplane.operations.role_floors`).
@@ -38,11 +40,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
 from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.policy.fixed_rules import CREDENTIAL_WAITS, DESTRUCTIVE_WAITS
 
 if TYPE_CHECKING:
     from meho_backplane.policy.evaluate import Asked, Asker
 
 __all__ = [
+    "CREDENTIAL_WAITS",
+    "DESTRUCTIVE_WAITS",
     "KNOWN_NON_SAFE",
     "NO_GRANT_MARKS",
     "FloorHit",
@@ -100,16 +105,16 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
         hits.append(
             FloorHit(
                 "wait",
-                "destructive_waits",
+                DESTRUCTIVE_WAITS,
                 "a destructive call always waits for a person",
                 sandbox_delete_grant_clears=asker.kind == "service",
             )
         )
-    if asker.kind in ("agent", "service") and "credential_waits" in asked.op_class:
+    if asker.kind in ("agent", "service") and CREDENTIAL_WAITS in asked.op_class:
         hits.append(
             FloorHit(
                 "wait",
-                "credential_waits",
+                CREDENTIAL_WAITS,
                 "the operation reads, writes or makes a credential, so a person approves each call",
                 sandbox_delete_grant_clears=(
                     asker.kind == "service" and "sandbox_delete_grant" in asked.op_class

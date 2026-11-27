@@ -64,6 +64,7 @@ from meho_backplane.auth.principal_block import (
     OwnBlockStaysError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
+    SignInAlreadyUsedError,
     block_principal,
     is_principal_blocked,
     list_blocked,
@@ -231,6 +232,11 @@ async def block_principal_route(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="cannot_block_self: you cannot block your own login.",
         ) from exc
+    except PrincipalBlockUnavailableError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="principal_block_check_unavailable",
+        ) from exc
 
 
 @router.delete("/{sub}", response_model=UnblockResponse)
@@ -263,6 +269,12 @@ async def unblock_principal_route(
         ) from exc
     except OwnBlockStaysError as exc:
         raise _blocked() from exc
+    except SignInAlreadyUsedError as exc:
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_already_used",
+            max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            remediation=_UNBLOCK_FRESH_SIGN_IN,
+        ) from exc
     except PrincipalNotBlockedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

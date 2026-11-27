@@ -175,7 +175,7 @@ refuse_install_options() {
         [[ " ${unique[*]} " == *" $option "* ]] || unique+=("$option")
     done
     fail "An update keeps the install's answers. These options are only for a first install: $(join_by ', ' "${unique[@]}")." \
-        "leave them out. The update reads the answers from $MEHO_INSTALL_RECORD. To change the SSH range, run 'meho-host admin-network <range>'."
+        "leave them out. The update reads the answers from $MEHO_INSTALL_RECORD. To change the SSH range, run 'meho-host admin-network <range>'. To change the target networks, run 'meho-host target-networks <list>'."
 }
 
 # check_rke2_step <installed RKE2> <RKE2 of the download>: RKE2 moves at most

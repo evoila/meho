@@ -417,6 +417,7 @@ NODE_OPS: tuple[WsfcOp, ...] = (
         tags=("write", "node", "evict"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": (
                 "Remove a node from cluster membership. Irreversible; "

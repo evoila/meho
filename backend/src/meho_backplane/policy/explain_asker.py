@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Final, Literal
 
+from meho_backplane.auth.caller_kind import token_login_kind
 from meho_backplane.auth.operator import (
     Operator,
     PrincipalKind,
@@ -112,6 +113,8 @@ def what_if_operator(
         self_approver=person and any(grant.self_approval for grant in grants),
         web_session=person and via == "web",
         raw_jwt="",
+        # The made-up login stands for the caller the question names.
+        in_code_kind="person" if person and via == "web" else token_login_kind(_KIND[principal]),
     )
 
 

@@ -67,7 +67,7 @@ async def approval_operator(session_id: uuid.UUID) -> Operator | None:
     if token is None:
         return None
     try:
-        return await verify_jwt_for_audience(
+        operator = await verify_jwt_for_audience(
             f"Bearer {token}",
             expected_audience=get_settings().keycloak_audience,
             allow_unchosen=True,
@@ -77,3 +77,5 @@ async def approval_operator(session_id: uuid.UUID) -> Operator | None:
             "ui_approval_sign_in_token_unusable", status_code=exc.status_code
         )
         return None
+    # The proof of a console approve by the person, in this moment.
+    return operator.model_copy(update={"in_code_kind": "person"})

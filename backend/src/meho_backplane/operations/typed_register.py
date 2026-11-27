@@ -135,11 +135,11 @@ from __future__ import annotations
 import hashlib
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import structlog
 from sqlalchemy import delete, insert, select, update
@@ -150,6 +150,14 @@ from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations._left_out import (
+    LeftOutOp,
+    collect_left_out_ops,
+    note_left_out_op,
+    note_registered_op,
+    publish_left_out_ops,
+    without_written_keys,
+)
 from meho_backplane.operations.built_in_check_upgrade import restore_built_in_check_defaults
 from meho_backplane.operations.caller_address import raise_for_caller_address
 from meho_backplane.operations.catalog_release import record_catalog_release
@@ -267,6 +275,8 @@ _TypedOpSnapshot = tuple[
     tuple[str, ...],  # registrar-set fingerprint
     list[dict[str, Any]],  # operation_group rows
     list[dict[str, Any]],  # endpoint_descriptor rows
+    frozenset[LeftOutOp],  # operations the pass left out
+    frozenset[tuple[str, str, str, str]],  # keys the pass wrote
 ]
 _TYPED_OP_SNAPSHOT: _TypedOpSnapshot | None = None
 
@@ -334,7 +344,12 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return {col.name: getattr(row, col.name) for col in row.__table__.columns}
 
 
-async def _capture_typed_op_snapshot(session: AsyncSession, fingerprint: tuple[str, ...]) -> None:
+async def _capture_typed_op_snapshot(
+    session: AsyncSession,
+    fingerprint: tuple[str, ...],
+    left_out: frozenset[LeftOutOp],
+    written: frozenset[tuple[str, str, str, str]],
+) -> None:
     """Read the built-in descriptor + group rows into the per-process cache.
 
     Called once, immediately after the first real registrar pass under
@@ -367,6 +382,8 @@ async def _capture_typed_op_snapshot(session: AsyncSession, fingerprint: tuple[s
         fingerprint,
         [_row_to_dict(g) for g in groups],
         [_row_to_dict(d) for d in descriptors],
+        left_out,
+        written,
     )
 
 
@@ -385,7 +402,11 @@ async def _replay_typed_op_snapshot(session: AsyncSession, snapshot: _TypedOpSna
     trip the ``operation_group`` partial-unique index. Mirrors the
     natural-key-lookup short-circuit the un-amortized path already has.
     """
-    _fingerprint, group_rows, descriptor_rows = snapshot
+    _fingerprint, group_rows, descriptor_rows, left_out, written = snapshot
+    # A replay runs no registrar, so the keys the captured pass wrote come
+    # from the snapshot: a key some registrar wrote is not hidden.
+    for op in without_written_keys(left_out, written):
+        note_left_out_op(op)
     already_present = (
         await session.execute(
             select(EndpointDescriptor.id)
@@ -425,6 +446,13 @@ async def run_typed_op_registrars(
     dispatch. Operators reading the traceback see the connector's
     own module path in the registrar identity, which points at the
     failing op directly.
+
+    One exception: an operation whose mark does not fit its risk level
+    (for example ``hard_to_undo`` on a ``safe`` op) does not fail its
+    registrar. Registration leaves that one op out with one
+    ``operation_left_out`` log line, writes and deletes nothing for it,
+    and the start goes on (:data:`_MARK_FIT_CHECKS`). Every other check of
+    the op still runs and still stops the start.
 
     The ``embedding_service`` parameter is the test seam: production
     callers leave it ``None`` and each registrar resolves the
@@ -522,17 +550,28 @@ async def operation_catalog_write(
     try:
         async with get_sessionmaker()() as session:
             async with _bind_catalog_session(session):
-                with collect_code_safety_levels() as code_levels:
-                    await _populate_catalog(session, embedding_service=embedding_service)
+                with (
+                    collect_code_safety_levels() as code_levels,
+                    collect_left_out_ops() as left_out,
+                ):
+                    await _populate_catalog(
+                        session, embedding_service=embedding_service, written=code_levels
+                    )
+                left_out_now = without_written_keys(left_out, code_levels)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
                 await assert_connector_declarations_valid(
                     session,
                     code_levels=code_levels,
+                    left_out=left_out_now,
                     allow_missing_rows=get_settings().test_amortize_typed_op_registrars,
                 )
                 await record_catalog_release(session)
                 await _fail_start_for_test(session)
+            # Before the yield: the block runs the background loops, so no
+            # loop and no call may see a left-out op's stored row. A start
+            # that fails after this point stops MEHO.
+            publish_left_out_ops(left_out_now)
             yield
             await session.commit()
     except Exception as exc:
@@ -632,14 +671,19 @@ async def _run_typed_op_registrars(
     """Write the registrars' rows in one transaction, without the sweeps. Test seam."""
     async with get_sessionmaker()() as session:
         async with _bind_catalog_session(session):
-            await _populate_catalog(session, embedding_service=embedding_service)
+            with collect_code_safety_levels() as written, collect_left_out_ops() as left_out:
+                await _populate_catalog(
+                    session, embedding_service=embedding_service, written=written
+                )
         await session.commit()
+    publish_left_out_ops(without_written_keys(left_out, written))
 
 
 async def _populate_catalog(
     session: AsyncSession,
     *,
     embedding_service: EmbeddingService | None = None,
+    written: Mapping[tuple[str, str, str, str], str],
 ) -> None:
     """Populate descriptor rows via a real registrar pass or the amortized replay.
 
@@ -656,9 +700,14 @@ async def _populate_catalog(
         # First call this process (or the registrar set changed since
         # capture): run for real, then capture the built-in rows so later
         # boots with the same registrar set replay the snapshot.
-        await _run_registrars(embedding_service=embedding_service)
+        with collect_left_out_ops() as left_out:
+            await _run_registrars(embedding_service=embedding_service)
+        for op in left_out:
+            note_left_out_op(op)
         await session.flush()
-        await _capture_typed_op_snapshot(session, fingerprint)
+        await _capture_typed_op_snapshot(
+            session, fingerprint, frozenset(left_out), frozenset(written)
+        )
         return
 
     await _run_registrars(embedding_service=embedding_service)
@@ -706,6 +755,10 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 # most strict.
 _SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 _VALID_SAFETY_LEVELS: frozenset[str] = frozenset(_SAFETY_RANK)
+
+# The three kinds of call that no later call of the same connector undoes.
+# Mirrors the DB CHECK on :attr:`EndpointDescriptor.hard_to_undo`.
+_HARD_TO_UNDO_KINDS: frozenset[str] = frozenset({"deletes", "stops", "overwrites"})
 
 
 class HandlerRefError(ValueError):
@@ -999,6 +1052,129 @@ def _validate_safety_level(safety_level: str) -> str:
     return safety_level
 
 
+def _validate_hard_to_undo(op_id: str, *, hard_to_undo: str | None) -> None:
+    """Refuse a ``hard_to_undo`` value MEHO does not know. The message names the op."""
+    if hard_to_undo is not None and hard_to_undo not in _HARD_TO_UNDO_KINDS:
+        raise ValueError(
+            f"op {op_id!r}: hard_to_undo must be one of {sorted(_HARD_TO_UNDO_KINDS)} "
+            f"or None (received {hard_to_undo!r})"
+        )
+
+
+class _Marks(NamedTuple):
+    """The risk level of an operation and the marks it sets in its code."""
+
+    safety_level: str
+    hard_to_undo: str | None
+    changes_rights: bool
+
+
+def _hard_to_undo_on_safe(marks: _Marks) -> str | None:
+    if marks.hard_to_undo is None or marks.safety_level != "safe":
+        return None
+    return (
+        f"hard_to_undo={marks.hard_to_undo!r} on a 'safe' operation; a safe operation "
+        "changes nothing, so it cannot be hard to undo. Give it a higher safety_level "
+        "or leave hard_to_undo out"
+    )
+
+
+def _changes_rights_on_safe(marks: _Marks) -> str | None:
+    if not marks.changes_rights or marks.safety_level != "safe":
+        return None
+    return (
+        "changes_rights=True on a 'safe' operation; a safe operation changes nothing, "
+        "so it cannot change rights. Give it a higher safety_level or leave "
+        "changes_rights out"
+    )
+
+
+#: The checks of an operation's marks against its risk level. Each returns
+#: why the marks do not fit, or ``None``. An operation that fails one is
+#: left out at registration (:func:`_left_out_for_misfit`), and the start
+#: goes on. A new check is one more entry here.
+_MARK_FIT_CHECKS: tuple[Callable[[_Marks], str | None], ...] = (
+    _hard_to_undo_on_safe,
+    _changes_rights_on_safe,
+)
+
+
+def _left_out_for_misfit(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+    handler_ref: str,
+    marks: _Marks,
+) -> bool:
+    """Leave *op_id* out when a mark does not fit its risk level; ``True`` when left out.
+
+    MEHO writes and deletes nothing for a left-out op. A row that an earlier
+    start, an import or a tenant stored under that key stays as it is. The
+    start keeps the key, so the lookups hide the stored built-in typed or
+    multi-step row under it (unless a registrar wrote that key in the same
+    start), and a call answers ``operation_left_out``
+    (:mod:`meho_backplane.operations._left_out`).
+    One log line names the op, its connector and the reason.
+    """
+    key = LeftOutOp(product, version, impl_id, op_id, connector_package_of(handler_ref))
+    reason = next((r for check in _MARK_FIT_CHECKS if (r := check(marks)) is not None), None)
+    if reason is None:
+        note_registered_op(key)
+        return False
+    structlog.get_logger(__name__).error(
+        "operation_left_out",
+        op_id=op_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        connector_package=key.owner_package,
+        reason=reason,
+    )
+    note_left_out_op(key)
+    return True
+
+
+def _check_registration(
+    op_id: str,
+    *,
+    parameter_schema: dict[str, Any],
+    safety_level: str,
+    requires_approval: bool,
+) -> tuple[str, bool]:
+    """Run the checks of a registration that read no stored row; return the final level.
+
+    They run for every op, also for one that is then left out, so a second
+    fault stops the start with its own message. Returns the risk level and
+    approval flag after a parameter that holds an address MEHO connects to
+    raised them.
+    """
+    # #3198 fail-fast: the destructive tier is human-approval-always by
+    # construction, so a descriptor that declares ``safety_level="destructive"``
+    # with ``requires_approval=False`` is inconsistent — it would (absent the
+    # dispatcher's own destructive park) invite the auto-execute path. Refuse
+    # it at registration time rather than let an ill-declared row exist. This
+    # is belt-and-suspenders with the runtime guarantee in
+    # ``_non_agent_verdict`` (which parks the destructive tier for every
+    # non-agent principal regardless of this flag).
+    if safety_level == "destructive" and not requires_approval:
+        raise ValueError(
+            f"op {op_id!r} declares safety_level='destructive' but "
+            "requires_approval=False; the destructive tier is "
+            "human-approval-always — register it with requires_approval=True"
+        )
+    # A parameter that holds an address MEHO connects to raises the op to at
+    # least ``caution`` with approval, whatever the registrar declared.
+    level, approval = raise_for_caller_address(
+        parameter_schema, safety_level=safety_level, requires_approval=requires_approval
+    )
+    # A parameter switch name that MEHO does not know stops the op from
+    # registering, so a typo never shows a parameter.
+    check_switch_names(parameter_schema, op_id=op_id)
+    return level, approval
+
+
 def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
     """Validate the ``group_key`` / ``when_to_use`` pairing at the boundary.
 
@@ -1244,6 +1420,8 @@ async def register_typed_operation(
     tags: list[str] | None = None,
     safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "safe",
     requires_approval: bool = False,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,
     session: AsyncSession | None = None,
@@ -1329,6 +1507,20 @@ async def register_typed_operation(
         When ``True``, the dispatcher writes an audit row in
         ``status='pending'`` and waits for operator decision before
         executing. Independent of ``safety_level``.
+    hard_to_undo
+        ``"deletes"``, ``"stops"`` or ``"overwrites"`` when a call can
+        delete, stop or overwrite something and no later call of the same
+        connector brings it back. ``None`` (default) otherwise. Any other
+        word raises :class:`ValueError`. When the mark does not fit the
+        risk level (for example on a ``safe`` op), nothing raises: the op is
+        left out and hidden, nothing is written or deleted for it, and one
+        ``operation_left_out`` log line names it (see
+        :data:`_MARK_FIT_CHECKS`). Stored on the row; see
+        ``docs/codebase/policy-classification.md``.
+    changes_rights
+        ``True`` when a call gives or takes rights, a login or an access
+        policy in the target system. Default ``False``. Refused on a
+        ``safe`` op. Stored on the row.
     llm_instructions
         Optional structured agent guidance ("when to call",
         "parameter hints", "output format"). The agent prompt
@@ -1367,7 +1559,8 @@ async def register_typed_operation(
         G0.9-T4a #731).
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
-        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        bounded enum, ``hard_to_undo`` an unknown word, or the
+        ``group_key`` / ``when_to_use`` pairing
         contract is violated (see ``when_to_use`` param description).
     HandlerRefError
         Handler is a closure, lambda, partial, or non-coroutine
@@ -1402,6 +1595,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1414,6 +1608,22 @@ async def register_typed_operation(
     )
 
     tags_list = list(tags) if tags is not None else []
+
+    level, approval = _check_registration(
+        op_id,
+        parameter_schema=parameter_schema,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+    )
+    if _left_out_for_misfit(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        handler_ref=handler_ref,
+        marks=_Marks(safety_level, hard_to_undo, changes_rights),
+    ):
+        return
 
     if session is None:
         session = _CATALOG_SESSION.get()
@@ -1433,8 +1643,10 @@ async def register_typed_operation(
             group_key=group_key,
             when_to_use=when_to_use,
             tags_list=tags_list,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
+            safety_level=level,
+            requires_approval=approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1459,8 +1671,10 @@ async def register_typed_operation(
             group_key=group_key,
             when_to_use=when_to_use,
             tags_list=tags_list,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
+            safety_level=level,
+            requires_approval=approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1488,6 +1702,8 @@ async def register_composite_operation(
     tags: list[str] | None = None,
     safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "dangerous",
     requires_approval: bool = True,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,
     session: AsyncSession | None = None,
@@ -1548,6 +1764,8 @@ async def register_composite_operation(
         (one composite call ⇒ N sub-ops dispatched), so the policy
         gate's approval-queue path is the right default. Read-only
         composites override at the call site.
+    hard_to_undo, changes_rights
+        Identical to :func:`register_typed_operation`.
     llm_instructions, custom_description, session, embedding_service
         Identical to :func:`register_typed_operation`.
 
@@ -1564,7 +1782,8 @@ async def register_composite_operation(
         kwarg from G0.9-T4a #731).
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
-        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        bounded enum, ``hard_to_undo`` an unknown word, or the
+        ``group_key`` / ``when_to_use`` pairing
         contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
         Handler accepts neither a ``dispatch_child`` nor a
@@ -1604,6 +1823,7 @@ async def register_composite_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1616,6 +1836,22 @@ async def register_composite_operation(
     )
 
     tags_list = list(tags) if tags is not None else []
+
+    level, approval = _check_registration(
+        op_id,
+        parameter_schema=parameter_schema,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
+    )
+    if _left_out_for_misfit(
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        handler_ref=handler_ref,
+        marks=_Marks(safety_level, hard_to_undo, changes_rights),
+    ):
+        return
 
     if session is None:
         session = _CATALOG_SESSION.get()
@@ -1635,8 +1871,10 @@ async def register_composite_operation(
             group_key=group_key,
             when_to_use=when_to_use,
             tags_list=tags_list,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
+            safety_level=level,
+            requires_approval=approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1661,8 +1899,10 @@ async def register_composite_operation(
             group_key=group_key,
             when_to_use=when_to_use,
             tags_list=tags_list,
-            safety_level=safety_level,
-            requires_approval=requires_approval,
+            safety_level=level,
+            requires_approval=approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1693,6 +1933,8 @@ async def _register_in_session(
     tags_list: list[str],
     safety_level: str,
     requires_approval: bool,
+    hard_to_undo: str | None,
+    changes_rights: bool,
     llm_instructions: dict[str, Any] | None,
     custom_description: str | None,
     embedding_service: EmbeddingService | None,
@@ -1710,32 +1952,11 @@ async def _register_in_session(
     so ORM-side defaults (``id``, ``created_at``, ``updated_at``) are
     populated even when the caller defers the commit.
     """
-    # #3198 fail-fast: the destructive tier is human-approval-always by
-    # construction, so a descriptor that declares ``safety_level="destructive"``
-    # with ``requires_approval=False`` is inconsistent — it would (absent the
-    # dispatcher's own destructive park) invite the auto-execute path. Refuse
-    # it at registration time rather than let an ill-declared row exist. This
-    # is belt-and-suspenders with the runtime guarantee in
-    # ``_non_agent_verdict`` (which parks the destructive tier for every
-    # non-agent principal regardless of this flag).
-    if safety_level == "destructive" and not requires_approval:
-        raise ValueError(
-            f"op {op_id!r} declares safety_level='destructive' but "
-            "requires_approval=False; the destructive tier is "
-            "human-approval-always — register it with requires_approval=True"
-        )
-    # A parameter that holds an address MEHO connects to raises the op to at
-    # least ``caution`` with approval, whatever the registrar declared.
-    safety_level, requires_approval = raise_for_caller_address(
-        parameter_schema, safety_level=safety_level, requires_approval=requires_approval
-    )
+    # The checks that read no stored row ran before (:func:`_check_registration`);
+    # *safety_level* and *requires_approval* are their result.
     note_code_safety_level(
         product=product, version=version, impl_id=impl_id, op_id=op_id, safety_level=safety_level
     )
-
-    # A parameter switch name that MEHO does not know stops the op from
-    # registering, so a typo never shows a parameter.
-    check_switch_names(parameter_schema, op_id=op_id)
 
     log = structlog.get_logger()
     now = datetime.now(UTC)
@@ -1840,6 +2061,10 @@ async def _register_in_session(
             safety_level=safety_level,
             requires_approval=requires_approval,
         )
+        # The two facts follow the code on every start, also when a later
+        # release takes one away. Nothing else writes them.
+        existing.hard_to_undo = hard_to_undo
+        existing.changes_rights = changes_rights
 
         existing_text = build_embedding_text(
             summary=existing.summary or "",
@@ -1941,6 +2166,8 @@ async def _register_in_session(
         llm_instructions=llm_instructions,
         safety_level=safety_level,
         requires_approval=requires_approval,
+        hard_to_undo=hard_to_undo,
+        changes_rights=changes_rights,
         is_enabled=True,
         embedding=embedding,
         custom_description=custom_description,

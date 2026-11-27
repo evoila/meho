@@ -339,15 +339,18 @@ claim for audit parent-linkage (#3446), is never matched against this table).
        the call; both give the same answer.
 
      To rebuild the agent there, the park stores a requester record on
-     the approval card (`permission_preflight.requester`: sub, kind,
-     client id, role, actor) when an agent asks and the switch is not
-     `off`. A card with no record (made while the switch was `off`)
-     cannot be checked. When the operation has steps to check, the run
-     is refused with `policy_denied` and the agent must ask again. A
-     call with no steps to check runs as before. A refusal writes one `denied` audit row, the
-     approval request ends as a failed run with the reason, and the
-     person who runs it sees the reason in the answer. People and
-     service logins that asked are not checked again. With `observe`
+     the approval card whenever an agent asks (sub, kind, client id,
+     role, actor), under an internal key. The REST and MCP approval
+     tools leave it out. While the
+     switch is not `off`, the card also shows it as
+     `permission_preflight.requester`. An agent's request whose card has
+     no readable record of the agent is refused when a person runs it
+     from an approvals surface. The agent must ask again. A refusal
+     writes one `denied` audit row, the approval request ends as a failed
+     run with the reason, and the person who runs it sees the reason in
+     the answer. This step check is for agents; the risk level is checked
+     for every requester (see "An approved request is checked again when
+     it runs" below). With `observe`
      nothing is refused again: the "would deny" lines were logged when
      the call was made. At resume the dispatcher only marks them as
      written (`agent_no_grant_already_logged`), so the step gate of the
@@ -436,14 +439,50 @@ So the approved call runs a decision a person with the role made,
 whichever resume path wins. When that person runs the approved call from
 an approvals surface, the dispatcher's approve-and-run path
 (`_approved=True`) checks their role once more and refuses with a
-`denied` audit row. The requester's own run of an approved call is not
-checked again, the person's approval is the authorization: an agent's
-own resume (`agent/approval_wait.py`, an agent principal or a hosted
-agent run), and the requester's re-run of a failed approved call
-(`POST /api/v1/approvals/{id}/rerun`, `operations/approval_rerun.py`),
-which runs under the requester, also a service login with the `operator`
-role. The dispatcher tells the two apart by the requester the resume
-helper binds (`secondary_target_policy.approved_requester_sub`).
+`denied` audit row. The dispatcher tells the requester's own run from a
+reviewer's run by the requester the resume helper binds
+(`secondary_target_policy.approved_requester_sub`).
+
+**An approved request is checked again when it runs**
+(`operations/approved_run_rights.py`). The approval is not asked for
+again. On the first run (an approvals surface, or the agent's own wait in
+`agent/approval_wait.py`) MEHO checks:
+
+- the grants of an agent that asked, and of the acting agent of a hosted
+  agent run: a `deny` grant, or no grant with the switch `on`, refuses the
+  run (`policy_gate` with `decide_only=True`, so no grant use is recorded);
+- a revoked agent login (`DELETE /api/v1/agent-principals/{name}/revoke`),
+  as the caller or as the acting agent of a hosted agent run: a new call
+  with a token that has not ended yet is refused too;
+- a blocked login;
+- the risk level, for every requester: MEHO compares the level stamped on
+  the card (`proposed_effect.safety_level`) with the operation's level
+  now. A raise to `destructive` refuses the run. A raise to `dangerous`
+  refuses it when the person who approved may not approve that level
+  (the decision audit row records `approver_may_approve_high_risk`; when
+  the key is there, its value decides). A card with no stamped level is
+  refused when the operation is `destructive` now.
+
+A re-run of a failed approved call (`POST /api/v1/approvals/{id}/rerun`,
+`operations/approval_rerun.py`) checks these and also the caller's role
+and grants from the caller's token now. It needs the `operator` role. A
+re-run of a request made inside a hosted agent run binds that acting
+agent again, so it is checked with the stricter of the requester's and
+the agent's rights. The approver is read as recorded at the decision.
+
+Who is checked: the caller, when it is the login that asked (the agent's
+own wait, a hosted agent run, the requester's re-run). When a person runs
+the call from an approvals surface, MEHO checks the agent that asked,
+rebuilt from the requester record on the approval card (see "A resumed
+call is checked again" above). The approved step of a multi-step
+operation is checked in the same way before it clears: its risk level
+now (after the override rows and the classification) against the level
+on its card, for every requester, and the grants of the agent that asked.
+A refused request stays approved and can run again later: the request
+ends as a failed run with the reason. A step cannot run again on its
+own, so the answer to a refused step says to start a new run of the
+operation. An agent's card with no readable record of the agent cannot
+run: the answer says that the agent must ask again with a new request.
 
 `policy_gate` (`_validate.py`) opens its own DB session
 (`get_sessionmaker()`) and calls
@@ -466,6 +505,78 @@ evaluator reads the matching grant through `matched_grant` (the same row
 match as `resolve_verdict`, before any ceiling) and applies the ceilings
 itself. See [policy-evaluator.md](policy-evaluator.md).
 
+## The kind of caller (`auth/caller_kind.py`)
+
+`caller_kind(operator, actor_sub)` names who is calling. It reads no
+database and no settings. Nothing decides on it yet. The guide page
+`docs-site/guides/who-is-calling.md` says what each kind may do today.
+
+The checks run in this order; the first one that fits gives the kind.
+
+| Login | Kind |
+|---|---|
+| A hosted agent run (`actor_sub` set), also one a person started in the web console | `service_agent` |
+| A login with `in_code_kind` set | that kind |
+| A person's login (`principal_kind` user) with a web console session (`web_session`) | `person` |
+| A person's login with a checked token (`token_checked`) and no web console session | `personal_agent` |
+| A person's login with neither | `system` |
+| A runner login | `runner` |
+| An agent or a service login, also a scheduled agent run (it uses the agent's own login) | `service_agent` |
+
+So the five kinds are: `person` (a person in the web console), `personal_agent`
+(a person's token used by a tool: the command line, REST or MCP),
+`service_agent`, `runner`, and `system` (a login that MEHO's own code builds).
+
+Two fields of `Operator` feed it:
+
+- `token_checked` — the token of this call was checked by the REST or
+  MCP token check, for every kind of login, also on the status route
+  (`GET /api/v1/health`), with or without a chosen tenant. Only the four
+  token checks set it: `auth/jwt.py::verify_jwt`,
+  `verify_jwt_allow_unchosen`, `verify_jwt_platform_admin_way_back` and
+  `mcp/auth.py::verify_mcp_jwt`. The shared step `verify_jwt_for_audience`
+  does not. The web console session, the scheduled agent run and every
+  login that code builds keep it false. The bind steps
+  (`middleware.verify_jwt_and_bind`, `verify_mcp_jwt_and_bind`) return the
+  same login they get.
+- `in_code_kind` — set by every place that builds an `Operator` itself,
+  with no sign-in and no token check. Most of them are MEHO's own work
+  (the check runner, the event intake, the findings investigator, the
+  topology scheduler, the boot stamp, the expiry of requests, the
+  connectors' own logins and each connector's old `execute` shim) and give
+  `system`. Some stand for someone else: the web console readers and the
+  web push recipient give `person`; the rebuilt requester of a secondary
+  target and the made-up login of `meho policy explain` give the kind of
+  the login they stand for; the runner executor gives `runner`. A test
+  (`tests/test_in_code_logins_have_a_kind.py`) scans the source and fails
+  when such a place has no kind. It also finds `Operator` under another
+  import name and the `model_validate*` and `model_construct` class
+  methods. `tests/test_caller_kind.py` builds every place the scan finds.
+  `in_code_kind` is also set by the five console steps that check a
+  person's token with the shared token check. They set `person`, because
+  the person is at the web console and acts in that moment: the console
+  sign-in, the approval sign-in, the tenant choice, the reset of a session
+  whose tenant is gone, and the read of the approval sign-in that a
+  console approve uses.
+- A runbook check step runs as a copy of the caller with no web console
+  session (`runbooks/run_service.py::check_step_caller`). MEHO runs the
+  step for the person, so a person's copy gets `personal_agent`.
+
+The audit row has a column for the kind: `audit_log.caller_kind`
+(migration `0191`). A database CHECK allows only the five kinds, or
+empty. Nothing writes or reads it yet, so every row keeps it empty. The
+five kinds are listed once in the code, as `CALLER_KINDS` in
+`meho_backplane/caller_kinds.py`. That module imports nothing from MEHO,
+so `db/models.py` builds its CHECK from it, and `auth/caller_kind.py`
+gives the same tuple. Migration `0191` writes the five kinds out, because
+a migration never imports the code.
+`tests/migrations/test_migration_0191_add_audit_log_caller_kind.py` fails
+when the migration and the model differ, or differ from `CALLER_KINDS`.
+
+The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
+`person` is any human login, by web or by token, and `Asker.via` tells
+them apart. `tests/test_caller_kind.py` pins how the two line up.
+
 ## Who stands behind an agent's request
 
 A request an agent makes under its own login counts as a request of the
@@ -478,6 +589,8 @@ knows nobody behind the agent, only an admin may approve. See
 ## Dependencies
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`
+- `meho_backplane/auth/caller_kind.py` — `caller_kind`, `CallerKind`
+- `meho_backplane/caller_kinds.py` — `CALLER_KINDS`, the one list of kinds
 - `meho_backplane/db/engine.py` — `get_sessionmaker`
 - `meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`
 - `meho_backplane/operations/_errors.py` — `result_denied`,

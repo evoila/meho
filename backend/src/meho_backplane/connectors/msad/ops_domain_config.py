@@ -307,6 +307,7 @@ DOMAIN_CONFIG_OPS: tuple[MsadOp, ...] = (
         tags=("write", "domain", "password-policy"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call while building a domain to set its password rules. Give only the "
@@ -356,6 +357,7 @@ DOMAIN_CONFIG_OPS: tuple[MsadOp, ...] = (
         tags=("write", "domain", "join-limit"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call while building a domain to stop normal users from joining "

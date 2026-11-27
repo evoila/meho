@@ -18,9 +18,13 @@ You keep the policy as one file, `policy: v1`. You can:
 
 !!! note "Off by default"
 
-    The policy file needs the setting `POLICY_CLASSIFICATION` (Helm
-    `config.policy.classification`). While it is off, MEHO refuses an
-    import with one sentence.
+    The policy file needs the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`) or the setting `POLICY_CLASSIFICATION`
+    (Helm `config.policy.classification`). `CUSTOM_POLICY` turns on all
+    three policy parts: the policy file, routing and the policy evaluator.
+    Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`,
+    `POLICY_APPROVER_ROUTING`) still turns on its own part alone. While
+    both are off, MEHO refuses an import with one sentence.
 
 The policy file is not part of the [settings file](settings-file.md). It
 has its own command, `meho policy`.
@@ -99,9 +103,9 @@ classifications:
 ## Who approves: routing
 
 The `routing` section says which login groups may approve a change that
-waits. It needs the setting `POLICY_APPROVER_ROUTING` (Helm
-`config.policy.approverRouting`), off by default. This one setting turns on
-both parts: the bindings at sign-in (next section) and the routing at the
+waits. It needs the setting `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING`
+(Helm `config.policy.approverRouting`), both off by default.
+Either setting turns on both parts: the bindings at sign-in (next section) and the routing at the
 click.
 
 ```yaml
@@ -218,10 +222,10 @@ the operation one category in the install's file, reject the waiting
 request, and start the call again.
 
 MEHO also does not know the install's category of a waiting change that
-started to wait while `POLICY_CLASSIFICATION` was off, once you turn that
-switch on. The same rule holds: nobody may approve it if an install entry
+started to wait while `CUSTOM_POLICY` and `POLICY_CLASSIFICATION` were
+off, once you turn one of them on. The same rule holds: nobody may approve it if an install entry
 that matches on a category could fit it. Reject it and start the call
-again. While the switch stays off, an entry that matches on a category
+again. While both stay off, an entry that matches on a category
 fits no change, so the other install entries decide.
 
 MEHO ships a starting file, "separated duties"
@@ -305,12 +309,53 @@ bindings:
 
 !!! note "Off by default"
 
-    Bindings count only while the setting `POLICY_APPROVER_ROUTING` (Helm
-    `config.policy.approverRouting`) is on. You can import a file with
-    `bindings` while the setting is off: the bindings take effect when the
-    setting goes on. The policy commands, and so
-    the import of bindings, also need the setting `POLICY_CLASSIFICATION`
-    (Helm `config.policy.classification`).
+    Bindings count only while the setting `CUSTOM_POLICY` or
+    `POLICY_APPROVER_ROUTING` (Helm `config.policy.approverRouting`) is on. You can
+    import a file with `bindings` while both are off: the bindings take
+    effect when one of them goes on. The policy commands, and so
+    the import of bindings, also need the setting `CUSTOM_POLICY` or
+    `POLICY_CLASSIFICATION` (Helm `config.policy.classification`).
+
+## The outer limit for personal agents
+
+The install's policy file can say how far a tenant's rule for personal
+agents may go, for the whole install. This is the outer limit:
+
+```yaml
+policy: v1
+limits:
+  personal_agent_up_to: caution   # safe, caution or dangerous
+```
+
+- `personal_agent_up_to` is the highest risk level that a tenant's rule
+  for personal agents may let run at once. A `destructive` operation
+  always waits, so `destructive` is not a value.
+- Without a `limits` part, the limit is `safe`. An empty part
+  (`limits: {}`) means the same.
+- Only the install's file holds `limits`. A tenant's file with `limits`
+  is refused: "`limits` belongs to the install's policy file. Only a
+  platform admin sets the outer limit; a tenant's file stays inside it."
+- Only a platform admin imports the install's file:
+  `meho policy import FILE --scope install`. The import is a change of the
+  policy. In the web console it runs at once after a fresh sign-in. With
+  a token it waits until a platform admin approves it in the web console.
+  An agent, a service login or a hosted agent run cannot ask for it.
+- `meho policy export --scope install` writes the `limits` part. An
+  exported file imports again with "No change.".
+- If MEHO cannot read a stored limit, it uses `safe`, the strictest
+  limit, and logs one warning that names the place. Import the install's
+  file again to fix it.
+- No call decision reads the limit: every call gets the same answer as
+  without it.
+
+!!! note "Off by default"
+
+    The outer limit needs the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`). While it is off, a file with `limits`
+    is refused: "`limits` needs CUSTOM_POLICY: the outer limit counts only
+    while the CUSTOM_POLICY setting is on. Remove the part, or ask the
+    person who runs MEHO to turn the setting on." A limit stored while the
+    setting was on is then ignored, and the export leaves it out.
 
 ## Rules that no file can loosen
 
@@ -391,11 +436,12 @@ meho policy explain --request <request-id>
   call with `--me`. Only a tenant admin or a platform admin may ask for
   other groups.
 - `--file` asks with a policy file that is not imported. The file takes
-  the place of your stored policy. It needs `POLICY_CLASSIFICATION`.
+  the place of your stored policy. It needs `CUSTOM_POLICY` or `POLICY_CLASSIFICATION`.
 - `--request` shows the rule stored on an approval request, and the
   groups that may approve it. The groups stored on the request count only
-  while `POLICY_APPROVER_ROUTING` is on. With it on, the install's routing
-  as it is now narrows them, as at the approve click. With it off, explain
+  while `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING` is on. With routing
+  on, the install's routing as it is now narrows them, as at the approve
+  click. With both off, explain
   shows today's groups, the same groups the approve check uses.
 - With routing on, "Who may approve" names the routing entries that fit,
   the install's first. "Install's floor" names the install's entry: a
@@ -433,7 +479,8 @@ Good to know:
 - Who may approve is a list of **MEHO group kinds** (`MEHO-Operators`,
   `MEHO-Admins`, ...). These are not the names of the login groups of
   your install. Each login group is bound to one of these kinds.
-- explain works with `POLICY_ENGINE_SHADOW` off. It then shows today's
+- explain works with `CUSTOM_POLICY` and `POLICY_ENGINE_SHADOW` off. It
+  then shows today's
   answer only.
 - Only a tenant admin or a platform admin sees the entries of the policy
   and their places in it. Everyone else gets the answer, the reason, the
@@ -461,15 +508,58 @@ Not checked: idempotency_key, connector_resolution
 
 !!! note "The policy evaluator is off by default"
 
-    The lines about the policy evaluator need the setting
-    `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With it
-    on, the evaluator works out its own answer next to today's checks, and
+    The lines about the policy evaluator need the setting `CUSTOM_POLICY`
+    or `POLICY_ENGINE_SHADOW` (Helm `config.policy.engineShadow`). With either on, the evaluator works out its own answer next to today's checks, and
     explain lists every rule it matched, in order. Only the `always_wait`
     step carries a place in the policy file (for example
     `file:classifications[1]`). The other classification entries that
     match are listed under the classification (the `matched` lines).
     Today's checks still decide. With the setting off, explain shows
     today's answer only.
+
+## Before "always wait" becomes `destructive`: `meho policy carry-over --dry-run`
+
+"Always wait" makes an operation wait for approval on every call. It is
+saved in two places: an admin's override with approval on, or a policy
+file entry with `always_wait: true`.
+
+The dry run lists every saved "always wait" and what changes for each
+setting if MEHO reads it as `destructive`. It only reads: it changes no
+setting and no answer, and it reads no setting switch. It writes only its
+audit row.
+
+```bash
+meho policy carry-over --dry-run                   # your tenant's settings
+meho policy carry-over --dry-run --scope install   # the install's (platform admin)
+```
+
+For each setting it shows:
+
+- where it comes from: `override` or `policy_file`, the scope, and the
+  place (for example `tenant:classifications[2]`);
+- the operations it matches. A policy file entry is matched against the
+  operations a call of the tenant can use, and against every step of a
+  multi-step operation, with the group the step check finds for it, also
+  a step with no row a call can use. A policy file entry makes an
+  operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
+  the dry run lists its matches with every switch;
+- a warning when the setting makes a step of a multi-step operation
+  wait, with every multi-step operation that runs it, at every level. A
+  setting of the install counts when it makes the step wait for at least
+  one run, also the run of a tenant whose own row of the step is in
+  another group. A
+  policy file entry that makes only the direct call wait gives no such
+  warning. As
+  `destructive`, a step is refused, not held for approval, so such a run
+  stops at that step;
+- a warning when the install is in sandbox mode. There a delete grant of
+  a service login can cover some `destructive` operations, but not every
+  one;
+- that, as `destructive`, a call needs a matching preview first. A call
+  without one is refused.
+
+Who may run it: the same callers who may export the policy, except an
+agent login, which gets 403. There is no MCP tool for it.
 
 ## What an import does
 
@@ -507,6 +597,7 @@ Not checked: idempotency_key, connector_resolution
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
 | `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
+| `GET /api/v1/policy/carry-over/dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row |
 
 Send the file as the request body with `Content-Type: application/yaml`.
 Every file route takes `?scope=tenant` (the default) or `?scope=install`.

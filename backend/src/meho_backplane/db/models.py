@@ -278,6 +278,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 # it in :mod:`tests.test_db_sensor`; ``db.models`` never re-declares the
 # enum. The import is safe against a cycle: the ``checks`` package is
 # dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
+from meho_backplane.caller_kinds import CALLER_KINDS
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.sandbox_mode import sandbox_mode_active
 
@@ -709,11 +710,24 @@ class AuditLog(Base):
     # gate ran, and on every row from before migration ``0168``.
     policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
+    # The kind of caller of the row: one of
+    # :data:`meho_backplane.caller_kinds.CALLER_KINDS`, DB-enforced by the
+    # CHECK below. Nothing writes it yet, so every row is NULL, also every
+    # row from before migration ``0191``.
+    caller_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     __table_args__ = (
         sa.CheckConstraint(
             _ck_event_class_in(AUDIT_EVENT_CLASSES),
             name="ck_audit_log_event_class",
+        ),
+        # Built from :data:`meho_backplane.caller_kinds.CALLER_KINDS`, the one
+        # list of kinds. Migration ``0191`` writes the five kinds out, and
+        # ``tests/migrations/test_migration_0191_add_audit_log_caller_kind.py``
+        # fails when its text differs from this one.
+        sa.CheckConstraint(
+            f"caller_kind IN ({', '.join(f"'{v}'" for v in CALLER_KINDS)}) OR caller_kind IS NULL",
+            name="ck_audit_log_caller_kind",
         ),
         # Verdict vocabulary is the closed ``PermissionVerdict`` set. The
         # literal mirrors ``_PERMISSION_VERDICTS`` (defined later in this
@@ -2103,6 +2117,16 @@ class EndpointDescriptor(Base):
     #: accepts no value there (``operations/switch_params.py``).
     #: ``parameter_schema`` is then the shown schema, without it.
     parameter_check_schema = cast("dict[str, object] | None", None)
+    #: Not columns. The code's own risk level and approval flag (from the
+    #: code or the import), kept by ``apply_effective_policy`` and
+    #: ``apply_step_policy`` before they set the effective values. ``None``
+    #: on a row they did not return: its own columns hold the code's values.
+    code_safety_level = cast("str | None", None)
+    code_requires_approval = cast("bool | None", None)
+    #: Not a column. The stored parameter schema, kept by the same two steps
+    #: before a switch hides a field from ``parameter_schema``. ``None`` on a
+    #: row they did not return: ``parameter_schema`` is then the stored one.
+    code_parameter_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -2156,6 +2180,15 @@ class EndpointDescriptor(Base):
     # from the op id. Stored on the row so every process applies it, also
     # after a restart.
     op_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #6959: two facts from the op's own definition in code
+    # (``register_typed_operation`` / ``register_composite_operation``).
+    # ``hard_to_undo`` is ``deletes``, ``stops`` or ``overwrites`` when a call
+    # can do that and no later call of the same connector undoes it; NULL
+    # means no. ``changes_rights`` is true when a call gives or takes rights,
+    # a login or an access policy in the target; NULL reads as no. Ingested
+    # ops leave both NULL. See ``docs/codebase/policy-classification.md``.
+    hard_to_undo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changes_rights: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -2206,6 +2239,10 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+        sa.CheckConstraint(
+            "hard_to_undo IN ('deletes', 'stops', 'overwrites')",
+            name="ck_endpoint_descriptor_hard_to_undo",
         ),
     )
 
@@ -3839,6 +3876,14 @@ class WebSession(Base):
       ever surfacing what looks like an OAuth token in stable
       storage.
 
+    * ``display_name`` -- Fernet-encrypted bytes of the access token's
+      ``name`` claim at login (migration ``0192``), for the console's
+      user menu. Same key and envelope as the tokens: the name is
+      already inside ``access_token``, so the column shows nothing a
+      leaked row did not. ``NULL`` when the token had no name. A token
+      refresh keeps it; a renamed person sees the new name after the
+      next sign-in.
+
     * ``created_at`` / ``expires_at`` -- timestamptz. ``created_at``
       gets a PG ``now()`` server default + ORM
       ``datetime.now(UTC)`` for SQLite; ``expires_at`` is supplied
@@ -3917,6 +3962,10 @@ class WebSession(Base):
     # Fernet ciphertext of the console approval sign-in's access token
     # (#6282, migration 0176). NULL = no approval sign-in on this session.
     approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
+    # Fernet ciphertext of the token's ``name`` claim at login
+    # (migration 0192). NULL = the token had no name; the console then
+    # shows a neutral label, never the ``sub``.
+    display_name: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(

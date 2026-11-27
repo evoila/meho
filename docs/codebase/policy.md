@@ -10,9 +10,39 @@ is **not** a section of the settings file
 ([settings.md](settings.md)): the settings import adds and updates but
 never deletes, and a policy import must be able to remove a right.
 
-Everything here is behind the switch `POLICY_CLASSIFICATION` (off by
-default). With the switch off, the import is refused with one sentence.
+Everything here is behind the switch `POLICY_CLASSIFICATION` or the
+switch `CUSTOM_POLICY` (both off by default). With both off, the import is
+refused with one sentence.
 Validate, diff, export and history still work: they only read.
+
+## The switches
+
+Three parts of the policy each have their own switch, off by default:
+
+- `POLICY_CLASSIFICATION`: categories, labels and "always wait" on
+  operations ([policy-classification.md](policy-classification.md));
+- `POLICY_ENGINE_SHADOW`: the policy evaluator runs next to today's
+  checks and decides nothing ([policy-evaluator.md](policy-evaluator.md));
+- `POLICY_APPROVER_ROUTING`: approvals go to the teams the file names
+  ([policy-bindings.md](policy-bindings.md)).
+
+`CUSTOM_POLICY` (Helm `config.policy.customPolicy`, off by default) is the
+one switch of the custom policy model
+([decision record](../decisions/2026-11-25-custom-policy-model.md),
+decision 12). With it on, all three parts count as on. Each old switch
+still works alone. With it off, each part follows its own switch.
+
+One module decides whether a part is on:
+`backend/src/meho_backplane/policy/switches.py`. Code asks it (or the
+helpers that call it: `classification_enabled`, `shadow_enabled`,
+`routing_enabled`), never the settings or the environment. Whether
+`CUSTOM_POLICY` itself is on: `custom_policy_on(settings)`, or
+`custom_policy_on_in_environment()` for code that runs before the
+settings are loaded. `GET /ready`
+shows `features.policy.custom_policy`, and for each part whether it is
+on, by its own switch or by `CUSTOM_POLICY`. `GET /version` lists
+`CUSTOM_POLICY` with the other switches that change what an agent sees.
+`backend/tests/test_custom_policy_switch.py` checks all of this.
 
 ## The file
 
@@ -75,6 +105,59 @@ routing:
   [policy-bindings.md](policy-bindings.md).
 - The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
   sign-in and the routing at the click.
+- The file reserves seven top-level keys (`RESERVED_KEYS` in
+  `policy/document.py`): `limits`, and six refused keys, `agents`,
+  `approvers`, `role_bindings`, `risk_levels`, `custom_roles` and
+  `baseline`. A file that holds one of the six is refused, whatever its
+  value, in a tenant's file and in the install's file, with one sentence:
+  "This version of MEHO does not read `agents` in a policy file; remove
+  it."
+- `limits` (the install's file only) is the outer limit of the tenants'
+  policies: `limits.personal_agent_up_to` is the highest risk level
+  (`safe`, `caution` or `dangerous`) that a tenant's rule for personal
+  agents may let run at once. `destructive` is not a value: it always
+  waits. Without the part the limit is `safe`; the shipped "small team"
+  file has no such part. With the switch `CUSTOM_POLICY` on, a platform
+  admin imports it with `meho policy import --scope install`; the import
+  is a change of the policy like every `policy.apply`: in the web console
+  it runs at once after a fresh sign-in, with a token it waits for a
+  platform admin's click in the web console, and an agent login, a
+  service login or a hosted agent run is refused before anything waits.
+  The routes (`/api/v1/policy/validate`, `import`, `export`, the file of
+  `explain`) and `policy.apply` (its approval card and its run) read the
+  switch with `custom_policy_on(get_settings())` and pass it as
+  `custom_policy` to `build_plan`, `apply_policy` and `export_policy`.
+  The run reads the switch when it runs, not when it was asked.
+- A tenant's file that holds the key `limits` is refused whatever its
+  value, with the switch on or off: "`limits` belongs to the install's
+  policy file. Only a platform admin sets the outer limit; a tenant's file
+  stays inside it." The install's file with the switch off is refused the
+  same way (also `limits: {}`, `limits: null` and `limits:`): "`limits`
+  needs CUSTOM_POLICY: the outer limit counts only while the
+  CUSTOM_POLICY setting is on. Remove the part, or ask the person who
+  runs MEHO to turn the setting on." With the switch on, an empty part
+  means the same as no part. A `limits` value of the wrong type gets its
+  type sentence first, for example "`limits` must be a mapping of named
+  keys."; an unknown key gets "`limits.<key>` is not a known key."; and
+  `destructive` or another unknown level gets "`limits.personal_agent_up_to`
+  is not a level a limit can have; use safe, caution or dangerous. A
+  destructive operation always waits."
+- With the switch on, the export of the install's file writes `limits`,
+  and the exported file imports again with "No change.".
+- With the switch off, a stored `limits` part is ignored: the export
+  writes no `limits` part, so the exported file imports again; the diff
+  has no `limits` section; a file that equals the stored policy apart from
+  that part is "No change."; an approved import keeps the stored part as
+  it is; `personal_agent_limit` answers `safe`. Classification reads the
+  stored policy key by key, so a stored `limits` part does not change it.
+- `install_personal_agent_limit(session, custom_policy=...)` in
+  `policy/limits.py` reads the install's stored policy (`tenant_id IS
+  NULL`) and answers with `personal_agent_limit`. A stored value that
+  MEHO cannot read (not a mapping, or not a limit level) never counts as a
+  looser limit: the answer is `safe`, the strictest limit, and one warning
+  `policy_limit_not_readable` names the stored place (`install:limits` or
+  `install:limits.personal_agent_up_to`). No call decision reads the limit
+  in this version.
 
 ## The shipped "small team" file
 
@@ -166,6 +249,11 @@ is one sentence that names the entry:
 - **A tenant's routing wider than the install's** (`policy/routing_floor.py`,
   `tenant_floor_mistakes`, only while `POLICY_APPROVER_ROUTING` is on): see
   the next section.
+- **Limits** (`policy/limits.py`, `limits_mistakes`): the check reads
+  whether the file has the key `limits`, not whether it has a value. A
+  tenant's file that holds it is refused, and so is the install's file
+  that holds it while the `CUSTOM_POLICY` switch is off ("`limits` needs
+  CUSTOM_POLICY: ...").
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
@@ -356,8 +444,10 @@ it.
 
 - `build_plan` parses and checks the file and works out the diff. It
   writes nothing. The diff has the sections `description`, `taxonomy`,
-  `classifications`, `routing` and `bindings`, each with `added`, `changed`
-  (`before` and `after`) and `removed`. A routing entry is found by its
+  `classifications`, `routing`, `bindings` and `limits`, each with
+  `added`, `changed` (`before` and `after`) and `removed`. The `limits`
+  section is there only with the switch on, and only when the stored
+  policy or the file has limits; each item names its `key`. A routing entry is found by its
   `match`; it is `changed` when its approvers or its place in the list
   changed (`index`, and `was` for the old place). Each classification entry also has `matches` (how many
   operations it matches) and `changes` (how many of those get other
@@ -403,6 +493,17 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
+- The approval card of a `scope: install` import planned with
+  `CUSTOM_POLICY` on holds `planned_with_custom_policy: true`, because the
+  switch decides whether the `limits` part of the install's file is read.
+  Every other card (a tenant import, or an import planned with the switch
+  off) has only the keys it had before the switch existed, also in
+  `meho_approvals_get` and `meho_approvals_list`. A card without the field
+  counts as planned with the switch off; so does a card that waited during
+  an upgrade. After the approval, a run of a `scope: install` import reads
+  the switch again. When it is not the same as on the card, the run writes
+  nothing and gives the same sentence. An admin's own run in the web
+  console has no card and plans with the switch as it is.
 - A run without an approval, or a run by the login that asked for it (for
   example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
   writes only for an admin in the web console. Any other such run writes
@@ -453,7 +554,8 @@ import is human-only.
 | `POST /api/v1/policy/import` | `meho policy import FILE` | 202 with the approval request; 200 "No change."; 422 with mistakes; 409 with the switch off |
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
-| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; with `CUSTOM_POLICY` on, also whether the person who asked may approve their own request (`own_approval`); runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+| `GET /api/v1/policy/carry-over/dry-run` | `meho policy carry-over --dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row; an agent login gets 403 (`policy/carry_over.py`) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `cli/internal/cmd/policy/`.
@@ -473,4 +575,22 @@ install's routing as a floor: import, run, click, install diff),
 `backend/tests/test_policy_routing_step_floor.py` (a step and a direct
 call get the same approvers, warnings and export marks, the card and the
 approve audit row),
-`cli/internal/cmd/policy/file_test.go`.
+`backend/tests/test_policy_limits.py` (the `limits` part and the reserved
+keys: parser, checks, import, export, the reader),
+`backend/tests/test_api_v1_policy_limits.py` (the same through the routes
+and `policy.apply`: a stored limit with the switch off, the approved run,
+the refusal sentences),
+`backend/tests/test_policy_carry_over_dry_run.py` (the dry run of the
+"always wait" carry-over: the list, steps at every level, the operations
+of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
+(who may run it, every table the same, an override keeps waiting),
+`backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
+warning exactly when the step check makes the step wait, in both scopes),
+`backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
+`CUSTOM_POLICY` on: import, export and import again, who may ask and
+approve, the audit rows, a wrong part, a stored value MEHO cannot read,
+the approval table with no part, the switch turned off again),
+`backend/tests/test_api_v1_policy_install_limits_card.py` (the `limits`
+part on the approval card of an install import, and a run with the switch
+not the same as on the card),
+`cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

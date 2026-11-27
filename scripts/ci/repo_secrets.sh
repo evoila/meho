@@ -23,7 +23,9 @@
 #               script writes ENV_NAME=<CI_IMAGE_PROXY>/<image> to
 #               $GITHUB_ENV. Without CI_IMAGE_PROXY it writes
 #               docker.io/<image>. A line with `PROXY_ONLY/<image>` gets an
-#               empty value instead (the test that reads it then skips).
+#               empty value instead. The test that reads it then skips, or
+#               uses its own default (the core Keycloak tests use the
+#               chart's image).
 #
 # REQUIRE_SECRETS=true (set in this repository) makes an empty secret
 # fail the job, so no test skips quietly. In another repository (a fork

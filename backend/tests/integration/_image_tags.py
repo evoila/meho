@@ -6,6 +6,10 @@
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
+
+import pytest
+from _pytest.mark.structures import ParameterSet
 
 
 def major_of_image(image: str) -> str | None:
@@ -19,3 +23,20 @@ def major_of_image(image: str) -> str | None:
     _repository, sep, tag = name.partition(":")
     match = re.match(r"\d+", tag) if sep else None
     return match.group(0) if match else None
+
+
+class ImageRun(NamedTuple):
+    """One image a module runs against, with the public name of the run."""
+
+    label: str
+    image: str
+
+
+def image_param(label: str, image: str) -> ParameterSet:
+    """A fixture parameter that runs *image* under the fixed test id *label*.
+
+    The test id and the skip and wait messages of the fixture name only
+    *label*. CI names its images through the image proxy, and the test report
+    that CI uploads holds every test id and every skip message.
+    """
+    return pytest.param(ImageRun(label, image), id=label)

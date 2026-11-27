@@ -389,13 +389,49 @@ connector kit (kit 1.7 or higher).
 | `hard_to_undo` | `deletes`, `stops`, `overwrites`, or none (the default) | A call can delete, stop or overwrite something, and no later call of the same connector brings it back. |
 | `changes_rights` | yes or no (the default) | A call that changes who or what may reach or use something in the target system: a login, a group or role, an access list, a firewall rule. |
 
-- Registration refuses `hard_to_undo` on a `safe` operation, and any word
-  other than the three. The error names the operation and says why.
+- MEHO leaves an operation whose mark does not fit its risk level out at
+  registration, and the log line names it. Every other operation
+  registers, and the start goes on. The first such mark is
+  `hard_to_undo` on a `safe` operation. The checks are in
+  `_MARK_FIT_CHECKS` in `operations/typed_register.py`; a new check is
+  one more entry there.
+- For a left-out operation, no row is written or deleted. A row that an
+  earlier start, an import or a tenant stored under that key stays as it
+  is, with the operator's settings on it. The start keeps the key in
+  memory. For a left-out key, every stored built-in typed or multi-step
+  row under that key is hidden, unless a registrar wrote that key in this
+  same start. A tenant's row and an imported row are not touched
+  (`operations/_left_out.py`). The lookups hide the row the same way they
+  hide the rows of a connector package that is not installed
+  (`installed_owner_clause` in `operations/_lookup.py` and its raw-SQL
+  twin in `operations/_search.py`). So search, the group list and the
+  connector list do not offer it, and a call answers
+  `operation_left_out`, also when no row is stored. The start makes its
+  left-out keys current before the background loops start, so nothing can
+  call the hidden row. Every path that finds a row to run it hides the
+  row the same way, also the forward path of the connectors (for example
+  `k8s.ls`). A later start without the fault uses the stored row again,
+  with the operator's settings.
+- The log line is `operation_left_out`, with the operation, its connector
+  (product, version, implementation and the connector package, if any)
+  and the reason. When the operation is the test read a connector
+  declares, the connector starts without a test read, and a second line,
+  `connector_test_read_left_out`, names the connector and the operation
+  (`connector-target-form.md`).
+- Every other check of a registration still runs for a left-out operation
+  (for example an unknown switch name in a parameter), and a second fault
+  stops the start with its own message.
+- Registration refuses any `hard_to_undo` word other than the three. The
+  error names the operation and says why, and the start stops.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
   (a CHECK allows only the three words) and
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
+- `backend/tests/test_operation_marks_stored.py` checks that each start
+  stores the values of the code for every built-in operation, also on an
+  upgraded database. It reads the values from the definitions in code, so
+  it fails when a connector's register call does not pass the two fields on.
 - No rule of MEHO reads the two fields. No call waits, runs or is refused
   because of them.
 - A delivery call of the Argo CD or Kubernetes connector (it deploys or

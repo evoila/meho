@@ -46,6 +46,7 @@ _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
 _SCRIPTS = _REPO_ROOT / "scripts" / "ci"
 _CI = _WORKFLOWS / "ci.yml"
 _SMOKE_WORKFLOW = "second-site-smoke.yml"
+_SMOKE_JOB = "Smoke check of the second runner site"
 
 _PICK = _SCRIPTS / "pick_second_site.sh"
 _WATCHDOG = _SCRIPTS / "second_site_watchdog.sh"
@@ -589,8 +590,12 @@ def _smoke_run(
     head: str | None = _REPO,
     branch: str = "main",
     repo: str | None = _REPO,
+    run_id: int = 4242,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     run: dict[str, Any] = {
+        "id": run_id,
+        "run_attempt": attempt,
         "conclusion": conclusion,
         "head_branch": branch,
         "run_started_at": _iso(age_seconds),
@@ -606,6 +611,8 @@ def _pick(
     tmp_path: Path,
     *,
     runs: list[dict[str, Any]] | None = None,
+    jobs: list[dict[str, Any]] | None = None,
+    jobs_body: str | None = None,
     gh_body: str | None = None,
     **overrides: str | None,
 ) -> tuple[str, subprocess.CompletedProcess[str]]:
@@ -613,8 +620,18 @@ def _pick(
     bin_dir.mkdir(exist_ok=True)
     answer = tmp_path / "answer.json"
     answer.write_text(json.dumps({"workflow_runs": runs if runs is not None else []}))
+    jobs_answer = tmp_path / "jobs.json"
+    jobs_answer.write_text(json.dumps({"jobs": jobs if jobs is not None else [_smoke_job()]}))
     calls = tmp_path / "calls.log"
-    body = gh_body if gh_body is not None else f'echo "$*" >> "{calls}"\ncat "{answer}"'
+    jobs_reply = jobs_body if jobs_body is not None else f'cat "{jobs_answer}"'
+    body = (
+        gh_body
+        if gh_body is not None
+        else (
+            f'echo "$*" >> "{calls}"\n'
+            f'case "$*" in *"/jobs"*) {jobs_reply} ;; *) cat "{answer}" ;; esac'
+        )
+    )
     _fake(bin_dir, "gh", body)
     output = tmp_path / "output.txt"
     env: dict[str, str | None] = {
@@ -640,6 +657,10 @@ def _pick(
     return lines[0].removeprefix("second_site="), result
 
 
+def _smoke_job(conclusion: str = "success", name: str = _SMOKE_JOB) -> dict[str, Any]:
+    return {"name": name, "conclusion": conclusion}
+
+
 def _gh_calls(tmp_path: Path) -> list[str]:
     calls = tmp_path / "calls.log"
     return calls.read_text().splitlines() if calls.exists() else []
@@ -649,9 +670,70 @@ def test_pick_uses_the_site_after_a_recent_smoke_pass(tmp_path: Path) -> None:
     value, result = _pick(tmp_path, runs=[_smoke_run(600)])
     assert value == "on"
     assert "use the second runner site" in result.stdout
-    (call,) = _gh_calls(tmp_path)
-    assert f"repos/{_REPO}/actions/workflows/{_SMOKE_WORKFLOW}/runs?branch=main" in call
-    assert "status=success" in call
+    runs_call, jobs_call = _gh_calls(tmp_path)
+    assert f"repos/{_REPO}/actions/workflows/{_SMOKE_WORKFLOW}/runs?branch=main" in runs_call
+    assert "status=success" in runs_call
+    assert f"repos/{_REPO}/actions/runs/4242/attempts/1/jobs" in jobs_call
+
+
+def test_pick_reads_the_jobs_of_the_newest_pass_and_its_attempt(tmp_path: Path) -> None:
+    runs = [_smoke_run(9000, run_id=1), _smoke_run(60, run_id=2, attempt=3), _smoke_run(5000)]
+    value, _ = _pick(tmp_path, runs=runs)
+    assert value == "on"
+    assert f"repos/{_REPO}/actions/runs/2/attempts/3/jobs" in _gh_calls(tmp_path)[1]
+
+
+def test_smoke_job_name_matches_the_workflow() -> None:
+    assert _workflow("second-site-smoke.yml")["jobs"]["smoke"]["name"] == _SMOKE_JOB
+    assert f'smoke_job="{_SMOKE_JOB}"' in _PICK.read_text()
+
+
+@pytest.mark.parametrize(
+    "jobs",
+    [
+        pytest.param([_smoke_job("skipped")], id="smoke-skipped"),
+        pytest.param(
+            [_smoke_job(name="Check the switch of the second runner site")], id="only-switch"
+        ),
+        pytest.param([_smoke_job("failure")], id="smoke-failed"),
+        pytest.param([_smoke_job("cancelled")], id="smoke-cancelled"),
+        pytest.param([], id="no-jobs"),
+    ],
+)
+def test_pick_needs_the_smoke_job_itself_to_pass(
+    tmp_path: Path, jobs: list[dict[str, Any]]
+) -> None:
+    # The workflow run passed, but no runner of the site ran the smoke job.
+    switch = _smoke_job(name="Check the switch of the second runner site")
+    value, result = _pick(tmp_path, runs=[_smoke_run(60)], jobs=[switch, *jobs])
+    assert value == ""
+    assert "the smoke job did not pass" in result.stdout
+
+
+def test_skipped_smoke_job_keeps_all_six_shards_on_the_usual_pool(tmp_path: Path) -> None:
+    value, _ = _pick(tmp_path, runs=[_smoke_run(60)], jobs=[_smoke_job("skipped")])
+    assert value == ""
+    assert _shard_matrix(second_site=value) == [1, 2, 3, 4, 5, 6]
+
+
+def test_pick_jobs_api_error(tmp_path: Path) -> None:
+    value, result = _pick(tmp_path, runs=[_smoke_run(60)], jobs_body="echo 'HTTP 500' >&2; exit 1")
+    assert value == ""
+    assert "could not read the jobs" in result.stdout
+
+
+@pytest.mark.parametrize("body", ["echo not-json", "echo '{}'", """echo '{"jobs": "x"}'"""])
+def test_pick_odd_jobs_answer(tmp_path: Path, body: str) -> None:
+    value, _ = _pick(tmp_path, runs=[_smoke_run(60)], jobs_body=body)
+    assert value == ""
+
+
+@pytest.mark.parametrize("field", ["id", "run_attempt"])
+def test_pick_run_without_id_or_attempt(tmp_path: Path, field: str) -> None:
+    run = _smoke_run(60)
+    del run[field]
+    value, _ = _pick(tmp_path, runs=[run])
+    assert value == ""
 
 
 @pytest.mark.parametrize("switch", [None, "", "off", "true", "ON", "on "])
@@ -703,7 +785,7 @@ def test_pick_attempt_2(tmp_path: Path, attempt: str | None) -> None:
         pytest.param({"TEST_MAP": "true"}, id="test-map"),
     ],
 )
-def test_pick_only_when_six_shards_run(tmp_path: Path, overrides: dict[str, str]) -> None:
+def test_pick_only_when_six_shards_run(tmp_path: Path, overrides: dict[str, Any]) -> None:
     value, result = _pick(tmp_path, runs=[_smoke_run(60)], **overrides)
     assert value == ""
     assert "does not run all six unit shards" in result.stdout
@@ -743,7 +825,7 @@ def test_pick_uses_the_newest_pass_in_any_order(tmp_path: Path) -> None:
         pytest.param({"head": "other/repo", "repo": "other/repo"}, id="both-another-repository"),
     ],
 )
-def test_pick_ignores_a_run_that_does_not_count(tmp_path: Path, run: dict[str, str]) -> None:
+def test_pick_ignores_a_run_that_does_not_count(tmp_path: Path, run: dict[str, Any]) -> None:
     value, _ = _pick(tmp_path, runs=[_smoke_run(60, **run)])
     assert value == ""
 

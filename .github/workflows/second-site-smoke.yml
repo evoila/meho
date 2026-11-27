@@ -9,8 +9,8 @@
 # image, and every address in the private pod env MEHO_CI_DENY_PROBE_HOSTS
 # ends in a timeout. And it tells CI the site is online: the `changes` job of
 # ci.yml reads this workflow's run history and sends unit test shards 4-6 to
-# the site only after a pass in the last 45 minutes. So no pass means today's
-# pool.
+# the site only after its smoke job passed in the last 45 minutes. So no
+# pass means today's pool.
 #
 # On a dead site the job just waits for a runner. `cancel-in-progress` keeps
 # that to one waiting run: the next scheduled run replaces it.
@@ -71,7 +71,9 @@ jobs:
   smoke:
     name: Smoke check of the second runner site
     needs: switch
-    # A skipped run counts as `skipped`, not as a pass.
+    # When this job is skipped, GitHub may still mark the run as a success.
+    # So scripts/ci/pick_second_site.sh checks that this job itself passed,
+    # by its name: change both together.
     if: needs.switch.outputs.run == 'true'
     runs-on: meho-runners-ci-heavy-site2
     # Starts when a runner takes the job, so it does not limit the wait.

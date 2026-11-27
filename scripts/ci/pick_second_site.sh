@@ -22,8 +22,9 @@
 # How it knows the site is online: the job token cannot list self-hosted
 # runners (GitHub answers 403), so it reads the run history of the smoke
 # workflow, which runs on the site twice an hour. A smoke run that passed
-# proves that a runner of the site really took a job. GitHub writes that
-# history itself, so the site has nothing to upload.
+# proves that a runner of the site really took a job, when its smoke job
+# passed too (see below). GitHub writes that history itself, so the site has
+# nothing to upload.
 #
 # run_started_at, not updated_at: a run can only look older than it is, never
 # newer. A smoke run that waited long for a runner counts as old, and then
@@ -31,6 +32,8 @@
 set -uo pipefail
 
 smoke_workflow="second-site-smoke.yml"
+# The `name:` of the smoke job in that workflow.
+smoke_job="Smoke check of the second runner site"
 max_age_seconds=$((45 * 60))
 
 decide() {
@@ -66,25 +69,39 @@ if ! runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${smoke_workfl
   decide "" "today's pool: could not read the smoke runs"
 fi
 
-# Prints the age in seconds of the newest smoke run that passed on main of
-# this repository. jq's `max` so the order of the answer does not matter.
-# Both names must be this repository: two missing names are equal in jq, so
-# comparing them only to each other proves nothing.
-age="$(jq -er --arg repo "${GITHUB_REPOSITORY:-}" '
+# Prints the id, the attempt and the age in seconds of the newest smoke run
+# that passed on main of this repository. jq's `max_by` so the order of the
+# answer does not matter. Both names must be this repository: two missing
+# names are equal in jq, so comparing them only to each other proves nothing.
+newest="$(jq -er --arg repo "${GITHUB_REPOSITORY:-}" '
   [.workflow_runs[]
    | select(.conclusion == "success" and .head_branch == "main"
             and $repo != ""
             and .head_repository.full_name == $repo
             and .repository.full_name == $repo)
-   | .run_started_at | fromdateiso8601]
-  | max // empty
-  | now - . | floor' <<<"${runs}" 2>/dev/null)"
+   | {id, attempt: .run_attempt, started: (.run_started_at | fromdateiso8601)}]
+  | max_by(.started) // empty
+  | "\(.id) \(.attempt) \(now - .started | floor)"' <<<"${runs}" 2>/dev/null)"
+read -r run_id run_attempt age <<<"${newest}"
 
 # Also catches an unreadable answer, no run at all and a time in the future.
-if [[ ! "${age}" =~ ^[0-9]+$ ]]; then
+if [[ ! "${run_id:-}" =~ ^[0-9]+$ || ! "${run_attempt:-}" =~ ^[0-9]+$ \
+  || ! "${age:-}" =~ ^[0-9]+$ ]]; then
   decide "" "today's pool: no smoke run passed that this job can use"
 fi
 if (( age > max_age_seconds )); then
   decide "" "today's pool: the newest smoke pass is ${age} s old (limit ${max_age_seconds} s)"
+fi
+
+# A run also counts as passed when its smoke job was skipped (the switch job
+# found the variable not exactly `on`). Only a passed smoke job in that same
+# attempt proves that a runner of the site took a job.
+if ! jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${run_attempt}/jobs?per_page=100" 2>/dev/null)"; then
+  decide "" "today's pool: could not read the jobs of the newest smoke pass"
+fi
+if ! jq -e --arg name "${smoke_job}" \
+  'any(.jobs[]; .name == $name and .conclusion == "success")' \
+  <<<"${jobs}" >/dev/null 2>&1; then
+  decide "" "today's pool: the smoke job did not pass in the newest smoke pass"
 fi
 decide "on" "shards 4-6 use the second runner site: a smoke check passed there ${age} s ago"

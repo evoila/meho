@@ -2638,7 +2638,10 @@ shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
   one-connector run, not a test map run);
 - the newest passed run of `second-site-smoke.yml` on `main` of this
   repository started at most 45 minutes ago. Both repository names of that
-  run must be this repository; a missing name does not count.
+  run must be this repository; a missing name does not count;
+- the job "Smoke check of the second runner site" passed in that same run
+  attempt. A run where the switch job skipped the smoke job also counts as
+  passed on GitHub, but no runner of the site took a job in it.
 
 Every doubt (an API error, an odd answer, no smoke run) gives empty, which
 means today's pool. The step never fails the job. Its notice says why.

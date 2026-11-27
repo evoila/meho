@@ -2450,6 +2450,64 @@
         }
       }
     },
+    "/api/v1/policy/carry-over/dry-run": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Carry Over",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
+        "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarryOverDryRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policy/explain": {
       "post": {
         "tags": [
@@ -33217,6 +33275,125 @@
         ],
         "title": "CapabilityRead",
         "description": "One persisted capability row, built from the ORM via ``model_validate``."
+      },
+      "CarryOverDryRun": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverSetting"
+            },
+            "type": "array",
+            "title": "Settings"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Dry run: nothing was changed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "sandbox_mode",
+          "settings"
+        ],
+        "title": "CarryOverDryRun",
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+      },
+      "CarryOverOperation": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "step_of": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "step_of"
+        ],
+        "title": "CarryOverOperation",
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once. It is empty when none does, or when the\nsetting makes only the direct call wait, not the step."
+      },
+      "CarryOverSetting": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "policy_file"
+            ],
+            "title": "Source"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Match"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverOperation"
+            },
+            "type": "array",
+            "title": "Operations"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "scope",
+          "ref",
+          "match",
+          "operations",
+          "warnings"
+        ],
+        "title": "CarryOverSetting",
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``."
       },
       "CatalogListResponse": {
         "properties": {

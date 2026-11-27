@@ -1361,10 +1361,10 @@ redirect. A value that the request body carries is not a path value there
 `_send_traced`), so a fixed segment such as `proxy` in
 `/v1/settings/proxy` stays when the proxy user name in the body is
 `proxy`; a value under a secret key of the body (`is_secret_param_name`)
-still counts. The same value rule holds for an
-address that does not follow the template, such as a redirect to another
-path. This holds for the first request, each followed
-redirect and a request that ends in a network error. A URL inside a recorded body
+still counts. The trace address is the address MEHO asked for (the first request of
+the call), also after a followed redirect, for the second send of a change
+and for a request that ends in a network error. The path mask runs on that
+address. A URL inside a recorded body
 keeps its query; the credential-shape net hides its user part and its
 secret query values (`url_secret`). A transport that needs the query on the span
 (Kubernetes: `dryRun`, `fieldManager`) passes it to `redact_query(params,

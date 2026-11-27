@@ -111,8 +111,8 @@ _INSTALLED_OWNER_SQL = """
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND NOT (tenant_id IS NULL
-               AND concat_ws(chr(31), product, version, impl_id, op_id,
-                             coalesce(owner_package, ''), source_kind)
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
                    = ANY(CAST(:left_out_keys AS text[])))"""
 
 # Raw-SQL twin of :func:`~meho_backplane.operations._lookup.enabled_for_tenant_clause`
@@ -191,8 +191,8 @@ _BM25_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND NOT (tenant_id IS NULL
-               AND concat_ws(chr(31), product, version, impl_id, op_id,
-                             coalesce(owner_package, ''), source_kind)
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
                    = ANY(CAST(:left_out_keys AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND (NOT CAST(:typed_only AS boolean)
@@ -234,8 +234,8 @@ _BM25_CUSTOM_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND NOT (tenant_id IS NULL
-               AND concat_ws(chr(31), product, version, impl_id, op_id,
-                             coalesce(owner_package, ''), source_kind)
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
                    = ANY(CAST(:left_out_keys AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND (NOT CAST(:typed_only AS boolean)
@@ -274,8 +274,8 @@ _COSINE_CANDIDATES_SQL = text(
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
           AND NOT (tenant_id IS NULL
-               AND concat_ws(chr(31), product, version, impl_id, op_id,
-                             coalesce(owner_package, ''), source_kind)
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
                    = ANY(CAST(:left_out_keys AS text[])))
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)

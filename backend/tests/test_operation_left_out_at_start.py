@@ -25,6 +25,10 @@ After a start with the misfit version:
   and the reason.
 * A connector whose test read is the left-out operation starts without
   its test read, and one more log line says so.
+* Every stored built-in typed or multi-step row under a left-out key is
+  hidden, unless a registrar wrote that key in the same start. A path that
+  runs an operation without the dispatcher (the forward of a connector)
+  hides it the same way.
 * Every other check of a registration still runs for a left-out
   operation.
 
@@ -37,6 +41,7 @@ import sys
 import types
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -52,12 +57,15 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connector_packages import record_installed_connector_packages
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors import registry as connector_registry
+from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.connectors.target_form import ConnectorDeclarationError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import _left_out, dispatch, typed_register
+from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.connector_declaration_check import registered_connector_classes
 from meho_backplane.operations.ingest import ReviewService
 from meho_backplane.operations.meta_tools import list_operation_groups, search_operations
@@ -82,6 +90,8 @@ _RENAME = "probewid.box.rename"
 _NEVER = "probewid.box.never"
 _WIPE_GROUP = "box-cleanup"
 
+_K8S_PROBE = "k8s.probebox.list"
+
 _TENANT = uuid.UUID("00000000-0000-0000-0000-000000007138")
 _OTHER_TENANT = uuid.UUID("00000000-0000-0000-0000-000000007139")
 
@@ -105,6 +115,15 @@ async def gadgets_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]
     return {"from": "gadgets"}
 
 
+#: Every call that reached :func:`widgets_k8s_handler`.
+_K8S_CALLS: list[dict[str, Any]] = []
+
+
+async def widgets_k8s_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _K8S_CALLS.append(params)
+    return {"from": "widgets"}
+
+
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Required settings, the declaration check on, and no left-out op of another test."""
@@ -122,7 +141,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _stand_in_packages(monkeypatch: pytest.MonkeyPatch) -> None:
     """Put each package's handlers in a connector folder that the package installed."""
     for module_name, handlers in (
-        (_WIDGETS_MODULE, (widgets_handler, widgets_steps)),
+        (_WIDGETS_MODULE, (widgets_handler, widgets_steps, widgets_k8s_handler)),
         (_GADGETS_MODULE, (gadgets_handler,)),
     ):
         module = types.ModuleType(module_name)
@@ -131,6 +150,7 @@ def _stand_in_packages(monkeypatch: pytest.MonkeyPatch) -> None:
             setattr(module, handler.__name__, handler)
         monkeypatch.setitem(sys.modules, module_name, module)
     monkeypatch.setattr(connector_packages, "_installed_folders", {})
+    _K8S_CALLS.clear()
     record_installed_connector_packages({_WIDGETS_FOLDER: _WIDGETS, _GADGETS_FOLDER: _GADGETS})
     _eager_import_connectors()
 
@@ -181,19 +201,23 @@ async def _list_and_rename(embedding_service: Any) -> None:
 
 
 def _widgets(wipe: str, *, wipe_id: str = _WIPE, **wipe_extra: Any) -> _Registrar:
-    """The registrar of ``probe-widgets``; *wipe* is ``fixed``, ``misfit`` or ``multi_step``."""
+    """The registrar of ``probe-widgets``.
+
+    *wipe* is ``fixed``, ``misfit``, ``multi_step`` (a misfit multi-step
+    op) or ``multi_step_fixed``.
+    """
 
     async def probe_widgets(*, embedding_service: Any = None) -> None:
         await register_typed_operation(
             handler=widgets_handler, embedding_service=embedding_service, **_common(_LIST)
         )
         fields = _common(wipe_id, **wipe_extra)
-        if wipe == "multi_step":
+        if wipe in ("multi_step", "multi_step_fixed"):
             await register_composite_operation(
                 handler=widgets_steps,
                 safety_level="safe",
                 requires_approval=False,
-                hard_to_undo="stops",
+                hard_to_undo="stops" if wipe == "multi_step" else None,
                 embedding_service=embedding_service,
                 **fields,
             )
@@ -436,10 +460,15 @@ def _built_in_op_that_is_no_test_read(rows: list[dict[str, Any]]) -> dict[str, A
     return candidates[0]
 
 
+@pytest.mark.parametrize("shared_handler", [False, True], ids=["own_handler", "shared_handler"])
 @pytest.mark.asyncio
-async def test_case7_a_package_cannot_hide_a_built_in_op(embedding: AsyncMock) -> None:
+async def test_case7_a_package_cannot_hide_a_built_in_op(
+    embedding: AsyncMock, shared_handler: bool
+) -> None:
     await _start(embedding=embedding)
     built_in = _built_in_op_that_is_no_test_read(await _rows())
+    # With a shared handler, the package's op names no package either.
+    handler = import_handler(built_in["handler_ref"]) if shared_handler else widgets_handler
     connector_id = f"{built_in['impl_id']}-{built_in['version']}"
     operator = _operator()
 
@@ -474,7 +503,7 @@ async def test_case7_a_package_cannot_hide_a_built_in_op(embedding: AsyncMock) -
             version=built_in["version"],
             impl_id=built_in["impl_id"],
             op_id=built_in["op_id"],
-            handler=widgets_handler,
+            handler=handler,
             summary="Not the built-in operation.",
             description="A package op under a built-in key.",
             parameter_schema={"type": "object"},
@@ -717,3 +746,176 @@ async def test_a_second_check_leaves_its_op_out_the_same_way(
     [line] = _left_out_lines(logs)
     assert "test-only check" in line["reason"]
     _assert_refused_as_left_out(await _call(_WIPE))
+
+
+# ---------------------------------------------------------------------------
+# Every stored built-in row under a left-out key is hidden, in both kinds
+# ---------------------------------------------------------------------------
+
+
+async def _assert_stored_row_hidden(stored: dict[str, Any]) -> None:
+    """*stored* is unchanged, hidden from every lookup, and no test read."""
+    assert await _row(_WIPE) == stored
+    found = await lookup_descriptor(
+        tenant_id=_TENANT, product=_PRODUCT, version=_VERSION, impl_id=_IMPL, op_id=_WIPE
+    )
+    assert found is None
+    searched, listed, _group_keys = await _offered()
+    assert _WIPE not in searched | listed
+    _assert_refused_as_left_out(await _call(_WIPE))
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.id == stored["id"])
+            )
+        ).scalar_one()
+    assert _left_out.row_is_left_out(row)
+    assert _route_test_operation() is None
+
+
+@pytest.mark.asyncio
+async def test_a_built_in_row_with_no_package_under_a_left_out_key_is_hidden(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    stored = await _store_copy_of_wipe(embedding, tenant_id=None, owner_package=None)
+    _probe_class(monkeypatch, _WIPE)
+
+    with structlog.testing.capture_logs() as logs:
+        await _start(_widgets("misfit"), embedding=embedding)
+
+    assert len(_left_out_lines(logs)) == 1
+    await _assert_stored_row_hidden(stored)
+
+
+@pytest.mark.parametrize(
+    ("stored_version", "misfit_version", "stored_kind"),
+    [("multi_step_fixed", "misfit", "composite"), ("fixed", "multi_step", "typed")],
+    ids=["stored_multi_step_now_typed", "stored_typed_now_multi_step"],
+)
+@pytest.mark.asyncio
+async def test_a_row_of_the_other_kind_under_a_left_out_key_is_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+    embedding: AsyncMock,
+    stored_version: str,
+    misfit_version: str,
+    stored_kind: str,
+) -> None:
+    await _start(_widgets(stored_version), embedding=embedding)
+    stored = await _row(_WIPE)
+    assert stored is not None
+    assert (stored["source_kind"], stored["owner_package"]) == (stored_kind, _WIDGETS)
+    _probe_class(monkeypatch, _WIPE)
+
+    with structlog.testing.capture_logs() as logs:
+        await _start(_widgets(misfit_version), embedding=embedding)
+
+    assert len(_left_out_lines(logs)) == 1
+    await _assert_stored_row_hidden(stored)
+
+
+# ---------------------------------------------------------------------------
+# The target form offers no test read that the start left out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_imported_row_under_a_left_out_test_read_is_no_test_read(
+    monkeypatch: pytest.MonkeyPatch, embedding: AsyncMock
+) -> None:
+    stored = await _store_copy_of_wipe(
+        embedding,
+        tenant_id=None,
+        owner_package=None,
+        source_kind="ingested",
+        handler_ref=None,
+        safety_level="safe",
+        is_enabled=True,
+        summary="Imported from an API description.",
+    )
+    _probe_class(monkeypatch, _WIPE)
+
+    with structlog.testing.capture_logs() as logs:
+        await _start(_widgets("misfit"), embedding=embedding)
+
+    assert [e["op_id"] for e in logs if e["event"] == "connector_test_read_left_out"] == [_WIPE]
+    assert _route_test_operation() is None
+    assert await _row(_WIPE) == stored
+    found = await lookup_descriptor(
+        tenant_id=_TENANT, product=_PRODUCT, version=_VERSION, impl_id=_IMPL, op_id=_WIPE
+    )
+    assert found is not None and found.id == stored["id"]
+    assert (await _call(_WIPE)).extras.get("error_code") != "operation_left_out"
+
+
+# ---------------------------------------------------------------------------
+# A forwarded call hides a left-out operation as the dispatcher does
+# ---------------------------------------------------------------------------
+
+
+def _k8s_probe(hard_to_undo: str | None) -> _Registrar:
+    """A ``probe-widgets`` registrar of one op under the Kubernetes connector."""
+
+    async def probe_widgets_k8s(*, embedding_service: Any = None) -> None:
+        await register_typed_operation(
+            product="k8s",
+            version="1.x",
+            impl_id="k8s",
+            op_id=_K8S_PROBE,
+            handler=widgets_k8s_handler,
+            summary="Lists the probe boxes of a cluster.",
+            description="Lists the probe boxes of one cluster.",
+            parameter_schema={"type": "object", "properties": {}},
+            when_to_use=None,
+            hard_to_undo=hard_to_undo,
+            embedding_service=embedding_service,
+        )
+
+    return probe_widgets_k8s
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_call_of_a_left_out_op_does_not_reach_its_handler(
+    embedding: AsyncMock,
+) -> None:
+    connector = KubernetesConnector()
+    target = SimpleNamespace(name="probe-cluster")
+    await _start(_k8s_probe(None), embedding=embedding)
+    assert (await connector.execute(target, _K8S_PROBE, {})).status == "ok"
+    assert len(_K8S_CALLS) == 1
+
+    await _start(_k8s_probe("deletes"), embedding=embedding)
+
+    assert await _row(_K8S_PROBE) is not None
+    _assert_refused_as_left_out(await connector.execute(target, _K8S_PROBE, {}), _K8S_PROBE)
+    shared = await dispatch(
+        operator=_operator(), connector_id="k8s-1.x", op_id=_K8S_PROBE, target=None, params={}
+    )
+    _assert_refused_as_left_out(shared, _K8S_PROBE)
+    assert len(_K8S_CALLS) == 1
+
+    await _start(_k8s_probe(None), embedding=embedding)
+
+    assert (await connector.execute(target, _K8S_PROBE, {})).status == "ok"
+    assert len(_K8S_CALLS) == 2
+
+
+# ---------------------------------------------------------------------------
+# The left-out keys are current before anything can call an operation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_left_out_keys_are_current_inside_the_catalog_write(
+    embedding: AsyncMock,
+) -> None:
+    await _start(_widgets("fixed"), embedding=embedding)
+    assert await _row(_WIPE) is not None
+    saved = list(typed_register._TYPED_OP_REGISTRARS)
+    register_typed_op_registrar(_widgets("misfit"))
+    try:
+        async with typed_register.operation_catalog_write(embedding_service=embedding):
+            inside = _left_out.left_out_ops()
+    finally:
+        typed_register._TYPED_OP_REGISTRARS[:] = saved
+
+    assert {(op.op_id, op.owner_package) for op in inside} == {(_WIPE, _WIDGETS)}

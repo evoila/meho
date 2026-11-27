@@ -103,7 +103,9 @@ while an override of the install or of the caller's tenant raises its risk
 level or makes it wait for approval (`ready_test_operations`). Then the
 console offers no test read for that class. When MEHO leaves the test read
 out at registration, the connector starts without a test read, and the
-route answers `test_operation: null` for that class. Otherwise the route names the
+route answers `test_operation: null` for that class, whatever row is
+stored under that key (an imported row under the key still decides its
+own calls). Otherwise the route names the
 test read the connector declares; whether the caller may run it is decided
 when it is called. The answer holds what the classes declare: names,
 labels, help texts, kinds, choices and the declared defaults of target

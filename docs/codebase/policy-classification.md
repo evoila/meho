@@ -353,17 +353,20 @@ connector kit (kit 1.7 or higher).
 - For a left-out operation, no row is written or deleted. A row that an
   earlier start, an import or a tenant stored under that key stays as it
   is, with the operator's settings on it. The start keeps the key in
-  memory, bound to the code that registered it (its connector package, or
-  built-in code) and to its kind (typed or multi-step)
-  (`operations/_left_out.py`). The lookups hide exactly that code's row,
-  the same way they hide the rows of a connector package that is not
-  installed (`installed_owner_clause` in `operations/_lookup.py` and its
-  raw-SQL twin in `operations/_search.py`). So search, the group list and
-  the connector list do not offer it, and a call answers
-  `operation_left_out`, also when no row is stored. A row with the same
-  key of other code (a built-in connector, another package, an import, a
-  tenant) is not hidden. A later start without the fault uses the stored
-  row again, with the operator's settings.
+  memory. For a left-out key, every stored built-in typed or multi-step
+  row under that key is hidden, unless a registrar wrote that key in this
+  same start. A tenant's row and an imported row are not touched
+  (`operations/_left_out.py`). The lookups hide the row the same way they
+  hide the rows of a connector package that is not installed
+  (`installed_owner_clause` in `operations/_lookup.py` and its raw-SQL
+  twin in `operations/_search.py`). So search, the group list and the
+  connector list do not offer it, and a call answers
+  `operation_left_out`, also when no row is stored. The start makes its
+  left-out keys current before the background loops start, so nothing can
+  call the hidden row. Every path that finds a row to run it hides the
+  row the same way, also the forward path of the connectors (for example
+  `k8s.ls`). A later start without the fault uses the stored row again,
+  with the operator's settings.
 - The log line is `operation_left_out`, with the operation, its connector
   (product, version, implementation and the connector package, if any)
   and the reason. When the operation is the test read a connector

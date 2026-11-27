@@ -46,7 +46,7 @@ from meho_backplane.connectors.target_form import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.operations._left_out import LeftOutOp, left_out_op, row_is_left_out
+from meho_backplane.operations._left_out import LeftOutOp, left_out_op
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     ingested_schema_for_validation,
@@ -287,9 +287,11 @@ async def ready_test_operations(
     The overrides read are those of the install and of *tenant_id*. A class is
     in the set when the stored row has risk level ``safe`` and is not turned
     off, and no override raises its risk level or makes it wait for approval.
-    A class with no row, with a row that registration left out in this start
-    (:func:`~meho_backplane.operations._left_out.row_is_left_out`), or with a
-    problem from :func:`stored_state_problems`, is not in the set.
+    A class with no row, or with a problem from :func:`stored_state_problems`,
+    is not in the set. Nor is a class whose test read registration left out
+    in this start (:func:`~meho_backplane.operations._left_out.left_out_op`),
+    whatever row is stored under that key: the connector starts without a
+    test read. An imported row under that key still decides its own calls.
     """
     wanted = [cls for cls in classes if cls.test_operation is not None]
     if not wanted:
@@ -298,8 +300,15 @@ async def ready_test_operations(
     async with get_sessionmaker()() as session:
         for cls in wanted:
             op_id = str(cls.test_operation)
+            if (
+                left_out_op(
+                    product=cls.product, version=cls.version, impl_id=cls.impl_id, op_id=op_id
+                )
+                is not None
+            ):
+                continue
             row = await _test_row(session, cls, op_id)
-            if row is None or row_is_left_out(row):
+            if row is None:
                 continue
             key = OpKey(cls.product, cls.version, cls.impl_id, op_id)
             overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(

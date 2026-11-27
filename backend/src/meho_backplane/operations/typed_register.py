@@ -135,7 +135,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -156,6 +156,7 @@ from meho_backplane.operations._left_out import (
     note_left_out_op,
     note_registered_op,
     publish_left_out_ops,
+    without_written_keys,
 )
 from meho_backplane.operations.built_in_check_upgrade import restore_built_in_check_defaults
 from meho_backplane.operations.caller_address import raise_for_caller_address
@@ -275,6 +276,7 @@ _TypedOpSnapshot = tuple[
     list[dict[str, Any]],  # operation_group rows
     list[dict[str, Any]],  # endpoint_descriptor rows
     frozenset[LeftOutOp],  # operations the pass left out
+    frozenset[tuple[str, str, str, str]],  # keys the pass wrote
 ]
 _TYPED_OP_SNAPSHOT: _TypedOpSnapshot | None = None
 
@@ -343,7 +345,10 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 
 async def _capture_typed_op_snapshot(
-    session: AsyncSession, fingerprint: tuple[str, ...], left_out: frozenset[LeftOutOp]
+    session: AsyncSession,
+    fingerprint: tuple[str, ...],
+    left_out: frozenset[LeftOutOp],
+    written: frozenset[tuple[str, str, str, str]],
 ) -> None:
     """Read the built-in descriptor + group rows into the per-process cache.
 
@@ -378,6 +383,7 @@ async def _capture_typed_op_snapshot(
         [_row_to_dict(g) for g in groups],
         [_row_to_dict(d) for d in descriptors],
         left_out,
+        written,
     )
 
 
@@ -396,8 +402,10 @@ async def _replay_typed_op_snapshot(session: AsyncSession, snapshot: _TypedOpSna
     trip the ``operation_group`` partial-unique index. Mirrors the
     natural-key-lookup short-circuit the un-amortized path already has.
     """
-    _fingerprint, group_rows, descriptor_rows, left_out = snapshot
-    for op in left_out:
+    _fingerprint, group_rows, descriptor_rows, left_out, written = snapshot
+    # A replay runs no registrar, so the keys the captured pass wrote come
+    # from the snapshot: a key some registrar wrote is not hidden.
+    for op in without_written_keys(left_out, written):
         note_left_out_op(op)
     already_present = (
         await session.execute(
@@ -546,20 +554,26 @@ async def operation_catalog_write(
                     collect_code_safety_levels() as code_levels,
                     collect_left_out_ops() as left_out,
                 ):
-                    await _populate_catalog(session, embedding_service=embedding_service)
+                    await _populate_catalog(
+                        session, embedding_service=embedding_service, written=code_levels
+                    )
+                left_out_now = without_written_keys(left_out, code_levels)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
                 await assert_connector_declarations_valid(
                     session,
                     code_levels=code_levels,
-                    left_out=left_out,
+                    left_out=left_out_now,
                     allow_missing_rows=get_settings().test_amortize_typed_op_registrars,
                 )
                 await record_catalog_release(session)
                 await _fail_start_for_test(session)
+            # Before the yield: the block runs the background loops, so no
+            # loop and no call may see a left-out op's stored row. A start
+            # that fails after this point stops MEHO.
+            publish_left_out_ops(left_out_now)
             yield
             await session.commit()
-            publish_left_out_ops(left_out)
     except Exception as exc:
         structlog.get_logger(__name__).error(
             "operation_catalog_unchanged",
@@ -657,16 +671,19 @@ async def _run_typed_op_registrars(
     """Write the registrars' rows in one transaction, without the sweeps. Test seam."""
     async with get_sessionmaker()() as session:
         async with _bind_catalog_session(session):
-            with collect_left_out_ops() as left_out:
-                await _populate_catalog(session, embedding_service=embedding_service)
+            with collect_code_safety_levels() as written, collect_left_out_ops() as left_out:
+                await _populate_catalog(
+                    session, embedding_service=embedding_service, written=written
+                )
         await session.commit()
-    publish_left_out_ops(left_out)
+    publish_left_out_ops(without_written_keys(left_out, written))
 
 
 async def _populate_catalog(
     session: AsyncSession,
     *,
     embedding_service: EmbeddingService | None = None,
+    written: Mapping[tuple[str, str, str, str], str],
 ) -> None:
     """Populate descriptor rows via a real registrar pass or the amortized replay.
 
@@ -688,7 +705,9 @@ async def _populate_catalog(
         for op in left_out:
             note_left_out_op(op)
         await session.flush()
-        await _capture_typed_op_snapshot(session, fingerprint, frozenset(left_out))
+        await _capture_typed_op_snapshot(
+            session, fingerprint, frozenset(left_out), frozenset(written)
+        )
         return
 
     await _run_registrars(embedding_service=embedding_service)
@@ -1073,7 +1092,6 @@ def _left_out_for_misfit(
     version: str,
     impl_id: str,
     op_id: str,
-    source_kind: Literal["typed", "composite"],
     handler_ref: str,
     marks: _Marks,
 ) -> bool:
@@ -1081,14 +1099,13 @@ def _left_out_for_misfit(
 
     MEHO writes and deletes nothing for a left-out op. A row that an earlier
     start, an import or a tenant stored under that key stays as it is. The
-    start keeps the key, bound to the code that registered it and to its
-    kind, so the lookups hide that code's row and a call answers
-    ``operation_left_out`` (:mod:`meho_backplane.operations._left_out`).
+    start keeps the key, so the lookups hide the stored built-in typed or
+    multi-step row under it (unless a registrar wrote that key in the same
+    start), and a call answers ``operation_left_out``
+    (:mod:`meho_backplane.operations._left_out`).
     One log line names the op, its connector and the reason.
     """
-    key = LeftOutOp(
-        product, version, impl_id, op_id, connector_package_of(handler_ref), source_kind
-    )
+    key = LeftOutOp(product, version, impl_id, op_id, connector_package_of(handler_ref))
     reason = next((r for check in _MARK_FIT_CHECKS if (r := check(marks)) is not None), None)
     if reason is None:
         note_registered_op(key)
@@ -1589,7 +1606,6 @@ async def register_typed_operation(
         version=version,
         impl_id=impl_id,
         op_id=op_id,
-        source_kind="typed",
         handler_ref=handler_ref,
         marks=_Marks(safety_level, hard_to_undo, changes_rights),
     ):
@@ -1818,7 +1834,6 @@ async def register_composite_operation(
         version=version,
         impl_id=impl_id,
         op_id=op_id,
-        source_kind="composite",
         handler_ref=handler_ref,
         marks=_Marks(safety_level, hard_to_undo, changes_rights),
     ):

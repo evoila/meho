@@ -1,0 +1,54 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The result of an apply, swapped into ``#settings-result``.
+
+  The main message comes from ``applied`` and ``failed`` together: all
+  written, part written, nothing written, or nothing to write.
+
+  Context (``_apply_handler`` in ``ui/routes/settings.py``): ``applied``,
+  ``revision_id``, ``failed`` (the items MEHO could not write; the rest
+  were written), ``warnings``, ``rows`` (what actually changed), ``reason``
+  (the reason in the audit row, or none).
+-#}
+<div class="card bg-base-100 border-base-300 border shadow-sm" data-settings-result>
+  <div class="card-body space-y-3">
+    {% if applied and not failed %}
+      <div class="alert alert-success" role="status" data-settings-applied>
+        <span>MEHO applied the file. Revision <code class="font-mono">{{ revision_id }}</code>.</span>
+      </div>
+    {% elif applied %}
+      <div class="alert alert-warning" role="status" data-settings-partly-applied>
+        <span>MEHO applied part of the file. Revision <code class="font-mono">{{ revision_id }}</code>. The parts below were not written.</span>
+      </div>
+    {% elif failed %}
+      <p class="text-sm" data-settings-nothing-applied>MEHO could not write any part of the file. Nothing changed.</p>
+    {% else %}
+      <p class="text-sm" data-settings-no-change>MEHO changed nothing: the stored settings already match the file.</p>
+    {% endif %}
+    {% if reason %}
+      <p class="text-sm" data-settings-applied-reason>Reason: {{ reason }}</p>
+    {% endif %}
+    {% if failed %}
+      <div class="alert alert-error" role="alert" data-settings-failed>
+        <div>
+          <p class="font-semibold">MEHO could not write these parts:</p>
+          <ul class="list-disc pl-5 text-sm">
+            {% for item in failed %}
+              <li>{{ item }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    {% endif %}
+    {% for warning in warnings %}
+      <div class="alert alert-warning" role="alert" data-settings-warning>
+        <span>{{ warning }}</span>
+      </div>
+    {% endfor %}
+    {% if rows %}
+      {% include "settings/_diff_table.html" %}
+    {% endif %}
+  </div>
+</div>

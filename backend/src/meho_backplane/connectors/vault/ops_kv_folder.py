@@ -543,6 +543,7 @@ async def register_vault_kv_folder_operations(
         response_schema=_RESPONSE_SCHEMA,
         tags=["write", "destructive", "reversible"],
         safety_level="dangerous",
+        hard_to_undo="deletes",
         requires_approval=True,
         llm_instructions=_LLM_INSTRUCTIONS,
     )

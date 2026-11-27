@@ -67,21 +67,106 @@ is named. It does so also when the dry
 run fails. The list keeps at most 16 KB. It always keeps room for the
 name of every later container: an entry that is too large keeps
 the start of what it runs, and its `cut` field says so.
-The stored request of a `k8s.apply` of a Secret, or of a manifest with a
-secret-looking value, keeps its manifest only in the encrypted one-time
-handoff of the run, as a credential write does. Such a call needs
-`APPROVAL_HANDOFF_ENCRYPTION_KEY`. An object holds a secret-looking value
-(`manifest_holds_credential` in `op_classes.py`) when:
+The card of a `k8s.apply` also has, for a person only, a short summary
+of each object (`object_summary`, built by `ops_write_apply_summary.py`):
+whether it is new or exists already, which other writers own fields of it,
+and its risky fields after the apply, read only from the places that
+Kubernetes defines. MEHO reads the live object only when the login that
+asked has the role Operator or higher; for any other login the card says
+"not read". It changes no approval rule. When the dry run fails, the card
+of a person still shows the manifest and the subject line, and names the
+document the dry run stopped at. See `approvals.md`. When the manifest is
+not valid YAML or JSON, the error (`manifest_yaml.py`) is "manifest is not
+valid YAML/JSON", followed by what the parser found wrong (for example
+"expected ',' or ']', but got '<stream end>'") with the line and the
+column; for a refused character, the reason and its position; for a value
+that its tag cannot read, a fixed sentence with the line and the column;
+for an error with no explanation, nothing more. A quoted part that is not
+a word of the YAML grammar, or fixed text of the parser such as the `'.'`
+of "expected a digit or '.'", becomes `'…'`; a `%` escape in a tag that
+is not UTF-8 gives "a %-escape in a tag is not valid UTF-8", with no byte
+value. So the error never quotes text of the manifest. The run after approval answers with the same error.
+The storage rule of a `k8s.apply` (`manifest_holds_credential` in
+`op_classes.py`) decides when the stored request keeps the manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The card hides a command line as the Job previews do, and it also hides
+every command-line value the storage rule counts. So a command-line value
+that makes MEHO keep a request only in the encrypted hand-off never shows
+on the card. For each item of `command` and `args`, the card joins the two
+answers (`_hide_command_line` with `apply_card=True` in
+`ops_write_preview.py`): when they are equal, or only one of them changed
+the item, the card shows that answer; when both changed the item in
+different ways, the card shows the whole item as one hidden mark. The card
+also hides every `env` and `httpHeaders` value, a whole map or list under
+a secret name, and the `kubectl.kubernetes.io/last-applied-configuration`
+annotation.
+The run after approval applies the manifest the caller sent, unchanged.
+The manifest is kept only in the handoff when:
 
-- a key of its `data`, `stringData` or `binaryData` has a secret name (the name rule of
-  `scrub_secret_named_values` in `broadcast/events.py`), in any kind, for
-  example a ConfigMap;
-- an `env` entry at any depth (the object itself, the containers and init
-  containers of a pod template) has a secret name and a value of its own; an entry that
-  reads its value from a Secret (`valueFrom`) does not count;
-- a text at any depth has a secret shape of its own: the rule of
-  `hide_in_text` in `redaction/command_line.py` (a password in a URL, a
-  token with a known vendor prefix).
+- it holds a Secret object, at the top or at any depth, for example as a
+  template: a map with the kind `Secret` and either its own `metadata` or
+  a `data`, `stringData` or `binaryData` field. A reference to a Secret
+  does not count: for example an entry of a ServiceAccount's `secrets`,
+  with an `apiVersion`, a `kind` and a `name`;
+- a key of a `data`, `stringData` or `binaryData` field has a secret name
+  (the name rule of `scrub_secret_named_values` in `broadcast/events.py`),
+  in any kind, for example a ConfigMap;
+- a key with a secret name at any depth holds a text, a number, a yes/no
+  value or a date (`password: x`, `spec.password: 123456` in a custom
+  kind), and so does the `value` of a `{name, value}` pair whose name is
+  a secret name. `automountServiceAccountToken` does not count: the card
+  shows it;
+- an `env` entry at any depth has a value of its own and a name that
+  holds PASS, PWD, SECRET, TOKEN, KEY, CREDENTIAL or AUTH, or that the
+  name rule marks (`PGPASSWORD`, `API_TOKEN`, also `SSH_AUTH_SOCK` and
+  `PASSWORD_MIN_LENGTH`). An entry that reads its value from a Secret
+  (`valueFrom`) does not count. The card hides every `env` value, with
+  any name;
+- the `command` and `args` of a map at any depth, read as one command
+  line, hold one of these values (`hide_command_secrets` with
+  `p_after_programs=True`). Inside one list item the rule reads words that
+  a space or a line continuation separates, and a new line ends a command
+  for it, as in a shell script:
+  - the value after `NAME=` or `--name=` whose name holds one of the
+    words above (`PGPASSWORD=x`, `--auth-mode=rbac`,
+    `KEYCLOAK_URL=...`);
+  - the value of a flag whose name holds one of these words
+    (`--password x`, `--token-ttl 60`, `--secret-name x`,
+    `--passthrough on`): when the flag is the last word of its list item
+    and no new line follows it, the next list item, whatever it starts
+    with and also when YAML reads it as a number; otherwise the next word
+    after the flag in the same list item (also in the item after `sh -c`,
+    `-ec` or `-lc`), when only white space without a new line, or a line
+    continuation, stands between them and that word does not start with
+    a dash;
+  - the argument after `-p` only in a command of a program that takes a
+    password there: `sshpass`, a word that starts with `mysql`,
+    `mariadb` or `mongo`, or the word `login` (the rule of
+    `hide_shell_script` in `redaction/command_line.py`). There a value
+    glued to `-p` (`-pVALUE`) counts too. `mkdir -p /data`, `-p 8080`,
+    `nc -l -p 8080`, `psql -p 5432` and `ssh -p 22` do not count: such a
+    call waits for approval with its params on the row, also without the
+    key. The card still hides the argument after `-p` there, as the Job
+    previews do, so it shows `mkdir -p` and then the hidden mark;
+  - the password of `user:password` after `-u` or `--user`, also glued
+    to `-u` (`curl -uroot:x`);
+- a text at any depth has a secret shape: a password in a URL, a token
+  with a known vendor prefix (`hide_in_text` in
+  `redaction/command_line.py`), or a value the shared redaction hides
+  with its default rules (for example `Authorization: Bearer ...`);
+- MEHO cannot read the manifest: it is not text, it is not valid YAML
+  or JSON, a document has no kind, or it has more than
+  `MAX_CHECKED_OBJECTS` objects.
+
+This needs `APPROVAL_HANDOFF_ENCRYPTION_KEY`. On an install without it,
+MEHO refuses such a `k8s.apply` at once with this text
+(`HANDOFF_KEY_REFUSAL`): "MEHO cannot keep this request: MEHO keeps this
+manifest only in the encrypted hand-off, because it holds a secret value
+or MEHO cannot read it, and the hand-off needs a key. Set
+APPROVAL_HANDOFF_ENCRYPTION_KEY on the MEHO server (in the Helm chart:
+approvalHandoff), then send the call again." Every other `k8s.apply`
+waits for approval with its params on the row, also without the key.
+Other operations keep their own refusal.
 
 The check reads each value of the manifest once, and the names of each
 `data`, `stringData`, `binaryData` and `env` value once, also when YAML aliases name
@@ -166,6 +251,14 @@ read keeps its rules. At start MEHO writes one warning log line,
 count.
 
 Source: `backend/src/meho_backplane/connectors/kubernetes/`.
+
+## Target form declarations
+
+`KubernetesConnector` declares one credential way, `kubeconfig`, with the one
+field `kubeconfig` on several lines. The test read is `k8s.namespace.list`.
+The connector also accepts the vSphere Supervisor user name and password
+pair (see the WCP section); that way is not declared. See
+[connector-target-form.md](connector-target-form.md).
 
 ## Key types
 

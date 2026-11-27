@@ -140,6 +140,7 @@ DATABASE_OPS: tuple[MssqlOp, ...] = (
         tags=("write", "databases", "drop", "mssql"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": (
                 "Drop (delete) a database. Irreversible; dangerous + requires "

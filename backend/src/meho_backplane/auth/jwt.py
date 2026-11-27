@@ -126,6 +126,7 @@ __all__ = [
     "AUDIENCE_NOT_CONFIGURED_REMEDIATION",
     "clear_jwks_cache",
     "keycloak_readiness_probe",
+    "mark_token_checked",
     "refuse_blocked_principal",
     "verify_jwt",
     "verify_jwt_for_audience",
@@ -2034,6 +2035,19 @@ def header_value(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def mark_token_checked(operator: Operator) -> Operator:
+    """*operator* with :attr:`~Operator.token_checked` set.
+
+    Only the four token checks of a REST or MCP call use it:
+    :func:`verify_jwt`, :func:`verify_jwt_allow_unchosen`,
+    :func:`verify_jwt_platform_admin_way_back` and
+    :func:`~meho_backplane.mcp.auth.verify_mcp_jwt`. The shared step
+    :func:`verify_jwt_for_audience` does not: it also serves the web
+    console session and the scheduled agent run.
+    """
+    return operator.model_copy(update={"token_checked": True})
+
+
 async def verify_jwt_allow_unchosen(
     authorization: str | None = Header(default=None),
     meho_tenant: str | None = Header(default=None, alias=TENANT_HEADER, include_in_schema=False),
@@ -2045,12 +2059,13 @@ async def verify_jwt_allow_unchosen(
     with the person's tenants and do no tenant work.
     """
     settings = get_settings()
-    return await verify_jwt_for_audience(
+    operator = await verify_jwt_for_audience(
         authorization,
         expected_audience=settings.keycloak_audience,
         requested_tenant=header_value(meho_tenant),
         allow_unchosen=True,
     )
+    return mark_token_checked(operator)
 
 
 async def verify_jwt(
@@ -2082,11 +2097,12 @@ async def verify_jwt(
     :mod:`meho_backplane.auth.current_tenant` for the rules.
     """
     settings = get_settings()
-    return await verify_jwt_for_audience(
+    operator = await verify_jwt_for_audience(
         authorization,
         expected_audience=settings.keycloak_audience,
         requested_tenant=header_value(meho_tenant),
     )
+    return mark_token_checked(operator)
 
 
 async def verify_jwt_platform_admin_way_back(
@@ -2101,12 +2117,13 @@ async def verify_jwt_platform_admin_way_back(
     refuses the request.
     """
     settings = get_settings()
-    return await verify_jwt_for_audience(
+    operator = await verify_jwt_for_audience(
         authorization,
         expected_audience=settings.keycloak_audience,
         requested_tenant=header_value(meho_tenant),
         platform_admin_own_way_back=True,
     )
+    return mark_token_checked(operator)
 
 
 async def keycloak_readiness_probe() -> ProbeResult:

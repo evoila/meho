@@ -133,6 +133,8 @@ BACKUP_OPS: tuple[MssqlOp, ...] = (
         tags=("write", "restore", "mssql"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Restore a database from a backup device — OVERWRITES data. "

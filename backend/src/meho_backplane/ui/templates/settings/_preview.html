@@ -1,0 +1,89 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The preview of a settings file, swapped into ``#settings-result``.
+
+  * ``mistakes`` set: every refused part with its reason, the warnings,
+    and no Apply button. MEHO saves nothing from such a file.
+  * else: the warnings, the changes that only a person in the web console
+    may make (the two policies, and each target added or changed), every
+    row of the diff, and the Apply form. The form sends the
+    same file bytes (``file_b64``) to ``/ui/settings/apply``, and the reason
+    when the file makes one of the two policy changes.
+
+  Context (``_preview_context`` in ``ui/routes/settings.py``): ``mistakes``,
+  ``warnings``, ``console_only``, ``reason_needed``, ``max_reason_chars``,
+  ``rows``, ``has_changes``, ``file_b64``.
+-#}
+<div class="card bg-base-100 border-base-300 border shadow-sm" data-settings-preview>
+  <div class="card-body space-y-3">
+    {% if mistakes %}
+      <div class="alert alert-error" role="alert" data-settings-mistakes>
+        <div>
+          <p class="font-semibold">MEHO refuses this file. Nothing is saved.</p>
+          <ul class="list-disc pl-5 text-sm">
+            {% for mistake in mistakes %}
+              <li data-settings-mistake>{{ mistake }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    {% endif %}
+    {% for warning in warnings %}
+      <div class="alert alert-warning" role="alert" data-settings-warning>
+        <span>{{ warning }}</span>
+      </div>
+    {% endfor %}
+    {% if not mistakes %}
+      {% for note in console_only %}
+        <div class="alert alert-info" role="status" data-settings-console-only>
+          <span>{{ note }}</span>
+        </div>
+      {% endfor %}
+
+      {% if rows %}
+        {% include "settings/_diff_table.html" %}
+        <p class="text-xs text-muted">
+          "not in file" means MEHO has this entry and the file does not name it.
+          An import never deletes, so MEHO keeps it.
+        </p>
+      {% endif %}
+
+      {% if has_changes %}
+        <form
+          id="settings-apply-form"
+          data-settings-form
+          hx-post="/ui/settings/apply"
+          hx-encoding="multipart/form-data"
+          hx-target="#settings-result"
+          hx-swap="innerHTML"
+          hx-disabled-elt="find button[type=submit]"
+          class="flex flex-wrap items-end justify-end gap-3"
+        >
+          <input type="hidden" name="file_b64" value="{{ file_b64 }}" />
+          {% if reason_needed %}
+            <label class="form-control grow">
+              <span class="label-text">Reason</span>
+              <input
+                type="text"
+                name="reason"
+                maxlength="{{ max_reason_chars }}"
+                required
+                class="input input-bordered input-sm"
+                aria-label="Reason for the policy changes"
+                autocomplete="off"
+                data-settings-reason
+              />
+            </label>
+          {% endif %}
+          <button type="submit" class="btn btn-sm btn-primary" data-action="settings-apply">
+            Apply
+          </button>
+        </form>
+      {% else %}
+        <p class="text-sm" data-settings-no-change>This file changes nothing.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>

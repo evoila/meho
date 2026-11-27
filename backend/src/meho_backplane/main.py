@@ -102,6 +102,9 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.connectors_ingest import (
     set_llm_client_factory,
 )
+from meho_backplane.api.v1.connectors_target_form import (
+    router as api_v1_connectors_target_form_router,
+)
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.event_source import router as api_v1_event_source_router
@@ -1286,6 +1289,9 @@ app.include_router(api_v1_operations_router)
 # claim; mutating routes are tenant_admin-gated, read routes are
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
+# The target form route goes first: ``/target-form`` must not be read as a
+# connector id by the ``/{connector_id}`` routes of the ingest router.
+app.include_router(api_v1_connectors_target_form_router)
 app.include_router(api_v1_connectors_ingest_router)
 # #4711 -- the override report: operator overrides of risk levels and
 # approval flags, and the "operations running with reduced approval" list.

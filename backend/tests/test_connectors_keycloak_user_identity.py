@@ -584,7 +584,7 @@ def assert_refused_without_write(
     """
     assert resumed.status != "ok"
     # Some ops withhold the error text, so the check is on the error class. A
-    # rights change can stop one step earlier: its card cannot be checked again.
+    # rights change can stop one step earlier, before the card check runs.
     dumped = str(resumed.model_dump(mode="json"))
     assert "ValueError" in dumped or "object_changed_since_approval" in dumped, dumped
     if text is not None and "object_changed_since_approval" not in dumped:

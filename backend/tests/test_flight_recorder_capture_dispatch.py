@@ -481,6 +481,7 @@ async def test_trace_of_an_approved_call_belongs_to_the_agent_that_asked(
     from meho_backplane.api.v1.audit import _load_trace_for
     from meho_backplane.auth.operator import PrincipalKind
     from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+    from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
     from meho_backplane.operations.approval_queue import _dispatch_resume_with_bound_context
 
     tenant_id = uuid.uuid4()
@@ -519,7 +520,16 @@ async def test_trace_of_an_approved_call_belongs_to_the_agent_that_asked(
         target_id=None,
         params_hash="0" * 64,
         params={},
-        proposed_effect={},
+        # The record of the agent that asked, as a park stores it.
+        proposed_effect={
+            AGENT_REQUESTER_RECORD_KEY: {
+                "sub": "agent-1",
+                "principal_kind": "agent",
+                "client_id": None,
+                "tenant_role": "operator",
+                "act": None,
+            }
+        },
         status=ApprovalRequestStatus.APPROVED.value,
         reviewed_by="person-approver",
         created_at=datetime.now(UTC),

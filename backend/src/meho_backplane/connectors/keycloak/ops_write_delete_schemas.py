@@ -160,6 +160,8 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "destructive", "user", "keycloak"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Use to remove a person's or a service's Keycloak account for good, "
@@ -194,6 +196,8 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "destructive", "group", "keycloak"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Use to remove a Keycloak group for good, for example a role group "
@@ -228,6 +232,8 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "destructive", "client", "keycloak"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Use to remove a Keycloak client (an app registration people or "
@@ -264,6 +270,8 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "destructive", "realm", "keycloak"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Use to remove a short-lived realm for good, for example a test or "

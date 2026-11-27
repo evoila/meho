@@ -642,6 +642,8 @@ _FIREWALL_CONFIRM_OP = LinuxOp(
     tags=("write", "firewall", "linux"),
     safety_level="caution",
     requires_approval=True,
+    hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call after linux.firewall.load with rollback_after_seconds, once your "

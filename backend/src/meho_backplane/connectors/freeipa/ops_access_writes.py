@@ -72,6 +72,7 @@ def _create_op(
     example: dict[str, Any],
     tags: tuple[str, ...],
     llm_instructions: dict[str, Any],
+    changes_rights: bool = False,
 ) -> FreeipaTypedOp:
     """A write that creates one object, picked by *name_key*, with an optional description."""
     return write_op(
@@ -87,6 +88,7 @@ def _create_op(
         tags=tags,
         safety_level="caution",
         llm_instructions=llm_instructions,
+        changes_rights=changes_rights,
     )
 
 
@@ -103,6 +105,7 @@ def _member_add_op(
     tags: tuple[str, ...],
     llm_instructions: dict[str, Any],
     external: bool = False,
+    changes_rights: bool = False,
 ) -> FreeipaTypedOp:
     """A write that adds members to the rule ``name``.
 
@@ -128,6 +131,7 @@ def _member_add_op(
         tags=tags,
         safety_level="caution",
         llm_instructions=llm_instructions,
+        changes_rights=changes_rights,
     )
 
 
@@ -170,6 +174,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         entry="The new sudo command; sudocmd holds its path.",
         example={"command": "/usr/bin/systemctl", "description": "Manage services"},
         tags=("sudocmd", "sudo-command"),
+        changes_rights=True,
         summary=(
             "Create a sudo command in the IPA domain, so sudo rules can allow it. Waits until a "
             "second person approves."
@@ -209,6 +214,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             "Runs the IPA command sudorule_add. The new rule is enabled but has no users, hosts "
             "or commands, so it allows nothing yet. Returns the new rule."
         ),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to start a new sudo rule: who may run which commands with sudo, on which "
@@ -244,6 +250,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         example={"name": "webadmins-systemctl", "groups": ["webadmins"]},
         tags=(*_SUDO_TAGS, "user", "membership"),
         external=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": "Call to say who may use a sudo rule. It changes the rule's users.",
             "preconditions": (
@@ -279,6 +286,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         example={"name": "webadmins-systemctl", "hostgroups": ["webservers"]},
         tags=(*_SUDO_TAGS, "host", "membership"),
         external=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to say on which hosts a sudo rule applies. It changes the rule's hosts."
@@ -317,6 +325,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         example={"name": "webadmins-systemctl", "commands": ["/usr/bin/systemctl"]},
         tags=(*_SUDO_TAGS, "sudocmd"),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to say which commands a sudo rule lets its users run. It changes the rule's "
@@ -350,6 +359,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
             "Runs the IPA command hbacrule_add. The new rule is enabled but has no users, hosts "
             "or services, so it lets nobody in yet. Returns the new rule."
         ),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to start a new access rule: which users may use which services on which "
@@ -384,6 +394,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         members={"users": _USERS, "groups": _GROUPS},
         example={"name": "webadmins-ssh", "groups": ["webadmins"]},
         tags=(*_HBAC_TAGS, "user", "membership"),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": "Call to say whom an access rule lets in. It changes the rule's users.",
             "preconditions": (
@@ -413,6 +424,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         members={"hosts": _HOSTS, "hostgroups": _HOSTGROUPS},
         example={"name": "webadmins-ssh", "hostgroups": ["webservers"]},
         tags=(*_HBAC_TAGS, "host", "membership"),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to say on which hosts an access rule lets users in. It changes the rule's "
@@ -454,6 +466,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         example={"name": "webadmins-ssh", "services": ["sshd"]},
         tags=(*_HBAC_TAGS, "service", "membership"),
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to say which services an access rule lets its users use, for example sshd "
@@ -492,6 +505,8 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=_HBAC_TAGS,
         safety_level="caution",
+        hard_to_undo="stops",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to stop an access rule from letting users in, for example the default rule "
@@ -546,6 +561,7 @@ ACCESS_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         # secret, and hide FreeIPA's error text from the caller.
         tags=("pwpolicy", "policy"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to change the password rules of a user group, or the global rules: how "

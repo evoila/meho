@@ -66,6 +66,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response={"entry": entry_schema("The new host group, with FreeIPA's default attributes.")},
         tags=("hostgroup",),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to add a new, empty host group to the IPA domain, for example before you "
@@ -118,6 +119,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("hostgroup", "host", "membership"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to put existing hosts or host groups into a host group. It changes the "
@@ -165,6 +167,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("automember", "hostgroup"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to make FreeIPA put new hosts into a host group by itself, for example "
@@ -222,6 +225,7 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("automember", "hostgroup"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call after freeipa.automember.rule.create, to say which new hosts the rule puts "
@@ -271,6 +275,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response=_DELETE_RESPONSE,
         tags=("host", "enrollment"),
         safety_level="dangerous",
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to remove a host from the IPA domain, for example after its machine was "
@@ -307,6 +313,8 @@ HOST_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response=_DELETE_RESPONSE,
         tags=("hostgroup",),
         safety_level="dangerous",
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to remove a host group that is no longer needed. It deletes the group; its "

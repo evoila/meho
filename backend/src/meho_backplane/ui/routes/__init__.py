@@ -114,6 +114,7 @@ from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.pairing import build_pairing_router
+from meho_backplane.ui.routes.policy import build_policy_router
 from meho_backplane.ui.routes.principal_blocks import build_principal_blocks_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.run_notices import build_run_notices_router
@@ -121,6 +122,7 @@ from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.sensors import build_sensors_router
+from meho_backplane.ui.routes.settings import build_settings_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.tenant import build_tenant_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
@@ -156,6 +158,7 @@ __all__ = [
     "build_runs_router",
     "build_scheduler_router",
     "build_sensors_router",
+    "build_settings_router",
     "build_stubs_router",
     "build_tenant_router",
     "build_topology_router",
@@ -371,5 +374,10 @@ def build_router() -> APIRouter:
     # lookup is unambiguous. Registered alongside its sibling vault routers
     # and before the stubs aggregate.
     router.include_router(build_vault_status_router())
+    # The settings file page: upload, preview, apply (``/ui/settings``).
+    router.include_router(build_settings_router())
+    # The policy page (``/ui/policy``), read only; with CUSTOM_POLICY off the route
+    # does not match, as an address that does not exist.
+    router.include_router(build_policy_router())
     router.include_router(build_stubs_router())
     return router

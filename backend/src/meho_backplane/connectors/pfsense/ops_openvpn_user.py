@@ -1428,6 +1428,7 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "vpn", "users", "pfsense"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_guidance(
             {
                 "when_to_call": (
@@ -1482,6 +1483,8 @@ OPENVPN_USER_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "vpn", "users", "pfsense"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions=_guidance(
             {
                 "when_to_call": (

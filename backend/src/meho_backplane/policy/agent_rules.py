@@ -372,28 +372,41 @@ def runs_at_once_by_role(
     limit: str,
     ops: Iterable[RuleOp],
     before: Sequence[AgentRule] = (),
+    before_ops: Iterable[RuleOp] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """For each role, the operations that start to run at once under *rules*.
 
-    An operation that already runs at once under the stored rules
-    (*before*) is not listed, so an edit that leaves the rules the same
-    lists none. Without a rule, a personal agent runs only ``safe``
-    operations at once, so a ``safe`` operation is never in the list. Each
-    item names the connector, the operation, its level and the rule
-    (:func:`rule_ref`).
+    *ops* are the operations as the file classifies them, and *before_ops*
+    the same operations as the stored policy classifies them (*ops* when
+    ``None``). An operation that already runs at once under the stored
+    rules (*before*) and the stored classifications is not listed, so an
+    edit that changes neither the rules nor what waits lists none. Without
+    a rule, a personal agent runs only ``safe`` operations at once, so a
+    ``safe`` operation is never in the list. Each item names the
+    connector, the operation, its level and the rule (:func:`rule_ref`).
     """
 
     def _runs(of: Sequence[AgentRule], role: str, op: RuleOp) -> AgentRule | None:
         rule = rule_for(of, role, op.connector_id)
         return rule if rule is not None and rule_lets_run(rule, role, limit, op) else None
 
+    def _ran(role: str, op: RuleOp) -> bool:
+        if op.level == RISK_LEVELS[0]:
+            return not op.keeps_waiting
+        return _runs(before, role, op) is not None
+
+    new_ops = list(ops)
+    old_of = (
+        {(op.connector_id, op.op_id): op for op in before_ops} if before_ops is not None else None
+    )
     out: dict[str, list[dict[str, str]]] = {role: [] for role in RULE_ROLES}
-    for op in ops:
+    for op in new_ops:
         if op.level == RISK_LEVELS[0]:
             continue
+        old = op if old_of is None else old_of.get((op.connector_id, op.op_id))
         for role in RULE_ROLES:
             rule = _runs(rules, role, op)
-            if rule is not None and _runs(before, role, op) is None:
+            if rule is not None and (old is None or not _ran(role, old)):
                 out[role].append(
                     {
                         "connector_id": op.connector_id,

@@ -473,7 +473,7 @@ async def build_plan(
         before=before,
         document=document,
         install_document=install_document,
-        side=(new_side.entries, new_side.taxonomy),
+        sides=((old_side.entries, old_side.taxonomy), (new_side.entries, new_side.taxonomy)),
         custom_policy=custom_policy,
     )
     plan.diff.update(sections)

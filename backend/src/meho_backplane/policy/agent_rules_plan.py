@@ -7,8 +7,9 @@
 
 * for a tenant's file: ``agents`` (the rules added, changed and removed)
   and ``runs_at_once`` (for each role, the operations that run at once for
-  a personal agent under the file's rules and do not under the stored
-  rules). Both only when one side has a rule.
+  a personal agent under the file's rules and classifications, and wait
+  under the stored rules and classifications). Both only when one side
+  has a rule.
 * for the install's file: ``agents_above_limit``, each tenant with a stored
   rule above the file's outer limit, with one warning each. Only when
   there is such a tenant.
@@ -67,6 +68,9 @@ from meho_backplane.policy.store import connector_id_of
 
 __all__ = ["agents_plan"]
 
+#: The classification entries and the taxonomy of one side of the plan.
+_Side = tuple[list[ClassificationEntry], Taxonomy]
+
 #: The rule role of each tenant role.
 _RULE_ROLE: dict[TenantRole, str] = {
     TenantRole.READ_ONLY: "Reader",
@@ -123,8 +127,8 @@ async def _rule_ops(
     tenant's on/off choice of a built-in operation, the installed packages,
     and the policy in force
     (:func:`~meho_backplane.operations.op_policy.policy_in_force`) with the
-    admin's per-operation edits. The classification is the one of the
-    planned file (*entries*, *taxonomy*).
+    admin's per-operation edits. The classification is the one of
+    *entries* and *taxonomy* (the stored policy's or the planned file's).
     """
     if tenant_id is None:
         return []
@@ -187,14 +191,18 @@ async def agents_plan(
     before: dict[str, Any] | None,
     document: dict[str, Any],
     install_document: dict[str, Any] | None,
-    side: tuple[list[ClassificationEntry], Taxonomy],
+    sides: tuple[
+        tuple[list[ClassificationEntry], Taxonomy], tuple[list[ClassificationEntry], Taxonomy]
+    ],
     custom_policy: bool,
 ) -> tuple[dict[str, Any], list[str]]:
     """The diff sections and the warnings of the personal agent rules.
 
-    *document* is the planned document, without mistakes. *side* holds the
-    classification entries and the taxonomy after the import (the plan's
-    new side). With the ``CUSTOM_POLICY`` switch off, nothing is added.
+    *document* is the planned document, without mistakes. *sides* holds the
+    classification entries and the taxonomy before the import (the stored
+    policy) and after it (the file). The stored rules are read with the
+    stored classifications, and the file's rules with the file's. With the
+    ``CUSTOM_POLICY`` switch off, nothing is added.
     """
     if not custom_policy:
         return {}, []
@@ -211,11 +219,12 @@ async def agents_plan(
     if not diff:
         return {}, []
     limit = personal_agent_limit(install_document, custom_policy=True)
-    ops = await _rule_ops(session, tenant_id, *side)
+    old_side, new_side = sides
     diff["runs_at_once"] = runs_at_once_by_role(
         rules_from_document(document),
         limit=limit,
-        ops=ops,
+        ops=await _rule_ops(session, tenant_id, *new_side),
         before=rules_from_document(before),
+        before_ops=await _rule_ops(session, tenant_id, *old_side),
     )
     return diff, []

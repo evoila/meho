@@ -479,6 +479,7 @@ async def register_vault_kv_generate_operation(
         response_schema=GENERATE_RESPONSE_SCHEMA,
         tags=["write", "secret-write"],
         safety_level="caution",
+        hard_to_undo="overwrites",
         requires_approval=True,
         llm_instructions=_LLM_INSTRUCTIONS,
     )

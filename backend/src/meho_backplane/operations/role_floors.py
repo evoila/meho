@@ -63,6 +63,7 @@ __all__ = [
     "READER_CHANGE_SENTENCE",
     "RequesterCheck",
     "asks_for_change",
+    "has_requester_check",
     "reader_change_denial",
     "reader_change_refusal",
     "register_requester_check",
@@ -126,6 +127,11 @@ def role_floor_denial(op_id: str, role: TenantRole) -> str | None:
 def register_requester_check(op_id: str, check: RequesterCheck) -> None:
     """Record *check*: who may ask for a call of *op_id* with given params."""
     _REQUESTER_CHECKS[op_id] = check
+
+
+def has_requester_check(op_id: str) -> bool:
+    """True when a check of who may ask is registered for *op_id*."""
+    return op_id in _REQUESTER_CHECKS
 
 
 def requester_check_denial(op_id: str, operator: Operator, params: dict[str, Any]) -> str | None:

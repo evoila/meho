@@ -46,7 +46,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.document import file_sha256
-from meho_backplane.policy.limits import personal_agent_limit
+from meho_backplane.policy.limits import LIMITS_NEED_CUSTOM_POLICY, personal_agent_limit
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.validate import check_document
 from meho_backplane.settings import get_settings
@@ -270,7 +270,7 @@ async def test_the_approved_run_refuses_limits_with_the_switch_off(embedding: As
 
     run = await _approve(request.id)
     assert run.status != "ok", run
-    assert _not_read("limits") in str(run.error) + str(run.extras)
+    assert LIMITS_NEED_CUSTOM_POLICY in str(run.error) + str(run.extras)
     assert await _stored_install() is None
 
 
@@ -313,7 +313,7 @@ _EMPTY_FORMS = ["limits: {}", "limits: null", "limits:", "limits: {personal_agen
 @pytest.mark.usefixtures("switch")
 @pytest.mark.parametrize(
     ("scope", "sentence"),
-    [("tenant", _TENANT_SENTENCE), ("install", _not_read("limits"))],
+    [("tenant", _TENANT_SENTENCE), ("install", LIMITS_NEED_CUSTOM_POLICY)],
 )
 async def test_an_empty_limits_part_is_refused_and_nothing_waits(
     client: TestClient, embedding: AsyncMock, scope: str, sentence: str
@@ -369,7 +369,7 @@ async def test_a_limits_part_of_the_wrong_type_is_refused(
 
 
 # ---------------------------------------------------------------------------
-# One refusal sentence, true with the switch on and off
+# The six refused keys are one sentence with the switch on and off; ``limits`` follows it
 # ---------------------------------------------------------------------------
 
 _SEVEN_FILES = {
@@ -379,7 +379,7 @@ _SEVEN_FILES = {
 
 
 @pytest.mark.parametrize("environment", [None, "true"])
-def test_the_refusal_is_the_same_sentence_whatever_the_environment(
+def test_the_six_keys_are_refused_whatever_the_environment_and_limits_follows_it(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, environment: str | None
 ) -> None:
     if environment is None:
@@ -395,12 +395,16 @@ def test_the_refusal_is_the_same_sentence_whatever_the_environment(
             content = f"policy: v1\n{line}\n"
             for path, extra in (("validate", {}), ("import", {"preview": "true"})):
                 resp = _post(client, path, install, content, scope="install", **extra)
-                assert resp.json()["ok"] is False
-                assert resp.json()["mistakes"] == [_not_read(name)]
-                assert "it is off" not in resp.text
-                assert "needs CUSTOM_POLICY" not in resp.text
+                if name == "limits" and environment == "true":
+                    assert resp.json()["ok"] is True, resp.text
+                    assert resp.json()["mistakes"] == []
+                elif name == "limits":
+                    assert resp.json()["mistakes"] == [LIMITS_NEED_CUSTOM_POLICY]
+                else:
+                    assert resp.json()["mistakes"] == [_not_read(name)]
         tenant = _post(client, "validate", _token(key), f"policy: v1\n{_SEVEN_FILES['limits']}\n")
     assert tenant.json()["mistakes"] == [_TENANT_SENTENCE]
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -423,7 +427,7 @@ async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
     document = plan.document
     assert document is not None
     assert check_document(document, scope="install", install_document=document, ops=[]) == [
-        _not_read("limits")
+        LIMITS_NEED_CUSTOM_POLICY
     ]
     assert (
         check_document(

@@ -56,6 +56,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_entry_keys,
     target_secret_cache_key,
 )
+from meho_backplane.connectors._shared.log_host import redirect_status_text
 from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
@@ -305,7 +306,8 @@ class ProxmoxConnector(HttpConnector):
         ``operator=None`` runs under the synthesised system operator; on a
         Vault backend that fails closed at the live JWT round-trip →
         ``reachable=False``. Transport / auth / credential failures map to
-        ``reachable=False`` with ``extras["error"]`` — the credential arm
+        ``reachable=False`` with ``extras["error"]`` (a 3xx answer names host
+        names only) — the credential arm
         catches the backend-neutral ``CredentialsReadError``, so a ``gsm:``
         read failure degrades the same way a Vault one does.
         """
@@ -328,7 +330,7 @@ class ProxmoxConnector(HttpConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=_PROBE_METHOD,
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+                extras={"error": f"{type(exc).__name__}: {redirect_status_text(exc) or exc}"},
             )
 
         version_data = version_payload.get("data") if isinstance(version_payload, dict) else None

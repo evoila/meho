@@ -28,6 +28,7 @@ import meho_backplane.connectors.linux.script_preview as script_preview
 import meho_backplane.operations._request_preview as request_preview
 import meho_backplane.operations.dispatcher as dispatcher
 import meho_backplane.operations.meta_tools as meta_tools
+from meho_backplane.connectors.kubernetes.op_classes import hide_command_secrets
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -51,7 +52,7 @@ _FAKE = "made-up-value-not-real-4471"
 def test_command_line_with_one_long_item_is_hidden_within_the_time_bound(unit: str) -> None:
     item = unit * (_ONE_MIB // len(unit))
     started = time.perf_counter()
-    hidden = k8s_preview._hide_command_secrets(["sh", "-c", item, "--password", _FAKE])
+    hidden = hide_command_secrets(["sh", "-c", item, "--password", _FAKE])
     assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
     assert hidden == ["sh", "-c", item, "--password", HIDDEN]
 
@@ -59,7 +60,7 @@ def test_command_line_with_one_long_item_is_hidden_within_the_time_bound(unit: s
 def test_job_args_item_with_many_words_is_hidden_within_the_time_bound() -> None:
     item = "w " * (_HALF_MIB // 2) + f"PGPASSWORD={_FAKE} tail"
     started = time.perf_counter()
-    hidden = k8s_preview._hide_command_secrets(["psql", item])
+    hidden = hide_command_secrets(["psql", item])
     assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
     assert hidden == ["psql", "w " * (_HALF_MIB // 2) + f"PGPASSWORD={HIDDEN}"]
 

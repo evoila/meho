@@ -580,7 +580,6 @@ EXEC_OP = KubernetesOp(
     tags=("write", "exec", "pod", "dangerous"),
     safety_level="dangerous",
     requires_approval=True,
-    hard_to_undo="overwrites",
     llm_instructions=K8S_EXEC_LLM_INSTRUCTIONS,
 )
 

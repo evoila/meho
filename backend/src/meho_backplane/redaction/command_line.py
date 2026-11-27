@@ -30,12 +30,17 @@ value of a flag may be on the next line.
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Any, Final
 
 from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
+    "COMMAND_LINE_START",
     "HIDDEN",
+    "SHELL_WORD",
+    "CommandLineState",
+    "hide_command_parts",
+    "hide_command_parts_from",
     "hide_command_text",
     "hide_flag_value",
     "hide_in_text",
@@ -70,6 +75,9 @@ _SHELL_WORD = (
     rf"""(?:[^\s'"\\{_OPERATOR_CHARS}]+|\\(?:[\s\S]|\Z)|'[^']*(?:'|\Z)|"""
     r""""(?:[^"\\]|\\[\s\S])*(?:"|\Z))+"""
 )
+
+#: One shell word, compiled: :data:`_SHELL_WORD`.
+SHELL_WORD: Final[re.Pattern[str]] = re.compile(_SHELL_WORD)
 
 #: Space between shell words: whitespace and line continuations (a ``\\``
 #: right before a new line), which the shell removes. So in ``curl -u \\``
@@ -351,3 +359,60 @@ def hide_shell_script(script: str) -> str:
         hide_in_text(script), None, shell=True, p_programs=_SCRIPT_P_PROGRAMS
     )
     return text
+
+
+#: Where a command line stands after some of its parts: the secret flag that
+#: waits for its value (or ``None``) and the last text part.
+CommandLineState = tuple[str | None, str]
+
+#: The state at the start of a command line.
+COMMAND_LINE_START: Final[CommandLineState] = (None, "")
+
+
+def hide_command_parts(parts: list[Any]) -> list[Any]:
+    """Copy one command line (``command`` + ``args``) with its secret values hidden.
+
+    The words stay, so the approver still reads what runs. Hidden are: what
+    follows a ``NAME=`` (or ``--name=``) with a secret-shaped name, the
+    password in a URL, tokens with a known vendor prefix, the argument after
+    a secret-shaped flag (``--password x``, ``-p x``) and the password in
+    ``user:password`` after ``-u`` or ``--user``. A flag and its value may be
+    two list items or two words of one string.
+
+    Each list item is one argument of the program, so a secret value in it
+    runs to the end of the item, spaces and shell operators included
+    (``PGPASSWORD=x;tail`` is hidden whole). Only the item right after
+    ``-c``, alone or in a short option group (``sh -ec``, ``bash -lc``),
+    is a shell command string: there a value is one shell word, quotes and
+    backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
+    shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
+    """
+    return hide_command_parts_from(parts, COMMAND_LINE_START)[0]
+
+
+def hide_command_parts_from(
+    parts: list[Any], state: CommandLineState
+) -> tuple[list[Any], CommandLineState]:
+    """:func:`hide_command_parts` for the parts that follow *state*, and the state after them.
+
+    So ``command`` can be read once and its end state carried into each
+    ``args`` list it is paired with: a secret flag that ends ``command``
+    hides the first item of ``args``.
+    """
+    hidden: list[Any] = []
+    pending, previous = state
+    for part in parts:
+        if not isinstance(part, str):
+            hidden.append(part)
+            previous = ""
+            continue
+        if pending is not None and not part.startswith("-"):
+            hidden.append(hide_flag_value(pending, part))
+            pending = None
+        else:
+            text, pending = hide_command_text(
+                hide_in_text(part), pending, shell=reads_shell_script(previous)
+            )
+            hidden.append(text)
+        previous = part
+    return hidden, (pending, previous)

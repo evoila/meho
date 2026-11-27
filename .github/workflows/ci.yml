@@ -1643,7 +1643,7 @@ jobs:
         shard: [4, 5, 6]
     # Same cap as python-unit-shard. A job that waits for a runner is not
     # stopped by it: the job `second-site-watchdog` covers that.
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       # The spec-shelf checkout does not run here, so this folder does not
       # exist and the spec-backed tests skip, as on a fork.

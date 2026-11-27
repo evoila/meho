@@ -354,10 +354,17 @@ MEHO-Admin, a click on a `caution` change that waited only for its
 token, or `APPROVAL_ALLOW_SELF_APPROVAL` for a `safe` or `caution`
 change), and the routing.
 
-The rule of the part:
+The rule of the part, in the order of the approve step:
 
-- Where the approve step reads a fact that only the call has, `web` and
-  `token` are `null`, and `web_reason` and `token_reason` are both "This
+- First, who may decide at all: `decide_refusal` in
+  `operations/approval_rights.py`, the check the approve step and the
+  approve sign run first. An agent login or a service login never
+  approves. For them `web` and `token` are `false` for every operation,
+  also the ones of the three functions below, and both reasons are the
+  text of the approve sign: "Only a person can approve. AI tools and
+  other machine logins never approve."
+- For a person, where the approve step reads a fact that only the call
+  has, `web` and `token` are `null`, and `web_reason` and `token_reason` are both "This
   depends on the values of the call. Explain asks without them." Such
   facts are the values of the call, and the facts of the approval card
   that MEHO reads from the values or from the target (the login, the
@@ -369,7 +376,7 @@ The rule of the part:
   `register_requester_check` (the check of who may ask reads the
   values). One function decides it: `approve_reads_call_facts` in
   `operations/grant_approval.py`.
-- For every other operation, `web` and `token` are `true` or `false`,
+- For every other operation of a person, `web` and `token` are `true` or `false`,
   exactly as the approve step decides for that caller, and a refusal has
   the approve step's reason.
 
@@ -382,9 +389,11 @@ on the approve sign of their own request. A reason can name the
 MEHO-Admins group, the groups that may approve and the setting
 `APPROVAL_ALLOW_SELF_APPROVAL`. Only a tenant admin or a platform admin
 also sees the place of a routing entry (such as `install:routing[0]`)
-when the routing refuses. For anyone else `without_policy` gives the
+when the routing refuses. For anyone else `without_place` gives the
 same sentence without the place; the routing refusal code makes that
-text. The answer for a what-if login with groups asks for that made-up
+text. A part that has no such text (one not built with `of`, for example
+read from JSON) gets a neutral reason with no place, never the text with
+the place. The answer for a what-if login with groups asks for that made-up
 login.
 
 With `CUSTOM_POLICY` off, or when the answer is not `wait`, the key is

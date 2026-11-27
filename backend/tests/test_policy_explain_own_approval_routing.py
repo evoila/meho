@@ -13,6 +13,8 @@
   stored groups, not of the install's routing.
 * A question with groups from inside a hosted agent run asks as a login of
   its own, not as the run.
+* A part built directly or read from JSON, with no text without the place:
+  a caller who is not an admin reads a neutral reason, never the place.
 
 All names and values are made up.
 """
@@ -30,6 +32,7 @@ import respx
 import structlog
 from fastapi.testclient import TestClient
 
+from meho_backplane.api.v1 import policy as policy_api
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -38,6 +41,11 @@ from meho_backplane.main import app
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.policy.explain import CallQuestion, explain_call
 from meho_backplane.policy.explain_asker import what_if_operator
+from meho_backplane.policy.explain_models import (
+    REASON_WITHOUT_PLACE,
+    ExplainOwnApproval,
+    PolicyExplainResponse,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import make_rsa_keypair, mock_discovery_and_jwks, public_jwks
@@ -220,3 +228,41 @@ async def test_a_question_with_groups_in_a_hosted_run_asks_as_its_own_login(
     own = answer.own_approval
     assert answer.answer == "wait" and own is not None
     assert (own.web, own.token) == (True, False), own
+
+
+_PLACED = "Only MEHO-Admins may approve it (`install:routing[0]`). You are in MEHO-Operators."
+
+
+def _parts_with_a_place() -> dict[str, ExplainOwnApproval]:
+    """The part built directly and from its JSON, so it has no text without the place."""
+    direct = ExplainOwnApproval(web=False, web_reason=_PLACED, token=False, token_reason=_PLACED)
+    return {
+        "direct": direct,
+        "json": ExplainOwnApproval.model_validate_json(direct.model_dump_json()),
+    }
+
+
+@pytest.mark.parametrize("built", ["direct", "json"])
+def test_a_part_without_a_text_without_the_place_never_shows_the_place(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, built: str
+) -> None:
+    switches(monkeypatch, CUSTOM_POLICY="true")
+    part = _parts_with_a_place()[built]
+    answer = PolicyExplainResponse(status="ok", engine="off", answer="wait", own_approval=part)
+    monkeypatch.setattr(policy_api, "_explain", AsyncMock(return_value=answer))
+    key = make_rsa_keypair(f"kid-ownappr-place-{built}")
+    found = {}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        for caller in (OPERATOR_TOKEN, ADMIN_TOKEN, PLATFORM_TOKEN, _PLATFORM_OPERATOR):
+            found[caller.name] = caller.ask(client, key, op("caution"))["own_approval"]
+    neutral = {
+        "web": False,
+        "web_reason": REASON_WITHOUT_PLACE,
+        "token": False,
+        "token_reason": REASON_WITHOUT_PLACE,
+    }
+    assert found[OPERATOR_TOKEN.name] == neutral
+    assert "routing[" not in json.dumps(found[OPERATOR_TOKEN.name])
+    for admin in (ADMIN_TOKEN, PLATFORM_TOKEN, _PLATFORM_OPERATOR):
+        assert found[admin.name] == part.model_dump(), admin.name

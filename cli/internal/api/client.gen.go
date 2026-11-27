@@ -6950,17 +6950,20 @@ type ExplainEvaluatorVerdict string
 // approve: a click in the web console (“web“), and the command line or
 // REST (“token“). Each reason is the text the approve step shows.
 //
-// “web“ and “token“ are “null“ when the approve step reads facts
-// that only the call has (its values, or what MEHO reads from them or
-// from the target). Then both reasons say so.
+// For an agent login or a service login, “web“ and “token“ are
+// “false“ for every operation, with the text of the approve sign: only
+// a person approves. For a person, “web“ and “token“ are “null“
+// when the approve step reads facts that only the call has (its values,
+// or what MEHO reads from them or from the target). Then both reasons
+// say so.
 type ExplainOwnApproval struct {
-	// Token True when an approve on the command line or REST does. Null when it depends on the values of the call.
+	// Token True when an approve on the command line or REST does. False for an agent or service login. Null for a person when it depends on the values of the call.
 	Token *bool `json:"token"`
 
 	// TokenReason Why, in the words of the approve step.
 	TokenReason string `json:"token_reason"`
 
-	// Web True when a click in the web console approves it. Null when it depends on the values of the call.
+	// Web True when a click in the web console approves it. False for an agent or service login. Null for a person when it depends on the values of the call.
 	Web *bool `json:"web"`
 
 	// WebReason Why, in the words of the approve step.
@@ -9280,9 +9283,12 @@ type PolicyExplainResponse struct {
 	// approve: a click in the web console (``web``), and the command line or
 	// REST (``token``). Each reason is the text the approve step shows.
 	//
-	// ``web`` and ``token`` are ``null`` when the approve step reads facts
-	// that only the call has (its values, or what MEHO reads from them or
-	// from the target). Then both reasons say so.
+	// For an agent login or a service login, ``web`` and ``token`` are
+	// ``false`` for every operation, with the text of the approve sign: only
+	// a person approves. For a person, ``web`` and ``token`` are ``null``
+	// when the approve step reads facts that only the call has (its values,
+	// or what MEHO reads from them or from the target). Then both reasons
+	// say so.
 	OwnApproval *ExplainOwnApproval `json:"own_approval,omitempty"`
 
 	// Request The rule stored on an approval request.

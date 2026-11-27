@@ -11,6 +11,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 __all__ = [
+    "REASON_WITHOUT_PLACE",
     "Answer",
     "ExplainApprovers",
     "ExplainAsker",
@@ -85,6 +86,13 @@ class ExplainApprovers(_Frozen):
     )
 
 
+#: The reason of :meth:`ExplainOwnApproval.without_place` when no text without the place is set.
+REASON_WITHOUT_PLACE = (
+    "This is the answer of the approve step. Only a tenant admin or a platform admin "
+    "sees its full reason."
+)
+
+
 class ExplainOwnApproval(_Frozen):
     """May the person who asked approve the request that the call makes?
 
@@ -92,19 +100,22 @@ class ExplainOwnApproval(_Frozen):
     approve: a click in the web console (``web``), and the command line or
     REST (``token``). Each reason is the text the approve step shows.
 
-    ``web`` and ``token`` are ``null`` when the approve step reads facts
-    that only the call has (its values, or what MEHO reads from them or
-    from the target). Then both reasons say so.
+    For an agent login or a service login, ``web`` and ``token`` are
+    ``false`` for every operation, with the text of the approve sign: only
+    a person approves. For a person, ``web`` and ``token`` are ``null``
+    when the approve step reads facts that only the call has (its values,
+    or what MEHO reads from them or from the target). Then both reasons
+    say so.
     """
 
     web: bool | None = Field(
-        description="True when a click in the web console approves it. Null when it depends "
-        "on the values of the call."
+        description="True when a click in the web console approves it. False for an agent "
+        "or service login. Null for a person when it depends on the values of the call."
     )
     web_reason: str = Field(description="Why, in the words of the approve step.")
     token: bool | None = Field(
-        description="True when an approve on the command line or REST does. Null when it "
-        "depends on the values of the call."
+        description="True when an approve on the command line or REST does. False for an "
+        "agent or service login. Null for a person when it depends on the values of the call."
     )
     token_reason: str = Field(description="Why, in the words of the approve step.")
     _web_reason_without_place: str | None = PrivateAttr(default=None)
@@ -126,11 +137,16 @@ class ExplainOwnApproval(_Frozen):
         return part
 
     def without_place(self) -> ExplainOwnApproval:
-        """The part for a caller who may not see the places of policy entries."""
+        """The part for a caller who may not see the places of policy entries.
+
+        A part built without :meth:`of` (for example read from JSON) has no
+        text without the place; it then gets :data:`REASON_WITHOUT_PLACE`,
+        never the text with the place.
+        """
         return self.model_copy(
             update={
-                "web_reason": self._web_reason_without_place or self.web_reason,
-                "token_reason": self._token_reason_without_place or self.token_reason,
+                "web_reason": self._web_reason_without_place or REASON_WITHOUT_PLACE,
+                "token_reason": self._token_reason_without_place or REASON_WITHOUT_PLACE,
             }
         )
 

@@ -26,9 +26,19 @@ end in a backslash, then fails on:
 * a ``<name>=<value>`` argument of ``vault`` or ``bao`` when the name is
   ``jwt``, ``token``, ``password`` or ``secret_id`` and the value is not ``-``
   or ``@<file>``;
-* ``-H`` or ``--header`` with ``Authorization:`` in its value, and
+* ``-H`` or ``--header`` with ``Authorization:`` in its value, also when
+  the value is attached to ``-H`` (``-H"Authorization: ..."``), and
   ``Bearer $`` or ``Bearer <`` anywhere;
-* ``PASSWORD '`` in a SQL block.
+* ``PASSWORD '`` in a SQL block;
+* a shell variable with a secret name (``$NAME`` or ``${NAME}``) that is
+  expanded as an argument of a program. The name holds ``PASSWORD``,
+  ``PASSWD``, ``SECRET``, ``TOKEN`` or ``CREDENTIAL`` (any case), or has
+  ``KEY`` or ``PW`` as a whole part between underscores (``API_KEY``,
+  ``TEMP_PW``, ``KEY``; not ``PWD``, not ``KEYCLOAK_URL``). Only the
+  built-ins ``printf``, ``[`` and ``test`` may get such a variable.
+
+A ``--from-literal`` argument counts also when it is quoted as a whole
+(``--from-literal="password=..."``).
 
 Run ``python3 scripts/ci/check_install_secrets.py``. Exit code 1 lists each
 line that breaks the rule.
@@ -50,18 +60,27 @@ _COMMAND_LANGUAGES = {"", "bash", "sh", "zsh", "shell", "console", "sql"}
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)")
 _SECRET_KEY = re.compile(r"password|passwd|secret|token|key|credential", re.IGNORECASE)
 
-_FROM_LITERAL = re.compile(r"""--from-literal=([^=\s'"]+)=('[^']*'|"[^"]*"|\S*)""")
+_FROM_LITERAL = re.compile(r"""--from-literal=['"]?([^=\s'"]+)=('[^']*'|"[^"]*"|[^\s'"]*)""")
 _ADDRESS_WITH_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 _SECRET_FLAG = re.compile(r"(?<![\w-])--(?:docker-password|password|token|client-secret)=")
 _VAULT_COMMAND = re.compile(r"(?:^|[\s|;&(])(?:vault|bao)\s")
 _VAULT_ARG = re.compile(r"""(?<![\w-])(jwt|token|password|secret_id)=('[^']*'|"[^"]*"|\S*)""")
 _AUTH_HEADER = re.compile(
-    r"""(?<![\w-])(?:-H|--header)(?:\s+|=)"""
+    r"""(?<![\w-])(?:-H|--header)(?:\s+|=)?"""
     r"""(?:"[^"]*Authorization:[^"]*"|'[^']*Authorization:[^']*'|\S*Authorization:\S*)""",
     re.IGNORECASE,
 )
 _BEARER = re.compile(r"Bearer\s+[$<]")
 _SQL_PASSWORD = re.compile(r"\bPASSWORD\s+'", re.IGNORECASE)
+
+_SECRET_NAME = re.compile(r"PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL", re.IGNORECASE)
+_SECRET_NAME_PARTS = {"KEY", "PW"}
+_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Words that start a shell construct; the program of the command comes after them.
+_KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "time"}
+# Built-ins that start no program, so their arguments are in no process list.
+_BUILTINS_FOR_SECRETS = {"printf", "[", "test"}
 
 
 def _literal_reasons(line: str) -> list[str]:
@@ -93,9 +112,164 @@ def _vault_reasons(line: str) -> list[str]:
     return reasons
 
 
+def is_secret_name(name: str) -> bool:
+    """Say whether a shell variable name names a secret."""
+    if _SECRET_NAME.search(name):
+        return True
+    return any(part.upper() in _SECRET_NAME_PARTS for part in name.split("_"))
+
+
+class _Word:
+    """One word of a simple command: its text and the variables it expands."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.variables: list[str] = []
+
+
+class _Splitter:
+    """Split a command line into simple commands, quote-aware.
+
+    A ``$(...)`` starts its own command. Text in single quotes expands
+    nothing. A ``#`` that starts a word starts a comment.
+    """
+
+    _SEPARATORS = "|;&(){}`"
+
+    def __init__(self, line: str) -> None:
+        self.line = line
+        self.pos = 0
+        self.done: list[list[_Word]] = []
+        self.stack: list[tuple[list[_Word], _Word, str]] = []
+        self.command: list[_Word] = []
+        self.word: _Word | None = None
+        self.quote = ""
+
+    def _current(self) -> _Word:
+        if self.word is None:
+            self.word = _Word()
+        return self.word
+
+    def _end_word(self) -> None:
+        if self.word is not None:
+            self.command.append(self.word)
+            self.word = None
+
+    def _end_command(self) -> None:
+        self._end_word()
+        if self.command:
+            self.done.append(self.command)
+        self.command = []
+
+    def _open_substitution(self) -> None:
+        self.stack.append((self.command, self._current(), self.quote))
+        self.command, self.word, self.quote = [], None, ""
+        self.pos += 2
+
+    def _separator(self, char: str) -> None:
+        self._end_command()
+        if char == ")" and self.stack:
+            self.command, self.word, self.quote = self.stack.pop()
+        self.pos += 1
+
+    def _variable(self) -> bool:
+        match = _VARIABLE.match(self.line, self.pos)
+        if not match:
+            return False
+        word = self._current()
+        word.variables.append(match.group(1) or match.group(2))
+        word.text += match.group(0)
+        self.pos = match.end()
+        return True
+
+    def _add(self, text: str) -> None:
+        self._current().text += text
+        self.pos += len(text)
+
+    def _step(self) -> bool:
+        """Read one item at ``pos``. Return False at a comment."""
+        line, char = self.line, self.line[self.pos]
+        if self.quote == "'":
+            if char == "'":
+                self.quote = ""
+                self.pos += 1
+            else:
+                self._add(char)
+        elif char == "\\":
+            self._add(line[self.pos : self.pos + 2])
+        elif line.startswith("$(", self.pos) and not line.startswith("$((", self.pos):
+            self._open_substitution()
+        elif char == "$" and self._variable():
+            pass
+        elif char in "\"'" and self.quote in ("", char):
+            self.quote = "" if self.quote else char
+            self._current()
+            self.pos += 1
+        else:
+            return self._plain(char)
+        return True
+
+    def _plain(self, char: str) -> bool:
+        """Read one character outside a quote start, a ``$`` and a backslash."""
+        if self.quote == '"':
+            self._add(char)
+        elif char == "#" and self.word is None:
+            return False
+        elif char in self._SEPARATORS:
+            self._separator(char)
+        elif char.isspace():
+            self._end_word()
+            self.pos += 1
+        else:
+            self._add(char)
+        return True
+
+    def split(self) -> list[list[_Word]]:
+        while self.pos < len(self.line) and self._step():
+            pass
+        self._end_command()
+        while self.stack:
+            outer, _, _ = self.stack.pop()
+            if outer:
+                self.done.append(outer)
+        return self.done
+
+
+def _commands(line: str) -> list[list[_Word]]:
+    """Split a command line into simple commands (see ``_Splitter``)."""
+    return _Splitter(line).split()
+
+
+def _program(command: list[_Word]) -> str | None:
+    """Return the program name of a simple command, or None for a bare assignment."""
+    for word in command:
+        if word.text in _KEYWORDS or _ASSIGNMENT.match(word.text):
+            continue
+        return word.text
+    return None
+
+
+def _variable_reasons(line: str) -> list[str]:
+    reasons: list[str] = []
+    for command in _commands(line):
+        program = _program(command)
+        if program is None or program in _BUILTINS_FOR_SECRETS:
+            continue
+        for word in command:
+            if word.text == program and not word.variables:
+                continue
+            reasons.extend(
+                f"the secret variable '{name}' is an argument of '{program}': "
+                "give it on standard input with printf"
+                for name in word.variables
+                if is_secret_name(name)
+            )
+    return reasons
+
+
 def check_line(line: str, *, sql: bool = False) -> list[str]:
     """Return the reasons why one (joined) command line breaks the rule."""
-    reasons = _literal_reasons(line) + _vault_reasons(line)
+    reasons = _literal_reasons(line) + _vault_reasons(line) + _variable_reasons(line)
     if _SECRET_FLAG.search(line):
         reasons.append("a secret is the value of a flag: read it from a file or standard input")
     if _AUTH_HEADER.search(line):

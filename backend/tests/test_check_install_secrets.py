@@ -29,56 +29,102 @@ _spec.loader.exec_module(cis)
 _AUTH = "Authorization" + ":"
 _VALUE = "stand-in" + "-value"
 
-# Each command of the old install guide and notes that held a secret.
+# Commands that hold a secret as an argument. The check must fail on each.
 _BAD_COMMANDS = [
-    "kubectl create secret generic meho-postgres -n meho \\\n"
-    "  --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'",
-    "kubectl create secret generic meho-postgres-app -n meho \\\n"
-    "  --from-literal=url='postgresql+asyncpg://meho_app:" + _VALUE + "@<host>:5432/meho'",
-    "kubectl create secret generic keycloak-db-admin \\\n"
-    "  --from-literal=username=<admin-user> \\\n"
-    "  --from-literal=password=<admin-password>",
+    (
+        "kubectl create secret generic meho-postgres -n meho \\\n"
+        "  --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'"
+    ),
+    (
+        "kubectl create secret generic meho-postgres-app -n meho \\\n"
+        "  --from-literal=url='postgresql+asyncpg://meho_app:" + _VALUE + "@<host>:5432/meho'"
+    ),
+    (
+        "kubectl create secret generic keycloak-db-admin \\\n"
+        "  --from-literal=username=<admin-user> \\\n"
+        "  --from-literal=password=<admin-password>"
+    ),
     'kubectl create secret generic meho-company-login -n meho --from-literal=client_secret="$CLIENT_SECRET"',  # noqa: E501
     'kubectl config --kubeconfig=$KC set-credentials installer --token="$TOKEN"',
-    "kubectl -n $NS create secret docker-registry registry-pull --docker-server=$REG_HOST "
-    '--docker-username="$PULL_USER" --docker-password="$PULL_PASSWORD"',
-    "kubectl -n <namespace> create secret generic <release>-core-console-admin \\\n"
-    "  --from-literal=username=console-admin \\\n"
-    "  --from-literal=password='stand-in-value'",
+    (
+        "kubectl -n $NS create secret docker-registry registry-pull --docker-server=$REG_HOST "
+        '--docker-username="$PULL_USER" --docker-password="$PULL_PASSWORD"'
+    ),
+    (
+        "kubectl -n <namespace> create secret generic <release>-core-console-admin \\\n"
+        "  --from-literal=username=console-admin \\\n"
+        "  --from-literal=password='stand-in-value'"
+    ),
+    'kubectl create secret generic x --from-literal="password=' + _VALUE + '"',
+    "kubectl create secret generic x '--from-literal=password=" + _VALUE + "'",
+    'kubectl create secret generic x --from-literal="url=postgresql://u:' + _VALUE + '@h/db"',
     'vault write auth/jwt/login role=meho-mcp jwt="$RUNNER_TOKEN"',
     "bao write auth/approle/login role_id=stand-in-role secret_id=stand-in-value",
     "vault login token=stand-in-value",
     'curl -s -H "' + _AUTH + ' Bearer $TOKEN" https://example.test/ready',
     "curl -s --header '" + _AUTH + " stand-in-value' https://example.test/ready",
     "curl -s -H " + _AUTH + "stand-in-value https://example.test/ready",
+    'curl -s -H"' + _AUTH + " Basic " + _VALUE + '" https://example.test/ready',
+    "curl -s -H'" + _AUTH + " Basic " + _VALUE + "' https://example.test/ready",
     'curl -s https://example.test/ready --data "x" -- "Bearer <token>"',
     "some-tool --client-secret=stand-in-value",
     "some-tool --password=stand-in-value",
     "some-tool --from-literal=api-key=stand-in-value",
     "some-tool --from-literal=url=postgresql://user:" + _VALUE + "@host/db",
+    "jq --arg s \"$CLIENT_SECRET\" '.config.clientSecret = $s' company-idp.json",
+    (
+        "jq --arg s \"$CLIENT_SECRET\" '.config.clientSecret = $s' company-idp.json \\\n"
+        '  | kcadm.sh create identity-provider/instances -r "$REALM" -f -'
+    ),
+    'some-tool login "${API_KEY}"',
+    "some-tool login $TEMP_PW",
+    'X="$DB_PASSWORD" some-tool',
+    'printf \'%s\' "$(some-tool "$PUSH_PASSWORD")"',
+    "{ printf 'Key: '; IFS= read -rs KEY; echo; some-tool \"$KEY\"; }",
 ]
 
 # The new forms: a secret comes from a file or from standard input.
 _GOOD_COMMANDS = [
     "printf '%s' \"$PW\" | kubectl create secret generic meho-x -n meho --from-file=password=/dev/stdin",  # noqa: E501
-    "printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' \"$DB_PASSWORD\" \\\n"
-    "  | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin",
-    "printf '%s' \"$PW\" \\\n"
-    "  | kubectl create secret generic keycloak-db-admin \\\n"
-    "      --from-literal=username=<admin-user> --from-file=password=/dev/stdin",
+    (
+        "printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' \"$DB_PASSWORD\" \\\n"
+        "  | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin"
+    ),
+    (
+        "printf '%s' \"$PW\" \\\n"
+        "  | kubectl create secret generic keycloak-db-admin \\\n"
+        "      --from-literal=username=<admin-user> --from-file=password=/dev/stdin"
+    ),
     "printf '%s' \"$RUNNER_TOKEN\" | vault write auth/jwt/login role=meho-mcp jwt=-",
     "vault write auth/jwt/login role=meho-mcp jwt=@token.txt",
     "printf '%s' \"$PUSH_PASSWORD\" | crane auth login registry.example.com -u <user> --password-stdin",  # noqa: E501
-    "kubectl -n meho get secret x -o jsonpath='{.data.token}' \\\n"
-    "  | base64 -d | sed 's/^/Authorization: Bearer /' \\\n"
-    "  | curl -s -H @- https://<your-backplane>/ready",
+    (
+        "kubectl -n meho get secret x -o jsonpath='{.data.token}' \\\n"
+        "  | base64 -d | sed 's/^/Authorization: Bearer /' \\\n"
+        "  | curl -s -H @- https://<your-backplane>/ready"
+    ),
     'kubectl config --kubeconfig=$KC set-cluster vks --server="$SERVER"',
     "kubectl create secret generic x --from-literal=username=console-admin --from-file=password=/dev/stdin",  # noqa: E501
-    'printf \'{"auths":{"%s":{"auth":"%s"}}}\' "$REG_HOST" \\\n'
-    '  "$(printf \'%s:%s\' "$U" "$P" | base64 | tr -d \'\\n\')" \\\n'
-    "  | kubectl create secret generic registry-pull --type=kubernetes.io/dockerconfigjson \\\n"
-    "      --from-file=.dockerconfigjson=/dev/stdin",
+    (
+        'printf \'{"auths":{"%s":{"auth":"%s"}}}\' "$REG_HOST" \\\n'
+        '  "$(printf \'%s:%s\' "$U" "$PULL_PASSWORD" | base64 | tr -d \'\\n\')" \\\n'
+        "  | kubectl create secret generic registry-pull --type=kubernetes.io/dockerconfigjson \\\n"
+        "      --from-file=.dockerconfigjson=/dev/stdin"
+    ),
     "read -rs CLIENT_SECRET",
+    "IFS= read -rs CLIENT_SECRET",
+    '[ -n "$CLIENT_SECRET" ]',
+    'if [ -n "$PULL_USER" ] && [ -n "$PULL_PASSWORD" ]; then',
+    'test -n "$TOKEN" && echo ok',
+    (
+        "printf '%s' \"$CLIENT_SECRET\" \\\n"
+        "  | jq --rawfile s /dev/stdin '.config.clientSecret = $s' company-idp.json \\\n"
+        '  | kcadm.sh create identity-provider/instances -r "$REALM" -f -'
+    ),
+    "TOKEN=$(kubectl -n meho create token meho-installer --duration=8h)",
+    "unset CLIENT_SECRET",
+    "echo 'the value of $TOKEN stays in single quotes'",
+    'kubectl get pods -n "$KEYCLOAK_NS" --kubeconfig="$PWD/kc"',
 ]
 
 
@@ -127,6 +173,34 @@ def test_an_indented_fence_is_read() -> None:
 def test_a_continued_command_reports_its_first_line() -> None:
     page = _page("kubectl create secret generic x \\\n  --from-literal=password=stand-in-value")
     assert [line for line, _ in cis.check_page(page)] == [4]
+
+
+@pytest.mark.parametrize(
+    "name", ["KEY", "API_KEY", "PW", "TEMP_PW", "CLIENT_SECRET", "db_password"]
+)
+def test_a_secret_name_is_known(name: str) -> None:
+    assert cis.is_secret_name(name)
+
+
+@pytest.mark.parametrize("name", ["PWD", "KEYCLOAK_URL", "REG_CM_ENTRY", "REALM", "KC"])
+def test_another_name_is_not_a_secret(name: str) -> None:
+    assert not cis.is_secret_name(name)
+
+
+def test_a_prompt_block_in_braces_passes() -> None:
+    block = (
+        "{\n"
+        "  printf 'Database password: '; IFS= read -rs DB_PASSWORD; echo\n"
+        '  if [ -n "$DB_PASSWORD" ]; then\n'
+        "    printf '%s' \"$DB_PASSWORD\" \\\n"
+        "      | kubectl create secret generic x -n meho --from-file=password=/dev/stdin\n"
+        "  else\n"
+        "    echo 'No password was typed. Nothing was made.'\n"
+        "  fi\n"
+        "  unset DB_PASSWORD\n"
+        "}"
+    )
+    assert cis.check_page(_page(block)) == []
 
 
 def test_the_install_guide_and_notes_of_the_repo_pass() -> None:

@@ -320,9 +320,13 @@ async def test_a_passed_check_does_not_count_for_the_next_call(
 _VENDOR_403 = "example vendor text of the refusal"
 
 #: Calls whose realm read Keycloak refuses: a read, a write, the realm update
-#: (it reads the realm itself before the write) and the login check.
+#: (it reads the realm itself before the write), the login check, and the
+#: reads that read the realm before they ask for events or flow steps.
 _REFUSED_CALLS: dict[str, dict[str, Any]] = {
     "keycloak.user.list": {},
+    "keycloak.events.list": {},
+    "keycloak.admin_events.list": {},
+    "keycloak.auth_flow.step.list": {},
     "keycloak.group.create": _WRITES["keycloak.group.create"],
     "keycloak.realm.update": {"representation": {"enabled": True}},
     _CHECK_LOGIN: {"username": "someone", "password_secret_ref": "example/ref"},

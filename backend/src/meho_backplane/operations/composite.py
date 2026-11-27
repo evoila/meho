@@ -127,6 +127,8 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
     from collections.abc import Awaitable, Callable
 
+    from meho_backplane.db.models import EndpointDescriptor
+
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
     "CompositeRecursionLimitExceeded",
@@ -661,30 +663,32 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     return False
 
 
-def _covered_by_approved_run(
-    *,
-    op_id: str,
-    safety_level: str,
-    requires_approval: bool,
-    always_wait: bool = False,
-    stored_op_class: str | None = None,
-) -> bool:
+def _covered_by_approved_run(descriptor: EndpointDescriptor, caller: Operator) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
     The run is approved when the dispatcher runs it with ``_approved=True``
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
-    internal step, except a ``destructive`` step, a step marked
-    ``requires_approval``, a step a classification entry makes always
-    wait and a step that reads, writes or makes a credential
-    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
-    those keep their own approval.
+    internal step, except a ``destructive`` step, a step a classification
+    entry makes always wait, a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    and a step that keeps its own approval
+    (:func:`~meho_backplane.operations.run_step_rules.step_keeps_own_approval`:
+    a ``requires_approval`` step, and with ``CUSTOM_POLICY`` on the fixed
+    rules). Those keep their own approval.
+
+    It takes the step's row and the caller, not single values, because the
+    fixed rules (:func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`)
+    read the whole row and who calls.
     """
+    from meho_backplane.operations.run_step_rules import step_keeps_own_approval
     from meho_backplane.operations.service_grants import credential_call_waits
 
-    if safety_level == "destructive" or requires_approval or always_wait:
+    if descriptor.safety_level == "destructive" or descriptor.policy_always_wait:
         return False
-    if credential_call_waits(op_id, stored_op_class):
+    if credential_call_waits(descriptor.op_id, None):
+        return False
+    if step_keeps_own_approval(descriptor, caller):
         return False
     return _runs_after_approval()
 
@@ -1343,10 +1347,7 @@ async def _gate_subop(
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
     if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
-        op_id=op_id,
-        safety_level=descriptor.safety_level,
-        requires_approval=descriptor.requires_approval,
-        always_wait=descriptor.policy_always_wait,
+        descriptor, operator
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return _GoAhead.PERSON

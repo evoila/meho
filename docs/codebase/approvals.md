@@ -939,6 +939,28 @@ gate asks this list before it reads a standing grant or a run approval.
 Each rule and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
+### Steps of an approved multi-step operation, with `CUSTOM_POLICY` on
+
+When a person approves a whole multi-step operation, its other steps go
+ahead under that one approval. With the switch `CUSTOM_POLICY` on, each
+step first asks the fixed rules (`operations/run_step_rules.py`,
+`step_keeps_own_approval`; called by `composite._covered_by_approved_run`
+and by the dispatcher's rule for a child call):
+
+- A step whose operation has only the plain "always ask" mark
+  (`op_policy.has_plain_mark`) no longer waits on its own. It goes ahead
+  under the run's approval. The owner decided this on 25 Nov 2026.
+- A step that a fixed rule covers (`fixed_rule_for`) waits for its own
+  approval: a credential call, a change of rights or of the policy, a call
+  to an address the caller gives, a `destructive` step and a delete.
+- A step that no run approval covers (`never_covered_reason`, plus the root
+  shell mark) waits too, and so does a step that an override, a param or
+  "always wait" made wait.
+
+With the switch off, a step keeps its own approval when it is
+`destructive`, marked `requires_approval`, "always wait" or a credential
+call, as before. Tests: `backend/tests/test_custom_policy_run_steps.py`.
+
 ## A credential call always waits for a person
 
 A call that reads, writes or makes a credential (the classes

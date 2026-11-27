@@ -160,6 +160,21 @@ the gateway, static route, alias, alias member and NAT deletes. A read with
 a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
 is not marked: it does not change the host.
 
+## The steps of an approved multi-step operation, with `CUSTOM_POLICY` on
+
+This is a different approval: a person approves one whole multi-step
+operation, and its steps go ahead under that approval. With the switch
+`CUSTOM_POLICY` on, a step goes ahead only when none of these holds
+(`operations/run_step_rules.py`):
+
+- a fixed rule (`policy/fixed_rules.fixed_rule_for`);
+- a rule that no run approval covers (`never_covered_reason`, plus the
+  root shell mark above, the same check as `_never_covered` here).
+
+`fixed_rule_for` alone is not enough: it has no root-shell rule. A step
+with only the plain "always ask" mark goes ahead under the run's approval.
+Details: [approvals.md](approvals.md#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
+
 ## Never covered: a call a person approves one by one
 
 A connector marks an operation with `declare_per_call_approval(op_ids)`

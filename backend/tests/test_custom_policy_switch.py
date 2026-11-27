@@ -10,9 +10,13 @@
 * ``policy.apply``, ``policy.classify`` and ``policy.classify_preview``
   register with only ``CUSTOM_POLICY`` on, and not with every switch off.
 * ``custom_policy_on`` and ``custom_policy_on_in_environment`` say off with
-  every switch off and on with only ``CUSTOM_POLICY`` on.
+  every switch off and on with only ``CUSTOM_POLICY`` on, and read each value
+  of ``CUSTOM_POLICY`` the same way.
 * No code outside :mod:`meho_backplane.policy.switches` and the settings
-  reads the four switches directly.
+  reads the four switches directly. The settings file holds only the
+  definition of ``CUSTOM_POLICY``, also when a read is split over lines.
+* Each file that reads a settings field by a name it gets while the code
+  runs is on a fixed list.
 """
 
 from __future__ import annotations
@@ -126,6 +130,35 @@ def test_custom_policy_functions_on_with_only_custom_policy(
     _turn_on(monkeypatch, "CUSTOM_POLICY")
     assert custom_policy_on(get_settings()) is True
     assert custom_policy_on_in_environment() is True
+
+
+@pytest.mark.parametrize(
+    ("value", "on"),
+    [
+        ("true", True),
+        ("1", True),
+        ("TRUE", True),
+        ("yes", True),
+        ("on", True),
+        (" true ", True),
+        (None, False),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("no", False),
+        ("off", False),
+        ("enabled", False),
+        ("on-ish", False),
+    ],
+)
+def test_custom_policy_functions_read_each_value_like_the_settings(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, on: bool
+) -> None:
+    if value is not None:
+        monkeypatch.setenv("CUSTOM_POLICY", value)
+    get_settings.cache_clear()
+    assert custom_policy_on_in_environment() is on
+    assert custom_policy_on(get_settings()) is on
 
 
 @pytest.mark.parametrize("old_switch", _SWITCHES[1:])
@@ -281,12 +314,143 @@ def test_direct_read_pattern_skips_calls_and_texts(line: str) -> None:
     assert _DIRECT_READ.search(line) is None
 
 
+#: A read of ``CUSTOM_POLICY`` that the line search above misses: the whole
+#: environment name as a string (also in a read split over lines, or kept in a
+#: constant), the setting on any name, and the setting name as a string (for
+#: ``getattr`` and ``model_dump()[...]``). A sentence that names the switch
+#: inside a longer text is no match.
+_CUSTOM_POLICY_READ = re.compile(r"([\"'])CUSTOM_POLICY\1|\.custom_policy\b|([\"'])custom_policy\2")
+
+#: The only such reads outside :mod:`meho_backplane.policy.switches`, each
+#: allowed once: the definition of the setting, and the field of ``/ready``
+#: with the example in the docstring of that function.
+_CUSTOM_POLICY_ALLOWED: dict[str, tuple[re.Pattern[str], ...]] = {
+    "settings.py": (
+        re.compile(r'custom_policy=parse_bool_env\(\s*os\.environ\.get\("CUSTOM_POLICY"\),\s*\)'),
+    ),
+    "features.py": (
+        re.compile(r'"custom_policy": custom_policy_on\(settings\),'),
+        re.compile(r'"custom_policy": <bool>,'),
+    ),
+}
+
+
+def _custom_policy_reads(text: str, allowed: tuple[re.Pattern[str], ...] = ()) -> list[int]:
+    """The line numbers of each read in ``text``, after the first match of each
+    allowed text is blanked out.
+    """
+    for pattern in allowed:
+        match = pattern.search(text)
+        if match:
+            start, end = match.span()
+            text = text[:start] + re.sub(r"[^\n]", " ", text[start:end]) + text[end:]
+    return [text.count("\n", 0, m.start()) + 1 for m in _CUSTOM_POLICY_READ.finditer(text)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'on = parse_bool_env(\n    os.environ.get(\n        "CUSTOM_POLICY",\n    )\n)',
+        'if "CUSTOM_POLICY" in os.environ:',
+        "_NAME = 'CUSTOM_POLICY'\non = os.environ.get(_NAME)",
+        'on = getattr(settings, "custom_policy")',
+        "on = settings.model_dump()['custom_policy']",
+        "on = cfg.custom_policy",
+        "on = (\n    cfg\n    .custom_policy\n)",
+    ],
+)
+def test_custom_policy_read_pattern_finds_wider_reads(text: str) -> None:
+    assert _custom_policy_reads(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "on = custom_policy_on(get_settings())",
+        "The CUSTOM_POLICY setting turns on all three policy parts.",
+        '"Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule"',
+        "from meho_backplane.policy.switches import custom_policy_on",
+        "on = switches.custom_policy_on_in_environment()",
+    ],
+)
+def test_custom_policy_read_pattern_skips_calls_and_texts(text: str) -> None:
+    assert _custom_policy_reads(text) == []
+
+
+def test_settings_allow_only_the_definition_of_custom_policy() -> None:
+    allowed = _CUSTOM_POLICY_ALLOWED["settings.py"]
+    definition = 'custom_policy=parse_bool_env(\n    os.environ.get("CUSTOM_POLICY"),\n),'
+    assert _custom_policy_reads(definition, allowed) == []
+    assert _custom_policy_reads(f"{definition}\n{definition}", allowed) == [5]
+    assert _custom_policy_reads(f'{definition}\non = os.getenv("CUSTOM_POLICY")', allowed) == [4]
+    assert _custom_policy_reads(f"{definition}\non = self.custom_policy", allowed) == [4]
+
+
 def test_no_code_reads_the_switches_directly() -> None:
+    sources = sorted(_SRC.rglob("*.py"))
     found = [
         f"{path.relative_to(_SRC)}:{number}"
-        for path in sorted(_SRC.rglob("*.py"))
+        for path in sources
         if path not in _ALLOWED
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
         if _DIRECT_READ.search(line)
     ]
+    found += [
+        f"{path.relative_to(_SRC)}:{number}"
+        for path in sources
+        if path != _SRC / "policy" / "switches.py"
+        for number in _custom_policy_reads(
+            path.read_text(encoding="utf-8"),
+            _CUSTOM_POLICY_ALLOWED.get(path.relative_to(_SRC).as_posix(), ()),
+        )
+    ]
     assert found == [], "ask meho_backplane.policy.switches instead"
+
+
+#: ``getattr(`` or ``model_dump(`` on the settings object. Code that does this
+#: can read a field by a name it gets while it runs, which no search finds.
+_SETTINGS_BY_NAME = re.compile(
+    r"getattr\(\s*(?:[\w.]*\.)?\w*settings\w*(?:\(\))?\s*,"
+    r"|\w*settings\w*(?:\(\))?\s*\.model_dump\("
+)
+
+#: The files that read settings fields by name, each checked by a reviewer:
+#: ``GET /version`` lists the settings that change what an agent sees, an
+#: operation parameter can depend on a switch, and the dashboard file compares
+#: its fields with the settings.
+_READS_SETTINGS_BY_NAME = {
+    "checks/dashboard_file.py",
+    "operations/switch_params.py",
+    "version.py",
+}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "getattr(settings, name)",
+        "getattr(\n    get_settings(),\n    setting,\n    False,\n)",
+        "getattr(self.settings, name)",
+        "settings.model_dump(include=fields)",
+        "get_settings().model_dump()",
+    ],
+)
+def test_settings_by_name_pattern_finds_reads(text: str) -> None:
+    assert _SETTINGS_BY_NAME.search(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["getattr(row, field)", "body.model_dump(mode='json')", "settings.custom_policy_on"],
+)
+def test_settings_by_name_pattern_skips_other_objects(text: str) -> None:
+    assert _SETTINGS_BY_NAME.search(text) is None
+
+
+def test_only_listed_files_read_settings_by_name() -> None:
+    found = {
+        path.relative_to(_SRC).as_posix()
+        for path in _SRC.rglob("*.py")
+        if _SETTINGS_BY_NAME.search(path.read_text(encoding="utf-8"))
+    }
+    assert found == _READS_SETTINGS_BY_NAME, "a reviewer checks each new file and adds it here"

@@ -44,8 +44,8 @@ system-initiated calls cannot read per-target vendor credentials
 :class:`SshConnector` instance keeps a pool of live
 ``asyncssh.SSHClientConnection`` objects keyed on
 :func:`_pool_key`: the tenant-unique target key, the target's secret
-reference, the caller's kind
-(:func:`_caller_kind`: a person or machine login, a call without a
+reference, the kind of login
+(:func:`_pool_login_kind`: a person or machine login, a call without a
 token, the check runner, or the system caller for ``operator=None``) and
 the caller's ``operator.sub``. So every caller logs in once, after their
 own Vault read of the target's secret, and reuses only the connection
@@ -135,7 +135,7 @@ _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
 type PoolKey = tuple[str, str, str, str, str]
 
 
-def _caller_kind(operator: Operator | None) -> str:
+def _pool_login_kind(operator: Operator | None) -> str:
     """Return the kind of caller the pool files a connection under.
 
     Each kind logs in to Vault in its own way, so each gets its own slot
@@ -161,12 +161,12 @@ def _pool_key(target: Target, operator: Operator | None) -> PoolKey:
 
     The first three parts are :func:`target_secret_cache_key`, so a call
     uses only a connection opened with the secret reference its own target
-    names. The caller kind (:func:`_caller_kind`) and the ``sub`` name the
+    names. The login kind (:func:`_pool_login_kind`) and the ``sub`` name the
     caller, so two callers to one target hold two logins, each opened after
     their own Vault read.
     """
     sub = operator.sub if operator is not None else SYSTEM_OPERATOR_SUB
-    return (*target_secret_cache_key(target), _caller_kind(operator), sub)
+    return (*target_secret_cache_key(target), _pool_login_kind(operator), sub)
 
 
 class SshHostKeyUnpinnedError(ValueError):

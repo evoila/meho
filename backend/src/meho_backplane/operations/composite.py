@@ -579,7 +579,7 @@ def _replayed_child(
     """What a ``dispatch_child`` step returns without running, during a resume.
 
     A step the earlier run finished returns its stored result. A credential
-    write or make that ended well returns ``ok`` with no result
+    write, make or use that ended well returns ``ok`` with no result
     (``extras["result_kept"]`` is ``False``). A ``run_again`` credential read
     runs again, through the dispatcher and its policy check; the approval of
     the run does not cover it
@@ -1020,10 +1020,10 @@ async def run_governed_subop(
 
     During the run after an approval, a step the earlier run finished is
     not checked and not sent again: ``value`` is the stored result and
-    ``replayed`` is ``True``. A step that writes or makes a credential and
-    ended well gives ``value=None`` with ``replayed=True``: its result is
-    never kept, so a handler that needs the made or written value in a later
-    step gets ``None`` on a resume and must not depend on it. A credential
+    ``replayed`` is ``True``. A step that writes, makes or uses a credential
+    and ended well gives ``value=None`` with ``replayed=True``: its result is
+    never kept, so a handler that needs its value in a later step gets
+    ``None`` on a resume and must not depend on it. A credential
     read on the list of reads that change nothing
     (:mod:`~meho_backplane.operations.composite_steps`), whose policy let it
     go ahead with no person, is sent again when its policy, checked again,
@@ -1096,8 +1096,8 @@ async def run_governed_subop(
 def _replayed_subop(journal: StepJournal, op_id: str, replayed: dict[str, Any]) -> SubopStep:
     """What a :func:`run_governed_subop` step with an entry of the earlier run gives back.
 
-    A finished step gives its stored result (``None`` for a credential write
-    or make). A step with no stored end, or a credential read a person
+    A finished step gives its stored result (``None`` for a step that writes,
+    makes or uses a credential). A step with no stored end, or a credential read a person
     approved, stops the run.
     """
     if replayed.get("status") in (STEP_DONE, STEP_DONE_NO_RESULT):

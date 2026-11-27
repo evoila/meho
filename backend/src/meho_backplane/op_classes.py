@@ -92,8 +92,8 @@ CREDENTIAL_CHANGE_OP_CLASSES: Final[frozenset[str]] = frozenset(
 )
 
 #: The classes of an operation whose request carries a secret. A waiting
-#: call of such an operation keeps its params only in the one-time store,
-#: and its preview and its error texts hide the values.
+#: call of such an operation keeps its params, and the params of a
+#: multi-step operation it is a step of, only in the one-time store.
 SECRET_REQUEST_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_write", "credential_use"})
 
 _DECLARED: dict[str, str] = {}

@@ -418,7 +418,9 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
-  - A credential write, and a `k8s.apply` whose manifest holds a Secret
+  - A call of class `credential_write` or `credential_use`, a waiting
+    plain step of a multi-step operation of one of these classes, and a
+    `k8s.apply` whose manifest holds a Secret
     or a secret-looking value (the param a connector declares with
     `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
@@ -5135,6 +5137,7 @@ a `role="alert"` warning banner when `write_capability_warning` is set
 rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
+`credential_use_redacted` → the same copy, which says the call uses a credential,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
 key-value table of the operation-specific fields (the bespoke `preview`,
 else the generic redaction-safe `params_echo`, #1856). The full envelope
@@ -5964,7 +5967,8 @@ What the agent waiter does:
   the target's detected version no longer fits it. Covered by
   `test_agent_resume_runs_on_the_stored_sibling_catalog` and
   `test_agent_resume_is_refused_when_the_target_version_moved`.
-- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+- **Sub-op of a `credential_write` or `credential_use` operation.** The row
+  stores only the parent `op_id`; the
   parent params live in the encrypted custody copy. For a composite sub-op
   the claim winner consumes that copy to get the parent params. For a direct
   request it still discards the copy.

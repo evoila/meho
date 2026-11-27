@@ -187,9 +187,16 @@ async def _documents(
 
 
 def _override_entries(
-    overrides: Sequence[OperationPolicyOverride], connector_id: str
+    overrides: Sequence[OperationPolicyOverride],
+    connector_id: str,
+    *,
+    for_connector: str | None = None,
 ) -> list[ClassificationEntry]:
-    """The ``category`` and ``labels`` of override rows, as exact operation entries."""
+    """The ``category`` and ``labels`` of override rows, as exact operation entries.
+
+    *for_connector* ties each entry to the operations of that connector id
+    (:attr:`ClassificationEntry.for_connector`).
+    """
     entries: list[ClassificationEntry] = []
     for override in overrides:
         labels = override.labels if isinstance(override.labels, dict) else {}
@@ -204,6 +211,7 @@ def _override_entries(
                 op=override.op_id,
                 category=override.category,
                 labels={str(k): str(v) for k, v in labels.items()},
+                for_connector=for_connector,
             )
         )
     return entries
@@ -212,11 +220,18 @@ def _override_entries(
 def _override_entries_at(
     overrides: Sequence[OperationPolicyOverride], coords: OpCoordinates
 ) -> list[ClassificationEntry]:
-    """:func:`_override_entries` once per form of *coords*, so each form matches its own."""
+    """:func:`_override_entries` once per form of *coords*, so each form matches its own.
+
+    For an operation with two forms, each entry is tied to the connector
+    id of *coords*: another connector with the same form with the dash
+    does not match it.
+    """
+    forms = coords.forms()
+    tie = coords.connector_id if len(forms) > 1 else None
     return [
         entry
-        for form in coords.forms()
-        for entry in _override_entries(overrides, form.connector_id)
+        for form in forms
+        for entry in _override_entries(overrides, form.connector_id, for_connector=tie)
     ]
 
 

@@ -31,7 +31,13 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.broadcast import events
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission, ApprovalRequest, EndpointDescriptor, Tenant
+from meho_backplane.db.models import (
+    AgentPermission,
+    ApprovalRequest,
+    EndpointDescriptor,
+    OperationPolicyOverride,
+    Tenant,
+)
 from meho_backplane.main import app
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -423,10 +429,24 @@ _RISK_REFUSAL = (
 )
 
 
-def _send_file(client: TestClient, key: Any, path: str, entry: dict[str, Any]) -> dict[str, Any]:
+def _yaml_entry(entry: dict[str, Any]) -> str:
     match = ", ".join(f"{k}: {v!r}" for k, v in entry["match"].items())
-    rest = ", ".join(f"{k}: {str(v).lower()}" for k, v in entry.items() if k != "match")
-    content = f"policy: v1\nclassifications:\n  - {{match: {{{match}}}, {rest}}}\n"
+    rest = ", ".join(
+        f"{k}: {v!r}" if isinstance(v, dict) else f"{k}: {str(v).lower()}"
+        for k, v in entry.items()
+        if k != "match"
+    )
+    return f"  - {{match: {{{match}}}, {rest}}}\n"
+
+
+def _send_file(client: TestClient, key: Any, path: str, entry: dict[str, Any]) -> dict[str, Any]:
+    return _send_entries(client, key, path, [entry])
+
+
+def _send_entries(
+    client: TestClient, key: Any, path: str, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
+    content = "policy: v1\nclassifications:\n" + "".join(_yaml_entry(e) for e in entries)
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.post(
@@ -583,3 +603,133 @@ async def test_case_27_the_card_names_the_entry_of_its_category(
     assert card["category"] == "storage", card
     assert card["classification_rule"] == "tenant:classifications[0]", card
     assert _wait_rule(client, key, "cowx")["path"] == "tenant:classifications[1]"
+
+
+@pytest.mark.asyncio
+async def test_the_card_names_the_entry_of_its_category_past_a_more_specific_entry(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    # A `-` entry gives the category, a more specific `-` entry sets no wait,
+    # and a product entry makes the call wait. The card names the first one.
+    await _register(embedding, RUN)
+    await policy(
+        TENANT,
+        [
+            {"match": {"connector": "-"}, "category": "storage"},
+            {"match": {"connector": "-", "op": RUN}, "always_wait": False},
+            {"match": {"connector": "cowx"}, "always_wait": True},
+        ],
+    )
+    key = make_rsa_keypair("kid-cpf-card-3")
+
+    status = _call(client, key, "cowx", RUN, OPERATOR)
+    async with get_sessionmaker()() as session:
+        (request,) = (await session.execute(select(ApprovalRequest))).scalars()
+    card = request.proposed_effect
+
+    assert status == WAIT
+    assert card["category"] == "storage", card
+    assert card["classification_rule"] == "tenant:classifications[0]", card
+    assert _wait_rule(client, key, "cowx")["path"] == "tenant:classifications[2]"
+
+
+# ---------------------------------------------------------------------------
+# An override counts only for its own product
+# ---------------------------------------------------------------------------
+
+
+async def _category_override(product: str, category: str) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            OperationPolicyOverride(
+                tenant_id=TENANT,
+                product=product,
+                version="",
+                impl_id="",
+                op_id=RUN,
+                category=category,
+                set_by_sub="admin-a",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_an_override_counts_only_for_its_own_product(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    # Both products share the form `-` and the op id, with another category each.
+    await _register(embedding, RUN)
+    await _category_override("cowx", "storage")
+    await _category_override("cowy", "network")
+    key = make_rsa_keypair("kid-cpf-override-own")
+    entry = {"match": {"op": RUN}, "labels": {"team": "blue"}}
+
+    preview = _edit_preview(client, key, entry)
+    imported = _send_entries(client, key, "import", [entry])
+
+    assert preview["conflict"] is None, preview
+    after = {op["connector_id"]: op["after"] for op in preview["operations"]}
+    assert after["cowx"]["category"] == "storage", after
+    assert after["cowy"]["category"] == "network", after
+    assert after["cowx"]["labels"] == after["cowy"]["labels"] == {"team": "blue"}, after
+    assert imported["ok"] is True, imported
+    assert imported["mistakes"] == [], imported
+
+
+# ---------------------------------------------------------------------------
+# Cases 28 to 37: the tenant's level against the install's, each the higher
+# of its two forms
+# ---------------------------------------------------------------------------
+
+_BY_PRODUCT = {"match": {"connector": "cowx", "op": RUN}, "risk": "dangerous"}
+_BY_DASH = {"match": {"connector": "-", "op": RUN}, "risk": "dangerous"}
+_ALL_CAUTION = {"match": {"connector": "*"}, "risk": "caution"}
+
+#: (case, the install's entry, the tenant's file, the levels of cowx and cowy or None)
+_LEVEL_CASES: list[tuple[str, dict[str, Any], list[dict[str, Any]], tuple[str, str] | None]] = [
+    ("28", _BY_PRODUCT, [_ALL_CAUTION, _BY_PRODUCT], ("dangerous", "caution")),
+    ("29", _BY_PRODUCT, [_ALL_CAUTION, _BY_DASH], ("dangerous", "dangerous")),
+    ("30", _BY_DASH, [_ALL_CAUTION, _BY_DASH], ("dangerous", "dangerous")),
+    ("31", _BY_DASH, [_ALL_CAUTION, _BY_PRODUCT], None),
+    ("32", _BY_DASH, [_ALL_CAUTION], None),
+    ("33", _BY_DASH, [{**_BY_DASH, "risk": "caution"}], None),
+    ("34", _BY_DASH, [{**_BY_PRODUCT, "risk": "caution"}], None),
+    ("35", _BY_PRODUCT, [_ALL_CAUTION], None),
+    ("36", _BY_PRODUCT, [{**_BY_PRODUCT, "risk": "caution"}], None),
+    ("37", _BY_PRODUCT, [{**_BY_DASH, "risk": "caution"}], None),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "install", "tenant", "levels"),
+    _LEVEL_CASES,
+    ids=[f"case-{c[0]}" for c in _LEVEL_CASES],
+)
+async def test_a_tenant_level_is_refused_only_below_the_install_level(
+    client: TestClient,
+    embedding: AsyncMock,
+    case: str,
+    install: dict[str, Any],
+    tenant: list[dict[str, Any]],
+    levels: tuple[str, str] | None,
+) -> None:
+    await _register(embedding, RUN)
+    await policy(None, [install])
+    key = make_rsa_keypair(f"kid-cpf-level-{case}")
+
+    validated = _send_entries(client, key, "validate", tenant)
+    imported = _send_entries(client, key, "import", tenant)
+
+    for answer in (validated, imported):
+        if levels is not None:
+            assert answer["ok"] is True, (case, answer)
+            continue
+        assert answer["ok"] is False, (case, answer)
+        (mistake,) = answer["mistakes"]
+        assert mistake.startswith(_RISK_REFUSAL), (case, mistake)
+    await policy(TENANT, tenant)
+    got = tuple(_explain(client, key, product, RUN)["risk_level"] for product in PRODUCTS)
+    # A refused file is never stored; stored anyway, the install's level still counts.
+    assert got == (levels or ("dangerous", got[1])), (case, got)

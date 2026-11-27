@@ -133,22 +133,32 @@ class OpCoordinates:
     form ``<impl_id>-<version>`` (for example ``-``). Such an operation is
     classified once per form (:meth:`forms`), and the stricter result
     counts (:func:`classify`). Build coordinates with
-    :func:`~meho_backplane.policy.store.coordinates_of`.
+    :func:`~meho_backplane.policy.store.coordinates_of`. ``form_of`` is set
+    only on a form made by :meth:`forms`: the connector id of the operation
+    the form belongs to.
     """
 
     connector_id: str
     group_key: str | None
     op_id: str
     dashed_connector_id: str | None = None
+    form_of: str | None = None
 
     def forms(self) -> tuple[OpCoordinates, ...]:
         """Each form of the connector id alone: the form with the dash first."""
         if self.dashed_connector_id is None:
             return (self,)
         return (
-            OpCoordinates(self.dashed_connector_id, self.group_key, self.op_id),
-            OpCoordinates(self.connector_id, self.group_key, self.op_id),
+            OpCoordinates(
+                self.dashed_connector_id, self.group_key, self.op_id, form_of=self.connector_id
+            ),
+            OpCoordinates(self.connector_id, self.group_key, self.op_id, form_of=self.connector_id),
         )
+
+    @property
+    def owner_id(self) -> str:
+        """The connector id of the operation, also for one form of it."""
+        return self.form_of or self.connector_id
 
 
 class ClassificationConflictError(ValueError):
@@ -172,7 +182,14 @@ def _literal_prefix(pattern: str | None) -> int:
 
 @dataclass(frozen=True)
 class ClassificationEntry:
-    """One classification entry, with where it came from (``ref``)."""
+    """One classification entry, with where it came from (``ref``).
+
+    ``for_connector`` is set on the entries of an override row: the entry
+    then matches only the operations of that connector id
+    (:attr:`OpCoordinates.owner_id`), in each form of the id. So two
+    connectors with no version that share the form with the dash and an
+    op id each keep their own override.
+    """
 
     ref: str
     scope: Scope
@@ -183,6 +200,7 @@ class ClassificationEntry:
     risk: str | None = None
     always_wait: bool | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
+    for_connector: str | None = None
 
     @property
     def level(self) -> str:
@@ -209,6 +227,8 @@ class ClassificationEntry:
         return any(self._matches_form(form) for form in coords.forms())
 
     def _matches_form(self, coords: OpCoordinates) -> bool:
+        if self.for_connector is not None and coords.owner_id != self.for_connector:
+            return False
         if self.connector is not None and not fnmatchcase(coords.connector_id, self.connector):
             return False
         if self.group is not None and (
@@ -368,21 +388,22 @@ def install_wait_text(name: str, op_id: str, install_ref: str, *, single_edit: b
     return f"{head} Remove `always_wait: false` from the tenant entry; its other fields can stay."
 
 
-def _tenant_risk_decided_by(
-    entry: ClassificationEntry, matched: Sequence[ClassificationEntry]
-) -> str | None:
-    """The tenant's own risk level when *entry* is one that decides it, else ``None``.
+def _tenant_form_risk(
+    entry: ClassificationEntry, form: OpCoordinates, matched: Sequence[ClassificationEntry]
+) -> tuple[str | None, bool]:
+    """The tenant's own risk level in one *form*, and whether *entry* decides it.
 
-    *matched* are the entries that match one operation. A more specific
-    tenant entry that sets ``risk`` decides instead of *entry*.
+    *matched* are the entries that match *form*. *entry* counts when it
+    matches *form*. The level is ``None`` when no tenant entry sets one.
     """
-    tenant = [e for e in matched if e.scope == "tenant"]
-    if not any(e is entry for e in tenant):
+    tenant = [e for e in matched if e.scope == "tenant" and e is not entry]
+    if entry.matches(form):
         tenant.append(entry)
     top = _scope_top(tenant, "tenant", "risk")
-    if not any(e is entry for e in top):
-        return None
-    return max((e.risk or "safe" for e in top), key=RISK_LEVELS.index)
+    if not top:
+        return None, False
+    level = max((e.risk or "safe" for e in top), key=RISK_LEVELS.index)
+    return level, any(e is entry for e in top)
 
 
 def install_risk_lowered(
@@ -395,12 +416,15 @@ def install_risk_lowered(
     *entries* are the install's entries and the other entries of the
     tenant. Returns ``(coords, install_ref, install_level)`` for the first
     operation in *coords* that *entry* matches, where *entry* decides the
-    tenant's level and an install entry sets a higher one. A more specific
+    tenant's level and that level is below the install's. A more specific
     tenant entry that sets the install's level or higher decides that
-    operation instead, so it is not returned. For an operation with two
-    forms of its connector id, the install's level is the higher of the
-    two forms, whichever form *entry* matches; the returned coordinates
-    are the form that *entry* matches. ``None`` when there is none.
+    operation instead, so it is not returned.
+
+    For an operation with two forms of its connector id, each side's
+    level is the higher of its two forms, each form decided by that
+    side's own entries. *entry* is returned when it decides the tenant's
+    level in one form and the tenant's level is below the install's; the
+    returned coordinates are that form. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.risk is None:
         return None
@@ -418,14 +442,11 @@ def install_risk_lowered(
         if install is None:
             continue
         install_level = install.risk or "safe"
-        for form in forms:
-            if not entry.matches(form):
-                continue
-            tenant_level = _tenant_risk_decided_by(entry, matched[form])
-            if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
-                install_level
-            ):
-                return form, install.ref, install_level
+        tenant = [_tenant_form_risk(entry, form, matched[form]) for form in forms]
+        decided = [form for form, (_, by_entry) in zip(forms, tenant, strict=True) if by_entry]
+        tenant_level = max((level for level, _ in tenant), key=_risk_index)
+        if decided and _risk_index(tenant_level) < RISK_LEVELS.index(install_level):
+            return decided[0], install.ref, install_level
     return None
 
 
@@ -503,22 +524,36 @@ def _risk_index(risk: str | None) -> int:
     return RISK_LEVELS.index(risk) if risk in RISK_LEVELS else -1
 
 
-def _stricter(dashed: Classification, product: Classification) -> Classification:
+def _shown_ref(matched: Sequence[ClassificationEntry]) -> str:
+    """The entry that gave the category, else the most specific one that gave a shown label.
+
+    :data:`DEFAULT_RULE_REF` when neither: the category is the taxonomy's
+    default and there are no labels.
+    """
+    top = _top(matched, "category")
+    if top:
+        return top[0].ref
+    labelled = [e for e in matched if any(label_text_ok(k, v) for k, v in e.labels.items())]
+    return max(labelled, key=lambda e: e.rank).ref if labelled else DEFAULT_RULE_REF
+
+
+def _stricter(dashed: Classification, product: Classification, shown_ref: str) -> Classification:
     """The two forms of one operation's connector id, field by field the stricter.
 
     The wait and the risk level are the stricter of the two, and a
     conflict of either form counts. The category and the labels are those
     of the form with the dash, so the product form never changes who
-    approves. ``rule_ref`` is that of the form with the dash too: it names
-    the entry that gave the category and the labels. The entry that makes
-    the operation wait is the one ``meho policy explain`` names.
+    approves. ``rule_ref`` is *shown_ref*: the entry of the form with the
+    dash that gave the category, or else the labels (:func:`_shown_ref`).
+    The entry that makes the operation wait is the one ``meho policy
+    explain`` names.
     """
     return Classification(
         category=dashed.category,
         labels=dashed.labels,
         risk=max((dashed.risk, product.risk), key=_risk_index),
         always_wait=dashed.always_wait or product.always_wait,
-        rule_ref=dashed.rule_ref,
+        rule_ref=shown_ref,
         conflict=dashed.conflict or product.conflict,
         install_category=dashed.install_category,
     )
@@ -542,7 +577,8 @@ def classify(
     first = _classify_form(forms[0], listed, taxonomy)
     if len(forms) == 1:
         return first
-    return _stricter(first, _classify_form(forms[1], listed, taxonomy))
+    shown_ref = _shown_ref([e for e in listed if e.matches(forms[0])])
+    return _stricter(first, _classify_form(forms[1], listed, taxonomy), shown_ref)
 
 
 def _classify_form(

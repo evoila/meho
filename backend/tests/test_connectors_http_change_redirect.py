@@ -956,7 +956,7 @@ def test_result_keeps_a_ticket_in_the_address_out_of_every_field(
         assert "one-time-ticket-123" not in text
         assert "/jobs" not in text
     if on:
-        assert "svc.example.com" in result.error
+        assert "svc.example.com." in result.error.split()
         assert result.extras["exception_message"] == (
             f"HTTP {status} redirect after POST svc.example.com"
         )
@@ -1171,7 +1171,12 @@ def test_the_answer_names_host_names_only(status: int, on: bool, answer_switch: 
     for text in (result.error, message):
         for marker in (*_MARKERS, "marker-sent-path", _MARKER_PORT, "https://"):
             assert marker not in text, (marker, text)
-    assert "svc.example.com" in message
+    if on:
+        assert message == f"HTTP {status} redirect after PUT svc.example.com"
+    else:
+        assert message == (
+            f"Redirect response {status} from svc.example.com to svc.example.com, not followed."
+        )
     if on:
         dumped = json.dumps(result.model_dump(mode="json"))
         for marker in (*_MARKERS, "marker-sent-path", _MARKER_PORT):

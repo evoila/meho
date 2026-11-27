@@ -316,7 +316,7 @@ async def test_ticket_in_the_redirect_address_stays_out_of_result_and_audit_row(
     message = result.extras["exception_message"]
     if on:
         assert message == "HTTP 303 redirect after POST vcfops.example.test"
-        assert "vcfops.example.test" in result.error
+        assert "vcfops.example.test." in result.error.split()
     else:
         assert result.error == "connector_error: HTTPStatusError"
         assert message == (

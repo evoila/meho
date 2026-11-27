@@ -20,7 +20,9 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 
+import hvac.exceptions
 import pytest
+from sqlalchemy import select
 
 from meho_backplane.auth import vault as auth_vault
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -33,6 +35,8 @@ from meho_backplane.connectors.vault import (
     register_vault_identity_token_operations,
     register_vault_typed_operations,
 )
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
@@ -147,3 +151,36 @@ async def test_kv_read_is_not_sent_once_the_caller_is_blocked_after_the_login(
     assert len(fake.auth.jwt.login_calls) == 1
     assert fake.secrets.kv.v2.read_calls == []
     assert _is_block_refusal(result), (result.status, result.error)
+
+
+async def test_token_store_names_the_accessor_when_the_revoke_fails_for_a_blocked_caller(
+    fake: _FakeClient, _registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mint = ops_token_store._mint
+
+    async def _mint_then_block(operator: Operator, target: Any, params: Any) -> Any:
+        minted = await real_mint(operator, target, params)
+        await block_the_caller(operator)
+        return minted
+
+    monkeypatch.setattr(ops_token_store, "_mint", _mint_then_block)
+    fake.auth.token.raise_on_revoke = hvac.exceptions.InternalServerError("stand-in failure")
+
+    result = await _run(ops_token_store.TOKEN_STORE_OP, dict(_STORE_PARAMS))
+
+    stays = "the new Vault token with accessor fake-accessor-for-block was not revoked"
+    assert fake.secrets.kv.v2.patch_calls == []
+    assert fake.secrets.kv.v2.put_calls == []
+    assert fake.auth.token.minted_client_token in fake.auth.token.revoked_tokens
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert stays in (result.error or "")
+    assert result.extras["not_removed"] == [stays]
+    async with get_sessionmaker()() as session:
+        rows = (
+            await session.execute(
+                select(AuditLog).where(AuditLog.path == ops_token_store.TOKEN_STORE_OP)
+            )
+        ).scalars()
+        (row,) = [r for r in rows if r.payload.get("result_status") == "denied"]
+    assert row.payload["error"]["not_removed"] == [stays]
+    assert fake.auth.token.minted_client_token not in str(row.payload)

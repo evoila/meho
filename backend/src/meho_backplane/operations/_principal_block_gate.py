@@ -28,6 +28,11 @@ step or request of the same operation was sent
 the answer then names the steps that were sent
 (:func:`~meho_backplane.auth.principal_block_run.sent_steps`) and says that
 the steps after them were not sent.
+
+When a clean-up of the run could not remove an account, user or token that
+the run made (:func:`~meho_backplane.auth.principal_block_run.not_removed`),
+the answer and the audit row name it and say that it stays
+(``not_removed``).
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from meho_backplane.auth.principal_block import (
     is_principal_blocked,
     refusal_of_step,
 )
-from meho_backplane.auth.principal_block_run import request_was_sent, sent_steps
+from meho_backplane.auth.principal_block_run import not_removed, request_was_sent, sent_steps
 from meho_backplane.connectors import OperationResult
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_ADVICE, UNCERTAIN_OUTCOME
 
@@ -64,6 +69,18 @@ _UNCERTAIN_EXTRAS: Final[dict[str, object]] = {
 }
 
 
+def _with_not_removed(text: str, extras: dict[str, object]) -> tuple[str, dict[str, object]]:
+    """Add what a clean-up of the run could not remove to the answer's text and extras."""
+    stays = not_removed()
+    if not stays:
+        return text, extras
+    names = "; ".join(stays)
+    return (
+        f"{text} This stays on the target, because MEHO could not remove it: {names}.",
+        {**extras, "not_removed": stays},
+    )
+
+
 def _unavailable(op_id: str, *, earlier_sent: bool = False) -> OperationResult:
     if earlier_sent:
         text = _after_earlier_request(
@@ -72,12 +89,13 @@ def _unavailable(op_id: str, *, earlier_sent: bool = False) -> OperationResult:
     else:
         text = "MEHO cannot read the block list, so the call did not run. Try again."
     outcome = _UNCERTAIN_EXTRAS if earlier_sent else {"execution_outcome": "not_started"}
+    text, extras = _with_not_removed(text, {"error_code": UNAVAILABLE_ERROR_CODE, **outcome})
     return OperationResult(
         status="error",
         op_id=op_id,
         error=f"{UNAVAILABLE_ERROR_CODE}: {text}",
         duration_ms=0.0,
-        extras={"error_code": UNAVAILABLE_ERROR_CODE, **outcome},
+        extras=extras,
     )
 
 
@@ -88,12 +106,16 @@ def _blocked(op_id: str, *, earlier_sent: bool = False) -> OperationResult:
         names = ", ".join(f"`{step}`" for step in steps)
         text = f"{text} These steps were sent: {names}. The steps after them were not sent."
     outcome = _UNCERTAIN_EXTRAS if earlier_sent else {"execution_outcome": "not_started"}
+    text, extras = _with_not_removed(
+        _after_earlier_request(text) if earlier_sent else text,
+        {"error_code": BLOCKED_ERROR_CODE, "reason": PRINCIPAL_BLOCKED_MESSAGE, **outcome},
+    )
     return OperationResult(
         status="denied",
         op_id=op_id,
-        error=f"{BLOCKED_ERROR_CODE}: {_after_earlier_request(text) if earlier_sent else text}",
+        error=f"{BLOCKED_ERROR_CODE}: {text}",
         duration_ms=0.0,
-        extras={"error_code": BLOCKED_ERROR_CODE, "reason": PRINCIPAL_BLOCKED_MESSAGE, **outcome},
+        extras=extras,
     )
 
 

@@ -479,9 +479,11 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
     always waits for approval, also when an older override turned it off.
     An operation that writes or makes a credential always waits for
     approval: also when its connector registered it without the approval
-    flag, and also when an install or tenant override turns it off. So does
-    an operation a connector marked with
-    :func:`~meho_backplane.op_classes.declare_credential_capable`.
+    flag, and also when an install or tenant override turns it off. An
+    operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable` keeps the
+    approval its code turns on; each of its calls waits anyway
+    (:func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
@@ -490,9 +492,8 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if (
-        is_credential_capable(row.op_id)
-        or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    if resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES or (
+        row.requires_approval and is_credential_capable(row.op_id)
     ):
         requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(

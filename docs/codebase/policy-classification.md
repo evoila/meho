@@ -151,10 +151,12 @@ always waits.
    value, and `always_wait: false` only goes back to the code's value;
 3. the floors: an operation that connects to an address the caller gives
    is at least `caution` and always waits. An operation that writes or
-   makes a credential (class `credential_write` or `credential_mint`), or
-   that a connector marked as credential capable, always waits: also when
-   its connector registered it without the approval flag, and also when an
-   install or tenant override turns approval off (`_with_floors`).
+   makes a credential (class `credential_write` or `credential_mint`)
+   always waits: also when its connector registered it without the
+   approval flag, and also when an install or tenant override turns
+   approval off (`_with_floors`). An operation a connector marked as
+   credential capable keeps the approval its code turns on; each of its
+   calls waits anyway (`raise_descriptor_for_params`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they

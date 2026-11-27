@@ -7,7 +7,8 @@
   connector registers at ``safe`` or ``caution`` without the approval flag
   gets the flag when it is looked up. A person's call waits for approval,
   with a token and in the web console. One approval request is stored and
-  the handler does not run.
+  the handler does not run. A call of an operation a connector marked as
+  credential capable waits the same way.
 * Every built-in operation that writes or makes a credential, or carries
   the credential mark, has the approval flag after the lookup.
 * The ingest floor turns the flag on for an ingested operation whose op id
@@ -29,7 +30,13 @@ from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
-from meho_backplane.op_classes import _DECLARED, declare_op_classes, is_credential_capable
+from meho_backplane.op_classes import (
+    _CREDENTIAL_CAPABLE,
+    _DECLARED,
+    declare_credential_capable,
+    declare_op_classes,
+    is_credential_capable,
+)
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.operations.ingest.safety_floors import apply_safety_floor, has_safety_floor
@@ -45,6 +52,7 @@ _TENANT = UUID("00000000-0000-0000-0000-00000000c4e1")
 _CONNECTOR_ID = "vault-1.x"
 _WRITE = "vault.standin.secret.write"
 _MINT = "vault.standin.token.make"
+_MARKED = "vault.standin.raw.write"
 _INGESTED_WRITE = "PUT:/v1/example/standin-keys/{id}"
 _CHANGE_CLASSES = frozenset({"credential_write", "credential_mint"})
 
@@ -66,9 +74,11 @@ def _state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_registry()
     ran.clear()
     declare_op_classes(credential_write=(_WRITE, _INGESTED_WRITE), credential_mint=(_MINT,))
+    declare_credential_capable((_MARKED,))
     yield
     for op_id in (_WRITE, _MINT, _INGESTED_WRITE):
         _DECLARED.pop(op_id, None)
+    _CREDENTIAL_CAPABLE.discard(_MARKED)
     reset_dispatcher_caches()
     clear_registry()
     get_settings.cache_clear()
@@ -145,6 +155,26 @@ async def test_a_persons_credential_write_waits_without_the_connector_flag(
 
     assert result.status == "awaiting_approval", result.error
     [request] = await _requests(op_id)
+    assert str(request.id) == result.extras["approval_request_id"]
+    assert ran == []
+
+
+@pytest.mark.parametrize("web_session", [False, True], ids=["token", "web-console"])
+async def test_a_persons_call_of_a_marked_operation_waits_without_the_connector_flag(
+    embedding: AsyncMock, web_session: bool
+) -> None:
+    await _register_standin(embedding, _MARKED, "safe")
+
+    result = await dispatch(
+        operator=_person(web_session=web_session),
+        connector_id=_CONNECTOR_ID,
+        op_id=_MARKED,
+        target=None,
+        params={},
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    [request] = await _requests(_MARKED)
     assert str(request.id) == result.extras["approval_request_id"]
     assert ran == []
 

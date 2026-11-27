@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 from custom_policy_check_fixture import (
@@ -1697,9 +1698,11 @@ def expected_floor_rules() -> set[str]:
     text = re.sub(r"\\\n\s*", " ", SCRIPT.read_text())
     ids: set[str] = set()
     for line in text.splitlines():
+        # A call may stand in an if: "if expect_previewed ...; then".
+        line = re.sub(r"^\s*if !?\s*", "", line)
         if line.split()[:1] not in (["expect"], ["expect_previewed"]):
             continue
-        words = shlex.split(line, comments=True)
+        words = shlex.split(line.split(";", 1)[0], comments=True)
         # The rule is argument 6 of expect and argument 9 of expect_previewed.
         rule = words[6] if words[0] == "expect" else words[9]
         if rule.startswith("floor:"):
@@ -1747,6 +1750,12 @@ class RuleIdTest(unittest.TestCase):
         self.assertEqual(expected - (fixed_rule_table() | floor_rule_ids()), set())
 
     def test_reads_the_ids_from_the_expect_lines_only(self) -> None:
+        with mock.patch.object(Path, "read_text", return_value=(
+            '    if expect_previewed s rest T OP "6 x" \\\n'
+            '        "who" REST waits "floor:only_in_an_if" personal_agent; then\n'
+            '# expect s 1 who REST waits "floor:in_a_comment" person\n'
+        )):  # fmt: skip
+            self.assertEqual(expected_floor_rules(), {"only_in_an_if"})
         self.assertIn("token_runs_only_safe", expected_floor_rules())
         self.assertIn("delete_waits", expected_floor_rules())
         self.assertNotIn("sandbox_delete_grant", floor_rule_ids())

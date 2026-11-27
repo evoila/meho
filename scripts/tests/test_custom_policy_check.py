@@ -19,8 +19,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 from typing import Any
+from unittest import mock
 
 from custom_policy_check_fixture import (
     ALWAYS_SKIPPED,

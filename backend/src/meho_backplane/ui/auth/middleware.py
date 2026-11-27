@@ -879,10 +879,12 @@ async def _reader_call_sentence(operator: Operator, request: Request) -> str | N
 
     Only a Reader's form is read; every other role gets ``None`` at once.
     FastAPI read the form before the dependencies run and the request keeps
-    it. ``params`` is the JSON text of the form; text that is not a JSON
-    object counts as no params. ``params`` that this check cannot read (JSON
-    nested too deep for the parser) give ``None``: the plain ``403
-    operator_required`` of the door, never a server error.
+    it. ``params`` is the JSON text of the form; an empty field counts as no
+    params. Text that is not JSON, or JSON nested too deep for the parser,
+    is params this check cannot read: it passes ``None``, so only what does
+    not depend on the params decides
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    Never a server error.
     """
     import json
 
@@ -892,12 +894,11 @@ async def _reader_call_sentence(operator: Operator, request: Request) -> str | N
     if operator.tenant_role is not TenantRole.READ_ONLY:
         return None
     form = await request.form()
+    params: object
     try:
         params = json.loads(str(form.get("params") or "{}"))
-    except ValueError:
-        params = {}
-    except RecursionError:
-        return None
+    except (ValueError, RecursionError):
+        params = None
     arguments = {
         "connector_id": form.get("connector_id"),
         "op_id": form.get("op_id"),

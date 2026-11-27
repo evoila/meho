@@ -16,6 +16,15 @@ does (the connector id, then
   :data:`~meho_backplane.operations.role_floors.READER_CHANGE_SENTENCE`;
 * a ``safe`` operation that needs no approval, or an operation that cannot
   be found: the plain role answer of the door.
+
+The door counts a call as a change with the same checks as the policy
+gate, also the checks that read the params
+(:func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`,
+for example a connector's check that marks a call as a credential call by
+its params). When the door can read the operation but not its params, it
+reads only what does not depend on the params: an operation that asks for
+a change whatever its params gets the sentence, and an operation that is a
+change only by its params gets the plain answer of the door.
 """
 
 from __future__ import annotations
@@ -34,27 +43,32 @@ async def reader_call_refusal(operator: Operator, arguments: object) -> str | No
     """The Reader sentence when *arguments* ask for a change, or ``None``.
 
     *arguments* is the body of the call: ``connector_id``, ``op_id`` and
-    ``params``. ``None`` means the door gives its plain role answer: the
-    caller is not a Reader, the arguments name no operation, the operation
-    cannot be found, or the call is a plain read.
+    ``params``. ``params`` that are missing count as no params. ``params``
+    that are not a JSON object (the door passes ``None`` for text it cannot
+    read) are params the door cannot read. ``None`` means the door gives its
+    plain role answer: the caller is not a Reader, the arguments name no
+    operation, the operation cannot be found, or the call is not a change.
     """
     if operator.tenant_role is not TenantRole.READ_ONLY or not isinstance(arguments, dict):
         return None
     connector_id = arguments.get("connector_id")
     op_id = arguments.get("op_id")
-    raw_params = arguments.get("params")
+    raw_params = arguments.get("params", {})
     if not isinstance(connector_id, str) or not isinstance(op_id, str):
         return None
     if not connector_id or not op_id:
         return None
-    params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
 
     from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
     from meho_backplane.operations._secret_values import split_reveal_secret
     from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
     from meho_backplane.operations.role_floors import asks_for_change, reader_change_refusal
+    from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
 
-    params, reveal_secret = split_reveal_secret(params)
+    params: dict[str, Any] | None = None
+    reveal_secret = False
+    if isinstance(raw_params, dict):
+        params, reveal_secret = split_reveal_secret(raw_params)
     product, version, impl_id = parse_connector_id(connector_id)
     descriptor = await lookup_descriptor(
         tenant_id=operator.tenant_id,
@@ -66,6 +80,8 @@ async def reader_call_refusal(operator: Operator, arguments: object) -> str | No
     if descriptor is None:
         return None
     raise_descriptor_for_reveal(descriptor, reveal_secret=reveal_secret)
+    if params is not None:
+        raise_descriptor_for_params(descriptor, params)
     return reader_change_refusal(
         operator.tenant_role, is_change=asks_for_change(descriptor, params)
     )

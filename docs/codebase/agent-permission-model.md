@@ -504,6 +504,29 @@ Where MEHO checks it:
     the code and the sentence. A `safe` read that needs no approval, an
     operation that cannot be found and a form that names no operation get
     `403 operator_required`.
+  - A Reader who asks for a change gets the Reader sentence only when MEHO
+    can read that it is a change; a body it cannot read gets the plain
+    refusal of the door. The three call doors count a call as a change
+    with the same checks as the policy gate, also the check by which a
+    connector marks a call as a credential call by its params
+    (`raise_descriptor_for_params`). A Reader's call that the gate refuses
+    as a change gets the code and the sentence at the door.
+    - When the door can read the operation but not its params, it reads
+      only what does not depend on the params. An operation that asks for
+      a change whatever its params gets the code and the sentence. An
+      operation that is a change only by its params gets the plain refusal
+      of the door.
+    - Params the door cannot read: on the REST call route and MCP
+      `call_operation`, `params` that are not a JSON object (a list, a
+      string, a number or `null`). On the console call form, the `params`
+      field is JSON text: an empty field counts as no params, and text
+      that is not JSON, JSON that is not an object and JSON nested too
+      deep for the parser are params it cannot read.
+    - When the door cannot read the operation itself (a body that is not
+      JSON on the REST call route), the Reader gets the plain refusal of
+      the door.
+    - MEHO stores nothing and runs nothing in every case. An Operator's
+      answers stay as they are.
   - The REST call route reads a body that is not a JSON object as a call
     that names no operation. An empty body, a form body and a `text/plain`
     body that is not JSON name no operation: a Reader gets the plain

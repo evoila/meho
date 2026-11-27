@@ -4032,7 +4032,7 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
-<td>With the switch <code>CUSTOM_POLICY</code> on, the setting <code>SERVICE_GRANT_DELETE_SHAPED_PATTERNS</code> only adds names to the built-in delete names. On MEHO versions without this change, a set value is the whole list. So an install whose setting leaves out a built-in name gets that name back when it turns the switch on. Then more calls by a service login wait for a person: a standing grant does not cover an operation with a built-in delete name. With the switch off, nothing changes.</td>
+<td>With the switch <code>CUSTOM_POLICY</code> on, the setting <code>SERVICE_GRANT_DELETE_SHAPED_PATTERNS</code> only adds names to the built-in delete names. On MEHO versions without this change, a setting with at least one name replaces the built-in names; an empty or blank setting keeps them. So an install whose setting leaves out a built-in name gets that name back when it turns the switch on. Then more calls by a service login wait for a person: a standing grant does not cover an operation with a built-in delete name. With the switch off, nothing changes.</td>
 <td>None. If you turn on <code>CUSTOM_POLICY</code>, keep only your own extra delete names in <code>SERVICE_GRANT_DELETE_SHAPED_PATTERNS</code>.</td>
 </tr>
 <tr>

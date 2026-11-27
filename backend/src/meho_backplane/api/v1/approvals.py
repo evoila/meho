@@ -103,9 +103,10 @@ from meho_backplane.auth.approval_sign_in import (
 from meho_backplane.auth.approval_sign_in_flow import sign_in_level_in_force
 from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.auth.rbac import (
+    HUMAN_ONLY_REST_REMEDIATION,
+    ensure_human_principal,
     require_approvals_access,
     require_fresh_approval_sign_in,
-    require_human_principal,
 )
 from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
@@ -150,6 +151,7 @@ from meho_backplane.operations.approval_queue import (
     DelegatedDecisionForbiddenError,
     DelegatedReasonInvalidError,
     Delegation,
+    NonHumanApprovalError,
     ParamsMismatchError,
     PreviewBindingMissingError,
     ResultAccessForbiddenError,
@@ -216,6 +218,7 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 #: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
 _require_approvals_access = Depends(require_approvals_access)
 
+
 #: Human-only governance gate. Rejects a non-human
 #: ``principal_kind`` (agent / service / runner) before the endpoint runs —
 #: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
@@ -223,7 +226,16 @@ _require_approvals_access = Depends(require_approvals_access)
 #: every transport. Attached only to the decision routes; the read routes
 #: (list / show / result) keep ``require_approvals_access`` alone so a
 #: service principal's approval bridge can still list the queue.
-_require_human = Depends(require_human_principal)
+def _require_human_approver(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    """Refuse a machine login on a decision route; the answer names the fixed rule."""
+    ensure_human_principal(
+        operator,
+        remediation=f"{HUMAN_ONLY_REST_REMEDIATION} Rule: {NonHumanApprovalError.rule}.",
+    )
+    return operator
+
+
+_require_human = Depends(_require_human_approver)
 
 #: Approve-only proof that a person is present (#3979, #5515): the token must
 #: come from a fresh approval sign-in, else ``401`` with the RFC 9470

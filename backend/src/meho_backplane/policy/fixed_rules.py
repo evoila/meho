@@ -22,14 +22,23 @@ The function wraps today's checks and does not copy them:
   :func:`~meho_backplane.operations.service_grants.descriptor_credential_reason`;
 * an address the caller gives:
   :func:`~meho_backplane.operations.service_grants.caller_address_grant_reason`;
-* the ``destructive`` level;
+* the ``destructive`` level, on the row or in the code
+  (``code_safety_level``), so a lowered level still counts;
 * a delete sign:
-  :func:`~meho_backplane.operations.service_grants.delete_grant_reason`.
+  :func:`~meho_backplane.operations.service_grants.delete_grant_reason`;
+* with the switch ``CUSTOM_POLICY`` on, a change of rights in a target
+  system (the field ``changes_rights`` of the operation).
 
 These are the kinds of :func:`~meho_backplane.operations.service_grants.never_covered_reason`
 that are fixed rules. Per-call approval and "always wait" stay their own
-rules there; they are not fixed rules. Nor are the role floor
-(:mod:`meho_backplane.operations.role_floors`) and the root shell mark.
+rules there; they are not fixed rules. Nor is the role floor
+(:mod:`meho_backplane.operations.role_floors`).
+
+Two fixed rules are never the answer of :func:`fixed_rule_for`:
+``agent_never_approves`` is a rule of the approve path, and
+``root_shell_waits`` (the root shell mark, :func:`root_shell_rule`) lets a
+standing grant made for the operation cover a call; only a run approval
+never covers it.
 
 Sandbox mode keeps its delete exception (``docs/decisions/sandbox-mode.md``):
 a delete grant may still cover a ``destructive`` or delete call of a
@@ -46,6 +55,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import is_human_principal
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -64,8 +74,13 @@ __all__ = [
     "POLICY_CHANGE_OPS",
     "POLICY_CHANGE_WAITS",
     "RIGHTS_CHANGE_WAITS",
+    "ROOT_SHELL_WAITS",
+    "TARGET_RIGHTS_WAITS",
     "FixedRuleId",
     "fixed_rule_for",
+    "fixed_rule_of_operation",
+    "rights_change_asker_refusal",
+    "root_shell_rule",
 ]
 
 FixedRuleId = Literal[
@@ -76,6 +91,8 @@ FixedRuleId = Literal[
     "destructive_waits",
     "delete_waits",
     "caller_address_waits",
+    "root_shell_waits",
+    "target_rights_waits",
 ]
 
 CREDENTIAL_WAITS: Final = "credential_waits"
@@ -85,6 +102,8 @@ AGENT_NEVER_APPROVES: Final = "agent_never_approves"
 DESTRUCTIVE_WAITS: Final = "destructive_waits"
 DELETE_WAITS: Final = "delete_waits"
 CALLER_ADDRESS_WAITS: Final = "caller_address_waits"
+ROOT_SHELL_WAITS: Final = "root_shell_waits"
+TARGET_RIGHTS_WAITS: Final = "target_rights_waits"
 
 #: Each fixed rule, with one plain sentence.
 FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
@@ -110,7 +129,23 @@ FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
         CALLER_ADDRESS_WAITS: (
             "A call to an address that the caller gives always waits for approval."
         ),
+        ROOT_SHELL_WAITS: (
+            "A command that runs as root on a host always waits for approval. No run "
+            "approval covers it; a standing grant made for the operation may."
+        ),
+        TARGET_RIGHTS_WAITS: (
+            "With the switch CUSTOM_POLICY on, a change of rights in a target system "
+            "waits for approval, and no standing grant and no run approval covers it."
+        ),
     }
+)
+
+#: What MEHO says when a login that is not a person asks for a change of
+#: the policy or of rights (:func:`rights_change_asker_refusal`).
+_RIGHTS_ASK_NEEDS_PERSON: Final[str] = (
+    "only a person may ask for a change of the policy or of rights. An agent login, "
+    "a service login and a hosted agent run cannot ask for it. A person asks in the "
+    "web console or with their own token"
 )
 
 #: The operations that change the policy. They are changes of rights too.
@@ -138,37 +173,92 @@ def _rights_rule(op_id: str, caller: Operator) -> FixedRuleId | None:
     return POLICY_CHANGE_WAITS if op_id in POLICY_CHANGE_OPS else RIGHTS_CHANGE_WAITS
 
 
-def fixed_rule_for(descriptor: EndpointDescriptor, caller: Operator) -> FixedRuleId | None:
-    """The fixed rule that holds when *caller* calls *descriptor*, or ``None``.
-
-    When more than one rule holds, the first of this order is named: a
-    change of the policy, a change of rights, a credential, an address the
-    caller gives, ``destructive``, a delete. Every kind of caller gets the
-    same rule, except a person's own click in the web console on a change
-    of rights or of the policy (:func:`_rights_rule`).
-
-    The answer never makes a call wait by itself. It says that no grant, no
-    run approval and no later policy rule may let the call run where
-    today's checks make it wait. ``agent_never_approves`` is a rule of the
-    approve path and is never the answer here.
-    """
+def _operation_rule(descriptor: EndpointDescriptor) -> FixedRuleId | None:
+    """The rule that holds for every caller of *descriptor*, without the change of rights."""
     from meho_backplane.operations.service_grants import (
         caller_address_grant_reason,
         delete_grant_reason,
         descriptor_credential_reason,
     )
 
-    op_id = descriptor.op_id
-    rights = _rights_rule(op_id, caller)
-    if rights is not None:
-        return rights
+    settings = get_settings()
+    if custom_policy_on(settings) and getattr(descriptor, "changes_rights", None):
+        return TARGET_RIGHTS_WAITS
     if descriptor_credential_reason(descriptor) is not None:
         return CREDENTIAL_WAITS
     if caller_address_grant_reason(descriptor) is not None:
         return CALLER_ADDRESS_WAITS
-    if descriptor.safety_level == "destructive":
+    if "destructive" in (descriptor.safety_level, getattr(descriptor, "code_safety_level", None)):
         return DESTRUCTIVE_WAITS
-    patterns = get_settings().service_grant_delete_shaped_patterns
-    if delete_grant_reason(op_id, patterns, descriptor) is not None:
+    patterns = settings.service_grant_delete_shaped_patterns
+    if delete_grant_reason(descriptor.op_id, patterns, descriptor) is not None:
         return DELETE_WAITS
     return None
+
+
+def fixed_rule_of_operation(descriptor: EndpointDescriptor) -> FixedRuleId | None:
+    """The fixed rule that holds for *descriptor* for some caller, or ``None``.
+
+    The edit checks of an operation's policy ask this: they do not know who
+    will call. It is :func:`fixed_rule_for` without the one exception for a
+    caller (a person's own click in the web console on a change of rights),
+    and with the root shell mark (:func:`root_shell_rule`).
+    """
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    op_id = descriptor.op_id
+    if is_rights_change_op(op_id):
+        return POLICY_CHANGE_WAITS if op_id in POLICY_CHANGE_OPS else RIGHTS_CHANGE_WAITS
+    return _operation_rule(descriptor) or root_shell_rule(op_id)
+
+
+def root_shell_rule(op_id: str) -> FixedRuleId | None:
+    """``root_shell_waits`` when a connector marked *op_id* as a command run as root, else ``None``.
+
+    The mark is :func:`~meho_backplane.op_classes.declare_root_shell`. No
+    run approval covers such a call.
+    """
+    from meho_backplane.op_classes import is_root_shell
+
+    return ROOT_SHELL_WAITS if is_root_shell(op_id) else None
+
+
+def rights_change_asker_refusal(op_id: str, caller: Operator) -> str | None:
+    """Why *caller* may not ask for *op_id* at all, or ``None``.
+
+    With the switch ``CUSTOM_POLICY`` on, only a person may ask for a change
+    of the policy or of rights. An agent login, a service login, a runner
+    and a hosted agent run are refused before anything waits. A person's
+    token is not refused here: its call waits. The rule holds for every
+    such operation, also one that brings no check of its own. With the
+    switch off it answers ``None``; then each operation's own check holds.
+    """
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    if not custom_policy_on(get_settings()) or not is_rights_change_op(op_id):
+        return None
+    if is_human_principal(caller) and resolve_actor_sub() is None:
+        return None
+    return _RIGHTS_ASK_NEEDS_PERSON
+
+
+def fixed_rule_for(descriptor: EndpointDescriptor, caller: Operator) -> FixedRuleId | None:
+    """The fixed rule that holds when *caller* calls *descriptor*, or ``None``.
+
+    When more than one rule holds, the first of this order is named: a
+    change of the policy, a change of rights, with the switch
+    ``CUSTOM_POLICY`` on a change of rights in a target system, a
+    credential, an address the caller gives, ``destructive`` (on the row or
+    in the code), a delete. Every kind of caller gets the
+    same rule, except a person's own click in the web console on a change
+    of rights or of the policy (:func:`_rights_rule`).
+
+    The answer never makes a call wait by itself. It says that no grant, no
+    run approval and no later policy rule may let the call run where
+    today's checks make it wait. ``agent_never_approves`` and
+    ``root_shell_waits`` are never the answer here (see the module text).
+    """
+    rights = _rights_rule(descriptor.op_id, caller)
+    if rights is not None:
+        return rights
+    return _operation_rule(descriptor)

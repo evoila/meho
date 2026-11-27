@@ -55,7 +55,13 @@ from meho_backplane.operations.rights_change_console import (
     runs_at_once_in_console,
 )
 from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
-from meho_backplane.policy.fixed_rules import fixed_rule_for
+from meho_backplane.policy.fixed_rules import (
+    POLICY_CHANGE_WAITS,
+    RIGHTS_CHANGE_WAITS,
+    TARGET_RIGHTS_WAITS,
+    fixed_rule_for,
+    rights_change_asker_refusal,
+)
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -727,13 +733,13 @@ def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor
     """True when a fixed rule holds, so no standing grant and no run approval is looked up.
 
     The gate asks :func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`
-    before it reads a grant. In sandbox mode the grant lookup decides, so
-    a delete grant may still cover a delete (``docs/decisions/sandbox-mode.md``).
+    before it reads a grant. In sandbox mode the grant lookup decides the
+    other rules, so a delete grant may still cover a delete
+    (``docs/decisions/sandbox-mode.md``); a change of rights or of the
+    policy is held here in sandbox mode too.
     """
-    if sandbox_mode_active():
-        return False
     rule = fixed_rule_for(descriptor, operator)
-    if rule is None:
+    if rule is None or (sandbox_mode_active() and rule not in _HELD_IN_SANDBOX):
         return False
     _log.info(
         "policy_gate_fixed_rule_no_grant",
@@ -743,6 +749,13 @@ def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor
         fixed_rule=rule,
     )
     return True
+
+
+#: The fixed rules that the gate holds also in sandbox mode: no standing
+#: grant and no run approval covers a change of rights or of the policy.
+_HELD_IN_SANDBOX: Final[frozenset[str]] = frozenset(
+    {RIGHTS_CHANGE_WAITS, POLICY_CHANGE_WAITS, TARGET_RIGHTS_WAITS}
+)
 
 
 async def _grant_or_run_approval(
@@ -1071,9 +1084,15 @@ def _requester_denial(
     The op's requester check
     (:func:`~meho_backplane.operations.role_floors.register_requester_check`)
     holds for every kind of login, so a refused call is ``DENY`` before any
-    approval request or preview is built.
+    approval request or preview is built. With the switch ``CUSTOM_POLICY``
+    on, the fixed rule that only a person asks for a change of the policy
+    or of rights holds too, for every such operation, also one with no
+    check of its own
+    (:func:`~meho_backplane.policy.fixed_rules.rights_change_asker_refusal`).
     """
     denial = requester_check_denial(descriptor.op_id, operator, params or {})
+    if denial is None:
+        denial = rights_change_asker_refusal(descriptor.op_id, operator)
     if denial is not None:
         _log.info(
             "policy_gate_requester_denied",

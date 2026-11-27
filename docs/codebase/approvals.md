@@ -936,9 +936,12 @@ genuine handler fault still records `500`.
 Some approval rules are fixed: no policy and no admin can lower them. They
 are in one list, `policy/fixed_rules.py` (`credential_waits`,
 `rights_change_waits`, `policy_change_waits`, `agent_never_approves`,
-`destructive_waits`, `delete_waits`, `caller_address_waits`). The call
-gate asks this list before it reads a standing grant or a run approval.
-Each rule and its sentence:
+`destructive_waits`, `delete_waits`, `caller_address_waits`,
+`root_shell_waits`, `target_rights_waits`). The call gate asks this list
+before it reads a standing grant or a run approval. When an agent, a
+service login or a runner tries to approve, the refusal names the rule
+`floor:agent_never_approves`, on REST and in the service layer. Each rule
+and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
 ## A credential call always waits for a person

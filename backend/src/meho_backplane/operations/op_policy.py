@@ -55,8 +55,9 @@ The rules:
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
 * **Credential write or mint.** An operation that writes or makes a
-  credential (class ``credential_write`` or ``credential_mint``) keeps the
-  approval its code turns on. No override removes it.
+  credential (class ``credential_write`` or ``credential_mint``) always
+  waits for approval, also when its connector registered it without the
+  approval flag. No override removes it.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -565,6 +566,11 @@ async def apply_step_policy(
     standing grant and no approval of the run clears an "always wait"
     step. The category and labels of an override row count too, so the
     step's approval request is routed like a direct call's.
+
+    A step whose operation writes or makes a credential (class
+    ``credential_write`` or ``credential_mint``) always gets the approval
+    flag, the same as :func:`_with_floors` gives it to a called operation.
+    Its risk level stays as it is.
     """
     key = OpKey.of(step)
     async with get_sessionmaker()() as session:
@@ -584,6 +590,8 @@ async def apply_step_policy(
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
+    if resolve_op_class(step.op_id, getattr(step, "op_class", None)) in _CREDENTIAL_CHANGE_CLASSES:
+        policy = replace(policy, requires_approval=True)
     _keep_code_values(step)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval

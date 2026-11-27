@@ -964,7 +964,10 @@ person approves it, only the child runs, and the multi-step run does not
 go on. An operation that writes or makes a credential always has the
 approval flag: MEHO turns it on when the operation is looked up and when
 an API description is ingested, also when the connector registered it
-without the flag. No install or tenant override turns it off. So a
+without the flag. A step of a multi-step operation whose operation writes
+or makes a credential gets the flag too, whatever flag the step declares
+(`apply_step_policy`): the step waits for a person, also at level `safe`
+and in the web console, and its risk level stays as it is. No install or tenant override turns it off. So a
 person's call waits too, with a token and in the web console, at every
 risk level. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),

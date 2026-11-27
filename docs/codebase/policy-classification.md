@@ -154,9 +154,11 @@ always waits.
    makes a credential (class `credential_write` or `credential_mint`)
    always waits: also when its connector registered it without the
    approval flag, and also when an install or tenant override turns
-   approval off (`_with_floors`). An operation a connector marked as
-   credential capable keeps the approval its code turns on; each of its
-   calls waits anyway (`raise_descriptor_for_params`).
+   approval off (`_with_floors`). A step of a multi-step operation whose
+   operation writes or makes a credential always waits the same way,
+   whatever flag the step declares (`apply_step_policy`). An operation a
+   connector marked as credential capable keeps the approval its code
+   turns on; each of its calls waits anyway (`raise_descriptor_for_params`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they

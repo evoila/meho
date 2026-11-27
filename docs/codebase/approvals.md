@@ -4002,9 +4002,9 @@ The one rule is `_level_for_plain_mark` in `operations/op_policy.py`.
 `effective_policy`, `apply_step_policy` and `policy_in_force` apply it, so
 the gate, a step of a multi-step operation, `meho policy explain`, the
 shadow check, search hits, the call contract, `preview_operation` and the
-approval card all see the same level. 50 built-in operations go from
-`caution` to `dangerous` (`backend/tests/test_custom_policy_no_plain_mark.py`
-builds the list from the registered operations).
+approval card all see the same level.
+`backend/tests/test_custom_policy_no_plain_mark.py` builds the list of
+re-levelled operations from the registered operations.
 
 What waits stays the same for a direct call: a `dangerous` call waits for
 a person in the web console, for a token and for an agent, and a service

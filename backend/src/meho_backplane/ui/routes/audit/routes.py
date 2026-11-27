@@ -587,7 +587,6 @@ async def _build_my_recent_context(session: UISessionContext) -> dict[str, objec
     result = await _run_query(filters, tenant_id=session.tenant_id)
     return {
         "rows": _project_rows(result, is_admin=is_admin),
-        "operator_sub": session.operator_sub,
     }
 
 

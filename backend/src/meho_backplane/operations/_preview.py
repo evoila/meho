@@ -413,6 +413,9 @@ class PreviewContext:
             agent gets beyond that follows ``PREVIEW_TYPED_WRITES``. A
             builder switch (:func:`register_preview_builder_switch`)
             applies only to the agent's side.
+        reads_target: ``True`` only when the agent's own preview gave the
+            builder the target's connector to read the target
+            (:func:`register_preview_target_read`, while its switch is on).
     """
 
     descriptor: EndpointDescriptor
@@ -422,6 +425,7 @@ class PreviewContext:
     params: dict[str, Any]
     connector_id: str | None = None
     agent_preview: bool = False
+    reads_target: bool = False
 
 
 class PreviewBuilder(Protocol):
@@ -1181,7 +1185,7 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
         return None
-    if ctx.agent_preview:
+    if ctx.agent_preview and ctx.reads_target:
         # The caller's own preview gets the dry run of every document.
         return await k8s_apply_agent_dry_run(ctx)
 

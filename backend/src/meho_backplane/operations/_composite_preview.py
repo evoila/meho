@@ -226,6 +226,7 @@ async def _synthetic_proposed_effect(
         params=params,
         connector_id=connector_id,
         agent_preview=True,
+        reads_target=connector is not None,
     )
     if connector is None:
         proposed_effect = await build_proposed_effect(ctx)

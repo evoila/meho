@@ -122,6 +122,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_gateway_mint_callers_name_the_approval.py",
     # Every guide and codebase docs page.
     "tests/test_people_behind_docs.py",
+    # Clean-ups that skip the block check, read from every module in the package.
+    "tests/test_principal_block_cleanup_guard.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")

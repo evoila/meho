@@ -33,7 +33,8 @@ read page by page.
 The answer is ``None`` ("not known") when MEHO cannot count:
 
 * the admin client is not set up;
-* a read fails, times out, is refused, or has an odd answer;
+* a read fails, times out, is refused, or has an odd answer (also a group
+  or a group member with no id);
 * platform admins come from a realm role (``JWT_PLATFORM_ADMIN_ROLE_NAME``),
   which the group read cannot see;
 * the realm has no admin group for the tenant, or the groups have no enabled
@@ -257,11 +258,10 @@ async def _admins(
         path = f"/groups/{quote(group_id, safe='')}/members"
         for user in await _read_list(kc, path, briefRepresentation="true"):
             user_id = user.get("id")
-            if (
-                isinstance(user_id, str)
-                and user_id
-                and user.get("enabled") is not False
-                and not _is_service_account(user, service_account_prefix)
+            if not isinstance(user_id, str) or not user_id:
+                raise _CannotCountError("a group member has no id")
+            if user.get("enabled") is not False and not _is_service_account(
+                user, service_account_prefix
             ):
                 ids.add(user_id.casefold())
                 if gives_platform:

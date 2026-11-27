@@ -1726,7 +1726,9 @@ there.
   platform admins together in `approvals.rights_change_admins`.
   `/api/v1/health` also reports the platform admins on their own in
   `approvals.rights_change_platform_admins`; `meho_status` leaves that field
-  out. `meho doctor` shows the line "second admin" from the platform admin
+  out, in an MCP session and for a hosted agent (`agent_health_payload` in
+  `api/v1/health.py`). A group member with no id makes both numbers not
+  known. `meho doctor` shows the line "second admin" from the platform admin
   number. For no platform admin or one it warns "This tenant has no platform
   admin." or "This tenant has only one platform admin.", followed by "Some
   changes of rights in MEHO's own login realm need a platform admin other

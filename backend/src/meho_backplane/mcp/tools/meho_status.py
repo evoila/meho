@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meho_backplane.api.v1.health import build_health_response
+from meho_backplane.api.v1.health import agent_health_payload
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import (
     READ_ONLY,
@@ -60,14 +60,11 @@ async def _meho_status_handler(
     The MCP dispatcher already validated ``arguments`` against the
     tool's ``inputSchema`` (``{additionalProperties: false}``) before
     reaching this handler, so the body unconditionally builds the
-    health bundle. ``model_dump(mode="json")`` serialises the
+    health bundle. :func:`agent_health_payload` serialises the
     :class:`HealthResponse` to a JSON-safe dict that the dispatcher
     wraps in the MCP ``content`` array.
     """
-    response = await build_health_response(operator)
-    return response.model_dump(
-        mode="json", exclude={"approvals": {"rights_change_platform_admins"}}
-    )
+    return await agent_health_payload(operator)
 
 
 register_mcp_tool(

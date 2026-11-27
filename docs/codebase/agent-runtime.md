@@ -367,7 +367,8 @@ A hosted agent whose prompt names no `connector_id` must still find one. Two
 pieces make that work:
 
 - `meho_status` — the backplane health check. It uses the same payload builder
-  as the MCP tool and `GET /api/v1/health` (`build_health_response`), then
+  as the MCP tool (`agent_health_payload`, built on `build_health_response`
+  of `GET /api/v1/health`), then
   drops the fields that only describe an MCP session:
   `mcp_session_id_capture`, `mcp_protocol_version`, `granted_scopes`, and
   `surface_summary` (that one lists MCP tools, which a hosted run does not

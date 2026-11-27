@@ -132,7 +132,7 @@ from meho_backplane.sandbox_mode import sandbox_mode_label
 from meho_backplane.settings import get_settings
 from meho_backplane.version import build_git_sha
 
-__all__ = ["build_health_response", "router"]
+__all__ = ["agent_health_payload", "build_health_response", "router"]
 
 #: Vault backend kind — the schemeless default (``config.credentialBackend`` /
 #: ``CREDENTIAL_BACKEND`` default). When the deployment runs on Vault the
@@ -381,7 +381,8 @@ class ApprovalsStatus(BaseModel):
     platform admin approves a change of rights in MEHO's own login realm, and
     never the person who asked with a token, so with fewer than two some
     changes cannot be approved. ``GET /api/v1/health`` reports it; the
-    ``meho_status`` tool leaves it out.
+    ``meho_status`` tool of an MCP session and of a hosted agent leaves it
+    out (:func:`agent_health_payload`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -1222,6 +1223,19 @@ async def _status_operator(
         return operator
     bound = await verify_jwt_and_bind(request, operator)
     return _operator_role_check(bound)
+
+
+async def agent_health_payload(operator: Operator) -> dict[str, Any]:
+    """The health answer an agent reads in ``meho_status``, as JSON.
+
+    The same answer as ``GET /api/v1/health``, without
+    ``approvals.rights_change_platform_admins``. The MCP tool and the
+    hosted agent's tool both use it.
+    """
+    response = await build_health_response(operator)
+    return response.model_dump(
+        mode="json", exclude={"approvals": {"rights_change_platform_admins"}}
+    )
 
 
 @router.get("/health", response_model=HealthResponse)

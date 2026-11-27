@@ -792,6 +792,22 @@ async def test_the_note_of_a_change_the_asker_never_approves_has_no_self_approva
     assert "approve it yourself" not in note
 
 
+@pytest.mark.parametrize("member", [{"username": "no-id"}, {"id": "", "username": "empty"}])
+async def test_a_platform_admin_with_no_id_makes_the_count_not_known(
+    member: dict[str, Any],
+) -> None:
+    """A tenant admin is found, but one platform admin cannot be counted."""
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(
+            mock,
+            [_admins_group(), _platform_group()],
+            {"g-admins": [_user(_ADMIN_A)], "g-platform": [_user(_PLATFORM_P), member]},
+        )
+        assert await platform_admin_count(_TENANT) is None
+        assert await admin_count(_TENANT) is None
+        assert await only_admin_note(_TENANT, _ADMIN_A) is None
+
+
 async def test_a_realm_with_no_admin_group_member_is_not_known() -> None:
     with respx.mock(assert_all_called=False) as mock:
         _mount(mock, [_operators_group()], {"g-operators": [_user("user-op")]})
@@ -840,17 +856,31 @@ async def test_health_without_the_platform_admin_count_reports_none(
     assert response.approvals.rights_change_platform_admins is None
 
 
-async def test_meho_status_leaves_out_the_platform_admin_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def _mcp_status(operator: Operator) -> dict[str, Any]:
     from meho_backplane.mcp.tools import meho_status
 
-    real = meho_status.build_health_response
+    return await meho_status._meho_status_handler(operator, {})
+
+
+async def _hosted_status(operator: Operator) -> dict[str, Any]:
+    from meho_backplane.agent import toolset_discovery
+
+    return await toolset_discovery._hosted_status(operator, {})
+
+
+@pytest.mark.parametrize("status", [_mcp_status, _hosted_status], ids=["mcp", "hosted"])
+async def test_meho_status_leaves_out_the_platform_admin_count(
+    monkeypatch: pytest.MonkeyPatch, status: Any
+) -> None:
+    """Both ``meho_status`` tools leave the field out, also when the count was read."""
+    from meho_backplane.api.v1 import health
+
+    real = health.build_health_response
 
     async def _build(operator: Operator) -> Any:
         return await real(operator, with_platform_admins=True)
 
-    monkeypatch.setattr(meho_status, "build_health_response", _build)
+    monkeypatch.setattr(health, "build_health_response", _build)
     operator = Operator(
         sub="op-platform-count",
         raw_jwt="<jwt>",
@@ -869,6 +899,6 @@ async def test_meho_status_leaves_out_the_platform_admin_count(
     monkeypatch.setattr("meho_backplane.api.v1.health.read_approval_sign_in", sign_in)
     with respx.mock(assert_all_called=False) as mock:
         _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
-        payload = await meho_status._meho_status_handler(operator, {})
+        payload = await status(operator)
     assert payload["approvals"]["rights_change_admins"] == 2
     assert "rights_change_platform_admins" not in payload["approvals"]

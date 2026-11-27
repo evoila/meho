@@ -76,6 +76,8 @@ jobs:
     # by its name: change both together.
     if: needs.switch.outputs.run == 'true'
     runs-on: meho-runners-ci-heavy-site2
+    # No cache access: the job has no cache step.
+    cache-mode: none
     # Starts when a runner takes the job, so it does not limit the wait.
     timeout-minutes: 15
     steps:

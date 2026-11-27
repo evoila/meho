@@ -68,6 +68,7 @@ _SECRET_STEPS = {
     "Verify spec-shelf provisioned the pinned specs",
     "Docker Hub login (for testcontainers pulls)",
     "Embedding-model drift guard (evoila/meho#574)",
+    "Hide the proxy name in the test reports",
 }
 # These save a cache: the new job restores caches and never saves one.
 _CACHE_SAVING_STEPS = {
@@ -85,7 +86,9 @@ _SECOND_SITE_ONLY_STEPS = {
     "Install uv",
     "Restore the fastembed model from the cache",
     "Restore the spaCy model from the cache",
+    "Hide the proxy name in the test reports",
 }
+_HIDE_STEP = "Hide the proxy name in the test reports"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("jq") is None or shutil.which("bash") is None,
@@ -272,7 +275,7 @@ def test_required_check_names_did_not_change() -> None:
 
 # The `secrets` context: `secrets.X`, `secrets['X']`, `toJSON(secrets)`. Not
 # part of a longer word such as `repo_secrets.sh` or `REQUIRE_SECRETS`.
-_SECRETS_CONTEXT = re.compile(r"(?<![\w./-])secrets\b(?!\.sh)", re.IGNORECASE)
+_SECRETS_CONTEXT = re.compile(r"(?<![\w./-])secrets\b", re.IGNORECASE)
 
 
 def _without_comments(text: str) -> str:
@@ -324,6 +327,8 @@ def test_ci_outside_the_jobs_names_no_secret() -> None:
         "env:\n  ALL: ${{ toJSON(secrets) }}\n",
         "env:\n  T: ${{ secrets['HF_TOKEN'] }}\n",
         "defaults:\n  run:\n    shell: bash\nenv:\n  T: ${{ secrets.X }}\n",
+        "env:\n  T: ${{ secrets.SHARED_TOKEN }}\n",
+        "env:\n  T: ${{ secrets.SH }}\n",
     ],
 )
 def test_ci_outside_the_jobs_check_finds_a_secret(entry: str) -> None:
@@ -346,9 +351,30 @@ def test_smoke_workflow_names_no_secret_environment_or_id_token() -> None:
         "needs",
         "if",
         "runs-on",
+        "cache-mode",
         "timeout-minutes",
         "steps",
     }
+
+
+def test_smoke_job_has_no_cache_access() -> None:
+    """``cache-mode: none``: GitHub gives the job no cache access at all."""
+    assert _workflow(_SMOKE_WORKFLOW)["jobs"]["smoke"].get("cache-mode") == "none"
+
+
+def test_a_secret_in_the_second_site_job_or_the_workflow_env_is_found() -> None:
+    text = _CI.read_text()
+    secret = "${{ secrets.SHARED_TOKEN }}"
+    marker = "      - *unit-sync\n"
+    assert text.count(marker) == 1
+    in_step = text.replace(marker, marker + f"      - name: Extra\n        run: echo {secret}\n", 1)
+    job = yaml.safe_load(in_step)["jobs"][_NEW_JOB]
+    with pytest.raises(AssertionError):
+        _assert_no_secret_environment_or_id_token(yaml.safe_dump(job))
+    in_env = text.replace("\njobs:\n", f"\nenv:\n  T: {secret}\njobs:\n", 1)
+    assert "\nenv:\n" not in text
+    with pytest.raises(AssertionError):
+        _assert_ci_outside_jobs_names_no_secret(in_env)
 
 
 @pytest.mark.parametrize(
@@ -358,6 +384,8 @@ def test_smoke_workflow_names_no_secret_environment_or_id_token() -> None:
         "x: ${{ secrets['HF_TOKEN'] }}",
         "x: ${{ toJSON(secrets) }}",
         "if: secrets.A != ''",
+        "x: ${{ secrets.SHARED_TOKEN }}",
+        "x: ${{ secrets.SH }}",
         "    environment: release",
         "      id-token: write",
     ],
@@ -519,6 +547,37 @@ def test_the_steps_that_differ_are_in_the_same_order() -> None:
     assert names[names.index(guard) + 1] == normal[normal.index(guard) + 1]
     for name in ("Install uv", "Restore the spaCy model from the cache"):
         assert names[names.index(name) + 1] == normal[normal.index(name) + 1]
+    for steps in (names, normal):
+        assert steps[steps.index(_HIDE_STEP) - 1] == "Pytest (unit shard ${{ matrix.shard }}/6)"
+        assert steps[steps.index(_HIDE_STEP) + 1] == (
+            "Upload per-test times (input for the shard split)"
+        )
+
+
+def test_hide_step_is_the_same_as_in_the_normal_job_without_its_env() -> None:
+    normal = dict(_step("python-unit-shard", _HIDE_STEP))
+    assert set(normal.pop("env")) == {"CI_IMAGE_PROXY"}
+    assert _step(_NEW_JOB, _HIDE_STEP) == normal
+
+
+def test_each_report_upload_of_the_second_site_job_needs_the_hide_step() -> None:
+    steps = _ci_jobs()[_NEW_JOB]["steps"]
+    names = [s["name"] for s in steps]
+    hide = names.index(_HIDE_STEP)
+    uploads = [
+        i
+        for i, s in enumerate(steps)
+        if str(s.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert uploads
+    for index in uploads:
+        assert index > hide, names[index]
+        assert "steps.hide-proxy-name.outcome == 'success'" in steps[index]["if"]
+
+
+def test_second_site_job_has_the_time_limit_of_the_normal_job() -> None:
+    jobs = _ci_jobs()
+    assert jobs[_NEW_JOB]["timeout-minutes"] == jobs["python-unit-shard"]["timeout-minutes"]
 
 
 # --- The second-site job restores caches and never saves one ---------------------
@@ -556,6 +615,11 @@ def _cache_saving_steps(steps: list[dict[str, Any]]) -> list[str]:
 def _second_site_saving_steps(text: str) -> list[str]:
     # yaml fills in every alias, so a save step in a shared step counts too.
     return _cache_saving_steps(_ci_jobs(text)[_NEW_JOB]["steps"])
+
+
+def test_second_site_job_has_read_only_cache_access() -> None:
+    """``cache-mode: read``: GitHub lets the job's token restore caches, never save one."""
+    assert _ci_jobs()[_NEW_JOB].get("cache-mode") == "read"
 
 
 def test_second_site_job_restores_caches_and_never_saves_one() -> None:
@@ -674,6 +738,7 @@ def test_image_step_writes_only_public_names(tmp_path: Path) -> None:
     assert set(written) == {
         "MEHO_TEST_PGVECTOR_IMAGE",
         "MEHO_TEST_VALKEY_IMAGE",
+        "RYUK_CONTAINER_IMAGE",
         "MEHO_TEST_VAULT_IMAGE",
         "MEHO_TEST_OPENBAO_IMAGE",
     }
@@ -684,7 +749,9 @@ def test_image_step_writes_only_public_names(tmp_path: Path) -> None:
 def test_new_job_has_no_login_and_no_spec_shelf() -> None:
     job = _ci_jobs()[_NEW_JOB]
     names = {s["name"] for s in job["steps"]}
-    assert not names & (_SECRET_STEPS - {"Embedding-model drift guard (evoila/meho#574)"})
+    assert not names & (
+        _SECRET_STEPS - {"Embedding-model drift guard (evoila/meho#574)", _HIDE_STEP}
+    )
     assert set(job["env"]) == {"MEHO_CONSUMER_DOCS_ROOT"}
     assert "HF_TOKEN" not in yaml.safe_dump(job)
 

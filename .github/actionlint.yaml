@@ -21,3 +21,15 @@ self-hosted-runner:
     - meho-runners-ci-heavy
     - meho-runners-ci-heavy-queue
     - meho-runners-ci-heavy-site2
+
+# actionlint 1.7.12 does not know the job key `cache-mode` yet (GitHub's
+# "Workflow syntax for GitHub Actions", `jobs.<job_id>.cache-mode`). Only
+# these two files set it. The pattern matches only the message for that one
+# key, so every other message still counts.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "job" section'
+  .github/workflows/second-site-smoke.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "job" section'

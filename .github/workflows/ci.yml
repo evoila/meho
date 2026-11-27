@@ -1592,8 +1592,8 @@ jobs:
     #
     # The test steps are YAML aliases (`*unit-...`) of the steps of
     # python-unit-shard, so the two jobs run the same steps. Only the steps
-    # that read a secret and the cache steps differ: this job restores
-    # caches and never saves one. Tests check both.
+    # that read a secret, the cache steps and the step "Hide the proxy name
+    # in the test reports" differ. Tests check this.
     #
     # Never on a fork pull request, the merge queue, the nightly run or any
     # other event: the `if:` below, and the pick rules in
@@ -1609,6 +1609,9 @@ jobs:
     runs-on: ${{ github.run_attempt == '1' && 'meho-runners-ci-heavy-site2' || 'meho-runners-ci-heavy' }}
     permissions:
       contents: read
+    # The job sets `cache-mode: read`, so GitHub lets its token restore
+    # caches and never save one.
+    cache-mode: read
     strategy:
       fail-fast: false
       matrix:
@@ -1651,6 +1654,7 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" <<'IMAGES'
           MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
           MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
           MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           IMAGES
@@ -1701,6 +1705,16 @@ jobs:
       - *unit-locale-install
       - *unit-download-picked
       - *unit-pytest
+
+      - name: Hide the proxy name in the test reports
+        # The same step as in python-unit-shard, with no `env:` block, so it
+        # names no secret. The upload below runs only when this step passed.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-unit-shard.xml
+
       - *unit-upload-times
       - *unit-peak-memory
 

@@ -2663,7 +2663,12 @@ runs shards 4-6, under the same check names `Python unit shard N/6`:
   `MEHO_CI_SITE=site2`;
 - its test steps are YAML aliases (`*unit-...`) of the steps of
   `python-unit-shard`, so the two jobs cannot drift apart. Only the steps
-  that read a secret and the cache steps differ;
+  that read a secret, the cache steps and the step "Hide the proxy name in
+  the test reports" differ. That step is the same as in
+  `python-unit-shard`, with no `env:` block, so it names no secret;
+- its time limit (`timeout-minutes`) is the same as in `python-unit-shard`;
+- the job sets `cache-mode: read`, so GitHub lets its token restore caches
+  and never save one;
 - it restores caches and never saves one: its cache steps use
   `actions/cache/restore`, its `astral-sh/setup-uv` step has
   `save-cache: false`, and it has no step that saves the PHP or the GBK
@@ -2685,7 +2690,8 @@ Every address in the private pod env `MEHO_CI_DENY_PROBE_HOSTS` (a comma or
 a line break ends an entry) must end in a timeout with no connection made. A
 refused connection, a certificate error, a success, a name that never
 resolved and an empty list all fail. The log shows only the position and
-the exit code of each address, never the address.
+the exit code of each address, never the address. The smoke job sets
+`cache-mode: none`, so GitHub gives it no cache access.
 
 **When the site dies.** The job `second-site-watchdog` runs on a
 GitHub-hosted runner when the site was picked. After 30 minutes, if a
@@ -2881,9 +2887,10 @@ The rule:
 - When the proxy is down or has no copy of an image, the pull fails. CI does
   not pull that image from Docker Hub instead. The test then fails, or skips
   where its fixture skips when its container cannot start.
-- GitHub hides a secret in the job log only. So the unit shard, coverage and
-  integration shard jobs run the step "Hide the proxy name in the test
-  reports" before they upload their JUnit files and pytest log.
+- GitHub hides a secret in the job log only. So the unit shard jobs (also
+  `python-unit-shard-second-site`), the coverage job and the integration
+  shard jobs run the step "Hide the proxy name in the test reports" before
+  they upload their JUnit files and pytest log.
   `scripts/ci/hide_proxy_name.py` replaces the proxy value and its host with
   `PROXY`, also in URL-encoded form. Each upload of these reports runs only
   when this step passed. The coverage data files stay as they are.
@@ -2930,6 +2937,11 @@ list does not grow old. It holds:
 - `python-outside-backend` in `ci.yml`: a GitHub-hosted runner on pull
   requests. The merge queue runs the same tests in the unit shards, through
   the proxy.
+- `python-unit-shard-second-site` in `ci.yml`: the job names no secret, so
+  it reads no proxy name. Its step "Use the public test images" sets the
+  same image lines as `python-unit-shard`, with the public `docker.io/`
+  names, and `test_image_step_uses_the_same_image_lines_with_no_secret`
+  keeps the lines equal.
 - the four kind jobs in `chart.yml` (`helm-test`, `helm-test-byo`,
   `rollback-drill`, `upgrade-from-release`): GitHub-hosted runners. kind
   pulls its node image, and the jobs pull the images they load into kind.

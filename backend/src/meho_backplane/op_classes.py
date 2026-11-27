@@ -81,8 +81,8 @@ _CREDENTIAL_CAPABLE: set[str] = set()
 _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
-_HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool]]] = {}
-_HIDDEN_STORED_REFUSALS: dict[str, str] = {}
+#: ``op_id`` -> (param name, check, refusal text or ``None``).
+_HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool], str | None]] = {}
 
 
 def declare_op_classes(
@@ -366,11 +366,7 @@ def declare_hidden_stored_param(
     because the install has no key for the encrypted hand-off
     (:func:`hidden_stored_param_refusal`).
     """
-    _HIDDEN_STORED_PARAMS[op_id] = (name, check)
-    if refusal is None:
-        _HIDDEN_STORED_REFUSALS.pop(op_id, None)
-    else:
-        _HIDDEN_STORED_REFUSALS[op_id] = refusal
+    _HIDDEN_STORED_PARAMS[op_id] = (name, check, refusal)
 
 
 def hidden_stored_param_refusal(op_id: str, params: Mapping[str, Any]) -> str | None:
@@ -379,10 +375,10 @@ def hidden_stored_param_refusal(op_id: str, params: Mapping[str, Any]) -> str | 
     ``None`` when *op_id* declared no refusal text, or when
     :func:`hidden_stored_param` does not hide a param of *params*.
     """
-    refusal = _HIDDEN_STORED_REFUSALS.get(op_id)
-    if refusal is None or hidden_stored_param(op_id, params) is None:
+    entry = _HIDDEN_STORED_PARAMS.get(op_id)
+    if entry is None or entry[2] is None or hidden_stored_param(op_id, params) is None:
         return None
-    return refusal
+    return entry[2]
 
 
 def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
@@ -394,7 +390,7 @@ def hidden_stored_param(op_id: str, params: Mapping[str, Any]) -> str | None:
     entry = _HIDDEN_STORED_PARAMS.get(op_id)
     if entry is None or entry[0] not in params:
         return None
-    name, check = entry
+    name, check, _refusal = entry
     try:
         flagged = bool(check(params))
     except Exception:
@@ -420,4 +416,3 @@ def _reset_declared_op_classes_for_testing() -> None:
     _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()
-    _HIDDEN_STORED_REFUSALS.clear()

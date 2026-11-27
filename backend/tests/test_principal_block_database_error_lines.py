@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A database error of the block table: the log line holds the step and the error type.
+"""A database error of the block table: the log line holds the step, the error type and code.
 
 Each step of the block code that reads or writes the block table fails with
 three faults: a database error whose statement values hold a made-up login
 id and a made-up reason (or sign-in key), a refused connection, and a
 time-out. The lines are read as the production log setup writes them,
 after the request log context was merged into them. No made-up value is in
-any line, the line of the step holds the fields of the request log context
-and its own step (``operation``) and error type (``error_type``). The call
-answers 503, or 500 when a block or unblock write fails with an error that
-is not a database error. The error that then leaves the app holds no
+any line, no line of the call but the error line of the request holds a
+traceback, and the line of the step holds the fields of the request log
+context and its own step (``operation``), error type (``error_type``) and
+error code (``error_code``). The call answers 503, or 500 when a block or
+unblock write fails with an error that is not a database error, and when
+the REST list cannot be read. The error that then leaves the app holds no
 made-up value in its text, its repr or its chain.
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import time
 import uuid
@@ -63,7 +66,7 @@ _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000db10c")
 _CALLER = "admin-of-the-block-list"
 _ROUTE = "/api/v1/principals/blocked"
 _PAGE = "/ui/blocked-people"
-_OWN_FIELDS = {"event", "level", "timestamp", "operation", "error_type"}
+_OWN_FIELDS = {"event", "level", "timestamp", "operation", "error_type", "error_code"}
 
 #: Step -> (event, operation) of its log line.
 _LINES = {
@@ -73,26 +76,42 @@ _LINES = {
     "unblock": ("principal_unblock_write_failed", "unblock"),
     "sign_in_lock": ("principal_unblock_sign_in_check_failed", "sign_in_check"),
     "sign_in_scan": ("principal_unblock_sign_in_check_failed", "sign_in_check"),
+    "list": ("principal_block_list_read_failed", "list_blocked"),
 }
 
-#: The routes each step runs through.
+#: The routes each step runs through, and the admin who calls them.
 _CASES = [
-    ("read_list", "rest_block"),
-    ("read_blocks", "rest_unblock"),
-    ("block", "rest_block"),
-    ("block", "console_block"),
-    ("unblock", "rest_unblock"),
-    ("unblock", "console_unblock"),
-    ("sign_in_lock", "rest_own_unblock"),
-    ("sign_in_scan", "rest_own_unblock"),
+    ("read_list", "rest_block", "platform"),
+    ("read_blocks", "rest_unblock", "platform"),
+    ("block", "rest_block", "platform"),
+    ("block", "console_block", "platform"),
+    ("unblock", "rest_unblock", "platform"),
+    ("unblock", "console_unblock", "platform"),
+    ("sign_in_lock", "rest_own_unblock", "platform"),
+    ("sign_in_scan", "rest_own_unblock", "platform"),
+    *[
+        ("list", route, admin)
+        for route in ("rest_list", "console_page", "console_unblock_list")
+        for admin in ("platform", "tenant")
+    ],
 ]
 
 _WRITES = ("block", "unblock")
 
+#: The lines that may hold a traceback: the error line of the request and
+#: the line the web server writes for an error that leaves the app.
+_ERROR_LINES = {"request_failed", "Exception in ASGI application\n"}
 
-def _status(step: str, fault: str) -> int:
-    """The status code of the call: a write fails with 500 on an error that is no database error."""
-    return 500 if step in _WRITES and fault != "database" else 503
+
+def _status(step: str, route: str, fault: str) -> int:
+    """The status code of the call.
+
+    A write fails with 500 on an error that is no database error, and the
+    REST list fails with 500 on every error. Every other call answers 503.
+    """
+    if route == "rest_list" or (step in _WRITES and fault != "database"):
+        return 500
+    return 503
 
 
 #: Fault -> the type name the log line names.
@@ -101,6 +120,19 @@ _ERROR_TYPES = {
     "refused": "ConnectionRefusedError",
     "timeout": "TimeoutError",
 }
+
+#: Fault -> the error code the log line names.
+_ERROR_CODES = {
+    "database": "57014",
+    "refused": errno.errorcode[errno.ECONNREFUSED],
+    "timeout": "none",
+}
+
+
+class _DriverError(Exception):
+    """A driver error with a SQLSTATE, as the asyncpg driver gives one."""
+
+    sqlstate = "57014"
 
 
 @pytest.fixture(autouse=True)
@@ -137,11 +169,11 @@ def _fault(kind: str, login: str, value: str) -> Exception:
         return OperationalError(
             "UPDATE principal_block SET reason=? WHERE sub=?",
             {"sub": login, "reason": value},
-            Exception(f"no row for {login}: {value}"),
+            _DriverError(f"no row for {login}: {value}"),
         )
     # The two other faults name the values too, so a chain to them shows.
     if kind == "refused":
-        return ConnectionRefusedError(111, f"Connection refused ({login} {value})")
+        return ConnectionRefusedError(errno.ECONNREFUSED, f"Connection refused ({login} {value})")
     return TimeoutError(f"timed out ({login} {value})")
 
 
@@ -161,6 +193,19 @@ def _make_fail(step: str, monkeypatch: pytest.MonkeyPatch, error: Exception) -> 
             return await execute(self, statement, *args, **kwargs)
 
         monkeypatch.setattr(AsyncSession, "execute", _execute)
+    elif step == "list":
+        execute = AsyncSession.execute
+
+        async def _execute_list(
+            self: AsyncSession, statement: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            if isinstance(statement, Select) and "principal_block.blocked_at DESC" in str(
+                statement
+            ):
+                raise error
+            return await execute(self, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", _execute_list)
     elif step == "block":
 
         def _fail_now(*args: Any, **kwargs: Any) -> None:
@@ -209,8 +254,8 @@ def _shown(sub: str) -> str:
     return asyncio.run(_do())
 
 
-def _token(key: Any, *, fresh: bool) -> str:
-    claims: dict[str, Any] = {"platform_admin": True}
+def _token(key: Any, *, fresh: bool, platform: bool = True) -> str:
+    claims: dict[str, Any] = {"platform_admin": True} if platform else {}
     if fresh:
         claims |= {"sid": f"sid-{uuid.uuid4().hex}", "auth_time": int(time.time())}
     return mint_token(
@@ -223,20 +268,29 @@ def _token(key: Any, *, fresh: bool) -> str:
     )
 
 
-def _call(client: TestClient, key: Any, route: str, login: str, reason: str) -> Any:
+def _call(client: TestClient, key: Any, route: str, login: str, reason: str, admin: str) -> Any:
+    platform = admin == "platform"
     if route.startswith("rest"):
-        token = _token(key, fresh=route == "rest_own_unblock")
+        token = _token(key, fresh=route == "rest_own_unblock", platform=platform)
         headers = {"Authorization": f"Bearer {token}", "Meho-Tenant": str(_TENANT)}
+        if route == "rest_list":
+            return client.get(_ROUTE, headers=headers)
         if route == "rest_block":
             return client.post(_ROUTE, json={"sub": login, "reason": reason}, headers=headers)
         sub = _CALLER if route == "rest_own_unblock" else login
         return client.request("DELETE", f"{_ROUTE}/{sub}", json={"reason": reason}, headers=headers)
     session_id = _seed_session_sync(
-        tenant_id=_TENANT, access_token=_token(key, fresh=False), operator_sub=_CALLER
+        tenant_id=_TENANT,
+        access_token=_token(key, fresh=False, platform=platform),
+        operator_sub=_CALLER,
     )
     csrf = mint_csrf_token(str(session_id))
     client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    if route == "console_page":
+        return client.get(_PAGE)
+    if route == "console_unblock_list":
+        return client.post(f"{_PAGE}/unblock", data={"sub": login}, headers=_csrf_headers(csrf))
     if route == "console_block":
         data = {"sub": login, "reason": reason}
         return client.post(_PAGE, data=data, headers=_csrf_headers(csrf))
@@ -252,12 +306,13 @@ def _chain(error: BaseException) -> Iterator[BaseException]:
 
 
 @pytest.mark.parametrize("fault", sorted(_ERROR_TYPES))
-@pytest.mark.parametrize(("step", "route"), _CASES)
+@pytest.mark.parametrize(("step", "route", "admin"), _CASES)
 def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_only(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
     step: str,
     route: str,
+    admin: str,
     fault: str,
 ) -> None:
     _seed_tenant(_TENANT, "block-table-errors")
@@ -279,7 +334,7 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
     with production_logging(), respx.mock(assert_all_called=False) as router:
         mock_discovery_and_jwks(router, public_jwks(key))
         client = TestClient(recorder, raise_server_exceptions=False, follow_redirects=False)
-        response = _call(client, key, route, login, reason)
+        response = _call(client, key, route, login, reason, admin)
         for error in recorder.errors:
             # The line the web server writes for an error that leaves the app.
             logging.getLogger("uvicorn.error").error(
@@ -287,9 +342,12 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
             )
     out = capfd.readouterr().out
 
-    assert response.status_code == _status(step, fault), response.text
+    status = _status(step, route, fault)
+    assert response.status_code == status, response.text
     assert [value for value in made_up if value in out] == []
     lines = json_lines(out)
+    with_traceback = [line["event"] for line in lines if "exception" in line]
+    assert set(with_traceback) <= _ERROR_LINES, lines
     event, operation = _LINES[step]
     step_lines = [line for line in lines if line["event"] == event]
     assert len(step_lines) == 1, lines
@@ -298,7 +356,8 @@ def test_a_database_error_of_the_block_table_logs_the_step_and_the_error_type_on
     assert line["level"] == "warning"
     assert line["operation"] == operation
     assert line["error_type"] == _ERROR_TYPES[fault]
-    if _status(step, fault) == 500:
+    assert line["error_code"] == _ERROR_CODES[fault]
+    if status == 500:
         assert len(recorder.errors) == 1
         for error in _chain(recorder.errors[0]):
             for value in made_up:

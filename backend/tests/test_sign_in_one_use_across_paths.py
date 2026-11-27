@@ -371,7 +371,7 @@ async def test_a_failed_sign_in_check_adds_no_login_field_of_its_own_and_no_erro
     step: str,
 ) -> None:
     ac, key = _client
-    # With the level check off, no other line of the call names the login.
+    # With the level check off, no other line of the call adds a login field of its own.
     monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "off")
     get_settings.cache_clear()
     login = f"login-{uuid.uuid4().hex}"
@@ -398,10 +398,11 @@ async def test_a_failed_sign_in_check_adds_no_login_field_of_its_own_and_no_erro
     assert {"request_id", "operator_sub", "tenant_id"} <= context
     failed = [line for line in lines if line["event"] == "principal_unblock_sign_in_check_failed"]
     assert len(failed) == 1, lines
-    assert set(failed[0]) == context | _LINE_FIELDS | {"operation", "error_type"}
+    assert set(failed[0]) == context | _LINE_FIELDS | {"operation", "error_type", "error_code"}
     assert failed[0]["level"] == "warning"
     assert failed[0]["operation"] == "sign_in_check"
     assert failed[0]["error_type"] == "OperationalError"
+    assert failed[0]["error_code"] == "none"
     assert failed[0]["operator_sub"] == login
     assert sign_in_key not in out
     assert "SELECT" not in out
@@ -416,6 +417,7 @@ async def test_a_failed_sign_in_check_adds_no_login_field_of_its_own_and_no_erro
             "log_level": "warning",
             "operation": "sign_in_check",
             "error_type": "OperationalError",
+            "error_code": "none",
         }
     ]
     assert login not in repr(logs)

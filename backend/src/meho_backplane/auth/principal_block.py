@@ -46,6 +46,7 @@ for an unknown state.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import time
@@ -189,14 +190,15 @@ async def _database_step[T](
 ) -> T:
     """Run *step*; on any error, log it and raise an error with the error type as its text.
 
-    The text of a database error holds the values of the statement (a
-    login, a reason, a sign-in key). So the warning *event* holds only
-    the step (*operation*) and the type of the error, and no traceback.
-    The raised error is *error*; with *other_error*, an error that is not
-    a database error (:class:`~sqlalchemy.exc.SQLAlchemyError`) raises
-    *other_error*. It is raised after the error was handled, so it carries
-    no chain to the error of the step. An error of *keep* (an answer of
-    the step itself) is raised as it is, with no warning.
+    A database error's text can hold values of the statement, so MEHO logs
+    only the step, the error type and the error code. The warning *event*
+    holds the step (*operation*), the type of the error and its fixed code
+    (:func:`_error_code`), and no traceback. The raised error is *error*;
+    with *other_error*, an error that is not a database error
+    (:class:`~sqlalchemy.exc.SQLAlchemyError`) raises *other_error*. It is
+    raised after the error was handled, so it carries no chain to the error
+    of the step. An error of *keep* (an answer of the step itself) is raised
+    as it is, with no warning.
     """
     try:
         return await step()
@@ -205,8 +207,26 @@ async def _database_step[T](
     except Exception as exc:
         error_type = type(exc).__name__
         raised = error if other_error is None or isinstance(exc, SQLAlchemyError) else other_error
-        _log.warning(event, operation=operation, error_type=error_type)
+        _log.warning(event, operation=operation, error_type=error_type, error_code=_error_code(exc))
     raise raised(error_type)
+
+
+def _error_code(exc: Exception) -> str:
+    """The fixed code of *exc*: a SQLSTATE, an ``errno`` name, or ``none``.
+
+    It reads only ``sqlstate`` and ``errno`` of the error and of the driver
+    error that SQLAlchemy keeps as ``orig``, never a message.
+    """
+    sources = (getattr(exc, "orig", None), exc)
+    for source in sources:
+        sqlstate = getattr(source, "sqlstate", None)
+        if isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum():
+            return sqlstate
+    for source in sources:
+        number = getattr(source, "errno", None)
+        if isinstance(number, int) and number in errno.errorcode:
+            return errno.errorcode[number]
+    return "none"
 
 
 def reset_block_cache() -> None:
@@ -642,10 +662,24 @@ async def _unblock_in_session(
 
 
 async def list_blocked(operator: Operator) -> list[BlockedPerson]:
-    """The blocks the admin may see: all for a platform admin, else their tenant's."""
+    """The blocks the admin may see: all for a platform admin, else their tenant's.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
+    """
     stmt = select(PrincipalBlock).order_by(PrincipalBlock.blocked_at.desc())
     if not operator.platform_admin:
         stmt = stmt.where(PrincipalBlock.scope == str(operator.tenant_id))
-    async with get_sessionmaker()() as session:
-        rows = (await session.execute(stmt)).scalars().all()
-    return [BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows]
+
+    async def _read() -> list[BlockedPerson]:
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+        return [
+            BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows
+        ]
+
+    return await _database_step(
+        _read,
+        event="principal_block_list_read_failed",
+        operation="list_blocked",
+        error=PrincipalBlockUnavailableError,
+    )

@@ -63,6 +63,7 @@ __all__ = [
     "Taxonomy",
     "check_no_conflict",
     "classify",
+    "each_form",
     "entries_from_document",
     "has_wildcard",
     "install_floor_texts",
@@ -128,16 +129,32 @@ def _label_key_ok(key: str) -> bool:
 class OpCoordinates:
     """What an entry can match on: the connector id, the group key, the op id.
 
-    ``dashed_connector_id`` is set only for a connector with no version,
-    whose id is its product: it holds the form ``<impl_id>-<version>``
-    (for example ``-``). An entry's connector pattern matches either form.
-    Build coordinates with :func:`~meho_backplane.policy.store.coordinates_of`.
+    ``dashed_connector_id`` is set only with ``CUSTOM_POLICY`` on, for a
+    connector with no version, whose id is then its product: it holds the
+    form ``<impl_id>-<version>`` (for example ``-``). Such an operation is
+    classified once per form (:meth:`forms`), and the stricter result
+    counts (:func:`classify`). Build coordinates with
+    :func:`~meho_backplane.policy.store.coordinates_of`.
     """
 
     connector_id: str
     group_key: str | None
     op_id: str
     dashed_connector_id: str | None = None
+
+    def forms(self) -> tuple[OpCoordinates, ...]:
+        """Each form of the connector id alone: the form with the dash first."""
+        if self.dashed_connector_id is None:
+            return (self,)
+        return (
+            OpCoordinates(self.dashed_connector_id, self.group_key, self.op_id),
+            OpCoordinates(self.connector_id, self.group_key, self.op_id),
+        )
+
+
+def each_form(coords: Iterable[OpCoordinates]) -> list[OpCoordinates]:
+    """Every form of every operation in *coords* (:meth:`OpCoordinates.forms`)."""
+    return [form for one in coords for form in one.forms()]
 
 
 class ClassificationConflictError(ValueError):
@@ -157,15 +174,6 @@ def _literal_prefix(pattern: str | None) -> int:
         if char in _GLOB_METACHARS:
             return index
     return len(pattern)
-
-
-def _connector_matches(coords: OpCoordinates, pattern: str) -> bool:
-    """True when *pattern* matches the connector id or its form with the dash."""
-    if fnmatchcase(coords.connector_id, pattern):
-        return True
-    return coords.dashed_connector_id is not None and fnmatchcase(
-        coords.dashed_connector_id, pattern
-    )
 
 
 @dataclass(frozen=True)
@@ -203,8 +211,11 @@ class ClassificationEntry:
         )
 
     def matches(self, coords: OpCoordinates) -> bool:
-        """True when every pattern the entry gives matches *coords*."""
-        if self.connector is not None and not _connector_matches(coords, self.connector):
+        """True when every pattern the entry gives matches one form of *coords*."""
+        return any(self._matches_form(form) for form in coords.forms())
+
+    def _matches_form(self, coords: OpCoordinates) -> bool:
+        if self.connector is not None and not fnmatchcase(coords.connector_id, self.connector):
             return False
         if self.group is not None and (
             coords.group_key is None or not fnmatchcase(coords.group_key, self.group)
@@ -334,7 +345,7 @@ def install_wait_undone(
     """
     if entry.scope != "tenant" or entry.always_wait is not False:
         return None
-    for one in coords:
+    for one in each_form(coords):
         if not entry.matches(one):
             continue
         install = _scope_wait([e for e in entries if e.matches(one)], "install")
@@ -392,7 +403,7 @@ def install_risk_lowered(
     """
     if entry.scope != "tenant" or entry.risk is None:
         return None
-    for one in coords:
+    for one in each_form(coords):
         if not entry.matches(one):
             continue
         matched = [e for e in entries if e.matches(one)]
@@ -463,10 +474,10 @@ def install_floor_texts(
         texts.append(install_wait_text(name, *undone))
     lowered = install_risk_lowered(entry, coords, entries)
     if lowered is not None and entry.risk is not None:
-        found = lowered[0]
+        found = (lowered[0].connector_id, lowered[0].op_id)
         wide = any(
             entry.matches(one)
-            and (one.connector_id, one.op_id) != (found.connector_id, found.op_id)
+            and found not in {(form.connector_id, form.op_id) for form in one.forms()}
             for one in coords
         )
         texts.append(
@@ -477,12 +488,58 @@ def install_floor_texts(
     return texts
 
 
+def _risk_index(risk: str | None) -> int:
+    """The place of *risk* in :data:`RISK_LEVELS`; no level is below ``safe``."""
+    return RISK_LEVELS.index(risk) if risk in RISK_LEVELS else -1
+
+
+def _stricter(dashed: Classification, product: Classification) -> Classification:
+    """The two forms of one operation's connector id, field by field the stricter.
+
+    The wait and the risk level are the stricter of the two, and a
+    conflict of either form counts. The category and the labels are those
+    of the form with the dash, so the product form never changes who
+    approves. ``rule_ref`` names the product form's entry only when it
+    made the operation wait or raised its level.
+    """
+    product_stricter = (product.always_wait and not dashed.always_wait) or _risk_index(
+        product.risk
+    ) > _risk_index(dashed.risk)
+    return Classification(
+        category=dashed.category,
+        labels=dashed.labels,
+        risk=max((dashed.risk, product.risk), key=_risk_index),
+        always_wait=dashed.always_wait or product.always_wait,
+        rule_ref=product.rule_ref if product_stricter else dashed.rule_ref,
+        conflict=dashed.conflict or product.conflict,
+        install_category=dashed.install_category,
+    )
+
+
 def classify(
     coords: OpCoordinates,
     entries: Iterable[ClassificationEntry],
     taxonomy: Taxonomy,
 ) -> Classification:
-    """Return the classified values of the operation at *coords*."""
+    """Return the classified values of the operation at *coords*.
+
+    An operation with two forms of its connector id (:meth:`OpCoordinates.forms`)
+    is classified once per form; the result is the stricter of the two
+    (:func:`_stricter`). An entry that matches only the product form can
+    add a wait or raise the level, never take a wait away, lower the level
+    or change the category or the labels.
+    """
+    listed = list(entries)
+    forms = coords.forms()
+    first = _classify_form(forms[0], listed, taxonomy)
+    if len(forms) == 1:
+        return first
+    return _stricter(first, _classify_form(forms[1], listed, taxonomy))
+
+
+def _classify_form(
+    coords: OpCoordinates, entries: Sequence[ClassificationEntry], taxonomy: Taxonomy
+) -> Classification:
     matched = [e for e in entries if e.matches(coords)]
     picked = [_scope_risk(matched, scope) for scope in _SCOPES]
     risks = [e.risk for e in picked if e is not None and e.risk is not None]

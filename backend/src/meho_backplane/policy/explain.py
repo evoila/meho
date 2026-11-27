@@ -97,6 +97,7 @@ from meho_backplane.policy.store import (
     _documents,
     _group_keys,
     _override_entries,
+    _override_entries_at,
     _stored_entries,
     classification_enabled,
     coordinates_of,
@@ -254,7 +255,9 @@ async def _apply_file(
         OpKey.of(stored), []
     )
     override_entries = _override_entries(overrides, coords.connector_id)
-    classified = classify(coords, [*view.entries, *override_entries], view.taxonomy)
+    classified = classify(
+        coords, [*view.entries, *_override_entries_at(overrides, coords)], view.taxonomy
+    )
     policy = policy_in_force(stored, overrides, classified)
     descriptor.safety_level = policy.safety_level
     descriptor.requires_approval = policy.requires_approval

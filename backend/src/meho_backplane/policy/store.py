@@ -57,7 +57,7 @@ from meho_backplane.policy.classification import (
     label_text_ok,
     taxonomy_from_documents,
 )
-from meho_backplane.policy.switches import classification_on
+from meho_backplane.policy.switches import classification_on, custom_policy_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -74,6 +74,7 @@ __all__ = [
     "load_classification",
     "load_step_groups",
     "plan_edit",
+    "product_form_on",
     "set_classification",
     "step_group_key",
 ]
@@ -97,6 +98,11 @@ SWITCH_OFF_REFUSAL: Final[str] = (
 def classification_enabled() -> bool:
     """True when ``POLICY_CLASSIFICATION`` or ``CUSTOM_POLICY`` is on."""
     return classification_on(get_settings())
+
+
+def product_form_on() -> bool:
+    """True when a connector with no version is named by its product (``CUSTOM_POLICY`` on)."""
+    return custom_policy_on(get_settings())
 
 
 class ConnectorRow(Protocol):
@@ -128,22 +134,26 @@ def _dashed_id(row: ConnectorRow) -> str:
 
 
 def connector_id_of(row: ConnectorRow) -> str:
-    """The connector id of *row*, the id a call uses.
+    """The connector id of *row* in the policy.
 
-    ``<impl_id>-<version>``, or ``<product>`` for a connector with no
-    implementation id or no version, the same rule as dispatch
+    ``<impl_id>-<version>``. With ``CUSTOM_POLICY`` on
+    (:func:`product_form_on`), a connector with no implementation id or no
+    version is named by its ``<product>`` instead, the id a call uses
     (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). Every
     reader of the policy names a connector with this function.
     """
-    return _dashed_id(row) if row.impl_id and row.version else row.product
+    if (row.impl_id and row.version) or not product_form_on():
+        return _dashed_id(row)
+    return row.product
 
 
 def coordinates_of(row: OperationRow, group_key: str | None) -> OpCoordinates:
     """What a policy entry matches for the operation of *row*, in group *group_key*.
 
-    For a connector with no version, an entry also matches the form
-    ``<impl_id>-<version>`` of its id, so an entry written for that form
-    keeps matching (:class:`~meho_backplane.policy.classification.OpCoordinates`).
+    When :func:`connector_id_of` names the connector by its product, the
+    coordinates also hold the form ``<impl_id>-<version>``. The operation is
+    then classified once per form, and the stricter result counts
+    (:func:`~meho_backplane.policy.classification.classify`).
     """
     connector_id = connector_id_of(row)
     dashed = _dashed_id(row)
@@ -190,6 +200,17 @@ def _override_entries(
             )
         )
     return entries
+
+
+def _override_entries_at(
+    overrides: Sequence[OperationPolicyOverride], coords: OpCoordinates
+) -> list[ClassificationEntry]:
+    """:func:`_override_entries` once per form of *coords*, so each form matches its own."""
+    return [
+        entry
+        for form in coords.forms()
+        for entry in _override_entries(overrides, form.connector_id)
+    ]
 
 
 async def load_classification(
@@ -266,7 +287,7 @@ async def classify_rows(
     results: list[Classification] = []
     for row, row_overrides in zip(rows, overrides, strict=True):
         coords = coordinates_of(row, keys.get(row.id))
-        all_entries = [*entries, *_override_entries(row_overrides, coords.connector_id)]
+        all_entries = [*entries, *_override_entries_at(row_overrides, coords)]
         results.append(classify(coords, all_entries, taxonomy))
     return results
 
@@ -376,9 +397,7 @@ async def classify_step(
     """
     taxonomy, entries = await load_classification(session, tenant_id)
     coords = coordinates_of(step, await step_group_key(session, tenant_id, step))
-    return classify(
-        coords, [*entries, *_override_entries(overrides, coords.connector_id)], taxonomy
-    )
+    return classify(coords, [*entries, *_override_entries_at(overrides, coords)], taxonomy)
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +529,7 @@ async def _override_entries_for(
     )
     entries: list[ClassificationEntry] = []
     for override in (await session.execute(stmt)).scalars():
-        entries.extend(_override_entries([override], connector_id_of(override)))
+        entries.extend(_override_entries_at([override], coordinates_of(override, None)))
     return entries
 
 

@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A connector with no version is named by its product in every policy answer.
+"""With ``CUSTOM_POLICY`` on, a connector with no version is named by its product.
 
 Two products, ``cowx`` and ``cowy``, each have a row of the operation
 ``cowshared.restart`` with no implementation id and no version. A call
-names such a connector by its product (``cowx``), so the dry run of the
-"always wait" carry-over, ``POST /api/v1/policy/explain`` and the
-overrides report name it that way too. A policy entry matches it by the
-product, and also by the form with the dash that it had before
-(``-``). The last test checks that no reader builds the id itself.
-All names and values are made up.
+names such a connector by its product (``cowx``). With ``CUSTOM_POLICY``
+on, the dry run of the "always wait" carry-over,
+``POST /api/v1/policy/explain`` and the overrides report name it that way
+too, and a policy entry that names the product makes its calls wait. An
+entry for the form with the dash (``-``) still matches it. The rule of
+the two forms is in ``test_policy_connector_product_form.py``; the answers
+with the switch off are in ``test_policy_connector_without_version_switch_off.py``.
+The last tests check that no reader builds the id itself. All names and
+values are made up.
 """
 
 from __future__ import annotations
@@ -64,8 +67,9 @@ def embedding() -> AsyncMock:
 
 
 @pytest.fixture(autouse=True)
-def classification_on(monkeypatch: pytest.MonkeyPatch) -> None:
+def custom_policy_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
     get_settings.cache_clear()
 
 
@@ -217,8 +221,9 @@ READERS = (
     "api/v1/operation_overrides.py",
 )
 
-#: The one function that may put the parts of a connector id together.
-ALLOWED = {("policy/store.py", "_dashed_id")}
+#: The functions that may put the parts of a connector id together: the
+#: shared one, and the overrides report's id with ``CUSTOM_POLICY`` off.
+ALLOWED = {("policy/store.py", "_dashed_id"), ("api/v1/operation_overrides.py", "_connector_id")}
 
 
 def _builds_connector_id(node: ast.JoinedStr) -> bool:

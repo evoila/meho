@@ -258,17 +258,25 @@ def _steps_by_op() -> tuple[dict[_StepKey, list[str]], dict[_StepKey, EndpointDe
 def _waiting_entries(
     entries: Sequence[ClassificationEntry], coords: OpCoordinates
 ) -> list[ClassificationEntry]:
-    """The entries of one scope that make *coords* wait.
+    """The entries of one scope that make *coords* wait, in any form of its connector id.
 
     The most specific entries that set ``always_wait`` decide it; on a tie
     ``true`` wins. So an entry with ``true`` that a more specific
-    ``always_wait: false`` overrules makes this operation not wait.
+    ``always_wait: false`` overrules makes this operation not wait. Each
+    form of the connector id (:meth:`OpCoordinates.forms`) is decided on
+    its own, as the gate does, and an entry that makes either form wait is
+    listed.
     """
-    setting = [e for e in entries if e.always_wait is not None and e.matches(coords)]
-    if not setting:
-        return []
-    best = max(e.rank for e in setting)
-    return [e for e in setting if e.rank == best and e.always_wait]
+    waiting: list[ClassificationEntry] = []
+    for form in coords.forms():
+        setting = [e for e in entries if e.always_wait is not None and e.matches(form)]
+        if not setting:
+            continue
+        best = max(e.rank for e in setting)
+        for entry in setting:
+            if entry.rank == best and entry.always_wait and all(entry is not w for w in waiting):
+                waiting.append(entry)
+    return waiting
 
 
 def _operation(coords: OpCoordinates, steps: Mapping[_StepKey, list[str]]) -> CarryOverOperation:

@@ -4055,8 +4055,9 @@ admin block list (`docs/codebase/principal-block.md`):
   block form.
 - `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
   303 back to the page. Refused: 422, the page again with the typed
-  values and the message next to its field. The table cannot be read or
-  written: 503, and no block is written.
+  values and the message next to its field. The database answers the
+  write with an error: 503 `principal_block_check_unavailable`, and no
+  block is written.
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
   the scope (all tenants for a platform admin). The confirm form carries

@@ -351,8 +351,9 @@ async def block_principal(
     the statement waits; when the unblock removed the row, the statement
     writes a new one. So a block is always written. Raises
     :class:`CannotBlockSelfError` for the admin's own login, and
-    :class:`PrincipalBlockUnavailableError` when the table cannot be
-    reached; then nothing is written.
+    :class:`PrincipalBlockUnavailableError` (503
+    ``principal_block_check_unavailable``) when the database answers the
+    write with an error; then nothing is written.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError

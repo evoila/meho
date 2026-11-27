@@ -272,9 +272,11 @@ sign-in, after a tenant switch, and on the first page view after
 change of role the entry follows within that time, while the page itself
 answers by the new role at once. The check keeps the role under the tenant
 it ran in, also when a token refresh finds the session in another tenant.
-The page and both forms keep their own 403. When the block list or the
-table cannot be read or written, a block and an unblock answer 503 and
-change nothing.
+The page and both forms keep their own 403. When the database answers the
+write of a block with an error, the block answers 503
+`principal_block_check_unavailable` and writes nothing. When the block list
+or the table cannot be read or written, an unblock answers 503 and changes
+nothing.
 
 Block and unblock of one login at the same moment: an unblock reads the
 blocks of the login with a row lock (`SELECT ... FOR UPDATE`, in the order

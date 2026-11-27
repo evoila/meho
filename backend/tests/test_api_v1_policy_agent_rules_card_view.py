@@ -10,9 +10,16 @@ agent and a service login over REST (``GET /api/v1/approvals`` and
 ``GET /api/v1/approvals/{request_id}``), and an agent and a service login
 through ``POST /mcp`` (``meho_approvals_get`` and ``meho_approvals_list``).
 
-* A person gets each role's whole list. A caller that is not a person gets,
-  for each role, the count, the first 50 items, and "N more" when there are
-  more. A runner login reads no approval card.
+* A person gets each role's whole list over REST and in the web console.
+  Every MCP answer (``meho_approvals_get``, ``meho_approvals_list`` and
+  ``preview_operation`` of ``policy.apply``, also for a person) and a caller
+  that is not a person over REST get, for each role, the count, the first
+  50 items, and "N more" when there are more. A runner login reads no
+  approval card.
+* The policy history (``GET /api/v1/policy/history``) gives its entries in
+  the same way: a person gets the whole list, a service login the short
+  form. With ``CUSTOM_POLICY`` off, an entry's ``diff`` has no part that
+  only the switch adds, and the stored revision stays as it is.
 * With ``CUSTOM_POLICY`` off, every view shows the card without the parts
   that only the switch adds. The stored row stays as it is, and a click
   stores nothing. A card asked with the switch off reads the same in every
@@ -36,7 +43,7 @@ from sqlalchemy import select
 
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, PolicyRevision
 from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE
 from meho_backplane.policy.service import POLICY_CHANGED
 from meho_backplane.settings import get_settings
@@ -121,7 +128,7 @@ def _rest_cards(client: TestClient, kind: str | None, request_id: str) -> list[d
     return [got.json()["proposed_effect"]["preview"], in_list["proposed_effect"]["preview"]]
 
 
-def _mcp_call(client: TestClient, kind: str, name: str, arguments: dict[str, Any]) -> Any:
+def _mcp_call(client: TestClient, kind: str | None, name: str, arguments: dict[str, Any]) -> Any:
     resp = client.post(
         "/mcp",
         json={
@@ -138,7 +145,7 @@ def _mcp_call(client: TestClient, kind: str, name: str, arguments: dict[str, Any
     return json.loads(body["result"]["content"][0]["text"])
 
 
-def _mcp_cards(client: TestClient, kind: str, request_id: str) -> list[dict[str, Any]]:
+def _mcp_cards(client: TestClient, kind: str | None, request_id: str) -> list[dict[str, Any]]:
     got = _mcp_call(client, kind, "meho_approvals_get", {"approval_request_id": request_id})
     listed = _mcp_call(client, kind, "meho_approvals_list", {"status": "pending"})
     (in_list,) = [item for item in listed["items"] if item["id"] == request_id]
@@ -181,7 +188,7 @@ async def test_a_person_gets_the_whole_list_and_another_caller_a_short_one(
         page = await a.console_get(client, _KEYPAIR, f"/ui/approvals/{request_id}", sub="rev-b")
         person = _rest_cards(client, None, request_id)
         short = [_rest_cards(client, kind, request_id) for kind in ("agent", "service")]
-        short += [_mcp_cards(client, kind, request_id) for kind in ("agent", "service")]
+        short += [_mcp_cards(client, kind, request_id) for kind in (None, "agent", "service")]
         runner = client.get(
             f"/api/v1/approvals/{request_id}",
             headers={"Authorization": f"Bearer {_token('runner')}"},
@@ -220,7 +227,8 @@ def _every_view(client: TestClient, request_id: str) -> list[dict[str, Any]]:
 
 
 def _without_switched(card: dict[str, Any]) -> dict[str, Any]:
-    shown = {key: value for key, value in card.items() if key != "planned_with_custom_policy"}
+    switched = ("planned_with_custom_policy", "planned_with_install_limits")
+    shown = {key: value for key, value in card.items() if key not in switched}
     shown["diff"] = {key: value for key, value in card["diff"].items() if key not in _SWITCHED}
     return shown
 
@@ -281,3 +289,109 @@ async def test_a_card_asked_with_the_switch_off_reads_the_same_in_every_view(
     assert not set(_SWITCHED) & set(stored["diff"])
     for card in before + after:
         assert card == stored
+
+
+def _short_form(whole: dict[str, list[Any]], more: str | None) -> dict[str, Any]:
+    return {
+        role: {
+            "count": len(items),
+            "items": items[:50],
+            **({"more": more} if more and items else {}),
+        }
+        for role, items in whole.items()
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("count", "more"), [(120, "70 more"), (50, None)], ids=["120", "50"])
+async def test_preview_operation_gives_a_person_the_short_form(
+    client: TestClient,
+    embedding: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int,
+    more: str | None,
+) -> None:
+    _switch(monkeypatch, True)
+    await h.setup_ops(embedding)
+    await a.set_limit("dangerous")
+    await _big_connector(count)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        planned = h.post(client, "import", a.tenant_admin(_KEYPAIR), _FILE_BIG, preview="true")
+        assert planned.status_code == 200, planned.text
+        params = {
+            "scope": "tenant",
+            "file": _FILE_BIG,
+            "file_sha256": planned.json()["file_sha256"],
+            "based_on": planned.json()["based_on"],
+        }
+        answer = _mcp_call(
+            client,
+            None,
+            "preview_operation",
+            {"connector_id": h.CONNECTOR, "op_id": POLICY_APPLY_OP_ID, "params": params},
+        )
+
+    whole = planned.json()["diff"]["runs_at_once"]
+    assert [len(whole[role]) for role in ("Reader", "Operator", "Admin")] == [0, count, count]
+    found = [card for card in _cards_in(answer) if "runs_at_once" in card.get("diff", {})]
+    assert found, answer
+    for card in found:
+        assert card["diff"]["runs_at_once"] == _short_form(whole, more)
+
+
+def _cards_in(value: Any) -> list[dict[str, Any]]:
+    """Every dict with a ``diff`` key anywhere in *value*."""
+    if isinstance(value, dict):
+        own = [value] if isinstance(value.get("diff"), dict) else []
+        return own + [card for item in value.values() for card in _cards_in(item)]
+    if isinstance(value, list):
+        return [card for item in value for card in _cards_in(item)]
+    return []
+
+
+def _history(client: TestClient, bearer: str) -> list[dict[str, Any]]:
+    resp = client.get("/api/v1/policy/history", headers={"Authorization": f"Bearer {bearer}"})
+    assert resp.status_code == 200, resp.text
+    entries: list[dict[str, Any]] = resp.json()
+    return entries
+
+
+async def _revision_diffs() -> list[Any]:
+    async with get_sessionmaker()() as session:
+        return [
+            copy.deepcopy(row.diff)
+            for row in (await session.execute(select(PolicyRevision))).scalars()
+        ]
+
+
+@pytest.mark.asyncio
+async def test_the_history_gives_a_service_login_the_short_form_and_hides_switch_parts_when_off(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _switch(monkeypatch, True)
+    await h.setup_ops(embedding)
+    await a.set_limit("dangerous")
+    await _big_connector(120)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        request_id = _ask(client, _FILE_BIG)
+        clicked = await h.console_approve(
+            client, _KEYPAIR, request_id, sub="tenant-admin-b", platform_admin=False
+        )
+        assert clicked.status_code == 200, clicked.text
+        (stored_diff,) = await _revision_diffs()
+        person = _history(client, a.tenant_admin(_KEYPAIR))
+        service = _history(client, _token("service"))
+        _switch(monkeypatch, False)
+        person_off = _history(client, a.tenant_admin(_KEYPAIR))
+
+    whole = stored_diff["runs_at_once"]
+    assert len(whole["Admin"]) == 120
+    ((entry,), (service_entry,), (off_entry,)) = (person, service, person_off)
+    assert entry["diff"] == stored_diff
+    assert service_entry["diff"]["runs_at_once"] == _short_form(whole, "70 more")
+    assert {**service_entry["diff"], "runs_at_once": whole} == stored_diff
+    assert not set(_SWITCHED) & set(off_entry["diff"])
+    assert off_entry["diff"] == {k: v for k, v in stored_diff.items() if k not in _SWITCHED}
+    assert await _revision_diffs() == [stored_diff]

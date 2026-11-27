@@ -228,6 +228,8 @@ async def test_only_a_card_planned_with_the_switch_on_holds_the_field(
         request_id, card = await _ask(client, key, FILE_P, scope=scope)
 
     expected = _RELEASED_KEYS if field is None else _RELEASED_KEYS | {"planned_with_custom_policy"}
+    if field is not None and scope == "tenant":
+        expected |= {"planned_with_install_limits"}
     reader = person("admin-b")
     got = (await _get_handler(reader, {"approval_request_id": str(request_id)}))["proposed_effect"][
         "preview"

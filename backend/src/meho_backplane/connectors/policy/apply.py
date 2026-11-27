@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import PrincipalKind, is_human_principal
+from meho_backplane.connectors.policy.apply_card import PLANNED_WITH_INSTALL_KEY, with_short_lists
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations._preview import approved_preview
 from meho_backplane.operations.secondary_target_policy import (
@@ -59,7 +60,12 @@ from meho_backplane.operations.typed_register import (
     remove_built_in_connector_rows,
 )
 from meho_backplane.policy.document import MAX_POLICY_BYTES
-from meho_backplane.policy.service import POLICY_CHANGED, apply_policy, build_plan
+from meho_backplane.policy.service import (
+    POLICY_CHANGED,
+    apply_policy,
+    build_plan,
+    install_limits_sha256,
+)
 from meho_backplane.policy.store import classification_enabled
 from meho_backplane.policy.switches import (
     classification_on_in_environment,
@@ -68,12 +74,15 @@ from meho_backplane.policy.switches import (
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from meho_backplane.auth.operator import Operator
     from meho_backplane.operations._preview import PreviewContext
     from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
     "IMPORT_NEEDS_APPROVAL",
+    "INSTALL_POLICY_CHANGED",
     "POLICY_APPLY_OP_ID",
     "SWITCH_OFF_IMPORT",
     "build_policy_apply_preview",
@@ -114,6 +123,12 @@ INSTALL_ASK_NEEDS_PLATFORM_ADMIN: Final[str] = (
 IMPORT_NEEDS_APPROVAL: Final[str] = (
     "A policy import runs at once only for an admin in the web console. Any other "
     "import waits until an admin approves it in the web console. Run the import again."
+)
+
+#: Why an approved tenant import did not run: the install's limits or
+#: classifications changed while the request waited.
+INSTALL_POLICY_CHANGED: Final[str] = (
+    "The install's policy changed since this request was planned. Ask again."
 )
 
 _SHA256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
@@ -280,6 +295,8 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
     if _card_switch_differs(custom_policy):
         raise ValueError(POLICY_CHANGED)
     async with get_sessionmaker()() as session, session.begin():
+        if custom_policy and await _install_changed_since_card(session):
+            raise ValueError(INSTALL_POLICY_CHANGED)
         return await apply_policy(
             session,
             scope=scope,
@@ -309,13 +326,32 @@ def _card_switch_differs(custom_policy: bool) -> bool:
     return (card.get("planned_with_custom_policy") is True) is not custom_policy
 
 
+async def _install_changed_since_card(session: AsyncSession) -> bool:
+    """True when the install's limits or classifications differ from the approved card's record.
+
+    Only a tenant import planned with ``CUSTOM_POLICY`` on has the record. A
+    run without an approval has no card and plans with the install's policy
+    now.
+    """
+    card = approved_preview(POLICY_APPLY_OP_ID)
+    if card is None or PLANNED_WITH_INSTALL_KEY not in card:
+        return False
+    return bool(card[PLANNED_WITH_INSTALL_KEY] != await install_limits_sha256(session))
+
+
 async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The plan on the approval card: what the file adds, changes and removes.
 
     An import planned with ``CUSTOM_POLICY`` on also holds
-    ``planned_with_custom_policy: true``; a card planned with the switch off
-    has the keys it had before the switch existed. Builds no plan for a
-    caller who may not ask for the import.
+    ``planned_with_custom_policy: true``, and a tenant import the hash of
+    the install's limits and classifications it was planned with
+    (:data:`~meho_backplane.connectors.policy.apply_card.PLANNED_WITH_INSTALL_KEY`).
+    A card planned with the switch off has the keys it had before the
+    switch existed. ``preview_operation`` gives each role's list of
+    ``runs_at_once`` in the short form
+    (:func:`~meho_backplane.connectors.policy.apply_card.with_short_lists`),
+    also to a person. Builds no plan for a caller who may not ask for the
+    import.
     """
     params = ctx.params
     refusal = policy_apply_requester_refusal(ctx.operator, params)
@@ -330,6 +366,7 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
             content=str(params["file"]).encode("utf-8"),
             custom_policy=custom_policy,
         )
+        install_sha = await install_limits_sha256(session) if custom_policy else None
     card: dict[str, Any] = {
         "scope": plan.scope,
         "file_sha256": plan.file_sha256,
@@ -342,7 +379,9 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
     if custom_policy:
         card["planned_with_custom_policy"] = True
-    return card
+        if plan.scope == "tenant":
+            card[PLANNED_WITH_INSTALL_KEY] = install_sha
+    return with_short_lists(card) if ctx.agent_preview else card
 
 
 async def register_policy_apply_operation(

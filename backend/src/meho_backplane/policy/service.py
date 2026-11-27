@@ -87,6 +87,7 @@ __all__ = [
     "build_plan",
     "builtin_install_document",
     "export_policy",
+    "install_limits_sha256",
     "list_history",
 ]
 
@@ -158,6 +159,12 @@ async def _stored_document(
     if stored is not None:
         return stored.document
     return builtin_install_document() if scope == "install" else None
+
+
+async def install_limits_sha256(session: AsyncSession) -> str:
+    """The hash of the ``limits`` and ``classifications`` of the install's stored policy."""
+    document = await _stored_document(session, "install", None) or {}
+    return canonical_sha256({key: document.get(key) for key in ("limits", "classifications")})
 
 
 def _stored_name(scope: Scope, tenant_id: uuid.UUID | None) -> str:

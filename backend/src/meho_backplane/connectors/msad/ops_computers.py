@@ -350,6 +350,7 @@ COMPUTER_OPS: tuple[MsadOp, ...] = (
         tags=("write", "computer", "join-prestage"),
         safety_level="caution",
         requires_approval=False,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Prestage a computer account so a machine can join the domain "
@@ -387,6 +388,7 @@ COMPUTER_OPS: tuple[MsadOp, ...] = (
         tags=("write", "computer", "unjoin"),
         safety_level="caution",
         requires_approval=False,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Disable a computer account so the machine leaves the domain's "

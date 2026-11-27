@@ -29,6 +29,7 @@ from meho_backplane.connectors.policy.apply import (
     record_policy_apply_requester,
     register_policy_apply_operation,
 )
+from meho_backplane.connectors.policy.apply_card import policy_card_as_read
 from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
     build_policy_classify_preview,
@@ -41,6 +42,7 @@ from meho_backplane.connectors.policy.preview import (
 )
 from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations._preview import (
+    register_card_view,
     register_permission_preflight,
     register_preview_builder,
 )
@@ -68,6 +70,7 @@ register_no_login_realm_op(POLICY_APPLY_OP_ID)
 declare_per_call_approval([POLICY_APPLY_OP_ID])
 register_requester_check(POLICY_APPLY_OP_ID, policy_apply_requester_refusal)
 register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)
+register_card_view(POLICY_APPLY_OP_ID, policy_card_as_read)
 register_permission_preflight(POLICY_APPLY_OP_ID, record_policy_apply_requester)
 register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)
 

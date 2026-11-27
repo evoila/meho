@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations._preview import card_as_read
 from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
@@ -237,7 +238,11 @@ def project_request_to_view(
         "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         **_project_people_behind(row),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
-        "proposed_effect": row.proposed_effect,
+        "proposed_effect": (
+            card_as_read(row.op_id, row.proposed_effect, whole=True)
+            if isinstance(row.proposed_effect, dict)
+            else row.proposed_effect
+        ),
         "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "reviewed_by": row.reviewed_by,

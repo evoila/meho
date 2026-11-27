@@ -113,6 +113,7 @@ __all__ = [
     "build_card_warnings",
     "build_permission_preflight",
     "build_proposed_effect",
+    "card_as_read",
     "describe_preview_provenance",
     "grant_preview",
     "grant_preview_var",
@@ -121,6 +122,7 @@ __all__ = [
     "preview_failure_reason",
     "proposed_effect_for_agent",
     "register_agent_preview_filter",
+    "register_card_view",
     "register_card_warnings",
     "register_permission_preflight",
     "register_person_only_preview_keys",
@@ -579,6 +581,28 @@ def register_agent_preview_filter(
     _AGENT_PREVIEW_FILTERS[op_id] = preview_filter
 
 
+#: ``op_id`` -> how a reader sees the stored card of the op
+#: (:func:`register_card_view`).
+_CARD_VIEWS: dict[str, Callable[[dict[str, Any], bool], dict[str, Any]]] = {}
+
+
+def register_card_view(op_id: str, view: Callable[[dict[str, Any], bool], dict[str, Any]]) -> None:
+    """Give each reader the stored card of *op_id* as ``view(effect, whole)`` returns it.
+
+    *whole* is true for a person in the web console or over REST, and false
+    for the MCP approval tools and for an agent, service or runner login
+    over REST. The view reads its own switch and gives back a new dict; it
+    never changes the stored one (:func:`card_as_read`).
+    """
+    _CARD_VIEWS[op_id] = view
+
+
+def card_as_read(op_id: str, effect: dict[str, Any], *, whole: bool) -> dict[str, Any]:
+    """*effect* as the view of *op_id* gives it to a reader; *effect* itself without a view."""
+    view = _CARD_VIEWS.get(op_id)
+    return effect if view is None else view(effect, whole)
+
+
 #: Top-level keys of a stored ``proposed_effect`` that only a person reads:
 #: the line of the approval card that says why a credential call waits, and
 #: what each container of a ``k8s.apply`` runs when its dry run failed
@@ -710,12 +734,13 @@ def proposed_effect_for_agent(
     The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
     the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
     of :data:`SWITCHED_EFFECT_KEYS` or a field of :data:`SWITCHED_OBJECT_FIELDS`
-    is in it only while its switch is on. Every other ``proposed_effect`` comes
-    back unchanged.
+    is in it only while its switch is on. The view of the op
+    (:func:`register_card_view`) gives the card as a reader that is not a
+    person reads it. Every other ``proposed_effect`` comes back unchanged.
     """
     if not isinstance(effect, dict):
         return effect
-    effect = without_person_only_effect_keys(effect)
+    effect = card_as_read(op_id, without_person_only_effect_keys(effect), whole=False)
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}

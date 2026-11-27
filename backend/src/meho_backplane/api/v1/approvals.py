@@ -112,6 +112,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations._preview import (
+    card_as_read,
     proposed_effect_for_agent,
     without_internal_effect_keys,
     without_person_only_effect_keys,
@@ -776,12 +777,18 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
     a person (:func:`without_person_only_effect_keys`). No caller reads the
-    internal keys (:func:`without_internal_effect_keys`).
+    internal keys (:func:`without_internal_effect_keys`). The view of the op
+    (:func:`~meho_backplane.operations._preview.card_as_read`) shapes every
+    card for its reader.
     """
     if _reads_whole_card(operator):
-        return without_internal_effect_keys(row.proposed_effect)
+        return card_as_read(
+            row.op_id, without_internal_effect_keys(row.proposed_effect), whole=True
+        )
     if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
-        return without_person_only_effect_keys(row.proposed_effect)
+        return card_as_read(
+            row.op_id, without_person_only_effect_keys(row.proposed_effect), whole=False
+        )
     shown = proposed_effect_for_agent(
         row.op_id,
         row.proposed_effect,

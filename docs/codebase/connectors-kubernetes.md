@@ -754,10 +754,8 @@ that is plain text, a `kind` or `metadata.name` that is not a text, a
 text with no documents, and text that is not valid YAML. A
 `metadata.name` that YAML reads as a number, a date or true or false (for
 example `2026-11-26` or `2024` without quotes) is refused, and the refusal
-says to put the name in quotes. A list object is
-refused too: a document whose `kind` is `List`, or that has a top-level
-`items` field, in any group. A Kubernetes API server refuses the
-server-side apply of such a document.
+says to put the name in quotes. A document whose `kind` is `List`, or
+whose top-level `items` field is a list, is refused before the wait.
 
 The refusal names the document by its number, counted from 1 (the first
 document is document 1; an empty document between two `---` lines counts

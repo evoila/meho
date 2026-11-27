@@ -484,12 +484,39 @@ async def test_a_custom_resource_with_items_under_spec_waits_once(cluster: Async
     assert preview["status"] == "ok", preview
 
 
+_COUNTER = "apiVersion: example.com/v1\nkind: Counter\nmetadata: {name: one}\nitems: 3\n"
+_CONFIG_MAP = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\ndata: {a: b}\n"
+
+
+async def test_a_custom_resource_whose_items_is_a_number_waits_once(cluster: AsyncMock) -> None:
+    params = {"manifest": _COUNTER}
+    result = await _call(params)
+    preview = await preview_dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP,
+        target=_TARGET,
+        params=params,
+    )
+    assert result.status == "awaiting_approval", result
+    assert await _count(ApprovalRequest) == 1
+    assert preview["status"] == "ok", preview
+
+
+async def test_three_documents_with_items_a_number_in_the_middle_wait_once(
+    cluster: AsyncMock,
+) -> None:
+    result = await _call({"manifest": "---\n".join([_CONFIG_MAP, _COUNTER, _CONFIG_MAP])})
+    assert result.status == "awaiting_approval", result
+    assert await _count(ApprovalRequest) == 1
+
+
 def _recorded(api_version: str, kind: str, rest: str) -> str:
     head = f"apiVersion: {api_version}\nkind: {kind}\n"
     return f"{head}metadata: {{name: one, namespace: prod}}\n{rest}"
 
 
-#: (manifest, the API server refused it) for the 14 recorded cases, in their order.
+#: (manifest, the API server refused it) for the 27 recorded cases, in their order.
 _RECORDED_ANSWERS: list[tuple[str, bool]] = [
     (_recorded("example.com/v1", "ShoppingList", "items: [milk]\n"), True),
     (_recorded("example.com/v1", "Cart", "items: [milk]\n"), True),
@@ -505,11 +532,24 @@ _RECORDED_ANSWERS: list[tuple[str, bool]] = [
     (_recorded("v1", "NamespaceList", "items: []\n"), True),
     (_recorded("example.com/v1", "ShoppingList", "spec:\n  items: [milk]\n"), False),
     (_recorded("v1", "ConfigMap", "data: {a: b}\n"), False),
+    (_recorded("example.com/v1", "Basket", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "Basket", "items: []\n"), True),
+    (_recorded("example.com/v1", "Counter", "items: 3\n"), False),
+    (_recorded("example.com/v1", "Label", "items: milk\n"), False),
+    (_recorded("example.com/v1", "Folder", "items: {a: b}\n"), False),
+    (_recorded("example.com/v1", "Basket", ""), False),
+    (_recorded("example.com/v1", "Bag", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "Bag", "items: []\n"), True),
+    (_recorded("example.com/v1", "Bag", "items: 3\n"), False),
+    (_recorded("example.com/v1", "Bag", "items: milk\n"), False),
+    (_recorded("example.com/v1", "Bag", "items: {a: b}\n"), False),
+    (_recorded("example.com/v1", "Bag", "items: null\n"), False),
+    (_recorded("example.com/v1", "Bag", ""), False),
 ]
 
 
 @pytest.mark.parametrize(
-    ("manifest", "refused"), _RECORDED_ANSWERS, ids=[str(n) for n in range(1, 15)]
+    ("manifest", "refused"), _RECORDED_ANSWERS, ids=[str(n) for n in range(1, 28)]
 )
 def test_the_list_object_check_matches_a_real_api_server(manifest: str, refused: bool) -> None:
     """Expected answers recorded from a real API server: Kubernetes 1.37.0 (a kind cluster),

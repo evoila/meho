@@ -137,7 +137,7 @@ def _check_document(number: int, doc: object) -> None:
             raise fail(f"is missing {field}")
         if not isinstance(value, str):
             raise fail(f"has {_ARTICLE[field]} {field} that is not a text")
-    if kind == "List" or "items" in doc:
+    if kind == "List" or isinstance(doc.get("items"), list):
         raise fail("is a list object")
     metadata = doc.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
@@ -158,10 +158,9 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     number in a refusal is the place of the document in the text. Each
     surviving doc must be a mapping with a ``metadata`` mapping, and
     ``apiVersion``, ``kind`` and ``metadata.name`` must be nonempty texts
-    -- SSA cannot address an object without them. A list object is
-    refused too: a document whose ``kind`` is ``List``, or that has a
-    top-level ``items`` field, in any group. A Kubernetes API server
-    refuses the server-side apply of such a document.
+    -- SSA cannot address an object without them. A document whose
+    ``kind`` is ``List``, or whose top-level ``items`` field is a list, is
+    refused before the wait.
     Raises :class:`ApplyManifestError` on any structural problem.
     """
     docs = iter(yaml.safe_load_all(manifest))

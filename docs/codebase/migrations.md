@@ -374,12 +374,13 @@ other pull requests still get their result.
 
 ### What to do when the check fails
 
-The last line of the check output says what to change. Example:
+The "What to do" line of the check output says what to change. Example:
 
 ```
 Migration chain check FAILED:
   - revision 0108 is used by 2 files: 0108_add_claims.py, 0108_add_scope.py
 What to do: main is at 0108. Rename your migration to 0109 and set down_revision to '0108'.
+Rule: each pull request with a migration must take the next free number and set down_revision to the newest migration on main. In the merge queue, the migrations of the pull requests ahead of yours count as on main.
 ```
 
 1. Rename your migration file to the number the message gives
@@ -392,6 +393,35 @@ If the message says only "Set down_revision ... to ...", your numbers are
 already right and only the named parent links are stale. If a migration on `main`
 merges after you fixed it, the check runs again on your branch by itself
 and tells you if you need to move once more.
+
+### Two pull requests with a migration
+
+Two pull requests can each add a migration with the same number, or with
+the same `down_revision`. Each one alone passes its own check. Together
+they give `main` two heads.
+
+The merge queue stops this. A merge-queue run tests the tree that holds
+`main` plus every pull request ahead of it in the queue. The check
+**Migration chain (single head)** runs there too (`merge_group` in
+`.github/workflows/migration-heads.yml`), and it is a required check. So
+the second pull request fails its merge-queue run and leaves the queue.
+`main` never gets the second head.
+
+What each author does:
+
+1. In the last push before you add the pull request to the merge queue,
+   take the next free number, and set `down_revision` to the newest
+   migration on `main`.
+2. If the merge queue refuses the pull request with "Migration chain
+   check FAILED", another migration got in first. Merge `main` into
+   your branch, take the next free number again, set `down_revision` to
+   the newest migration on `main`, push, and add the pull request to
+   the queue again. The file names in the message show which migration
+   got in first.
+
+In the merge queue, the "What to do" line can name a migration of a pull
+request ahead of yours as if it were yours. The "Rule" line under it is
+true in every case.
 
 Run it locally before you push (from the repo root):
 
@@ -411,7 +441,8 @@ python3 scripts/ci/check_migration_heads.py --main /tmp/main-versions/backend/al
 
 Tests: `backend/tests/migrations/test_migration_heads.py` covers one head,
 two heads, two files with the same number, a stale parent, a branch that
-adds several migrations, and compares the script's heads with Alembic's
+adds several migrations, two pull requests in one merge-queue run that
+each add a migration on the same parent, and compares the script's heads with Alembic's
 own `ScriptDirectory.get_heads()` on the real tree.
 `backend/tests/migrations/test_recheck_migration_prs.py` covers the
 re-check: a fork pull request and a branch without the workflow file both

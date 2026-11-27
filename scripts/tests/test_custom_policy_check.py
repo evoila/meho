@@ -1551,7 +1551,8 @@ class CallerKindWaitsTest(DryRunTestCase):
             skips,
             [
                 "[skip] check 6 change of rights (an Operator's token, a personal agent, REST, "
-                "the caller kind): not run: waits for #6962"
+                "the caller kind): not run: waits for #6962, "
+                f"audit row {audit_id('c6-rights')}"
             ],
         )
         self.assertIn("caller kind not proven: 1", result.stdout)
@@ -1572,6 +1573,13 @@ class CallerKindWaitsTest(DryRunTestCase):
         self.assertNotIn("check 6 change of rights (an Operator's token, a personal agent, REST, "
                          "the caller kind)", result.stdout)  # fmt: skip
 
+    def test_a_row_without_its_caller_kind_that_was_not_found_still_fails(self) -> None:
+        self.answers["c6-rights-row"] = self.without_kind(self.answers["c6-rights-row"])
+        self.answers["c6-rights-row"]["code"] = 404
+        result = self.run_script()
+        self.assert_one_fail(result, "check 6 change of rights", "no audit row")
+        self.assertNotIn("[skip] check 6 change of rights", result.stdout)
+
     def test_check_1_and_the_web_console_reader_skip_the_caller_kind(self) -> None:
         self.answers["c1-row"] = self.without_kind(self.answers["c1-row"])
         result = self.run_script()
@@ -1581,7 +1589,9 @@ class CallerKindWaitsTest(DryRunTestCase):
             "check 11 (the web console reader, the console run of check 1",
         ):
             self.assertIn(
-                f"[skip] {start}, the caller kind): not run: waits for #6962", result.stdout
+                f"[skip] {start}, the caller kind): not run: waits for #6962, "
+                f"audit row {audit_id('c1')}",
+                result.stdout,
             )
             self.assertNotIn(f"[ok]   {start}", result.stdout)
         self.assertIn("caller kind not proven: 2", result.stdout)
@@ -1605,6 +1615,13 @@ class CallerKindWaitsTest(DryRunTestCase):
         for line in result_lines(result.stdout):
             self.assertFalse(line.startswith("[ok]") and "caller kind none" in line, line)
         self.assertIn("caller kind not proven: 24", result.stdout)
+        kind_skips = [
+            line for line in result_lines(result.stdout)
+            if line.startswith("[skip]") and "the caller kind): not run" in line
+        ]  # fmt: skip
+        self.assertEqual(len(kind_skips), 24)
+        for line in kind_skips:
+            self.assertRegex(line, r", audit row [0-9a-f-]{36}$")
         self.assertEqual(result.returncode, NOT_COMPLETE)
 
     def test_a_wrong_caller_kind_still_fails(self) -> None:
@@ -1779,6 +1796,13 @@ class HelpAndDocsTest(unittest.TestCase):
     def test_the_caller_kind_waits_for_6962(self) -> None:
         self.assertIn("the caller kind): not run: waits for #6962", self.docs)
         self.assertNotIn("`check 11: not run: waits for #7073`", self.docs)
+
+    def test_the_help_says_check_4_needs_a_caution_write(self) -> None:
+        text = " ".join(help_text().split())
+        start = text.index("CPC_OP_AGENT_RULE check 4:")
+        line = text[start : text.index("CPC_OP_APPROVER", start)]
+        self.assertIn("a caution write", line)
+        self.assertIn("default:service.caution_write", line)
 
     def test_check_11_without_result_history(self) -> None:
         self.assertIn("CHECKS_EVIDENCE_RETENTION_DAYS=0", self.docs)

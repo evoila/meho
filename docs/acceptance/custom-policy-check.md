@@ -182,8 +182,9 @@ These lines are always `[skip]`, also in a run where every check passes:
   "a write stays at least caution". It still fails when the refusal is the
   one for an operation that shows a secret or calls an address the caller
   gives.
-- `check ... (..., the caller kind): not run: waits for #6962`, as long as
-  the audit row holds no `caller_kind` field. Each line that expects a
+- `check ... (..., the caller kind): not run: waits for #6962, audit row
+  <id>`, as long as the audit row holds no `caller_kind` field. The id is
+  the audit row the line read. Each line that expects a
   caller kind (checks 1 to 6, 10 and 11) still checks the rest: the
   answer, the rule, the audit row and the fresh result. Such a line never
   prints `[ok]`: it prints `[FAIL]` when another part failed, and else

@@ -172,7 +172,9 @@ default is {}.
   CPC_OP_LOWERED          check 1: a dangerous operation an Admin lowers to caution.
   CPC_OP_RELEVELLED       check 2: a former caution operation with the plain mark.
   CPC_OP_ALWAYS_WAIT      check 3: an operation with a saved "always wait".
-  CPC_OP_AGENT_RULE       check 4: a caution operation for the personal agent rule.
+  CPC_OP_AGENT_RULE       check 4: a caution write for the personal agent rule. A
+                          service login without a grant waits for it by the rule
+                          default:service.caution_write, which check 4 expects.
   CPC_OP_APPROVER         check 5: a dangerous operation on the approver policy's connector.
   CPC_OP_CREDENTIAL_READ  check 6: an operation that reads a credential.
   CPC_OP_CREDENTIAL_WRITE check 6: an operation that writes a credential.
@@ -769,15 +771,15 @@ kind_ok() {
 # report_kind LINE LINE_START [PROBLEM...]: report, for a line that expects
 # a caller kind, after kind_ok. While its audit row holds no caller_kind
 # field, the line is never [ok]: it is [FAIL] when another part failed,
-# else one [skip] line for its caller kind part, and it counts in "caller
-# kind not proven". LINE_START is the line's start without its closing
-# bracket.
+# else one [skip] line for its caller kind part that names the audit row
+# the line read (ROW_ID), and it counts in "caller kind not proven".
+# LINE_START is the line's start without its closing bracket.
 report_kind() {
     local line="$1" start="$2"; shift 2
     if [[ -z "$KIND_WAITS" ]]; then report "$line" "$@"; return; fi
     KIND_UNPROVEN=$((KIND_UNPROVEN + 1))
     if [[ $# -gt 0 ]]; then report "$line" "$@"; return; fi
-    check_skip "$start, the caller kind): not run: waits for #6962"
+    check_skip "$start, the caller kind): not run: waits for #6962, audit row ${ROW_ID:-none}"
 }
 
 # report LINE [PROBLEM...]: [ok] without problems, else [FAIL] with them.

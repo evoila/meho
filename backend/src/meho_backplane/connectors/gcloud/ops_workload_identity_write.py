@@ -414,6 +414,7 @@ _UPDATE_KEYS_OP = GcloudOp(
     tags=(*_TAGS, "update", "workload-identity"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
     changes_rights=True,
     llm_instructions={
         "when_to_call": (

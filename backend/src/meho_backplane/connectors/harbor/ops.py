@@ -410,6 +410,7 @@ async def _register_harbor_robot_create(embedding_service: EmbeddingService | No
         # four-eyes bypass #128 set out to close. Flip to True so the dispatch
         # parks at ``awaiting_approval`` and a second operator must approve.
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions=_HARBOR_ROBOT_CREATE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,

@@ -99,6 +99,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["HarborConnector", "robot_access_actions"]
 
@@ -237,6 +238,26 @@ class HarborConnector(HttpConnector):
     priority = 1
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True
+    credential_ways = (
+        CredentialWay(
+            key="basic",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="A Harbor user or a robot account name.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password",
+                    label="Password",
+                    help="The password of the user, or the secret of the robot account.",
+                ),
+            ),
+        ),
+    )
+    test_operation = "harbor.project.list"
 
     def __init__(
         self,
@@ -472,6 +493,7 @@ class HarborConnector(HttpConnector):
             raw_jwt="",
             tenant_id=UUID(int=0),
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
         connector_id = f"{self.impl_id}-{self.version}"
         return await dispatch(

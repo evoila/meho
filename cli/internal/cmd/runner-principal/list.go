@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -110,13 +112,49 @@ func printListTable(w io.Writer, r *api.RunnerPrincipalListResponse) {
 		fmt.Fprintln(w, "no runner principals registered in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-32s %-8s %-20s %-6s %-19s %s\n",
-		"NAME", "REVOKED", "OWNER", "WIRE", "PACKAGES", "KEYCLOAK CLIENT ID")
-	for _, e := range r.Principals {
-		fmt.Fprintf(w, "%-32s %-8v %-20s %-6s %-19s %s\n",
-			e.Name, e.Revoked, e.OwnerSub, wireVersionText(e.WireVersion),
-			packageSetText(e.PackageSetDigest), e.KeycloakClientId)
+	withSetAside := hasSetAside(r.Principals)
+	header := fmt.Sprintf("%-32s %-8s %-20s %-6s %-19s", "NAME", "REVOKED", "OWNER", "WIRE", "PACKAGES")
+	if withSetAside {
+		header += fmt.Sprintf(" %-9s %-20s", "SET ASIDE", "LAST SET ASIDE")
 	}
+	fmt.Fprintf(w, "%s %s\n", header, "KEYCLOAK CLIENT ID")
+	for _, e := range r.Principals {
+		row := fmt.Sprintf("%-32s %-8v %-20s %-6s %-19s", e.Name, e.Revoked, e.OwnerSub,
+			wireVersionText(e.WireVersion), packageSetText(e.PackageSetDigest))
+		if withSetAside {
+			row += fmt.Sprintf(" %-9s %-20s", setAsideCountText(e.SetAsideCount), setAsideTimeText(e.SetAsideLastAt))
+		}
+		fmt.Fprintf(w, "%s %s\n", row, e.KeycloakClientId)
+	}
+}
+
+// hasSetAside says whether the answer holds the set-aside counts. The server
+// sends them only with RUNNER_CHECKS_ENABLED on; without them the table has
+// no such columns.
+func hasSetAside(principals []api.RunnerPrincipalRead) bool {
+	for _, e := range principals {
+		if e.SetAsideCount != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// setAsideCountText renders how many result batches the runner set aside.
+func setAsideCountText(v *int) string {
+	if v == nil {
+		return "-"
+	}
+	return strconv.Itoa(*v)
+}
+
+// setAsideTimeText renders when the runner set the newest batch aside, or "-"
+// when it set none aside.
+func setAsideTimeText(v *time.Time) string {
+	if v == nil {
+		return "-"
+	}
+	return v.UTC().Format("2006-01-02T15:04:05Z")
 }
 
 // packageSetText renders the start of the connector package set digest the

@@ -31,7 +31,10 @@ When it runs it plans again
 (:func:`~meho_backplane.policy.service.apply_policy`). When the stored
 policy changed after the plan, it writes nothing and says so. The
 install's policy (``scope: install``) is imported only when a platform
-admin approves it.
+admin approves it. With the ``CUSTOM_POLICY`` switch on, the install's
+file may hold the outer limit (``limits``,
+:mod:`~meho_backplane.policy.limits`). The approval card records the
+switch; a run with the switch not the same as on the card writes nothing.
 
 The operation exists only while the ``POLICY_CLASSIFICATION`` switch is
 on, like ``policy.classify``.
@@ -39,12 +42,12 @@ on, like ``policy.classify``.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import PrincipalKind, is_human_principal
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.operations._preview import approved_preview
 from meho_backplane.operations.secondary_target_policy import (
     approved_requester_sub,
     approved_requester_subject,
@@ -54,9 +57,13 @@ from meho_backplane.operations.typed_register import (
     remove_built_in_connector_rows,
 )
 from meho_backplane.policy.document import MAX_POLICY_BYTES
-from meho_backplane.policy.service import apply_policy, build_plan
+from meho_backplane.policy.service import POLICY_CHANGED, apply_policy, build_plan
 from meho_backplane.policy.store import classification_enabled
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.policy.switches import (
+    classification_on_in_environment,
+    custom_policy_on,
+)
+from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -79,8 +86,10 @@ POLICY_APPLY_OP_ID: Final[str] = "policy.apply"
 
 #: What an import says while the switch is off.
 SWITCH_OFF_IMPORT: Final[str] = (
-    "The policy file import is off on this MEHO. An admin turns it on with the "
-    "POLICY_CLASSIFICATION setting."
+    "The policy file import is off on this MEHO, because classification is off. An "
+    "admin can turn it on in one of two ways. The POLICY_CLASSIFICATION setting turns "
+    "on classification only. The CUSTOM_POLICY setting turns on all three policy parts: "
+    "classification, the policy evaluator and approver routing."
 )
 
 #: Why an install-wide import did not run.
@@ -265,6 +274,9 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
         raise ValueError(refusal)
     if scope == "install" and not operator.platform_admin:
         raise ValueError(INSTALL_NEEDS_PLATFORM_ADMIN)
+    custom_policy = custom_policy_on(get_settings())
+    if scope == "install" and _card_switch_differs(custom_policy):
+        raise ValueError(POLICY_CHANGED)
     async with get_sessionmaker()() as session, session.begin():
         return await apply_policy(
             session,
@@ -275,26 +287,47 @@ async def policy_apply(operator: Operator, target: Any, params: dict[str, Any]) 
             based_on=params["based_on"],
             imported_by=importer,
             approved_by=operator.sub,
+            custom_policy=custom_policy,
         )
+
+
+def _card_switch_differs(custom_policy: bool) -> bool:
+    """True when the approval card was planned with the other ``CUSTOM_POLICY`` value.
+
+    The switch decides whether the install's ``limits`` part is read, so a
+    run with the other value would store a plan the approver did not see. A
+    card without the record was planned with the switch off (also a card made
+    before MEHO wrote the record). A run without an approval (an admin in the
+    web console) has no card and plans with the switch now.
+    """
+    card = approved_preview(POLICY_APPLY_OP_ID)
+    if card is None:
+        return False
+    return (card.get("planned_with_custom_policy") is True) is not custom_policy
 
 
 async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """The plan on the approval card: what the file adds, changes and removes.
 
-    Builds no plan for a caller who may not ask for the import.
+    An install import planned with ``CUSTOM_POLICY`` on also holds
+    ``planned_with_custom_policy: true``; every other card has the keys it had
+    before the switch existed. Builds no plan for a caller who may not ask for
+    the import.
     """
     params = ctx.params
     refusal = policy_apply_requester_refusal(ctx.operator, params)
     if refusal is not None:
         raise ValueError(refusal)
+    custom_policy = custom_policy_on(get_settings())
     async with get_sessionmaker()() as session:
         plan = await build_plan(
             session,
             scope=params["scope"],
             tenant_id=ctx.operator.tenant_id,
             content=str(params["file"]).encode("utf-8"),
+            custom_policy=custom_policy,
         )
-    return {
+    card: dict[str, Any] = {
         "scope": plan.scope,
         "file_sha256": plan.file_sha256,
         "based_on": plan.based_on,
@@ -304,6 +337,9 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
         "no_change": plan.no_change,
         "diff": plan.diff,
     }
+    if plan.scope == "install" and custom_policy:
+        card["planned_with_custom_policy"] = True
+    return card
 
 
 async def register_policy_apply_operation(
@@ -311,7 +347,7 @@ async def register_policy_apply_operation(
     embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Upsert the ``policy.apply`` typed op; delete it while the switch is off."""
-    if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
+    if not classification_on_in_environment():
         await remove_built_in_connector_rows(
             product="policy", version="1.x", impl_id="policy-registry"
         )

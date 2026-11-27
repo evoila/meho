@@ -318,6 +318,7 @@ TOUCH_OPS: tuple[KeycloakOp, ...] = (
         tags=("login-flow", "passkey", "client", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE,
             "when_to_call": (

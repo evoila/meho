@@ -81,6 +81,7 @@ from meho_backplane.operations.ingest.payload import (
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.reason import clean_reason
 from meho_backplane.ui.templating import get_templates
 
 __all__ = [
@@ -535,7 +536,7 @@ def _build_edit_body(
         safety_level=_coerce_safety_level(safety_level),
         requires_approval=requires_approval,
         is_enabled=is_enabled,
-        reason=(reason or "").strip() or None,
+        reason=clean_reason(reason),
     )
 
 

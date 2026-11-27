@@ -734,7 +734,7 @@ async def test_robot_create_credential_mint_classification(
 
     # The executed (post-approval) op audits under the *requester* identity:
     # the resume re-dispatches as the original requester with ``_approved=True``
-    # (the committed approval is the authorization), so the executed dispatch
+    # (the approval is not asked for again), so the executed dispatch
     # row is keyed on the requester sub. The park writes a separate
     # ``approval.request`` row (not keyed on the op-id), so filtering on
     # ``path == "harbor.robot.create"`` + the requester sub selects exactly

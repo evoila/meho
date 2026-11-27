@@ -109,6 +109,13 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   approval). Same lifespan/idempotency contract as the robot registrar;
   queued separately in `__init__.py`.
 
+## Target form declarations
+
+`HarborConnector` declares one credential way, `basic`, with the fields
+`username` and `password` (both required, `password` hidden). The test read
+is `harbor.project.list`. See
+[connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration

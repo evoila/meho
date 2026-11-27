@@ -130,6 +130,7 @@ SCOPE_MAPPER_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "protocol-mapper", "client-scope", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Use to change a protocol mapper that already exists on a client "

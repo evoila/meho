@@ -79,6 +79,7 @@ def system_operator(tenant_id: uuid.UUID) -> Operator:
         raw_jwt="",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        in_code_kind="system",
     )
 
 

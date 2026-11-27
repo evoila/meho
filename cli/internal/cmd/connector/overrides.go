@@ -40,9 +40,11 @@ func newOverridesCmd() *cobra.Command {
 			"approval that apply in the row's scope (the value in code with every\n" +
 			"change there), the scope (a tenant's id, or `install` for the whole\n" +
 			"install), who made the change, when, and the reason. With the\n" +
-			"POLICY_CLASSIFICATION setting on, the values include the\n" +
-			"classification, and two more columns name the category and the\n" +
-			"entry that decided them. Remove a row\n" +
+			"CUSTOM_POLICY or POLICY_CLASSIFICATION setting on, the values\n" +
+			"include the classification, and two more columns name the category\n" +
+			"and the entry that decided them. Each older switch\n" +
+			"(POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, POLICY_APPROVER_ROUTING)\n" +
+			"still turns on its own part alone. Remove a row\n" +
 			"with `meho connector remove-override`.\n\n" +
 			"--reduced-approval lists only the operations a platform admin turned\n" +
 			"approval off for, where approval is still off: the report\n" +

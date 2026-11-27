@@ -91,6 +91,7 @@ def synthesise_system_operator() -> Operator:
         raw_jwt=SYSTEM_OPERATOR_PLACEHOLDER_JWT,
         tenant_id=_SYSTEM_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
+        in_code_kind="system",
     )
 
 

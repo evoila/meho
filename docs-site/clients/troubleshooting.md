@@ -329,6 +329,25 @@ older dotted names (`meho.status`) failed.
 to underscores (`meho_status`, `list_targets`, …). See
 [Claude Desktop § pinning a build](claude-desktop.md#pin-a-build-with-underscore-tool-names-and-structured-results).
 
+## A model gateway refuses MEHO's tool list
+
+**Symptom.** A strict model gateway (one that checks tool schemas the
+way the OpenAI API does in strict mode) refuses the tool list, and the
+agent gets no MEHO tools. The error says a schema holds `null` inside an
+`enum`. Some clients check the schemas themselves. For example, LangChain's
+Gemini client (`langchain-google-genai` 4.5.2) stops with
+`Input should be a valid string [... input_value=None ...]` for an `enum`.
+
+**Wall.** On MEHO 0.48.0 and older, the sent input and output schemas of
+some tools list `null` inside an `enum`. A strict gateway refuses such a schema, and
+then refuses the whole list.
+
+**Fix.** Update MEHO to a version newer than 0.48.0. MEHO then sends the
+tool input and output schemas without `null` inside an `enum`. A call that
+sends `null` still works, because the server checks every call against the
+full schema. An answer with `null` in such a field still passes the sent
+output schema.
+
 ## A tool call fails with "Tool execution failed" but the server logged 200
 
 **Symptom.** A specific tool (e.g. `list_targets`, `query_topology`)

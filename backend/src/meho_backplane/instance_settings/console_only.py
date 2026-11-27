@@ -18,8 +18,10 @@ Any other caller (the CLI, a script, an AI tool with a person's token) gets
 403 for the whole file and MEHO writes nothing. The opposite direction
 (target kinds off, gate on) narrows what runs, so it applies with a token.
 The preview works with a token and names each such change in ``warnings``.
-The web console cannot apply a settings file yet, so for now no caller can
-make these two changes.
+A person makes these two changes on the settings file page of the web
+console (``/ui/settings``, :mod:`meho_backplane.ui.routes.settings`), and gives
+a reason there (:func:`loosening_refusal`). The audit row of the apply holds the
+reason. The opposite direction needs no reason.
 
 The other policies are not in this list. ``flight_recorder`` and
 ``mail_recipient_allowlist`` have their own REST routes, which write at once
@@ -38,10 +40,15 @@ from meho_backplane.auth.operator import Operator
 
 __all__ = [
     "CONSOLE_ONLY_POLICIES",
+    "SETTINGS_PAGE",
     "console_only_changes",
     "console_only_refusal",
     "console_only_warnings",
+    "loosening_refusal",
 ]
+
+#: The web console page that applies a settings file.
+SETTINGS_PAGE: Final[str] = "/ui/settings"
 
 #: Policy key -> (the value that loosens it, what that value does).
 CONSOLE_ONLY_POLICIES: Final[dict[str, tuple[bool, str]]] = {
@@ -69,14 +76,18 @@ def _what(path: str) -> str:
     return CONSOLE_ONLY_POLICIES[path.rsplit(".", 1)[1]][1]
 
 
+def _named(paths: Iterable[str]) -> str:
+    return ", ".join(f"`{path}` ({_what(path)})" for path in paths)
+
+
 def console_only_warnings(operator: Operator, paths: Iterable[str]) -> list[str]:
     """One preview sentence per path, for a caller that is not in the web console."""
     if runs_at_once(operator):
         return []
     return [
         f"`{path}` {_what(path)}. This change applies only for a person in the web "
-        "console. The web console cannot apply a settings file yet, so MEHO cannot make "
-        "this change now; an import with a token is refused (403) and writes nothing."
+        f"console: apply the file on the settings file page ({SETTINGS_PAGE}). An import "
+        "with a token is refused (403) and writes nothing."
         for path in paths
     ]
 
@@ -85,9 +96,25 @@ def console_only_refusal(operator: Operator, paths: list[str]) -> str | None:
     """The 403 reason when *operator* may not apply *paths*, else ``None``."""
     if not paths or runs_at_once(operator):
         return None
-    named = ", ".join(f"`{path}` ({_what(path)})" for path in paths)
     return (
-        f"A settings file that changes {named} applies only for a person in the web "
-        "console. The web console cannot apply a settings file yet, so MEHO cannot make "
-        "this change now. MEHO wrote nothing from this file."
+        f"A settings file that changes {_named(paths)} applies only for a person in the web "
+        f"console. Apply it on the settings file page ({SETTINGS_PAGE}). "
+        "MEHO wrote nothing from this file."
+    )
+
+
+def loosening_refusal(operator: Operator, paths: list[str], reason: str | None) -> str | None:
+    """The 403 reason when *operator* may not apply *paths* now, else ``None``.
+
+    A person in the web console needs a written *reason* for these changes, the
+    same as for turning approval off for an operation. Blanks are no reason.
+    """
+    refusal = console_only_refusal(operator, paths)
+    if refusal is not None or not paths:
+        return refusal
+    if reason and reason.strip():
+        return None
+    return (
+        f"A settings file that changes {_named(paths)} needs a reason. Show the preview "
+        "again and fill in the Reason field. MEHO wrote nothing from this file."
     )

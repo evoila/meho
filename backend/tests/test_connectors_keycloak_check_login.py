@@ -344,6 +344,27 @@ async def test_accepted_login_with_failed_logout(
     _assert_nothing_leaks("the structlog events", json.dumps(logs, default=str))
 
 
+@pytest.mark.parametrize("switch_on", [True, False], ids=["switch-on", "switch-off"])
+async def test_accepted_login_with_a_logout_redirect_stays_accepted(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch, switch_on: bool
+) -> None:
+    # A logout that ends on a redirect MEHO does not follow keeps the
+    # accepted login, in both states of the switch.
+    monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if switch_on else "false")
+    get_settings.cache_clear()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        token = mock.post(_TOKEN_PATH).respond(200, json=_ACCEPTED)
+        logout = mock.post(_LOGOUT_PATH).respond(
+            302, headers={"Location": "https://other.example.test/logged-out"}
+        )
+        result = await _run(_PARAMS)
+    assert result.status == "ok", result.error
+    assert result.result["result"] == "accepted"
+    assert result.result["session_ended"] is False
+    assert token.call_count == 1
+    assert logout.call_count == 1
+
+
 async def test_wrong_password_is_refused_and_not_retried(kc: KeycloakConnector) -> None:
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         token = mock.post(_TOKEN_PATH).respond(401, json=_WRONG_PASSWORD)

@@ -52,6 +52,7 @@ import httpx
 import structlog
 
 from meho_backplane.connectors._shared.login_mark import login_request
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors.keycloak._paths import _LOGOUT_PATH, _TOKEN_PATH, fill_path
 from meho_backplane.connectors.keycloak.connector import _OAUTH2_TOKEN_ERROR_CODES
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
@@ -282,7 +283,9 @@ async def _end_session(
                 headers=_FORM_HEADERS,
                 extensions=self._request_extensions(target),
             )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, SessionLoginRedirectError) as exc:
+        # The login was already accepted: a failed logout, also one that ends
+        # on a redirect MEHO does not follow, keeps that answer.
         _log.warning(
             "keycloak_check_login_logout_failed", target=target.name, error=type(exc).__name__
         )

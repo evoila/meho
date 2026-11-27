@@ -17,6 +17,7 @@ Every test value is made up at run time.
 
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
 from collections.abc import Iterator
@@ -42,6 +43,7 @@ from meho_backplane.connectors.targets.update import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.mcp.tools.approvals import _get_handler as _mcp_get
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import dispatch
 from meho_backplane.operations._preview import PreviewContext
@@ -112,12 +114,15 @@ async def _approve_and_run(request_id: uuid.UUID) -> Any:
     return await resume_dispatch_after_approval(operator=approver, request=approved)
 
 
-def _card_texts(client: TestClient, request_id: str) -> list[str]:
+async def _card_texts(client: TestClient, request_id: str) -> list[str]:
+    """The card as the stored row, the REST views and the MCP approvals tool show it."""
     shown = _call(client, "GET", f"/api/v1/approvals/{request_id}")
     listed = _call(client, "GET", "/api/v1/approvals?status=all")
     assert shown.status_code == 200, shown.text
     assert listed.status_code == 200, listed.text
-    return [shown.text, listed.text]
+    tool = await _mcp_get(_operator(), {"approval_request_id": request_id})
+    [stored] = [r for r in await _requests() if str(r.id) == request_id]
+    return [repr(stored.proposed_effect), shown.text, listed.text, json.dumps(tool, default=str)]
 
 
 async def _audit_rows() -> list[AuditLog]:
@@ -139,36 +144,51 @@ def _columns(row: Any) -> str:
     [
         ({"name": "password"}, "value", True),
         ({"snmp_version": "v2c"}, "community", True),
+        ({"snmp_version": None}, "community", True),
+        ({"snmpPort": None, "other": 1}, "community", True),
         ({"label": "old"}, "label", False),
     ],
-    ids=["name-value-pair", "snmp-community", "plain-value"],
+    ids=[
+        "name-value-pair",
+        "snmp-community",
+        "snmp-version-null",
+        "snmp-port-null",
+        "plain-value",
+    ],
 )
 async def test_the_card_hides_what_the_full_map_card_hides(
     client: TestClient, stored: dict[str, Any], key: str, hidden: bool
 ) -> None:
-    new = _made("new")
-    row = await _insert_target(name=_NAME, extras=dict(stored))
+    old, new = _made("old"), _made("new")
+    start = {**stored, key: old}
+    row = await _insert_target(name=_NAME, extras=dict(start))
     shown_on: dict[str, list[bool]] = {}
     for form, body in (
         ("extras_changes", {"extras_changes": {key: new}}),
-        ("extras", {"extras": {**stored, key: new}}),
+        ("extras", {"extras": {**start, key: new}}),
     ):
         response = _patch(client, body)
         assert response.status_code == 202, response.text
         request_id = response.json()["approval_request_id"]
-        before = [new in text for text in _card_texts(client, request_id)]
+        before = await _card_texts(client, request_id)
         result = await _approve_and_run(uuid.UUID(request_id))
         assert result.status == "ok", result
-        after = [new in text for text in _card_texts(client, request_id)]
-        shown_on[form] = before + after
+        after = await _card_texts(client, request_id)
+        # The card of the request: the old and the new value, before and
+        # after the run, in each of the four places.
+        shown_on[form] = [v in text for v in (old, new) for text in before + after]
+        assert await _extras(row.id) == {**start, key: new}
         # Back to the stored map for the next form.
         async with get_sessionmaker()() as session, session.begin():
             target = await session.get(type(row), row.id)
             assert target is not None
-            target.extras = dict(stored)
+            target.extras = dict(start)
 
     assert shown_on["extras_changes"] == shown_on["extras"]
-    assert shown_on["extras_changes"] == [not hidden] * 4
+    if hidden:
+        assert not any(shown_on["extras_changes"])
+    else:
+        assert all(shown_on["extras_changes"])
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ from meho_backplane.targets.extras_limits import check_extras_size
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["extras_change_keys", "merge_extras_changes"]
+__all__ = ["apply_extras_changes", "extras_change_keys", "merge_extras_changes"]
 
 
 def extras_change_keys(changes: Mapping[str, Any]) -> dict[str, list[str]]:
@@ -32,15 +32,16 @@ def extras_change_keys(changes: Mapping[str, Any]) -> dict[str, list[str]]:
     }
 
 
-def merge_extras_changes(
+def apply_extras_changes(
     current: Mapping[str, Any] | None,
     changes: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Return the stored ``extras`` after *changes*.
+    """Return *current* after *changes*, without the size check.
 
     A value sets or replaces its key; ``None`` removes the key (also when it
-    is not stored). The result keeps the size limit of a full ``extras``
-    map; a map that is too big or too deep is a 422 and nothing changes.
+    is not stored). A stored key that is not named stays, also when its
+    stored value is ``null``. The approval card uses this to show the map
+    that the change will store.
     """
     merged = dict(current or {})
     for key, value in changes.items():
@@ -48,6 +49,19 @@ def merge_extras_changes(
             merged.pop(key, None)
         else:
             merged[key] = value
+    return merged
+
+
+def merge_extras_changes(
+    current: Mapping[str, Any] | None,
+    changes: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the stored ``extras`` after *changes* (:func:`apply_extras_changes`).
+
+    The result keeps the size limit of a full ``extras`` map; a map that is
+    too big or too deep is a 422 and nothing changes.
+    """
+    merged = apply_extras_changes(current, changes)
     try:
         check_extras_size(merged)
     except ValueError as exc:

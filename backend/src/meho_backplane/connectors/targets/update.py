@@ -64,7 +64,11 @@ from meho_backplane.operations._validate import params_problem, register_params_
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
-from meho_backplane.targets.extras_changes import extras_change_keys, merge_extras_changes
+from meho_backplane.targets.extras_changes import (
+    apply_extras_changes,
+    extras_change_keys,
+    merge_extras_changes,
+)
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
@@ -425,11 +429,11 @@ def _extras_changes_card(
     then the named keys are picked. So a value is hidden here when the card
     of a full ``extras`` change hides it, also when the key that makes it
     secret (for example ``"name": "password"`` next to ``"value"``) is not
-    named.
+    named. The map after the change is the map the change stores (the same
+    merge), so a stored key with a ``null`` value stays in it.
     """
     stored = dict(row.extras or {})
-    merged = {**stored, **extras_changes}
-    merged = {key: value for key, value in merged.items() if value is not None}
+    merged = apply_extras_changes(stored, extras_changes)
     hidden = _redact_echoed_params(
         {"extras": {"from": stored, "to": merged}},
         connector_id=ctx.connector_id,

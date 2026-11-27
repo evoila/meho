@@ -107,10 +107,11 @@ classifications:
   matches. A tenant entry that sets a risk level is refused when it
   decides the tenant's level and the tenant's level is below the
   install's: each side's level is the higher of its two forms.
-- With `CUSTOM_POLICY` off, a connector with no version has the id `-` in
-  every answer except two: the carry-over dry run names it by its product,
-  and the overrides report names it by its implementation id, the empty
-  text.
+- With `CUSTOM_POLICY` off, a policy entry matches a connector with no
+  version by the id `-`. The overrides report names it by its
+  implementation id, the empty text, and the carry-over dry run names it
+  by its product. A call and its approval card name the connector by the
+  id the caller used.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
@@ -406,6 +407,14 @@ refused, and the message names the entry and the operation.
   example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
   Without the group, the new entry is less specific than the refused
   one, and the file is refused again.
+- With `CUSTOM_POLICY` on, a connector with no version is named by its
+  product. Then the message names the operation with its product, for
+  example `` `<op-id>` of `acmedb` ``, and suggests an entry for that
+  product: `{match: {connector: acmedb, op: <op-id>}, risk: <level>}`.
+  Two such products share the id `-`. So the message suggests a change
+  of the refused entry only when the entry matches that one operation
+  alone. Otherwise the entry can stay, and the message suggests one new
+  entry for each operation it names.
 - Which install values make **every** call wait: `always_wait: true` and
   `risk: destructive`. With `risk: dangerous`, a call waits too, but
   two things can still let it run without a new approval: a standing

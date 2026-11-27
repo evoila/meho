@@ -73,11 +73,13 @@ classifications:
   `policy.classify_preview`, the carry-over dry run and the overrides
   report. A test fails when a reader builds the id itself
   (`test_policy_connector_without_version.py`).
-  - With `CUSTOM_POLICY` off (`product_form_on()` is false), a connector
-    with no version has the id `-` in every answer except two: the
-    carry-over dry run names it by its product, and the overrides report
-    names it by its implementation id, the empty text. `test_policy_connector_without_version_switch_off.py` checks
-    these answers.
+  - With `CUSTOM_POLICY` off (`product_form_on()` is false), a policy
+    entry matches a connector with no version by the id `-`. The
+    overrides report names it by its implementation id, the empty text,
+    and the carry-over dry run names it by its product. A call and its
+    approval card name the connector by the id the caller used.
+    `test_policy_connector_without_version_switch_off.py` checks these
+    answers.
   - The carry-over dry run's list reads no switch; only its first field,
     `custom_policy_on`, says whether `CUSTOM_POLICY` is on. It names such a connector by
     its product with every switch state: it calls `connector_id_of` and
@@ -90,9 +92,10 @@ classifications:
     `risk` (no level is the lowest), the conflict of either form; the
     `category`, `install_category` and `labels` of the form with the
     dash. The `rule_ref` (the approval card's `classification_rule`) is
-    the entry of the form with the dash that gave the category, else the
-    most specific one that gave a shown label, else `taxonomy.default`
-    (`_shown_ref`). So an entry that
+    an entry whose value the card shows: the entry of the form with the
+    dash that gave the category, else the most specific one that gave a
+    shown label, else `taxonomy.default` (`_shown_ref`). A category
+    cleared by a conflict names no entry. So an entry that
     matches only by the product can add a wait or raise a level, and never
     takes a wait away, lowers a level or changes the category or the
     labels. `meho policy explain` names the entry that makes the operation
@@ -158,8 +161,13 @@ The rules are in `policy/classification.py` (`classify`, no database):
    its connector, because the same op id can exist on another connector.
    When the refused entry names a group, the suggested entry names the
    group too; without it, the suggested entry ranks below the refused one.
-   An entry that matches the op on two connectors counts as wide. The
-   single edit has no `risk` field, so it refuses only the
+   An entry that matches the op on two connectors counts as wide. With
+   `CUSTOM_POLICY` on, an operation of a connector with no version has
+   its own text (`_product_risk_text`): it names each such operation the
+   entry lowers with its product, and suggests an entry for that product,
+   never for the form with the dash. It suggests a change of the entry
+   only when the entry matches that one operation alone, because two
+   products share the form with the dash. The single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for
    `always_wait` `true` wins. A different `category`, or a different value

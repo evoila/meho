@@ -425,7 +425,7 @@ _WAIT_REFUSAL = (
 )
 _RISK_REFUSAL = (
     "`classifications[0]` sets `risk: caution`, but `install:classifications[0]` sets "
-    "`wild.thing.run` to `dangerous` for the whole install"
+    "`wild.thing.run` of `cow"
 )
 
 
@@ -733,3 +733,151 @@ async def test_a_tenant_level_is_refused_only_below_the_install_level(
     got = tuple(_explain(client, key, product, RUN)["risk_level"] for product in PRODUCTS)
     # A refused file is never stored; stored anyway, the install's level still counts.
     assert got == (levels or ("dangerous", got[1])), (case, got)
+
+
+# ---------------------------------------------------------------------------
+# Cases 38 to 41: the refusal names the tenant's entry and the product, and
+# its suggested fix keeps the other products at their level
+# ---------------------------------------------------------------------------
+
+BULL = "bullapi-1.x"
+
+
+async def _register_bull(embedding: AsyncMock) -> None:
+    await register_typed_operation(
+        product="bullapi",
+        version="1.x",
+        impl_id="bullapi",
+        op_id=RUN,
+        handler=_handler,
+        summary="Fixture operation.",
+        description="Fixture operation.",
+        parameter_schema={"type": "object", "properties": {}},
+        group_key="compute",
+        when_to_use="Fixture group.",
+        safety_level="safe",
+        embedding_service=embedding,
+    )
+
+
+def _suggested(product: str) -> str:
+    return f"`{{match: {{connector: {product}, op: {RUN}}}, risk: dangerous}}`"
+
+
+def _sets(product: str) -> str:
+    return f"`install:classifications[0]` sets `{RUN}` of `{product}` to `dangerous`"
+
+
+_HEAD = "`classifications[0]` sets `risk: caution`, but "
+_ONE_COWX = f"{_HEAD}{_sets('cowx')} for the whole install, so `risk: caution` does not count "
+_ONE_COWX += f"for `{RUN}` of `cowx`."
+
+#: (case, the install's entry, the tenant's file, the sentence, the file it suggests,
+#: the levels of cowx, cowy and bullapi-1.x after the suggested file)
+_SUGGEST_CASES: list[
+    tuple[str, dict[str, Any], list[dict[str, Any]], str, list[dict[str, Any]], tuple[str, ...]]
+] = [
+    (
+        "38",
+        _BY_PRODUCT,
+        [_ALL_CAUTION],
+        f"{_ONE_COWX} This entry can stay. Add a tenant entry, with this risk level or higher: "
+        f"{_suggested('cowx')}.",
+        [_ALL_CAUTION, _BY_PRODUCT],
+        ("dangerous", "caution", "caution"),
+    ),
+    (
+        "39",
+        _BY_PRODUCT,
+        [{**_BY_DASH, "risk": "caution"}],
+        f"{_ONE_COWX} This entry can stay. Add a tenant entry, with this risk level or higher: "
+        f"{_suggested('cowx')}.",
+        [{**_BY_DASH, "risk": "caution"}, _BY_PRODUCT],
+        ("dangerous", "caution", "safe"),
+    ),
+    (
+        "40",
+        _BY_DASH,
+        [_ALL_CAUTION],
+        f"{_HEAD}{_sets('cowx')} and {_sets('cowy')} for the whole install, so `risk: caution` "
+        "does not count for them. This entry can stay. Add a tenant entry for each operation, "
+        f"with this risk level or higher: {_suggested('cowx')}, {_suggested('cowy')}.",
+        [_ALL_CAUTION, _BY_PRODUCT, {**_BY_PRODUCT, "match": {"connector": "cowy", "op": RUN}}],
+        ("dangerous", "dangerous", "caution"),
+    ),
+    (
+        "41",
+        _BY_PRODUCT,
+        [{**_BY_PRODUCT, "risk": "caution"}],
+        f"{_ONE_COWX} Set `risk: dangerous` or higher in this entry; its other fields can stay.",
+        [_BY_PRODUCT],
+        ("dangerous", "safe", "safe"),
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "install", "tenant", "sentence", "suggested", "levels"),
+    _SUGGEST_CASES,
+    ids=[f"case-{c[0]}" for c in _SUGGEST_CASES],
+)
+async def test_the_refusal_suggests_an_entry_for_the_product_only(
+    client: TestClient,
+    embedding: AsyncMock,
+    case: str,
+    install: dict[str, Any],
+    tenant: list[dict[str, Any]],
+    sentence: str,
+    suggested: list[dict[str, Any]],
+    levels: tuple[str, ...],
+) -> None:
+    await _register(embedding, RUN)
+    await _register_bull(embedding)
+    await policy(None, [install])
+    key = make_rsa_keypair(f"kid-cpf-suggest-{case}")
+
+    refused = [_send_entries(client, key, path, tenant) for path in ("validate", "import")]
+    accepted = [_send_entries(client, key, path, suggested) for path in ("validate", "import")]
+    await policy(TENANT, suggested)
+    got = tuple(_explain(client, key, c, RUN)["risk_level"] for c in (*PRODUCTS, BULL))
+
+    for answer in refused:
+        assert answer["ok"] is False, (case, answer)
+        assert answer["mistakes"] == [sentence], case
+    for answer in accepted:
+        assert answer["ok"] is True, (case, answer)
+        assert answer["mistakes"] == [], case
+    assert got == levels, (case, got)
+
+
+# ---------------------------------------------------------------------------
+# Case 42: the card names the entry of a label it shows when a conflict
+# clears the category
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_case_42_the_card_names_the_entry_of_a_shown_label_on_a_conflict(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _register(embedding, RUN)
+    await policy(
+        TENANT,
+        [
+            {"match": {"connector": "*-*"}, "category": "storage"},
+            {"match": {"connector": "-", "op": RUN}, "labels": {"team": "made-up-a"}},
+            {"match": {"connector": "-", "op": RUN}, "labels": {"team": "made-up-b"}},
+        ],
+    )
+    key = make_rsa_keypair("kid-cpf-card-42")
+
+    status = _call(client, key, "cowx", RUN, OPERATOR)
+    async with get_sessionmaker()() as session:
+        (request,) = (await session.execute(select(ApprovalRequest))).scalars()
+    card = request.proposed_effect
+
+    assert status == WAIT
+    assert card["category"] is None, card
+    assert card["labels"] == {"team": "made-up-a"}, card
+    assert card["classification_rule"] == "tenant:classifications[1]", card

@@ -6158,7 +6158,9 @@ group rules (only a MEHO-Admin approves their own delete).
   so a refused call leaves no `approval.decision` row. The grant-use row
   stores the hash and the blast radius in `payload`.
 - A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
-  a delete name, a delete step) runs under a delete grant with no hash;
+  a delete name, a delete step, or, with the switch `CUSTOM_POLICY` on,
+  `hard_to_undo` on the operation's own definition) runs under a delete
+  grant with no hash;
   its grant-use row stores the proposed effect.
 - A `destructive` step gate or child call stays refused: it cannot carry a
   preview hash (`preview_binding_required`, as today).

@@ -218,7 +218,8 @@ The inputs of `register_typed_operation`:
     your connector brings it back. Leave it out (`None`) otherwise. MEHO
     refuses it on a `safe` operation, and refuses any other word.
   - `changes_rights=True` when a call gives or takes rights, a login or
-    an access policy in the target system. The default is `False`.
+    an access policy in the target system. The default is `False`. MEHO
+    refuses it on a `safe` operation.
 
   MEHO stores both on the operation. Set them from what the call does,
   not from its name.

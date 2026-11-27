@@ -353,12 +353,16 @@ connector kit (kit 1.7 or higher).
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
 - With the switch `CUSTOM_POLICY` on, an operation with `hard_to_undo` has
-  a delete sign, the same as a `DELETE` call. So no standing grant and no
-  run approval covers it: a person approves each call. In sandbox mode a
-  delete grant still covers it. The one read site is
-  `_delete_shaped_reason_by_descriptor` in `operations/service_grants.py`.
-  With the switch off, `hard_to_undo` changes no answer.
-- No rule of MEHO reads `changes_rights` yet.
+  a delete sign, the same as a `DELETE` call. So a standing grant of a
+  service login and a run approval do not cover a call of it: the call
+  waits for a person. In sandbox mode a delete grant covers it, as for an
+  operation with another delete sign, except for an operation that waits
+  on every call because it can read, write or make a credential. The one
+  read site is `_delete_shaped_reason_by_descriptor` in
+  `operations/service_grants.py`. With the switch off, `hard_to_undo`
+  changes no answer.
+- Registration refuses `changes_rights=True` on a `safe` operation. No
+  call waits, runs or is refused because of `changes_rights`.
 
 ## Known limits
 

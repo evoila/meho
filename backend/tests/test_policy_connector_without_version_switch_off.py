@@ -200,8 +200,9 @@ async def test_case_10_the_dry_run_answers_for_the_product_with_every_switch_sta
         assert resp.status_code == 200, (case, resp.text)
         answer = resp.json()
         assert next(iter(answer)) == "custom_policy_on", (case, answer)
-        assert answer.pop("custom_policy_on") is ("CUSTOM_POLICY" in on), (case, answer)
-        assert answer == PRODUCT_DRY_RUN, case
+        assert answer["custom_policy_on"] is ("CUSTOM_POLICY" in on), (case, answer)
+        rest = {k: v for k, v in answer.items() if k != "custom_policy_on"}
+        assert rest == PRODUCT_DRY_RUN, case
         assert call["status"] == status, (case, call)
 
 

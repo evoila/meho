@@ -30,7 +30,8 @@ func newCarryOverCmd() *cobra.Command {
 			"one it shows where it comes from, the operations it matches, and " +
 			"what changes for each setting if MEHO reads it as destructive: a " +
 			"step of a multi-step operation is refused, sandbox mode, and the " +
-			"preview a call needs first. It only reads and reads no switch. " +
+			"preview a call needs first. It only reads. Its list reads no " +
+			"switch; its first line says whether CUSTOM_POLICY is on. " +
 			"Nothing is changed.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,

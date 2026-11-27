@@ -55,6 +55,7 @@ operator-only degrade).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from contextvars import ContextVar
@@ -64,6 +65,7 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.connectors._shared.log_host import REDIRECT_TEXT_WITHHELD, is_redirect_status
 from meho_backplane.flight_recorder._capture_util import (
     approx_bytes,
     approx_span_bytes,
@@ -466,6 +468,11 @@ def _redact_vendor_call(
     response_content_type = header_value(response, "content-type")
     req_body, req_truncated = cap_body(request_body)
     raw_response_body = response_content(response) if response_body is None else response_body
+    if is_redirect_status(getattr(response, "status_code", None)):
+        # A 3xx in the trace is one MEHO did not follow: its text is not kept.
+        # The fixed sentence goes in as a JSON string, so the span records it.
+        raw_response_body = json.dumps(REDIRECT_TEXT_WITHHELD)
+        response_content_type = "application/json"
     resp_body, resp_truncated = cap_body(raw_response_body)
     redaction = redact_span(
         op_id=op.op_id if op else None,

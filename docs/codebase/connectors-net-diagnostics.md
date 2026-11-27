@@ -362,7 +362,12 @@ It reuses the same three foundations plus two probe-specific rules:
    address the caller asked for. A `Location` httpx cannot read gives one
    fixed error text in `error_detail`. `_SameOriginRedirectClient` in
    `connectors/adapters/http.py` handles the same concern for
-   target-coupled dispatch. The redirect count is bounded
+   target-coupled dispatch. In `headers`, the `location` and
+   `content-location` values hold only the host name of their address
+   (a relative address names the host of the request; an address httpx
+   cannot read gives `<unparseable-location>`). This holds for every
+   last answer, for example a `300`, a `201` or a `200`. The redirect
+   count is bounded
    (`_MAX_REDIRECTS`) and the whole walk runs under one
    `asyncio.wait_for(timeout)` ceiling. This mid-chain refusal stays a
    `status="ok"` observation — the #2784 carve-out; only the **initial**

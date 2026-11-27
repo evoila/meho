@@ -53,7 +53,11 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import redirect_status_text
+from meho_backplane.connectors._shared.log_host import (
+    REDIRECT_TEXT_WITHHELD,
+    followed_redirect_status_text,
+    redirect_status_text,
+)
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -65,6 +69,7 @@ from meho_backplane.connectors.base import (
     ConnectorResourceNotFoundError,
     ConnectorUpstreamError,
 )
+from meho_backplane.flight_recorder.capture import FIRST_REQUEST_URL_EXTENSION
 from meho_backplane.operations._left_out import left_out_op
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
@@ -1721,9 +1726,13 @@ def result_connector_error(
     :func:`_add_attached_upstream_fault`).
 
     A 3xx answer gets the text of :func:`redirect_status_text`, with
-    host names only.
+    host names only. Its ``upstream_message`` is
+    :data:`REDIRECT_TEXT_WITHHELD` in place of the vendor's text, and it has
+    no ``upstream_fault``. An error answer after a followed redirect gets the
+    text of :func:`followed_redirect_status_text`, with the host name only.
     """
-    msg = _sanitize_free_text(redirect_status_text(exc) or str(exc))
+    redirect_text = redirect_status_text(exc)
+    msg = _sanitize_free_text(redirect_text or _followed_hop_text(exc) or str(exc))
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,
@@ -1736,8 +1745,11 @@ def result_connector_error(
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
-        extras["upstream_message"] = _http_upstream_message(exc.response)
-        _add_upstream_fault(extras, exc.response)
+        if redirect_text is not None:
+            extras["upstream_message"] = REDIRECT_TEXT_WITHHELD
+        else:
+            extras["upstream_message"] = _http_upstream_message(exc.response)
+            _add_upstream_fault(extras, exc.response)
     elif isinstance(exc, ConnectorUpstreamError):
         extras["http_status"] = exc.http_status
         extras["upstream_message"] = (
@@ -1745,7 +1757,8 @@ def result_connector_error(
             if exc.upstream_message
             else None
         )
-    _add_attached_upstream_fault(extras, exc)
+    if redirect_text is None:
+        _add_attached_upstream_fault(extras, exc)
     remediation = getattr(exc, "remediation", None)
     if isinstance(remediation, str) and remediation:
         # MEHO's own next step, set by the raising connector. It stays when the
@@ -1758,6 +1771,15 @@ def result_connector_error(
         duration_ms=duration_ms,
         extras=extras,
     )
+
+
+def _followed_hop_text(exc: BaseException) -> str | None:
+    """Return the host-only text of an error answer after a followed redirect, or ``None``."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    if exc.response.extensions.get(FIRST_REQUEST_URL_EXTENSION) is None:
+        return None
+    return followed_redirect_status_text(exc)
 
 
 def result_vault_credentials_read_error(

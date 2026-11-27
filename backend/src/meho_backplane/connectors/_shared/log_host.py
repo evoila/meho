@@ -7,10 +7,13 @@ import re
 import httpx
 
 __all__ = [
+    "REDIRECT_TEXT_WITHHELD",
     "UNPARSEABLE_ADDRESS",
     "UNREADABLE_LOCATION_ERRORS",
     "UNREADABLE_LOCATION_MESSAGE",
+    "followed_redirect_status_text",
     "host_for_log",
+    "is_redirect_status",
     "redirect_status_text",
     "unreadable_location_error",
 ]
@@ -20,6 +23,10 @@ UNPARSEABLE_ADDRESS = "<unparseable-location>"
 
 #: The fixed text of the error when httpx cannot read a ``Location`` address.
 UNREADABLE_LOCATION_MESSAGE = "MEHO could not read the address in the Location header"
+
+#: The fixed text that stands in place of the vendor's text of a 3xx answer
+#: MEHO does not follow: in the answer, the audit row, the log and the trace.
+REDIRECT_TEXT_WITHHELD = "MEHO does not pass on the text of a redirect answer it does not follow."
 
 #: What httpx raises while it builds the request for a ``Location`` address.
 UNREADABLE_LOCATION_ERRORS = (httpx.RemoteProtocolError, httpx.InvalidURL, UnicodeError)
@@ -51,6 +58,11 @@ def host_for_log(address: str | httpx.URL) -> str:
     return host
 
 
+def is_redirect_status(status_code: object) -> bool:
+    """Return ``True`` when *status_code* is a 3xx HTTP status."""
+    return isinstance(status_code, int) and 300 <= status_code < 400
+
+
 def redirect_status_text(exc: BaseException) -> str | None:
     """Return the text for a 3xx answer with host names only, or ``None``.
 
@@ -58,7 +70,9 @@ def redirect_status_text(exc: BaseException) -> str | None:
     error the result is ``None``. The text holds only the status code and the
     host names of the request address and of the ``Location`` header.
     """
-    if not isinstance(exc, httpx.HTTPStatusError) or not 300 <= exc.response.status_code < 400:
+    if not isinstance(exc, httpx.HTTPStatusError) or not is_redirect_status(
+        exc.response.status_code
+    ):
         return None
     response = exc.response
     text = f"Redirect response {response.status_code} from {host_for_log(exc.request.url)}"
@@ -66,6 +80,20 @@ def redirect_status_text(exc: BaseException) -> str | None:
     if location is None:
         return f"{text}, with no Location header."
     return f"{text} to {host_for_log(location)}, not followed."
+
+
+def followed_redirect_status_text(exc: httpx.HTTPStatusError) -> str:
+    """Return the text for an error answer that came after a followed redirect.
+
+    The address of the followed hop is the vendor's choice. The text holds
+    only the status code, its reason phrase and the host name of that address.
+    """
+    response = exc.response
+    kind = "Client error" if response.status_code < 500 else "Server error"
+    return (
+        f"{kind} '{response.status_code} {response.reason_phrase}' from "
+        f"{host_for_log(exc.request.url)}, after a redirect on the same host."
+    )
 
 
 def unreadable_location_error(exc: Exception, request: httpx.Request) -> Exception:

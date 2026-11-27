@@ -343,9 +343,12 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
     """The plan on the approval card: what the file adds, changes and removes.
 
     An import planned with ``CUSTOM_POLICY`` on also holds
-    ``planned_with_custom_policy: true``, and a tenant import the hash of
-    the install's limits and classifications it was planned with
-    (:data:`~meho_backplane.connectors.policy.apply_card.PLANNED_WITH_INSTALL_KEY`).
+    ``planned_with_custom_policy: true``. The stored card of a tenant import
+    also holds the hash of the install's limits and classifications it was
+    planned with
+    (:data:`~meho_backplane.connectors.policy.apply_card.PLANNED_WITH_INSTALL_KEY`);
+    the run compares it with the install's stored policy. ``preview_operation``
+    gives no such hash, and no view of the stored card shows it.
     A card planned with the switch off has the keys it had before the
     switch existed. ``preview_operation`` gives each role's list of
     ``runs_at_once`` in the short form
@@ -366,7 +369,8 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
             content=str(params["file"]).encode("utf-8"),
             custom_policy=custom_policy,
         )
-        install_sha = await install_limits_sha256(session) if custom_policy else None
+        record_install = custom_policy and plan.scope == "tenant" and not ctx.agent_preview
+        install_sha = await install_limits_sha256(session) if record_install else None
     card: dict[str, Any] = {
         "scope": plan.scope,
         "file_sha256": plan.file_sha256,
@@ -379,7 +383,7 @@ async def build_policy_apply_preview(ctx: PreviewContext) -> dict[str, Any] | No
     }
     if custom_policy:
         card["planned_with_custom_policy"] = True
-        if plan.scope == "tenant":
+        if record_install:
             card[PLANNED_WITH_INSTALL_KEY] = install_sha
     return with_short_lists(card) if ctx.agent_preview else card
 

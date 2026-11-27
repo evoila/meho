@@ -228,8 +228,9 @@ async def test_only_a_card_planned_with_the_switch_on_holds_the_field(
         request_id, card = await _ask(client, key, FILE_P, scope=scope)
 
     expected = _RELEASED_KEYS if field is None else _RELEASED_KEYS | {"planned_with_custom_policy"}
+    stored_keys = expected
     if field is not None and scope == "tenant":
-        expected |= {"planned_with_install_limits"}
+        stored_keys = expected | {"planned_with_install_limits"}
     reader = person("admin-b")
     got = (await _get_handler(reader, {"approval_request_id": str(request_id)}))["proposed_effect"][
         "preview"
@@ -240,9 +241,12 @@ async def test_only_a_card_planned_with_the_switch_on_holds_the_field(
         for item in listed["items"]
         if item["id"] == str(request_id)
     ]
+    assert set(card) == stored_keys
     for shown in (card, got, in_list):
-        assert set(shown) == expected
+        assert set(shown) - {"planned_with_install_limits"} == expected
         assert shown.get("planned_with_custom_policy") is field
+    for shown in (got, in_list):
+        assert "planned_with_install_limits" not in shown
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ and :func:`with_short_lists` for the card that ``preview_operation`` gives.
   and its warnings, ``planned_with_custom_policy`` and
   ``planned_with_install_limits``. A plan made with the switch off has none
   of them, so it reads as it is stored.
+* With the switch on, no reader gets ``planned_with_install_limits``. Only
+  the run reads it, from the stored card.
 * With the switch on, a reader that gets the short form (every MCP answer,
   and a caller that is not a person over REST) gets, for each role of
   ``runs_at_once``, the count, the first :data:`SHORT_LIST_ITEMS` items, and
@@ -38,8 +40,9 @@ __all__ = [
     "with_short_lists",
 ]
 
-#: The key of a tenant import's card (``CUSTOM_POLICY`` on) that records the
-#: hash of the install's limits and classifications it was planned with.
+#: The key of a tenant import's stored card (``CUSTOM_POLICY`` on) that records
+#: the hash of the install's limits and classifications at the plan. The run
+#: compares it with the install's stored policy; no view shows it.
 PLANNED_WITH_INSTALL_KEY: Final[str] = "planned_with_install_limits"
 
 #: How many items of each role's list a reader of the short form gets.
@@ -115,6 +118,12 @@ def _without_switched_parts(card: dict[str, Any]) -> dict[str, Any]:
     return shown
 
 
+def _without_install_record(card: dict[str, Any]) -> dict[str, Any]:
+    if PLANNED_WITH_INSTALL_KEY not in card:
+        return card
+    return {key: value for key, value in card.items() if key != PLANNED_WITH_INSTALL_KEY}
+
+
 def policy_card_as_read(effect: dict[str, Any], whole: bool) -> dict[str, Any]:
     """The stored ``proposed_effect`` of a policy import as the reader gets it.
 
@@ -126,8 +135,8 @@ def policy_card_as_read(effect: dict[str, Any], whole: bool) -> dict[str, Any]:
         return effect
     if not custom_policy_on(get_settings()):
         shown = _without_switched_parts(card)
-    elif not whole:
-        shown = with_short_lists(card)
     else:
-        return effect
+        shown = _without_install_record(card)
+        if not whole:
+            shown = with_short_lists(shown)
     return effect if shown is card else {**effect, "preview": shown}

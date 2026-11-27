@@ -198,8 +198,10 @@ async def test_a_person_gets_the_whole_list_and_another_caller_a_short_one(
     assert [len(whole[role]) for role in ("Reader", "Operator", "Admin")] == [0, count, count]
     assert page.status_code == 200, page.text
     assert f"fxbig.thing.op{count:03d}" in page.text
+    shown = {key: value for key, value in stored.items() if key != "planned_with_install_limits"}
+    assert "planned_with_install_limits" in stored
     for card in person:
-        assert card == stored
+        assert card == shown
     expected = {
         role: {
             "count": len(items),
@@ -211,7 +213,7 @@ async def test_a_person_gets_the_whole_list_and_another_caller_a_short_one(
     for cards in short:
         for card in cards:
             assert card["diff"]["runs_at_once"] == expected
-            assert {**card, "diff": {**card["diff"], "runs_at_once": whole}} == stored
+            assert {**card, "diff": {**card["diff"], "runs_at_once": whole}} == shown
     assert runner.status_code == 403, runner.text
     assert await _stored_card() == stored
 

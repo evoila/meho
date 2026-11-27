@@ -6949,15 +6949,19 @@ type ExplainEvaluatorVerdict string
 // The answer of the approve step for that request, once for each way to
 // approve: a click in the web console (“web“), and the command line or
 // REST (“token“). Each reason is the text the approve step shows.
+//
+// “web“ and “token“ are “null“ when the approve step reads facts
+// that only the call has (its values, or what MEHO reads from them or
+// from the target). Then both reasons say so.
 type ExplainOwnApproval struct {
-	// Token True when an approve on the command line or REST does.
-	Token bool `json:"token"`
+	// Token True when an approve on the command line or REST does. Null when it depends on the values of the call.
+	Token *bool `json:"token"`
 
 	// TokenReason Why, in the words of the approve step.
 	TokenReason string `json:"token_reason"`
 
-	// Web True when a click in the web console approves it.
-	Web bool `json:"web"`
+	// Web True when a click in the web console approves it. Null when it depends on the values of the call.
+	Web *bool `json:"web"`
 
 	// WebReason Why, in the words of the approve step.
 	WebReason string `json:"web_reason"`
@@ -9275,6 +9279,10 @@ type PolicyExplainResponse struct {
 	// The answer of the approve step for that request, once for each way to
 	// approve: a click in the web console (``web``), and the command line or
 	// REST (``token``). Each reason is the text the approve step shows.
+	//
+	// ``web`` and ``token`` are ``null`` when the approve step reads facts
+	// that only the call has (its values, or what MEHO reads from them or
+	// from the target). Then both reasons say so.
 	OwnApproval *ExplainOwnApproval `json:"own_approval,omitempty"`
 
 	// Request The rule stored on an approval request.

@@ -37507,8 +37507,9 @@
         "properties": {
           "web": {
             "type": "boolean",
+            "nullable": true,
             "title": "Web",
-            "description": "True when a click in the web console approves it."
+            "description": "True when a click in the web console approves it. Null when it depends on the values of the call."
           },
           "web_reason": {
             "type": "string",
@@ -37517,8 +37518,9 @@
           },
           "token": {
             "type": "boolean",
+            "nullable": true,
             "title": "Token",
-            "description": "True when an approve on the command line or REST does."
+            "description": "True when an approve on the command line or REST does. Null when it depends on the values of the call."
           },
           "token_reason": {
             "type": "string",
@@ -37534,7 +37536,7 @@
           "token_reason"
         ],
         "title": "ExplainOwnApproval",
-        "description": "May the person who asked approve the request that the call makes?\n\nThe answer of the approve step for that request, once for each way to\napprove: a click in the web console (``web``), and the command line or\nREST (``token``). Each reason is the text the approve step shows."
+        "description": "May the person who asked approve the request that the call makes?\n\nThe answer of the approve step for that request, once for each way to\napprove: a click in the web console (``web``), and the command line or\nREST (``token``). Each reason is the text the approve step shows.\n\n``web`` and ``token`` are ``null`` when the approve step reads facts\nthat only the call has (its values, or what MEHO reads from them or\nfrom the target). Then both reasons say so."
       },
       "ExplainRule": {
         "properties": {

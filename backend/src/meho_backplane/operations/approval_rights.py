@@ -220,15 +220,22 @@ def approve_right(
 
 
 def approve_right_any_status(
-    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+    operator: Operator,
+    request: ApprovalRequest,
+    *,
+    floor: InstallFloor | None = None,
+    place: bool = True,
 ) -> ApproveRight:
     """Like :func:`approve_right`, but without the "still pending" check.
 
     The push messages (:mod:`meho_backplane.web_push.recipients`) ask who
     may approve a request also after it was decided: its decision message
-    goes to the same people as its first message.
+    goes to the same people as its first message. With *place* ``False`` a
+    routing refusal does not name the places of routing entries in the
+    policy (``meho policy explain`` for a caller who is not an admin).
     """
-    return _routed(operator, request, _right(operator, request, check_pending=False), floor)
+    right = _right(operator, request, check_pending=False)
+    return _routed(operator, request, right, floor, place=place)
 
 
 def _routed(
@@ -236,14 +243,16 @@ def _routed(
     request: ApprovalRequest,
     right: ApproveRight,
     floor: InstallFloor | None,
+    *,
+    place: bool = True,
 ) -> ApproveRight:
     """*right*, or a refusal when the install's routing or the stored group kinds refuse."""
     if not right.may_approve or not routing_enabled():
         return right
-    refusal = floor.refusal(operator, request) if floor is not None else None
+    refusal = floor.refusal(operator, request, place=place) if floor is not None else None
     if refusal is not None:
         return _refused(ApproveRightReason.NOT_ROUTED, refusal)
-    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule, place=place)
     if refusal is None:
         return right
     return _refused(ApproveRightReason.NOT_ROUTED, refusal)

@@ -11,8 +11,27 @@ about it. That is the check the approve sign and the approve itself run,
 in the same order: a machine login never approves, a change of rights only
 an admin in the web console, an own change by the own-approval rule
 (:func:`~meho_backplane.operations.approval_queue._check_self_approval`),
-the role floor, and the routing. So the part cannot say something else
-than the approve. Nothing is stored.
+the role floor, and the routing. Nothing is stored.
+
+The rule of the part:
+
+* Where the approve step reads a fact that only the call has, ``web`` and
+  ``token`` are ``None`` and both reasons are :data:`DEPENDS_ON_VALUES`.
+  Such facts are the values of the call, and the facts of the approval
+  card that MEHO reads from the values or from the target (for example
+  the login-realm fact). These are the operations registered with
+  :func:`~meho_backplane.operations.grant_approval.register_rights_change_check`,
+  :func:`~meho_backplane.operations.grant_approval.register_grant_op` or
+  :func:`~meho_backplane.operations.role_floors.register_requester_check`;
+  :func:`~meho_backplane.operations.grant_approval.approve_reads_call_facts`
+  decides it.
+* For every other operation, ``web`` and ``token`` are ``True`` or
+  ``False``, as the approve step decides for that caller, and a refusal
+  has the approve step's reason.
+
+The part answers for the person and the request. The approve still checks
+at the click what can change until then: the sign-in, the deadline and the
+preview binding.
 
 It asks twice: once as a click in the web console, once with a token (the
 command line or REST). The request says it waits only because it came with
@@ -34,7 +53,11 @@ from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, EndpointDescriptor
 from meho_backplane.operations._validate import TOKEN_CALL_WAIT, waits_only_for_token_call
 from meho_backplane.operations.approval_rights import approve_right_any_status
-from meho_backplane.operations.grant_approval import ASKED_IN_WEB_CONSOLE, is_rights_change
+from meho_backplane.operations.grant_approval import (
+    ASKED_IN_WEB_CONSOLE,
+    approve_reads_call_facts,
+    is_rights_change,
+)
 from meho_backplane.policy.explain_models import ExplainOwnApproval
 from meho_backplane.policy.routing import RouteEntry, routing_enabled
 from meho_backplane.policy.routing_floor import InstallFloor
@@ -42,7 +65,10 @@ from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.policy.who_approves import Approvers
 from meho_backplane.settings import get_settings
 
-__all__ = ["own_approval_view", "request_of_call"]
+__all__ = ["DEPENDS_ON_VALUES", "own_approval_view", "request_of_call"]
+
+#: Both reasons when the approve step reads a fact that only the call has.
+DEPENDS_ON_VALUES = "This depends on the values of the call. Explain asks without them."
 
 
 def request_of_call(
@@ -111,19 +137,22 @@ def own_approval_view(
     """
     if not custom_policy_on(get_settings()):
         return None
+    if approve_reads_call_facts(descriptor.op_id):
+        reason = (DEPENDS_ON_VALUES, DEPENDS_ON_VALUES)
+        return ExplainOwnApproval.of(web=None, web_reason=reason, token=None, token_reason=reason)
     actor = {} if me else {ACTOR_SUB_KEY: None}
     with structlog.contextvars.bound_contextvars(**actor):
         request = request_of_call(asker, descriptor, connector_id, approvers)
     floor = _install_floor(routes)
-    web = approve_right_any_status(
-        asker.model_copy(update={"web_session": True}), request, floor=floor
-    )
-    token = approve_right_any_status(
-        asker.model_copy(update={"web_session": False}), request, floor=floor
-    )
-    return ExplainOwnApproval(
-        web=web.may_approve,
-        web_reason=web.message,
-        token=token.may_approve,
-        token_reason=token.message,
+    answers: dict[str, tuple[bool, tuple[str, str]]] = {}
+    for way, web in (("web", True), ("token", False)):
+        login = asker.model_copy(update={"web_session": web})
+        right = approve_right_any_status(login, request, floor=floor)
+        hidden = approve_right_any_status(login, request, floor=floor, place=False)
+        answers[way] = (right.may_approve, (right.message, hidden.message))
+    return ExplainOwnApproval.of(
+        web=answers["web"][0],
+        web_reason=answers["web"][1],
+        token=answers["token"][0],
+        token_reason=answers["token"][1],
     )

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 __all__ = [
     "Answer",
@@ -91,12 +91,48 @@ class ExplainOwnApproval(_Frozen):
     The answer of the approve step for that request, once for each way to
     approve: a click in the web console (``web``), and the command line or
     REST (``token``). Each reason is the text the approve step shows.
+
+    ``web`` and ``token`` are ``null`` when the approve step reads facts
+    that only the call has (its values, or what MEHO reads from them or
+    from the target). Then both reasons say so.
     """
 
-    web: bool = Field(description="True when a click in the web console approves it.")
+    web: bool | None = Field(
+        description="True when a click in the web console approves it. Null when it depends "
+        "on the values of the call."
+    )
     web_reason: str = Field(description="Why, in the words of the approve step.")
-    token: bool = Field(description="True when an approve on the command line or REST does.")
+    token: bool | None = Field(
+        description="True when an approve on the command line or REST does. Null when it "
+        "depends on the values of the call."
+    )
     token_reason: str = Field(description="Why, in the words of the approve step.")
+    _web_reason_without_place: str | None = PrivateAttr(default=None)
+    _token_reason_without_place: str | None = PrivateAttr(default=None)
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        web: bool | None,
+        web_reason: tuple[str, str],
+        token: bool | None,
+        token_reason: tuple[str, str],
+    ) -> ExplainOwnApproval:
+        """The part; each reason is (text, the same text without the places of policy entries)."""
+        part = cls(web=web, web_reason=web_reason[0], token=token, token_reason=token_reason[0])
+        part._web_reason_without_place = web_reason[1]
+        part._token_reason_without_place = token_reason[1]
+        return part
+
+    def without_place(self) -> ExplainOwnApproval:
+        """The part for a caller who may not see the places of policy entries."""
+        return self.model_copy(
+            update={
+                "web_reason": self._web_reason_without_place or self.web_reason,
+                "token_reason": self._token_reason_without_place or self.token_reason,
+            }
+        )
 
 
 class ExplainEntry(_Frozen):

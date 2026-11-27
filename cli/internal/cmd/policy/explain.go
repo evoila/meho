@@ -269,18 +269,23 @@ func printApprovers(w io.Writer, a api.ExplainApprovers) {
 }
 
 // printOwnApproval says whether the person who asked may approve their own
-// request, for each way to approve. Only with CUSTOM_POLICY on.
+// request, for each way to approve. Only with CUSTOM_POLICY on. A null value
+// means the answer depends on the values of the call.
 func printOwnApproval(w io.Writer, o api.ExplainOwnApproval) {
 	fmt.Fprintln(w, "May you approve your own request:")
 	fmt.Fprintf(w, "  in the web console: %s (%s)\n", yesNo(o.Web), sanitize(o.WebReason))
 	fmt.Fprintf(w, "  with a token: %s (%s)\n", yesNo(o.Token), sanitize(o.TokenReason))
 }
 
-func yesNo(b bool) string {
-	if b {
+func yesNo(b *bool) string {
+	switch {
+	case b == nil:
+		return "depends on the values of the call"
+	case *b:
 		return "yes"
+	default:
+		return "no"
 	}
-	return "no"
 }
 
 func ruleLine(r api.ExplainRule) string {

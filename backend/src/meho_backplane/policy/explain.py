@@ -547,7 +547,9 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
     The entries of the policy and their places in it are left out: the
     matching classification entries with their category and labels, the
     place of each evaluator rule, and the routing entries (also the
-    install's floor) that name the approvers.
+    install's floor) that name the approvers. The reasons of
+    ``own_approval`` keep their sentence and the groups that may approve,
+    without the places of routing entries.
     """
     update: dict[str, Any] = {"approvers": _without_rule(response.approvers)}
     if response.classification is not None:
@@ -568,6 +570,8 @@ def without_policy(response: PolicyExplainResponse) -> PolicyExplainResponse:
         update["request"] = response.request.model_copy(
             update={"approvers": _without_rule(response.request.approvers)}
         )
+    if response.own_approval is not None:
+        update["own_approval"] = response.own_approval.without_place()
     return response.model_copy(update=update)
 
 

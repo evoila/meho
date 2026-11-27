@@ -132,6 +132,27 @@ func TestExplainPrintsWhetherYouMayApproveYourOwnRequest(t *testing.T) {
 	}
 }
 
+func TestExplainSaysWhenYourOwnApprovalDependsOnTheValues(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"status":"ok","engine":"shadow","answer":"wait","decided_by":"today",
+		"approvers":{"groups":["MEHO-Admins"],"rule":null},
+		"own_approval":{"web":null,"web_reason":"This depends on the values of the call. Explain asks without them.",
+			"token":null,"token_reason":"This depends on the values of the call. Explain asks without them."},
+		"today":{"verdict":"wait","policy_verdict":"needs-approval","reason":null},"evaluator":null}`, &got)
+	stdout, stderr, err := run(t, "explain", "<connector-id>", "<op-id>", "--me", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("explain: %v; stderr=%s", err, stderr)
+	}
+	for _, want := range []string{
+		"  in the web console: depends on the values of the call (This depends on the values of the call. Explain asks without them.)\n",
+		"  with a token: depends on the values of the call (This depends on the values of the call. Explain asks without them.)\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestExplainWithoutOwnApprovalPrintsNoLine(t *testing.T) {
 	var got seen
 	srv := server(t, 200, explainWait, &got)

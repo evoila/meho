@@ -764,6 +764,8 @@
   "tests/test_group_listing_operations.py": 7.77,
   "tests/test_guest_reads_and_pod_applies_wait.py": 9.85,
   "tests/test_hard_to_undo_delete_sign.py": 8.0,
+  "tests/test_hard_to_undo_sandbox_exception.py": 6.0,
+  "tests/test_hard_to_undo_upgrade_query.py": 8.0,
   "tests/test_health.py": 0.71,
   "tests/test_health_server_time.py": 2.93,
   "tests/test_hosted_run_events.py": 4.88,

@@ -522,9 +522,12 @@ def _sandbox_delete_exception(
     :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`; the op
     has no credential class; the params (when known) do not make the call a
     credential call; no other rule of :func:`never_covered_reason`
-    holds; and the op has a delete sign (:func:`delete_grant_reason`). Only a
-    delete grant may then cover the call: no standing grant, no agent grant
-    and no run approval does.
+    holds; and the op has a delete sign other than ``hard_to_undo``: a
+    configured name pattern, a vendor delete action name, the
+    ``destructive`` level, the HTTP verb ``DELETE`` or the ``destructive``
+    tag. ``hard_to_undo`` never opens the exception, with the switch
+    ``CUSTOM_POLICY`` on or off. Only a delete grant may then cover the
+    call: no standing grant, no agent grant and no run approval does.
     """
     from meho_backplane.settings import get_settings
 
@@ -541,7 +544,9 @@ def _sandbox_delete_exception(
     ):
         return False
     patterns = get_settings().service_grant_delete_shaped_patterns
-    return delete_grant_reason(op_id, patterns, descriptor) is not None
+    if delete_shaped_refusal_reason(op_id, patterns) is not None:
+        return True
+    return descriptor is not None and _delete_reason_by_descriptor_fields(descriptor) is not None
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -615,6 +620,14 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     (:attr:`~meho_backplane.db.models.EndpointDescriptor.hard_to_undo`).
     With the switch off, the field changes no answer.
     """
+    reason = _delete_reason_by_descriptor_fields(descriptor)
+    if reason is None:
+        reason = _hard_to_undo_reason(descriptor)
+    return reason
+
+
+def _delete_reason_by_descriptor_fields(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason for the level, the HTTP verb or the tag, without ``hard_to_undo``."""
     if descriptor.safety_level == "destructive":
         return (
             f"op {descriptor.op_id!r} is safety_level=destructive; delete-shaped "
@@ -633,7 +646,7 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
             f"op {descriptor.op_id!r} carries the 'destructive' tag; "
             "delete-shaped operations are never grantable"
         )
-    return _hard_to_undo_reason(descriptor)
+    return None
 
 
 def _hard_to_undo_reason(descriptor: EndpointDescriptor) -> str | None:

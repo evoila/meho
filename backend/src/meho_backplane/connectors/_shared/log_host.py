@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from http import HTTPStatus
 
 import httpx
 
 __all__ = [
+    "FIRST_REQUEST_URL_EXTENSION",
     "REDIRECT_TEXT_WITHHELD",
     "UNPARSEABLE_ADDRESS",
     "UNREADABLE_LOCATION_ERRORS",
@@ -15,6 +17,7 @@ __all__ = [
     "host_for_log",
     "is_redirect_status",
     "redirect_status_text",
+    "redirect_text_withheld",
     "unreadable_location_error",
 ]
 
@@ -24,8 +27,13 @@ UNPARSEABLE_ADDRESS = "<unparseable-location>"
 #: The fixed text of the error when httpx cannot read a ``Location`` address.
 UNREADABLE_LOCATION_MESSAGE = "MEHO could not read the address in the Location header"
 
+#: The key of :attr:`httpx.Response.extensions` and :attr:`httpx.Request.extensions`
+#: that holds the first request address when the HTTP client followed a redirect.
+FIRST_REQUEST_URL_EXTENSION = "meho_first_request_url"
+
 #: The fixed text that stands in place of the vendor's text of a 3xx answer
-#: MEHO does not follow: in the answer, the audit row, the log and the trace.
+#: other than a 304 that MEHO does not follow: in the answer, the audit row,
+#: the log and the trace.
 REDIRECT_TEXT_WITHHELD = "MEHO does not pass on the text of a redirect answer it does not follow."
 
 #: What httpx raises while it builds the request for a ``Location`` address.
@@ -63,6 +71,16 @@ def is_redirect_status(status_code: object) -> bool:
     return isinstance(status_code, int) and 300 <= status_code < 400
 
 
+def redirect_text_withheld(status_code: object) -> bool:
+    """Return ``True`` when MEHO does not pass on the vendor's text of a *status_code* answer.
+
+    This holds for a 3xx answer other than a ``304 Not Modified``. A 304
+    asks for no redirect, so its answer and trace are built as for any other
+    status.
+    """
+    return is_redirect_status(status_code) and status_code != HTTPStatus.NOT_MODIFIED
+
+
 def redirect_status_text(exc: BaseException) -> str | None:
     """Return the text for a 3xx answer with host names only, or ``None``.
 
@@ -82,17 +100,30 @@ def redirect_status_text(exc: BaseException) -> str | None:
     return f"{text} to {host_for_log(location)}, not followed."
 
 
-def followed_redirect_status_text(exc: httpx.HTTPStatusError) -> str:
-    """Return the text for an error answer that came after a followed redirect.
+def followed_redirect_status_text(exc: BaseException) -> str | None:
+    """Return the text for an error answer that came after a followed redirect, or ``None``.
 
-    The address of the followed hop is the vendor's choice. The text holds
-    only the status code, its reason phrase and the host name of that address.
+    ``exc`` is an :exc:`httpx.HTTPStatusError` whose answer carries the mark
+    :data:`FIRST_REQUEST_URL_EXTENSION`; for any other error the result is
+    ``None``. The address of the followed hop is the vendor's choice, and so
+    is the reason phrase of its status line. The text holds only the status
+    code, the fixed phrase of that code from :class:`http.HTTPStatus` (none
+    for a code it does not know) and the host name of that address.
     """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
     response = exc.response
-    kind = "Client error" if response.status_code < 500 else "Server error"
+    if response.extensions.get(FIRST_REQUEST_URL_EXTENSION) is None:
+        return None
+    code = response.status_code
+    try:
+        status = f"{code} {HTTPStatus(code).phrase}"
+    except ValueError:
+        status = str(code)
+    kind = "Client error" if code < 500 else "Server error"
     return (
-        f"{kind} '{response.status_code} {response.reason_phrase}' from "
-        f"{host_for_log(exc.request.url)}, after a redirect on the same host."
+        f"{kind} '{status}' from {host_for_log(exc.request.url)}, "
+        "after a redirect on the same host."
     )
 
 

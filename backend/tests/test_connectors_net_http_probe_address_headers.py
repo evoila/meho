@@ -6,7 +6,8 @@
 The probe runs through the real dispatcher, with the tenant's trace on,
 against a local HTTP server. The last answer carries a ``Location`` or a
 ``Content-Location`` header whose address holds made-up values in the path,
-the query (also a ticket value), the fragment, the user part or the port.
+the query (also a made-up one-time value in the address), the fragment,
+the user part or the port.
 The tests check the answer, every column of the audit row, the stored trace
 and its spans, the agent's copy of the trace, and the log output at DEBUG
 and above. None of them holds a made-up value. The ``headers`` value is the

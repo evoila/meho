@@ -12,15 +12,13 @@ dispatcher against a local HTTP server.
 - MEHO does not follow a redirect. The vendor's text of that answer is not
   passed on: one fixed sentence stands in its place.
 
-Made-up values sit in the path, the query (also a ticket value), the
-fragment and the user part of each address. The tests check the answer,
-every column of the audit row, the stored trace and its spans, the agent's
-copy of the trace, and the log output at DEBUG and above.
+Made-up values sit in the path, the query (also a made-up one-time value in
+the address), the fragment and the user part of each address. The tests
+check the answer, every column of the audit row, the stored trace and its
+spans, the agent's copy of the trace, and the log output at DEBUG and above.
 """
 
 from __future__ import annotations
-
-import secrets
 
 import pytest
 
@@ -35,15 +33,10 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixtures
     _run,
     _settings_env,
     _stub_embedding,
+    _ticket,
 )
 
 _VENDOR_WORDS = "the vendor could not find this thing"
-
-
-def _ticket() -> tuple[str, list[str]]:
-    """A made-up ticket in the Proxmox shape, and its made-up parts."""
-    user, hex_part, signature = _made_up(), secrets.token_hex(4).upper(), _made_up()
-    return f"PVE:{user}@pve:{hex_part}::{signature}", [user, hex_part, signature]
 
 
 @pytest.mark.asyncio

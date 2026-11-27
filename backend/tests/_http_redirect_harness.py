@@ -59,6 +59,12 @@ def _made_up() -> str:
     return "zq" + secrets.token_hex(14)
 
 
+def _ticket() -> tuple[str, list[str]]:
+    """A made-up one-time value in the address, and its made-up parts."""
+    user, hex_part, signature = _made_up(), secrets.token_hex(4).upper(), _made_up()
+    return f"PVE:{user}@pve:{hex_part}::{signature}", [user, hex_part, signature]
+
+
 class _DemoConnector(HttpConnector):
     """A typed connector whose one read operation runs through the shared HTTP seam."""
 
@@ -294,6 +300,17 @@ async def _stored_text(audit_id: UUID, *, trace: bool = True) -> tuple[str, str]
         assert any(span.span_kind == "vendor_call" for span in spans)
         trace_text = _row_text(stored) + "".join(_row_text(span) for span in spans)
         return _row_text(audit), trace_text
+
+
+async def _vendor_call_bodies(audit_id: UUID) -> list[Any]:
+    """The ``response_body`` of each ``vendor_call`` span of the stored trace."""
+    async with get_sessionmaker()() as s:
+        trace = await s.scalar(select(DispatchTrace).filter_by(audit_id=audit_id))
+        assert trace is not None
+        spans = await s.scalars(
+            select(DispatchTraceSpan).filter_by(trace_id=trace.id, span_kind="vendor_call")
+        )
+        return [span.attributes.get("response_body") for span in spans]
 
 
 async def _run(

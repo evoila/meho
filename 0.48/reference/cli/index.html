@@ -7607,6 +7607,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-policy-carry-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy carry-over
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-policy-diff" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -15210,6 +15221,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#meho-policy-carry-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho policy carry-over
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#meho-policy-diff" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -21263,9 +21285,19 @@
 <li><code>--target</code> — target slug to dispatch against (required)</li>
 </ul>
 <h2 id="meho-policy"><code>meho policy</code><a class="headerlink" href="#meho-policy" title="Permanent link">&para;</a></h2>
-<p>Manage the policy file (validate / diff / import / export / history / explain)</p>
+<p>Manage the policy file (validate / diff / import / export / history / explain / carry-over)</p>
 <div class="highlight"><pre><span></span><code>meho policy
 </code></pre></div>
+<h3 id="meho-policy-carry-over"><code>meho policy carry-over</code><a class="headerlink" href="#meho-policy-carry-over" title="Permanent link">&para;</a></h3>
+<p>List every saved "always wait" and what changes if MEHO reads it as destructive</p>
+<div class="highlight"><pre><span></span><code>meho policy carry-over --dry-run [flags]
+</code></pre></div>
+<ul>
+<li><code>--backplane</code> — backplane URL to call (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--dry-run</code> — list the settings; change nothing (required)</li>
+<li><code>--json</code> — print the server's answer as JSON</li>
+<li><code>--scope</code> — tenant (your tenant's policy) or install (the whole install; platform admins only)</li>
+</ul>
 <h3 id="meho-policy-diff"><code>meho policy diff</code><a class="headerlink" href="#meho-policy-diff" title="Permanent link">&para;</a></h3>
 <p>Show what importing a policy file would change (dry run)</p>
 <div class="highlight"><pre><span></span><code>meho policy diff FILE [flags]

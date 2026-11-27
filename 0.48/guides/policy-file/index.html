@@ -2637,6 +2637,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#before-always-wait-becomes-destructive-meho-policy-carry-over-dry-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before "always wait" becomes destructive: meho policy carry-over --dry-run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-an-import-does" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3384,6 +3395,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#before-always-wait-becomes-destructive-meho-policy-carry-over-dry-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Before "always wait" becomes destructive: meho policy carry-over --dry-run
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#what-an-import-does" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3864,6 +3886,44 @@ match are listed under the classification (the <code>matched</code> lines).
 Today's checks still decide. With the setting off, explain shows
 today's answer only.</p>
 </div>
+<h2 id="before-always-wait-becomes-destructive-meho-policy-carry-over-dry-run">Before "always wait" becomes <code>destructive</code>: <code>meho policy carry-over --dry-run</code><a class="headerlink" href="#before-always-wait-becomes-destructive-meho-policy-carry-over-dry-run" title="Permanent link">&para;</a></h2>
+<p>"Always wait" makes an operation wait for approval on every call. It is
+saved in two places: an admin's override with approval on, or a policy
+file entry with <code>always_wait: true</code>.</p>
+<p>The dry run lists every saved "always wait" and what changes for each
+setting if MEHO reads it as <code>destructive</code>. It only reads: it changes no
+setting and no answer, and it reads no setting switch. It writes only its
+audit row.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>policy<span class="w"> </span>carry-over<span class="w"> </span>--dry-run<span class="w">                   </span><span class="c1"># your tenant's settings</span>
+meho<span class="w"> </span>policy<span class="w"> </span>carry-over<span class="w"> </span>--dry-run<span class="w"> </span>--scope<span class="w"> </span>install<span class="w">   </span><span class="c1"># the install's (platform admin)</span>
+</code></pre></div>
+<p>For each setting it shows:</p>
+<ul>
+<li>where it comes from: <code>override</code> or <code>policy_file</code>, the scope, and the
+  place (for example <code>tenant:classifications[2]</code>);</li>
+<li>the operations it matches. A policy file entry is matched against the
+  operations a call of the tenant can use, and against every step of a
+  multi-step operation, with the group the step check finds for it, also
+  a step with no row a call can use. A policy file entry makes an
+  operation wait only with <code>POLICY_CLASSIFICATION</code> or <code>CUSTOM_POLICY</code> on;
+  the dry run lists its matches with every switch;</li>
+<li>a warning when the setting makes a step of a multi-step operation
+  wait, with every multi-step operation that runs it, at every level. A
+  setting of the install counts when it makes the step wait for at least
+  one run, also the run of a tenant whose own row of the step is in
+  another group. A
+  policy file entry that makes only the direct call wait gives no such
+  warning. As
+  <code>destructive</code>, a step is refused, not held for approval, so such a run
+  stops at that step;</li>
+<li>a warning when the install is in sandbox mode. There a delete grant of
+  a service login can cover some <code>destructive</code> operations, but not every
+  one;</li>
+<li>that, as <code>destructive</code>, a call needs a matching preview first. A call
+  without one is refused.</li>
+</ul>
+<p>Who may run it: the same callers who may export the policy, except an
+agent login, which gets 403. There is no MCP tool for it.</p>
 <h2 id="what-an-import-does">What an import does<a class="headerlink" href="#what-an-import-does" title="Permanent link">&para;</a></h2>
 <ol>
 <li>MEHO checks the file and works out the diff.</li>
@@ -3922,6 +3982,10 @@ import the file again.</p>
 <tr>
 <td><code>POST /api/v1/policy/explain</code></td>
 <td>why a call runs, waits or is denied; runs nothing</td>
+</tr>
+<tr>
+<td><code>GET /api/v1/policy/carry-over/dry-run</code></td>
+<td>every saved "always wait" and what changes if MEHO reads it as <code>destructive</code>; writes only its audit row</td>
 </tr>
 </tbody>
 </table>

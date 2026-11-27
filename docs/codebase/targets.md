@@ -275,8 +275,9 @@ key with the value the request would store:
   its role.
 - A key is added, changed or removed, and the operator has no
   `platform_admin`: HTTP 403 `vault_login_role_requires_platform_admin`,
-  and the row is not changed. Values are compared as stored, so a blank
-  string is a change like any other.
+  and the row is not changed. Values are compared as stored, with their
+  JSON type, so a blank string is a change like any other, and so is a
+  change of only the type (`1` to `true` or `1.0`).
 
 `targets.register` calls `create_target`, so the same rule holds there:
 the operation answers with an invalid-parameters error that names the
@@ -719,12 +720,21 @@ with a token becomes a call of this op.
   were set and removed (`extras_keys_set`, `extras_keys_removed`), never
   the values. The answer of the operation holds the same two lists, and no
   value of `extras`, because it is also stored in the audit row and in the
-  approval request; read the target to see the values. A change in the web
+  approval request; read the target to see the values. A realm warning in
+  that answer names the key `managed_realm`, not the realm. When the
+  request runs, or ends without a run (rejected, withdrawn, expired),
+  MEHO replaces each value of `extras_changes` in the stored params with
+  the marker it uses for a secret value; the key names stay
+  (`declare_hidden_stored_map_values` in `op_classes.py`). A value can be
+  secret only next to a stored key, so every value goes. A run again
+  without params then needs the params. A change in the web
   console runs at once and answers with the whole target. It locks the
   target row (`SELECT ... FOR UPDATE`) and merges into the extras of that
   locked read, so two changes of different keys at the same time both
   stay. A change of only the JSON type of a value (`1` to `true`) is
-  stored. CLI:
+  stored. The Vault login keys (`vault_role`, `vault_mount`) are compared
+  with their JSON type too, so a change of only the type needs a platform
+  admin. CLI:
   `meho targets update <target> --set-extra key=value` (text),
   `--set-extra-json key=<json>` (typed) and `--unset-extra key`, each
   repeatable. To correct the realm of a Keycloak target:

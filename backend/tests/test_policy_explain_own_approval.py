@@ -25,8 +25,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import respx
+import structlog
 from fastapi.testclient import TestClient
 
+from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
@@ -44,6 +46,7 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.explain import CallQuestion, explain_call
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import (
@@ -365,6 +368,35 @@ async def test_own_approval_follows_the_routing(
     assert "install:routing[0]" in operator["token_reason"]
     admin = by[("Admin, token", "caution")].own
     assert admin is not None and admin["web"] and admin["token"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", ["caution", "dangerous"])
+async def test_a_hosted_run_reads_what_the_approve_does(
+    embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    """A person's login in a hosted agent run: the part says what the approve does."""
+    _switches(monkeypatch, CUSTOM_POLICY="true", APPROVAL_ALLOW_SELF_APPROVAL="false")
+    await _setup(embedding)
+    caller = _Caller("hosted run", "person-run", PrincipalKind.USER, TenantRole.OPERATOR)
+    with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: "agent:hosted"}):
+        answer = await explain_call(
+            CallQuestion(
+                asker=caller.operator(), me=True, connector_id=_CONNECTOR, op_id=_op(level)
+            )
+        )
+        assert answer.answer == "wait", answer
+        request_id = await _park(caller, _op(level))
+    own = answer.own_approval
+    assert own is not None
+    for way, (accepted, reason) in (
+        ("web", await _approve(caller, request_id, web=True)),
+        ("token", await _approve(caller, request_id, web=False)),
+    ):
+        assert getattr(own, way) is accepted, (way, own)
+        assert getattr(own, f"{way}_reason") == reason, (way, own)
+    # The run's call never waits only for its token, so no click approves it.
+    assert not own.web and not own.token
 
 
 @pytest.mark.asyncio

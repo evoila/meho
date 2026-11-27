@@ -111,7 +111,7 @@ def _installed_package() -> Iterator[None]:
     """Record the made-up folder as installed by a package, as the start check does."""
     saved = dict(connector_packages._installed_folders)
     connector_packages.record_installed_connector_packages(
-        {**saved, _FOLDER: "meho-connectors-made-up"}
+        {**saved, _FOLDER: "made-up-connector-package"}
     )
     yield
     connector_packages.record_installed_connector_packages(saved)

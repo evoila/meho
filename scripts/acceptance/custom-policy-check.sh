@@ -68,11 +68,15 @@ What it does:
 
   The script never approves or decides a request. Its one approve call is
   the agent's attempt in check 6, which MEHO must refuse. MEHO gives back a
-  request that already waits (extras.approval_request_reused) in one case:
-  a second identical call while APPROVAL_SAME_CALL_REUSE is on. A request
-  given back that is on this run's list is this run's. One that is not on
-  the list waited before this run: the check fails, and the script never
-  asks anyone to approve that request and never withdraws it.
+  request that already waits (extras.approval_request_reused) only for a
+  call with the same work reference while APPROVAL_SAME_CALL_REUSE is on.
+  Each request of a run is sent with a work reference of its own, so MEHO
+  never gives the first request of check 10 back for its second call. A
+  request given back that is on this run's list is this run's. One that is
+  not on the list waited before this run: the check fails, and the script
+  never asks anyone to approve that request and never withdraws it. Check
+  10 makes its second call only after its first request is decided, and
+  prints [skip] while that request still waits.
 
   Each call sends a work reference of its own: the run's reference and the
   step, for example custom-policy-check-<run>-c6-delete-person (the
@@ -116,8 +120,8 @@ Checks:
    3  a carried-over "always wait": needs a preview, then waits
    4  an agent policy: a personal agent runs, a service login waits
    5  an approver policy: only the custom role approves
-   6  each fixed rule waits; an agent's change of the policy is refused;
-      an agent's approve attempt is refused
+   6  each fixed rule waits; an agent's policy import (policy.apply) is
+      refused; an agent's approve attempt is refused
    8  a write is never lowered below caution (console and token)
    9  every policy change in the console needs a fresh sign-in
   10  a person approves their own agent's request in the console, and the
@@ -125,10 +129,11 @@ Checks:
   11  each login of MEHO's own code writes its caller kind
    7  the switch off again: every answer, and who may approve, is as before
 
-Check 6, a change of the policy: an agent login asks for policy.apply over
-MCP, and MEHO refuses it before anything waits ("Only a person can ask for
-a policy import"). An Operator's token is refused too ("needs the
-tenant_admin role"). The same call with the Admin's token waits.
+Check 6, an agent's policy import (policy.apply): an agent login asks for
+policy.apply over MCP, and MEHO refuses it before anything waits
+("Only a person can ask for a policy import"). An Operator's token is
+refused too ("needs the tenant_admin role"). The same call with the
+Admin's token waits. Check 7 probes the policy import of all three logins.
 
 Environment (live run). Each CPC_OP_* value is "<connector_id> <op_id> [<target>]";
 without a target the call has no target. A CPC_PARAMS_<name> value (for
@@ -835,6 +840,7 @@ PROBES=(
     "6 CPC_PERSON_TOKEN CPC_OP_CREDENTIAL_WRITE token"
     "6 CPC_PERSON_TOKEN CPC_OP_RIGHTS_CHANGE token"
     "6 CPC_AGENT_TOKEN CPC_OP_POLICY_CHANGE token"
+    "6 CPC_PERSON_TOKEN CPC_OP_POLICY_CHANGE token"
     "6 CPC_ADMIN_TOKEN CPC_OP_POLICY_CHANGE token"
     "6 CPC_SERVICE_TOKEN CPC_OP_DESTRUCTIVE token"
     "6 CPC_SERVICE_TOKEN CPC_OP_ROOT_SHELL token"
@@ -1251,8 +1257,8 @@ check_6() {
     # Table row: "floor", a change of rights waits.
     expect c6-rights-row "6 change of rights" "an Operator's token, a personal agent" REST waits "floor:rights_change_waits" personal_agent
 
-    # An agent never asks for a policy change: MEHO refuses it before anything
-    # waits (policy_apply_requester_refusal). policy.apply needs the
+    # An agent's policy import (policy.apply) is refused: MEHO refuses it
+    # before anything waits (policy_apply_requester_refusal). policy.apply needs the
     # tenant_admin role, so an Operator is refused too (its role floor). An
     # Admin's token waits.
     call_op c6-policy-agent mcp CPC_AGENT_TOKEN CPC_OP_POLICY_CHANGE
@@ -1302,20 +1308,23 @@ check_8_console() {
     # path with HTTP 400, the answer of the "Edit rejected" panel of a refused
     # value (a 404, or a 403 or 401 for a login, is another reason), and no
     # edit row of the operation. The row does not hold the text of the
-    # refusal, so the person says which reason the panel named.
+    # refusal, so the person says whether the panel showed it. For a caution
+    # write, MEHO refuses the lowering because the level is lower than the
+    # classification; the write rule has no reason of its own yet (#6966).
     console_edit_rows c8-console-rows "$since" CPC_OP_WRITE
     edit_rows c8-edits "$since" CPC_OP_WRITE
     preview c8-level rest CPC_ADMIN_TOKEN CPC_OP_WRITE
-    ask c8-refusal "Did MEHO show \"Edit rejected\" with the reason that a write stays at least caution? \"Not found\", a sign-in page, and the reason that the level is lower than the classification are a no."
+    ask c8-refusal "Did MEHO show \"Edit rejected\" and keep the risk level? The refusal that the level is lower than the classification is a yes. \"Not found\", a sign-in page and an error are a no."
     local refused admin_sub problems=()
     admin_sub="$(sub_of_token CPC_ADMIN_TOKEN || true)"
     refused="$(jq -r --arg u "$admin_sub" '[.[] | select($u != "" and .principal_sub == $u and .status_code == 400) | .id] | join(",")' <<<"$CONSOLE_EDITS")"
     [[ -n "$admin_sub" ]] || problems+=("the login of ADMIN_TOKEN could not be read at the start")
     [[ -n "$refused" ]] || problems+=("expected the audit row of the Admin's refused edit of $(op_label CPC_OP_WRITE) with HTTP 400")
-    [[ "$ANSWER" == yes ]] || problems+=("expected the refusal that a write stays at least caution")
+    [[ "$ANSWER" == yes ]] || problems+=("expected \"Edit rejected\" with the risk level kept")
     [[ "$EDITS" == "[]" ]] || problems+=("expected no edit of $(op_label CPC_OP_WRITE)")
     [[ "$(level_rank "$PREVIEW_LEVEL")" -ge 1 ]] || problems+=("expected the risk level to stay at least caution")
     report "check 8 (an Admin, a person, web console): risk level after the try ${PREVIEW_LEVEL:-none}, refused edit rows ${refused:-none}" ${problems[@]+"${problems[@]}"}
+    check_skip "check 8 (an Admin, a person, web console, the reason of the write rule): not run: waits for #6966"
 }
 
 check_8_token() {
@@ -1406,9 +1415,9 @@ check_10() {
         "Check 10. As the Operator of CPC_PERSON_TOKEN, in the web console, approve your own request ${request_web:-<none>}."
 
     local who="check 10 (the Operator, a person, command line)"
-    # The second call is the same call. While the first request still waits,
-    # MEHO may give that request back (APPROVAL_SAME_CALL_REUSE), so the
-    # second call does not run.
+    # The second call sends a work reference of its own, so MEHO never gives
+    # the first request back for it. It runs only after the first request is
+    # decided; while that request still waits, both parts print [skip].
     if [[ -n "$request_web" ]]; then
         request_status c10-first-request "$request_web"
         if [[ "$REQUEST_STATUS" == pending ]]; then
@@ -1623,32 +1632,40 @@ stopped_in_clean_up() { left_unhandled; rm -rf "$WORK"; exit "$1"; }
 # made it. A request leaves the list only once it is handled, so a stop
 # during the clean-up names each one that is left. Then read the queue: a
 # waiting request whose work reference starts with this run's reference is
-# this run's too (a call that a stop cut off); it is withdrawn as well, and
-# one whose sender is none of the known logins prints a [left] line. A
-# waiting request of one of the script's logins, made since the run started,
-# without this run's reference is another session's: it stays, with one
-# [note] line. Only an answer HTTP 200 whose body is a list counts as the
-# queue; any other answer prints a [left] line.
+# this run's too (a call that a stop cut off); it goes on the list before
+# its state is read, and is withdrawn as well. One whose sender is none of
+# the known logins prints a [left] line. A waiting request of one of the
+# script's logins, made since the run started, without this run's reference
+# is another session's: it stays, with one [note] line. Only an answer HTTP
+# 200 whose body is a list counts as the queue; any other answer prints a
+# [left] line.
+DONE_IDS=" "
 withdraw_requests() {
     TAKEN_BACK=yes
     trap 'stopped_in_clean_up 130' INT
     trap 'stopped_in_clean_up 143' TERM
-    local request token_name _rest done_ids=" "
-    while [[ ${#REQUESTS[@]} -gt 0 ]]; do
-        read -r request token_name _rest <<<"${REQUESTS[0]}"
-        withdraw_one "$request" "$token_name"
-        done_ids+="$request "
-        REQUESTS=("${REQUESTS[@]:1}")
-    done
-    withdraw_queue "$done_ids"
+    withdraw_list
+    withdraw_queue
+    withdraw_list
     trap 'exit 130' INT
     trap 'exit 143' TERM
 }
 
-# withdraw_queue DONE_IDS: the waiting requests of this run that the list
-# did not hold.
+# withdraw_list: handle each request of the list, the first one first.
+withdraw_list() {
+    local request token_name _rest
+    while [[ ${#REQUESTS[@]} -gt 0 ]]; do
+        read -r request token_name _rest <<<"${REQUESTS[0]}"
+        withdraw_one "$request" "$token_name"
+        DONE_IDS+="$request "
+        REQUESTS=("${REQUESTS[@]:1}")
+    done
+}
+
+# withdraw_queue: put the waiting requests of this run that the list did not
+# hold on the list.
 withdraw_queue() {
-    local done_ids="$1" request token_name
+    local request token_name
     rest withdraw-queue GET "/api/v1/approvals?status=pending&order=newest" CPC_ADMIN_TOKEN
     if [[ "$REPLY_CODE" != 200 ]]; then
         left "the waiting requests of this run: could not read the queue (HTTP $REPLY_CODE)"
@@ -1668,7 +1685,7 @@ withdraw_queue() {
         return
     }
     while IFS=$'\t' read -r request sub ref since; do
-        [[ -n "$request" && "$request" != - && "$done_ids" != *" $request "* ]] || continue
+        [[ -n "$request" && "$request" != - && "$DONE_IDS" != *" $request "* ]] || continue
         [[ "$sub" == - ]] && sub=""
         [[ "$ref" == - ]] && ref=""
         if [[ "$ref" != "$WORK_REF-"* ]]; then
@@ -1681,7 +1698,7 @@ withdraw_queue() {
             left "request $request (work reference of this run): not withdrawn, its sender is not known"
             continue
         fi
-        withdraw_one "$request" "$token_name"
+        REQUESTS+=("$request $token_name")
     done <<<"$queue"
 }
 
@@ -1827,6 +1844,10 @@ take_back_changes() {
 }
 
 check_7() {
+    # MEHO's answer does not say yet whether the owner may approve their own
+    # request (#7132), so check 7 cannot compare it. Check 10 tests it while
+    # the switch is on.
+    check_skip "check 7 (the owner's own approval of the request of check 10, web console and command line): not run: waits for #7132"
     if ! person p7 "Check 7. Turn the switch CUSTOM_POLICY off on the install and restart MEHO. Wait until /ready answers again."; then
         needs_person "check 7 (a person turns the switch off)"
         waits_for "check 7 (every probe, REST policy explain)" 7

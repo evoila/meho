@@ -58,6 +58,7 @@ PROBE_KEYS = [
     "6 PERSON_TOKEN CREDENTIAL_WRITE token",
     "6 PERSON_TOKEN RIGHTS_CHANGE token",
     "6 AGENT_TOKEN POLICY_CHANGE token",
+    "6 PERSON_TOKEN POLICY_CHANGE token",
     "6 ADMIN_TOKEN POLICY_CHANGE token",
     "6 SERVICE_TOKEN DESTRUCTIVE token",
     "6 SERVICE_TOKEN ROOT_SHELL token",
@@ -89,11 +90,15 @@ REMOVAL_NOT_CONFIRMED = [
 
 #: The [skip] lines of a run where every check passes: they never count as passed.
 ALWAYS_SKIPPED = [
+    "check 8 (an Admin, a person, web console, the reason of the write rule): not run: "
+    + "waits for #6966",
     "check 8 (an Admin's token, REST, a policy file preview): not run: waits for #6966",
     "check 11 (the event intake): not run: the script cannot send an event to the install",
     "check 11 (the findings investigator): not run: "
     + "it needs a sensor change and an AI model on the install",
     "check 11 (the runner executor): not run: it needs a satellite runner",
+    "check 7 (the owner's own approval of the request of check 10, web console and command "
+    + "line): not run: waits for #7132",
 ]
 
 #: CPC_PARAMS_* of the tests: the credential write has params, so its check 7

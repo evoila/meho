@@ -110,7 +110,7 @@ class FullRunTest(DryRunTestCase):
         for line in lines:
             if line.startswith("[ok]") and "risk level" not in line:
                 self.assertRegex(line, r"rows? [0-9a-f-]{36}", line)
-        self.assertIn("passed, 0 failed, 4 not run, 2 not taken back", result.stdout)
+        self.assertIn("passed, 0 failed, 6 not run, 2 not taken back", result.stdout)
 
     def test_runs_the_checks_in_order_and_ends_with_the_switch_off(self) -> None:
         result = self.run_script()
@@ -324,9 +324,19 @@ class SwitchOffBaselineTest(DryRunTestCase):
         return "".join(lines)
 
 
+OPERATOR_DELETE_PROBE = PROBE_KEYS.index("6 PERSON_TOKEN DELETE token") + 1
+OWN_APPROVAL_SKIP = (
+    "[skip] check 7 (the owner's own approval of the request of check 10, web console and "
+    "command line): not run: waits for #7132"
+)
+
+
 class Check7Test(DryRunTestCase):
     def test_check_7_fails_when_an_answer_changed(self) -> None:
-        self.answers["c7-14"] = {"code": 200, "body": {"status": "ok", "answer": "run"}}
+        self.answers[f"c7-{OPERATOR_DELETE_PROBE}"] = {
+            "code": 200,
+            "body": {"status": "ok", "answer": "run"},
+        }
         self.assert_one_fail(
             self.run_script(),
             "check 7 (as check 6: PERSON_TOKEN DELETE, token",
@@ -334,7 +344,7 @@ class Check7Test(DryRunTestCase):
         )
 
     def test_check_7_fails_when_only_who_may_approve_changed(self) -> None:
-        self.answers["c7-14"] = {
+        self.answers[f"c7-{OPERATOR_DELETE_PROBE}"] = {
             "code": 200,
             "body": {"status": "ok", "answer": "wait", "approvers": {"groups": ["Operators"]}},
         }
@@ -344,6 +354,36 @@ class Check7Test(DryRunTestCase):
             "approvers of before",
         )
         self.assertNotIn("expected the answer of before", line)
+
+    def test_the_owners_own_approval_is_skipped_and_the_run_is_not_complete(self) -> None:
+        result = self.run_script()
+        self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
+        self.assertEqual(self.fails(result), [])
+        lines = result_lines(result.stdout)
+        self.assertEqual(lines.count(OWN_APPROVAL_SKIP), 1, lines)
+        self.assertNotIn(OWN_APPROVAL_SKIP.replace("[skip]", "[ok]  "), lines)
+
+    def test_check_7_fails_when_only_the_operators_policy_import_changed(self) -> None:
+        probe = PROBE_KEYS.index("6 PERSON_TOKEN POLICY_CHANGE token") + 1
+        self.answers[f"c7-{probe}"] = {"code": 200, "body": {"status": "ok", "answer": "deny"}}
+        self.assert_one_fail(
+            self.run_script(),
+            "check 7 (as check 6: PERSON_TOKEN POLICY_CHANGE, token",
+            "expected the answer of before",
+        )
+
+    def test_check_7_probes_the_policy_import_of_all_three_logins(self) -> None:
+        policy = [key for key in PROBE_KEYS if "POLICY_CHANGE" in key]
+        self.assertEqual(
+            policy,
+            [
+                "6 AGENT_TOKEN POLICY_CHANGE token",
+                "6 PERSON_TOKEN POLICY_CHANGE token",
+                "6 ADMIN_TOKEN POLICY_CHANGE token",
+            ],
+        )
+        baseline = [line.split("\t")[0] for line in baseline_text().splitlines()]
+        self.assertTrue(set(policy) <= set(baseline))
 
     def test_check_7_compares_the_preview_with_the_params(self) -> None:
         step = f"c7-{PROBE_KEYS.index('6 PERSON_TOKEN CREDENTIAL_WRITE token') + 1}-preview"
@@ -383,6 +423,7 @@ class Check7Test(DryRunTestCase):
             "2 PERSON_TOKEN RELEVELLED token": "check 2 (an Operator's token, a personal agent, REST)",
             "6 PERSON_TOKEN CREDENTIAL_WRITE token": "check 6 credential write (the Operator's meho login",
             "6 AGENT_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an agent login",
+            "6 PERSON_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an Operator's AI tool",
             "6 ADMIN_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an Admin's AI tool",
             "6 DELETE_GRANT_TOKEN DELETE token": "check 6 delete (a service login with a delete grant",
             "10 PERSON_TOKEN OWN_AGENT token": "check 10 (the Operator's AI tool, a personal agent, MCP)",
@@ -1199,12 +1240,32 @@ class Check8ConsoleRowTest(DryRunTestCase):
                     self.run_script(), "check 8 (an Admin, a person, web console)", "HTTP 400"
                 )
 
-    def test_needs_the_refusal_of_the_write_rule(self) -> None:
+    def test_the_admins_400_row_with_a_yes_passes_and_skips_the_write_rule_reason(self) -> None:
+        result = self.run_script()
+        lines = result_lines(result.stdout)
+        passed = [line for line in lines if line.startswith("[ok]   check 8 (an Admin, a person")]
+        self.assertEqual(len(passed), 1, lines)
+        self.assertIn(f"refused edit rows {audit_id('c8-console')}", passed[0])
+        self.assertIn(
+            "[skip] check 8 (an Admin, a person, web console, the reason of the write rule): "
+            "not run: waits for #6966",
+            lines,
+        )
+
+    def test_the_question_counts_the_refusal_below_the_classification_as_a_yes(self) -> None:
+        text = " ".join(SCRIPT.read_text().split())
+        self.assertIn(
+            'Did MEHO show \\"Edit rejected\\" and keep the risk level? The refusal that the '
+            "level is lower than the classification is a yes.",
+            text,
+        )
+
+    def test_a_no_fails(self) -> None:
         self.answers["c8-refusal"] = {"code": 0, "body": "n"}
         self.assert_one_fail(
             self.run_script(),
             "check 8 (an Admin, a person, web console)",
-            "a write stays at least caution",
+            '"Edit rejected" with the risk level kept',
         )
 
 
@@ -1451,7 +1512,15 @@ class DocsPageTest(unittest.TestCase):
         for sentence in (
             "Exit code 0 needs the three open parts of check 11",
             "#7073",
-            "the token part of check 8 (#6966)",
+            "the two parts of check 8 that need the write rule's own reason (#6966)",
+            "the owner's own approval in check 7 (#7132)",
+            "Check 7 does not compare whether the owner may approve their own request until "
+            "#7132 is merged",
+            "Check 10 tests it while the switch is on.",
+            "MEHO never gives the first request of check 10 back for its second call.",
+            "Check 10 makes its second call only after its first request is decided.",
+            "An agent's policy import (`policy.apply`) is refused before anything waits",
+            "An agent's policy import (`policy.apply`, check 6) passes only when MEHO refuses it",
             "exit code 3, or 1 when a check also failed",
             "When a check failed and something was not taken back, the run ends with exit code 1",
             "Each request of a run has its own work reference.",

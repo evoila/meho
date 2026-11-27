@@ -29,13 +29,15 @@ each time.
   agent's attempt in check 6, which MEHO must refuse. Every approval is a
   person's click in the web console.
 - MEHO gives back a request that already waits
-  (`extras.approval_request_reused: true`) in one case: a second identical
-  call while `APPROVAL_SAME_CALL_REUSE` is on. A request given back that is
-  on this run's list is this run's: the check goes on as usual. Any other
-  request given back waited before the run. Then the check fails, nobody is
-  asked to approve it, and the script never withdraws it. The second call of
-  check 10 is the same call as the first, so it prints `[skip]` while the
-  first request still waits.
+  (`extras.approval_request_reused: true`) only for a call with the same
+  work reference while `APPROVAL_SAME_CALL_REUSE` is on. Each request of a
+  run is sent with a work reference of its own, so MEHO never gives the
+  first request of check 10 back for its second call. A request given back
+  that is on this run's list is this run's: the check goes on as usual. Any
+  other request given back waited before the run. Then the check fails,
+  nobody is asked to approve it, and the script never withdraws it.
+- Check 10 makes its second call only after its first request is decided.
+  While the first request still waits, it prints `[skip]`.
 
 ## When it stops before any call
 
@@ -93,10 +95,12 @@ version. It stops with exit code 2 when:
   the start. Each waiting request whose work reference starts with this
   run's reference and whose sender is none of the logins it knows prints
   `[left] request <id> (work reference of this run): not withdrawn, its sender is not known`.
-- A request leaves the list only when it is handled. A stop signal during
-  the clean-up prints one
+- A request leaves the list only when it is handled. A request found in
+  the queue goes on the list before the script reads its state or
+  withdraws it. A stop signal during the clean-up prints one
   `[left] request <id> (sent with <login>): not withdrawn, the run was stopped`
-  line for each request of the list that was not handled yet.
+  line for each request of the list that was not handled yet, also for one
+  found only in the queue.
 - The script reads the waiting requests only from an answer HTTP 200 whose
   body is a list. Any other answer prints
   `[left] the waiting requests of this run: could not read the queue (...)`,
@@ -157,6 +161,15 @@ Decide only that request. With no terminal, or when the person answers no:
 
 These lines are always `[skip]`, also in a run where every check passes:
 
+- `check 7 (the owner's own approval of the request of check 10, web
+  console and command line): not run: waits for #7132`. Check 7 does not
+  compare whether the owner may approve their own request until #7132 is
+  merged, because MEHO's answer does not say it yet. Check 10 tests it
+  while the switch is on.
+- `check 8 (an Admin, a person, web console, the reason of the write rule):
+  not run: waits for #6966`. For a `caution` write, the console refuses
+  the lowering because the level is lower than the classification. The
+  write rule has no reason of its own yet.
 - `check 8 (an Admin's token, REST, a policy file preview): not run: waits
   for #6966`, while MEHO's policy check has no mistake text of its own for
   "a write stays at least caution". It still fails when the refusal is the
@@ -182,7 +195,7 @@ A `[skip]` line never counts as passed.
    and its audit row. A preview that answers `status: "error"` is no valid
    answer. Else it fails and keeps an earlier file as it was.
    With the switch off the policy import operation is not there, so the
-   two probes of `CPC_OP_POLICY_CHANGE` save the answer
+   three probes of `CPC_OP_POLICY_CHANGE` save the answer
    `unknown_connector`; any other error fails.
 
 2. Turn the switch on and restart MEHO. Sign in with `meho login` to the
@@ -210,8 +223,9 @@ exit code 1, and the `[left]` lines are printed.
 
 Exit code 0 needs the three open parts of check 11 (the event intake, the
 findings investigator and the runner executor, which wait for #7073 and the
-logins it names) and the token part of check 8 (#6966). Until those are
-done, a run where every check passes ends with exit code 3. So does a run
+logins it names), the two parts of check 8 that need the write rule's own
+reason (#6966), and the owner's own approval in check 7 (#7132). Until
+those are done, a run where every check passes ends with exit code 3. So does a run
 where the person did checks 4 and 5, while MEHO has no route that reads
 the agent rule and the custom role.
 
@@ -224,7 +238,7 @@ the agent rule and the custom role.
 | 3 | A saved "always wait" from before the switch is now `destructive`: without a preview the call is refused; with a preview it waits. |
 | 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it. |
 | 5 | A custom role approves requests on one connector. A person without the role is refused at the click. |
-| 6 | A credential read, a credential write, a change of rights, a change of the policy (with the Admin's token), a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login's root command on a host waits by the rule `default:service.root_shell`. A service login with a delete grant runs the delete (sandbox mode). An agent's change of the policy is refused before anything waits, and so is an Operator's (it needs the tenant_admin role). An agent's approve attempt is refused. |
+| 6 | A credential read, a credential write, a change of rights, a change of the policy (with the Admin's token), a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login's root command on a host waits by the rule `default:service.root_shell`. A service login with a delete grant runs the delete (sandbox mode). An agent's policy import (`policy.apply`) is refused before anything waits, and so is an Operator's (it needs the tenant_admin role). An agent's approve attempt is refused. |
 | 8 | A write is never lowered below `caution`: in the console and with a token (a policy file preview). |
 | 9 | Every change of the policy in the console needs a fresh sign-in: a raise and the removal of an override too. |
 | 10 | A person approves their own personal agent's request in the console. The same approve from the command line is refused: the person runs the printed `meho approvals approve` command. |
@@ -278,19 +292,23 @@ What makes a check pass:
   that starts with `human_principal_required`, the audit row of the
   attempt, and a request that still waits. Any other answer fails, also a
   401.
-- An agent's change of the policy (check 6) passes only when MEHO refuses
-  it with "Only a person can ask for a policy import". An Operator's token
-  is refused too, with "needs the tenant_admin role". The same call with
-  the Admin's token (`CPC_ADMIN_TOKEN`) must wait, and its check 7 probe
-  uses that token too.
+- An agent's policy import (`policy.apply`, check 6) passes only when MEHO
+  refuses it with "Only a person can ask for a policy import". An
+  Operator's token is refused too, with "needs the tenant_admin role". The
+  same call with the Admin's token (`CPC_ADMIN_TOKEN`) must wait. Check 7
+  probes the policy import with the agent login, the Operator's token and
+  the Admin's token.
 - Check 8 with a token passes only on HTTP 200 with `ok: false` and the
   mistake of the write rule itself. Checks 8 and 9 in the console count
   only the audit rows of the Admin of `CPC_ADMIN_TOKEN` for the edit of
   `CPC_OP_WRITE`. Check 8 needs the refused console edit
   (`/ui/connectors/registry/<connector>/operations/<op>`) with HTTP 400,
-  the answer of the "Edit rejected" panel, and the person's word that the
-  panel named the refusal for a write lowered below `caution`. A 404, or a
-  403 or 401 for a login, does not count, and nor does a saved edit.
+  the answer of the "Edit rejected" panel, no edit row of the operation, a
+  risk level read back of at least `caution`, and the person's word that
+  MEHO showed "Edit rejected" and kept the level. The refusal "the level
+  is lower than the classification" is a yes. "Not found", a sign-in page
+  and an error are a no. A 404, or a 403 or 401 for a login, does not
+  count, and nor does a saved edit.
   Check 9 needs an edit row (`meho_connector_edit_op`) of the connector and
   operation that sets the level `dangerous`, followed by the row that
   removes that override.
@@ -313,7 +331,10 @@ same way in (web console or token), and every operation of checks 1 to 6,
 `policy_verdict` of a REST preview with those parameters, because explain
 takes no parameters. A preview that answers `status: "error"` (for example
 `invalid_params`) is no valid answer. It passes only with HTTP 200, a valid
-answer, its audit rows, and the same three values as the baseline.
+answer, its audit rows, and the same three values as the baseline. It
+does not compare whether the owner may approve their own request until
+#7132 is merged: that line is always `[skip]`, and check 10 tests it while
+the switch is on.
 
 ## The start of a run
 

@@ -96,7 +96,7 @@ class FullLiveRunTest(LiveTestCase):
         self.assertNotIn("[FAIL]", result.stdout)
         left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
         self.assertEqual(left, REMOVAL_NOT_CONFIRMED)
-        self.assertIn("passed, 0 failed, 4 not run, 2 not taken back", result.stdout)
+        self.assertIn("passed, 0 failed, 6 not run, 2 not taken back", result.stdout)
 
     def test_every_call_goes_to_the_checked_install(self) -> None:
         self.assertTrue(self.full_calls)
@@ -269,6 +269,36 @@ class NoTerminalTest(LiveTestCase):
             [f"[left] request {req} (sent with {MAKERS[req].removeprefix('CPC_')}): not "
              "withdrawn, the run was stopped" for req in not_handled],
         )  # fmt: skip
+
+    def test_a_stop_at_the_state_read_of_a_request_found_only_in_the_queue_names_it(
+        self,
+    ) -> None:
+        answers = good_answers()
+        answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [
+                {"id": "req-cut", "principal_sub": "operator-1", "created_at": FAR_FUTURE,
+                 "work_ref": f"{WORK_REF}-c6-rights"},
+                {"id": "req-cut-2", "principal_sub": "service-1", "created_at": FAR_FUTURE,
+                 "work_ref": f"{WORK_REF}-c6-root"},
+            ],
+        }  # fmt: skip
+        for req in ("req-cut", "req-cut-2"):
+            answers[f"withdraw-{req}-status"] = {"code": 200, "body": {"status": "pending"}}
+            answers[f"withdraw-{req}"] = {"code": 200, "body": {"status": "withdrawn"}}
+        result = self.live.run(answers, CPC_STUB_STOP_AT="withdraw-req-cut-status")
+        self.assertEqual(result.returncode, STOPPED, result.stdout + result.stderr)
+        left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
+        self.assertEqual(
+            left,
+            [
+                "[left] request req-cut (sent with PERSON_TOKEN): not withdrawn, the run was stopped",
+                "[left] request req-cut-2 (sent with SERVICE_TOKEN): not withdrawn, the run was "
+                "stopped",
+            ],
+        )
+        urls = [c.get("url") or "" for c in self.live.calls()]
+        self.assertFalse([u for u in urls if u.endswith("/req-cut/withdraw")], urls)
 
     def test_a_stopped_call_is_found_in_the_queue_and_withdrawn(self) -> None:
         answers = good_answers()

@@ -146,6 +146,7 @@ def _restore_operator(tenant_id: UUID | None) -> Operator:
         raw_jwt="",
         tenant_id=tenant_id if tenant_id is not None else uuid.UUID(int=0),
         tenant_role=TenantRole.TENANT_ADMIN,
+        in_code_kind="system",
     )
 
 

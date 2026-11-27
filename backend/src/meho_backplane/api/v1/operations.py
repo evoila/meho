@@ -52,7 +52,7 @@ from meho_backplane.api.v1._freetext_filter import (
     resolve_free_text_filter,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import require_operator_for_call, require_role
 from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operation_picks.recorder import (
     recorded_background_call,
@@ -132,6 +132,8 @@ router = APIRouter(prefix="/api/v1/operations", tags=["operations"])
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 #: For the ``POST`` routes that only read (a preview, a result read).
 _require_operator_read = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
+#: For the general call route: a Reader's answer depends on the operation.
+_require_operator_for_call = Depends(require_operator_for_call)
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
@@ -372,7 +374,7 @@ async def post_call(
     body: CallOperationBody,
     request: Request,
     response: Response,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_for_call,
 ) -> dict[str, Any]:
     """Invoke :func:`~meho_backplane.operations.dispatch` for an op id.
 

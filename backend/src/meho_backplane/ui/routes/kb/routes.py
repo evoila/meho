@@ -208,7 +208,7 @@ _MAX_UPLOAD_BYTES: Final[int] = 512 * 1024
 #: chains ``require_ui_session``). Matches the ruff B008 idiom the topology and
 #: dashboard routes use.
 _require_session = Depends(require_ui_operator)
-#: The same gate for the ``POST`` search, which only reads.
+#: The same gate for the ``POST`` search and the editor preview, which only read.
 _require_session_read = Depends(require_ui_operator_read)
 
 #: Module-level Depends closure for the require_ui_admin gate (T2 upload).
@@ -623,7 +623,7 @@ def build_kb_router() -> APIRouter:
     @router.post("/ui/kb/editor-preview", response_class=HTMLResponse)
     async def kb_editor_preview(
         request: Request,
-        session: UISessionContext = _require_session,
+        session: UISessionContext = _require_session_read,
         body: str = Form(default="", max_length=_MAX_EDITOR_BODY_LENGTH),
     ) -> HTMLResponse:
         """HTMX editor live-preview partial.

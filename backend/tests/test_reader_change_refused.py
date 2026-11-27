@@ -39,6 +39,7 @@ from sqlalchemy import func, select
 
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
+from meho_backplane.auth.rbac import require_operator_for_call
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, EndpointDescriptor
@@ -89,6 +90,7 @@ _READ_OP = "vault.reader.plain_read"
 _RUNS: list[str] = []
 
 _ANSWER = f"{READER_CHANGE_CODE}: {READER_CHANGE_SENTENCE}"
+_PLAIN_MCP = "forbidden: 'call_operation' requires a higher role"
 _REST_BODY = {"detail": READER_CHANGE_CODE, "message": READER_CHANGE_SENTENCE}
 
 
@@ -235,6 +237,13 @@ def _assert_reader_refused(result: Any) -> None:
 
 
 # --- The rule ----------------------------------------------------------------------
+
+
+def test_the_reader_sentence_is_the_exact_text() -> None:
+    assert READER_CHANGE_SENTENCE == (
+        "You have the Reader role. A Reader cannot ask for changes, so MEHO did not "
+        "store or run this call. Ask an admin for a role that may make this change."
+    )
 
 
 @pytest.mark.usefixtures("kinds")
@@ -448,6 +457,11 @@ async def test_an_operator_caution_write_in_the_console_runs_at_once() -> None:
 
 @pytest.mark.usefixtures("kinds")
 async def test_an_agent_whose_role_is_now_reader_does_not_run_its_approved_call() -> None:
+    """The resume of an approved call is handed a login with the Reader role.
+
+    The approved-run branch of ``dispatch`` refuses that login with the code
+    and the sentence, and the operation does not run.
+    """
     from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
 
     op_id = _KINDS["write_caution"][0]
@@ -702,13 +716,19 @@ async def test_the_walk_finds_a_route_that_runs_a_change_for_a_reader(
 
 
 def _change_tool(name: str) -> bool:
+    """A write tool that needs the ``operator`` role.
+
+    ``call_operation`` looks the operation up first: its answer to a call
+    that names no operation is the plain one.
+    """
     entry = get_tool(name)
     assert entry is not None
     defn = entry[0]
-    return defn.required_role is TenantRole.OPERATOR and defn.op_class not in {
-        "read",
-        "audit_query",
-    }
+    return (
+        name != "call_operation"
+        and defn.required_role is TenantRole.OPERATOR
+        and defn.op_class not in {"read", "audit_query"}
+    )
 
 
 @pytest.mark.parametrize("login", ["person_token", "service", "agent"])
@@ -728,12 +748,48 @@ async def test_the_walk_over_every_mcp_tool(
             problems.append(f"{name}: a Reader stored or ran something")
         if _change_tool(name) and body.get("error", {}).get("message") != _ANSWER:
             problems.append(f"{name}: {str(body)[:120]}")
+        if name == "call_operation" and body["error"]["message"] != _PLAIN_MCP:
+            problems.append(f"{name}: {str(body)[:120]}")
 
     assert problems == []
 
 
+#: The ``POST`` routes that only read: their ``operator`` door is ``reads_only``.
+_READ_ROUTES = (
+    "/api/v1/operations/preview",
+    "/api/v1/search_docs",
+    "/api/v1/ask_docs",
+    "/api/v1/read_docs",
+    "/api/v1/retrieve",
+    "/api/v1/audit/query",
+    "/api/v1/audit/class-counts",
+)
+
+
 def test_the_rest_walk_reads_the_role_door_of_each_route() -> None:
-    """The walk finds the ``operator`` door of the call route, so its check can fail."""
-    doors = {route.path: _role_checks(route) for _method, _path, route in _change_routes()}
-    assert (TenantRole.OPERATOR, False) in doors["/api/v1/operations/call"]
-    assert doors["/api/v1/operations/preview"] == [(TenantRole.OPERATOR, True)]
+    """The walk reads the ``operator`` door of each route, so its check can fail.
+
+    The general call route has its own door, which looks the operation up.
+    """
+    routes = {route.path: route for _method, _path, route in _change_routes()}
+    doors = {path: _role_checks(route) for path, route in routes.items()}
+    assert (TenantRole.OPERATOR, False) in doors["/api/v1/broadcast/announce"]
+    for path in _READ_ROUTES:
+        assert doors[path] == [(TenantRole.OPERATOR, True)], path
+    call_doors = [d.call for d in routes["/api/v1/operations/call"].dependant.dependencies]
+    assert require_operator_for_call in call_doors
+    assert doors["/api/v1/operations/call"] == []
+
+
+@pytest.mark.parametrize("path", _READ_ROUTES)
+async def test_a_reader_post_that_only_reads_gets_the_plain_answer(
+    client: tuple[httpx.AsyncClient, Any], path: str
+) -> None:
+    ac, key = client
+
+    response = await ac.post(
+        path, json={"query": "made-up question"}, headers=_reader_tokens(key)["person"]
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": READER_CHANGE_CODE}

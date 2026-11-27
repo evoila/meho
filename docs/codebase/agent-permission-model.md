@@ -438,19 +438,25 @@ login, an agent login, and a hosted agent run that a Reader started.
   operation;
 - an operation that always waits for approval (`requires_approval`, or a
   classification that makes it always wait);
+- a write, also at level `safe`: an operation of class `write`
+  (`resolve_op_class`), or one that its connector marks as a safe write
+  (`declare_safe_writes`, `is_safe_write`);
 - a credential write or mint;
 - a change of rights.
 
-A `safe` read, also a credential read, is not a change. What a Reader can
-read stays the same. A preview is not a change either: who may preview
-stays as it is.
+A `safe` read is not a change. A credential read is at least `caution` and
+waits for a person's approval (`operations/credential_read.py`), so it
+counts as a change: a Reader's credential read is refused. A credential
+read that its connector marks as one whose answer holds no secret value
+(`declare_no_secret_value`) stays `safe`, so it is not a change. A preview
+is not a change: who may preview stays as it is.
 
 The answer has the code `insufficient_role` and this sentence, the same
 on every way in:
 
 > You have the Reader role. A Reader cannot ask for changes, so MEHO did
-> not store or run this call. Ask an admin for the Operator role if you
-> need to make changes.
+> not store or run this call. Ask an admin for a role that may make this
+> change.
 
 Where MEHO checks it:
 
@@ -461,27 +467,36 @@ Where MEHO checks it:
   and its `reason_code` is `insufficient_role`. The policy evaluator has
   the same rule (`policy/floors.py`, `reader_change_floor`, with the mark
   `asks_for_change`).
-- **The requester's own run of an approved request.** In the approved-run
-  branch of `dispatch` (an agent's own wait, a hosted agent run, a re-run
-  by the requester), a requester whose role is now Reader is refused with
-  the same code and sentence, and the operation does not run. The REST
-  re-run route (`POST /api/v1/approvals/{id}/rerun`) refuses such a caller
-  before it takes the run.
+- **The requester's own run of an approved request.** A re-run by the
+  requester (`POST /api/v1/approvals/{id}/rerun`) is checked with the role
+  in the caller's token at the re-run. A requester whose role is now Reader
+  is refused with the same code and sentence before the route takes the
+  run, and the operation does not run.
 - **The three doors.** They keep their checks and take the code and the
   sentence from `reader_change_refusal`:
   - REST `require_role(TenantRole.OPERATOR)`: on a route that does not
     only read (any method but `GET`, `HEAD`, `OPTIONS`), the body is
     `{"detail": "insufficient_role", "message": "<the sentence>"}`
     (`auth/role_refusal.py`). A `POST` route that only reads (the
-    preview, a result read) declares `reads_only=True` and keeps the plain
-    `{"detail": "insufficient_role"}`.
-  - MCP: a tool that needs `operator` and is not a read (`call_operation`,
-    the write tools) answers with the error message
+    preview, a result read, the docs search, ask and read, the retrieval,
+    the audit query and the audit class counts) declares `reads_only=True`
+    and keeps the plain `{"detail": "insufficient_role"}`.
+  - MCP: a write tool that needs `operator` (not of class `read` or
+    `audit_query`) answers with the error message
     `insufficient_role: <the sentence>`. A read tool keeps
     `forbidden: '<tool>' requires a higher role`.
+  - The general call route `POST /api/v1/operations/call`
+    (`require_operator_for_call`) and the MCP tool `call_operation` look the
+    operation up first, the same way `dispatch` does
+    (`operations/reader_call.py`). An operation that asks for a change gets
+    the code and the sentence. A `safe` read that needs no approval, and an
+    operation that cannot be found, get the plain answer of the door:
+    `403 {"detail": "insufficient_role"}` on REST, and
+    `forbidden: 'call_operation' requires a higher role` on MCP.
   - The console `require_ui_operator`: on a route that does not only read,
     the answer is `403` with the same body as REST. A `POST` form that only
-    reads (the preview, the knowledge search, the retrieval pages) uses
+    reads (the preview, the knowledge search and the editor preview, the
+    retrieval pages, the docs search and a docs text read) uses
     `require_ui_operator_read` and keeps `403 operator_required`.
 
 A walk test (`tests/test_reader_change_refused.py`,

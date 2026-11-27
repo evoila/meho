@@ -191,12 +191,17 @@ from meho_backplane.mcp.registry import capability_satisfied, role_at_least
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
 from meho_backplane.operation_picks.recorder import recorded_meta_tool
 from meho_backplane.operations._target_connector_limit import connector_limit
-from meho_backplane.operations.deny_reasons import CONNECTOR_NOT_ALLOWED, ROLE_INSUFFICIENT
+from meho_backplane.operations.deny_reasons import (
+    CONNECTOR_NOT_ALLOWED,
+    INSUFFICIENT_ROLE,
+    ROLE_INSUFFICIENT,
+)
 from meho_backplane.operations.meta_tools import (
     call_operation,
     list_operation_groups,
     search_operations,
 )
+from meho_backplane.operations.role_floors import reader_change_refusal
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -639,7 +644,11 @@ def _refuse_disallowed_connector(
 
 
 def _refuse_role_below_floor(meta: MetaToolSpec, operator: Operator) -> None:
-    """Raise :class:`ToolRefusedRetry` when *operator*'s role is below *meta*'s floor."""
+    """Raise :class:`ToolRefusedRetry` when *operator*'s role is below *meta*'s floor.
+
+    A Reader at a write tool (``add_to_memory``, ``add_to_knowledge``) gets
+    the code ``insufficient_role`` and the Reader sentence.
+    """
     if role_at_least(operator.tenant_role, meta.required_role):
         return
     _log.warning(
@@ -648,6 +657,15 @@ def _refuse_role_below_floor(meta: MetaToolSpec, operator: Operator) -> None:
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
     )
+    sentence = reader_change_refusal(
+        operator.tenant_role, is_change=meta.name in WRITE_META_TOOL_NAMES
+    )
+    if sentence is not None:
+        raise ToolRefusedRetry(
+            f"{INSUFFICIENT_ROLE}: {sentence} Do not retry it.",
+            reason_code=INSUFFICIENT_ROLE,
+            reason=f"{INSUFFICIENT_ROLE}: {sentence}",
+        )
     raise ToolRefusedRetry(
         f"forbidden: {meta.name!r} requires a higher role. Do not retry it.",
         reason_code=ROLE_INSUFFICIENT,

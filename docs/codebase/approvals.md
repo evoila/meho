@@ -943,10 +943,10 @@ Each rule and its sentence:
 
 A caller with the Reader role (`read_only`) who asks for a change gets one
 plain sentence next to the code `insufficient_role`. MEHO stores nothing and
-runs nothing. The same check covers a new call and the requester's own run
-of an approved request, also a re-run: a requester whose role became Reader
-after the approval is refused, and the operation does not run. A preview is
-not a change. The rule, the sentence and the places MEHO checks it:
+runs nothing. The same check covers a new call and a re-run by the
+requester (`POST /api/v1/approvals/{id}/rerun`), checked with the role in
+the caller's token at the re-run: a requester whose role is now Reader is
+refused, and the operation does not run. A preview is not a change. The rule, the sentence and the places MEHO checks it:
 [agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
 
 ## A credential call always waits for a person

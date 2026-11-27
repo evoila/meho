@@ -184,3 +184,24 @@ def test_the_console_walk_reads_the_operator_door_of_each_route() -> None:
     ]
     assert any(route.path == "/ui/operations/call" for route in behind)
     assert all(route.path != "/ui/operations/preview" for route in behind)
+
+
+#: The console ``POST`` routes that only read: a Reader gets ``operator_required``.
+_READ_POSTS = (
+    ("/ui/corpus/search", {"q": "made-up question"}),
+    ("/ui/corpus/chunks/made-up-collection/made-up-chunk", {"read_handle": "made-up-handle"}),
+    ("/ui/kb/editor-preview", {"body": "# Made-up text"}),
+    ("/ui/kb/search", {"q": "made-up question"}),
+)
+
+
+@pytest.mark.parametrize(("path", "form"), _READ_POSTS)
+def test_a_reader_console_post_that_only_reads_keeps_its_answer(
+    reader: tuple[TestClient, str], path: str, form: dict[str, str]
+) -> None:
+    client, csrf = reader
+
+    response = client.post(path, headers=_csrf_headers(csrf), data=form)
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "operator_required"}

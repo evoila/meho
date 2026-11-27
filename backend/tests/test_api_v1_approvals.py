@@ -56,7 +56,6 @@ from httpx import ASGITransport
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.main import app
-from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -649,10 +648,11 @@ async def test_the_approver_claim_does_not_open_the_approvals_list() -> None:
 def test_approve_only_principal_denied_call_operation_dispatch(client: TestClient) -> None:
     """The decoupling contract, end-to-end: the approver cannot dispatch.
 
-    ``POST /api/v1/operations/call`` stays ``Depends(require_role(OPERATOR))``,
-    so a ``read_only`` + ``approver`` token is refused 403 ``insufficient_role``
+    ``POST /api/v1/operations/call`` needs the ``operator`` role, so a
+    ``read_only`` + ``approver`` token is refused 403 ``insufficient_role``
     — the orthogonal capability never leaks into the dispatch gate (#3243). A
     valid body is sent so the role gate, not body validation, owns the 403.
+    The operation is not registered here, so the answer is the plain one.
     """
     key = make_rsa_keypair("kid-appr-dispatch")
     with respx.mock as r:
@@ -663,7 +663,7 @@ def test_approve_only_principal_denied_call_operation_dispatch(client: TestClien
             headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
         )
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role", "message": READER_CHANGE_SENTENCE}
+    assert response.json() == {"detail": "insufficient_role"}
 
 
 @pytest.mark.asyncio

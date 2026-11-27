@@ -25,10 +25,11 @@ there as well:
   (:mod:`~meho_backplane.operations.approved_run_rights`).
 
 A caller with the Reader role (``read_only``) cannot ask for a change at
-all (:func:`reader_change_denial`). This holds for every kind of login,
-in a new call and in the requester's own run of an approved request.
-The REST, MCP and console doors give the same code and sentence
-(:func:`reader_change_refusal`).
+all (:func:`reader_change_denial`). This holds for every kind of login in
+a new call, and in a re-run of an approved request by the requester
+(``POST /api/v1/approvals/{id}/rerun``), checked with the role in the
+caller's token at the re-run. The REST, MCP and console doors give the
+same code and sentence (:func:`reader_change_refusal`).
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a
@@ -78,8 +79,7 @@ READER_CHANGE_CODE: Final[str] = "insufficient_role"
 #: The sentence next to :data:`READER_CHANGE_CODE`, the same on every way in.
 READER_CHANGE_SENTENCE: Final[str] = (
     "You have the Reader role. A Reader cannot ask for changes, so MEHO did not "
-    "store or run this call. Ask an admin for the Operator role if you need to "
-    "make changes."
+    "store or run this call. Ask an admin for a role that may make this change."
 )
 
 #: Why the caller may not ask for a call with these params, or ``None``.
@@ -151,11 +151,16 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
 
     That is a call at any risk level above ``safe`` (a write, a delete, a
     multi-step operation that changes something), an operation that always
-    waits for approval, a credential write or mint, and a change of rights.
-    A ``safe`` read, also a credential read, is not a change.
+    waits for approval, a write (class ``write``, or marked by its connector
+    as a safe write), a credential write or mint, and a change of rights.
+
+    A ``safe`` read is not a change. A credential read is raised to at least
+    ``caution`` when the operation is looked up, so it counts as a change,
+    unless its connector marks it as a read whose answer holds no secret
+    value.
     """
     from meho_backplane.broadcast.events import resolve_op_class
-    from meho_backplane.op_classes import is_credential_capable
+    from meho_backplane.op_classes import is_credential_capable, is_safe_write
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
 
@@ -165,7 +170,7 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     if getattr(descriptor, "policy_always_wait", False):
         return True
     op_class = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
-    if op_class in _CHANGE_CREDENTIAL_CLASSES or is_credential_capable(op_id):
+    if op_class in _CHANGE_CLASSES or is_safe_write(op_id) or is_credential_capable(op_id):
         return True
     return is_rights_change_op(op_id) or params_write_credential(op_id, params)
 
@@ -186,7 +191,5 @@ def reader_change_denial(
     return None if sentence is None else f"{READER_CHANGE_CODE}: {sentence}"
 
 
-#: The credential classes that change something (a read is not one).
-_CHANGE_CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_write", "credential_mint"}
-)
+#: The op classes that change something (a read is not one).
+_CHANGE_CLASSES: Final[frozenset[str]] = frozenset({"write", "credential_write", "credential_mint"})

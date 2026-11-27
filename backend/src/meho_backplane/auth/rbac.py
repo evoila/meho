@@ -56,6 +56,7 @@ __all__ = [
     "ensure_human_principal",
     "require_approvals_access",
     "require_human_principal",
+    "require_operator_for_call",
     "require_role",
 ]
 
@@ -186,6 +187,43 @@ def require_role(
 
 #: HTTP methods that only read.
 _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The plain ``operator`` check of the general call route, used after the
+#: Reader lookup of :func:`require_operator_for_call`.
+_OPERATOR_PLAIN_CHECK: Final = require_role(TenantRole.OPERATOR, reads_only=True)
+
+
+async def require_operator_for_call(
+    request: Request,
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> Operator:
+    """The ``operator`` role check of ``POST /api/v1/operations/call``.
+
+    A Reader's answer depends on the operation, so this check looks it up
+    from the body first
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    An operation that asks for a change gets ``403 insufficient_role`` with
+    the sentence in ``message``. A plain read, an operation that cannot be
+    found and a body that names no operation get the plain ``403
+    {"detail": "insufficient_role"}``. MEHO stores nothing and runs nothing.
+    """
+    if operator.tenant_role is TenantRole.READ_ONLY:
+        from meho_backplane.auth.role_refusal import RoleRefusedError
+        from meho_backplane.operations.reader_call import reader_call_refusal
+        from meho_backplane.operations.role_floors import READER_CHANGE_CODE
+
+        # FastAPI read and checked the JSON body before the dependencies run;
+        # the request keeps it, so this read does not wait on the client.
+        sentence = await reader_call_refusal(operator, await request.json())
+        if sentence is not None:
+            structlog.get_logger(__name__).warning(
+                "insufficient_role",
+                operator_sub=operator.sub,
+                actual_role=operator.tenant_role.value,
+                required_role=TenantRole.OPERATOR.value,
+            )
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence)
+    return _OPERATOR_PLAIN_CHECK(operator)
 
 
 def _raise_reader_change_refusal(

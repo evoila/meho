@@ -92,7 +92,7 @@ from meho_backplane.audit_cutover import (
     open_classified_record_scope,
     wrapper_row_class,
 )
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import compute_effective_broadcast_detail
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.connectors.result_handle_store import (
@@ -119,11 +119,13 @@ from meho_backplane.mcp.registry import (
     get_resource_for_uri,
     get_tool,
     has_addon_gated_tools,
+    plain_role_refusal,
     redacted_audit_uri,
     role_at_least,
     surface_visible,
     tool_for_settings,
     tool_role_gate_met,
+    tool_role_refusal,
     tool_surface,
 )
 from meho_backplane.mcp.server import (
@@ -492,7 +494,9 @@ async def handle_tools_call(
                 actual=operator.tenant_role,
             )
             status_code = 403
-            raise McpInvalidParamsError(_role_refusal_message(name, defn, operator))
+            raise McpInvalidParamsError(
+                await _role_refusal_message(name, defn, operator, arguments)
+            )
 
         # Capability gate (G4.5-T1): the tool's required_capability gates
         # invocation too, not just listing. all_tools_for already hides a
@@ -926,27 +930,27 @@ def _decision_status(status_code: int, *, handler_rejected: bool) -> int:
     return 400 if handler_rejected else status_code
 
 
-#: Tool classes that only read. Any other class asks for a change.
-_READ_TOOL_CLASSES: Final[frozenset[str]] = frozenset({"read", "audit_query"})
-
-
-def _role_refusal_message(name: str, defn: ToolDefinition, operator: Operator) -> str:
+async def _role_refusal_message(
+    name: str, defn: ToolDefinition, operator: Operator, arguments: dict[str, Any]
+) -> str:
     """The error text when *operator*'s role is below the tool's role.
 
-    A Reader who calls a tool that asks for a change (``call_operation``,
-    a write tool) gets the code and the plain sentence of
-    :func:`~meho_backplane.operations.role_floors.reader_change_refusal`.
+    A Reader who calls a write tool gets the code and the plain sentence
+    (:func:`~meho_backplane.mcp.registry.tool_role_refusal`). For
+    ``call_operation`` the answer depends on the operation, so it is looked
+    up first (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`):
+    a change gets the sentence; a plain read or an operation that cannot be
+    found gets ``forbidden: 'call_operation' requires a higher role``.
     """
-    from meho_backplane.operations.role_floors import READER_CHANGE_CODE, reader_change_refusal
+    if name != "call_operation":
+        return tool_role_refusal(name, defn, operator)
+    from meho_backplane.operations.reader_call import reader_call_refusal
+    from meho_backplane.operations.role_floors import READER_CHANGE_CODE
 
-    sentence = reader_change_refusal(
-        operator.tenant_role,
-        is_change=defn.required_role is TenantRole.OPERATOR
-        and defn.op_class not in _READ_TOOL_CLASSES,
-    )
+    sentence = await reader_call_refusal(operator, arguments)
     if sentence is not None:
         return f"{READER_CHANGE_CODE}: {sentence}"
-    return f"forbidden: {name!r} requires a higher role"
+    return plain_role_refusal(name)
 
 
 def _operator_meets_required_role(

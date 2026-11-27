@@ -10,8 +10,9 @@ same user on one computer can read each other's saved logins.
 
 ## Your tools
 
-Open your account page in the console: click your name in the sidebar,
-or go to `/ui/account`. The card **Your tools** lists each tool kind:
+Open your account page in the console: click your name in the top bar
+and choose **Account**, or go to `/ui/account`. The card **Your tools**
+lists each tool kind:
 
 - the name of the tool kind;
 - its login client in Keycloak (for example `meho-mcp-desktop`);

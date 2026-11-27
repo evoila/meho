@@ -12,21 +12,22 @@
 // inline-script exception in its Content-Security-Policy.
 //
 // Design: the badge is server-authoritative, not a client counter.
-//   Each bell's badge span ``hx-get``s ``/ui/approvals/badge`` on ``load``,
+//   The bell's badge span ``hx-get``s ``/ui/approvals/badge`` on ``load``,
 //   on the ``meho:approval-badge-poll`` event this controller's timer
 //   dispatches on <body>, and on ``meho:approval-bump`` (after a decision).
 //   The count is always the server's tenant-scoped pending total; this file
-//   never counts anything itself. The timer uses its own event so only the
-//   two badges re-fetch: the approvals history list listens to
-//   ``meho:approval-bump`` and must not reload (and lose its "Load more"
-//   pages) every few seconds.
+//   never counts anything itself. The badge sits in the shared top bar's
+//   notification slot (#1436), the one bell on the page. The timer uses
+//   its own event so only the badge re-fetches: the approvals history list
+//   listens to ``meho:approval-bump`` and must not reload (and lose its
+//   "Load more" pages) every few seconds.
 //
 // Refresh (#3758): the console used to bump the badge on ``approval.*``
 // frames from the Broadcast SSE stream. Broadcast now carries deliberate
 // agent announcements only, so the bell polls instead:
-//   * ONE timer for the whole shell (mobile and desktop badges both listen
-//     for the same body event), every ``POLL_MS`` while the page is
-//     visible. A hidden tab sends no requests.
+//   * ONE timer for the whole shell, every ``POLL_MS`` while the page is
+//     visible. The badge listens for the event on <body>, so where the
+//     bell sits does not matter. A hidden tab sends no requests.
 //   * When the tab becomes visible again, refresh at once.
 //   * After a decision (the approve/deny POST returns
 //     ``HX-Trigger: meho:approval-decided``), close the modal and refresh.
@@ -68,7 +69,7 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    // After a decision: re-fetch both badges and the open history list.
+    // After a decision: re-fetch the badge and the open history list.
     bumpBadge() {
       document.body.dispatchEvent(new CustomEvent("meho:approval-bump"));
     },

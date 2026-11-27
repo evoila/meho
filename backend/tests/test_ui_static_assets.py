@@ -60,7 +60,7 @@ _STATIC_URL_PREFIX = "/ui/static/"
 
 # Selectors the console templates author that a healthy Tailwind scan
 # must emit. The evoila/meho#3647 empty bundle carried zero of these.
-_REQUIRED_CSS_SELECTORS = (".btn", ".card", ".navbar", "bg-base", "badge-error")
+_REQUIRED_CSS_SELECTORS = (".btn", ".card", ".drawer", "bg-base", "badge-error")
 
 # Size floor for the compiled bundle, kept in lockstep with the
 # Dockerfile build-time gate. The empty #3647 bundle was ~35 KB; a

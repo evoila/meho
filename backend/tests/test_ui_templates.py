@@ -9,9 +9,11 @@ assert the Jinja2 ``Environment`` constructed by
 ``base.html`` and produce HTML that contains the chassis-required
 shape:
 
-* DaisyUI ``navbar`` + ``drawer`` chrome.
+* The shared MEHO top bar (meho-ui's ``top_bar``, #1436) over the
+  DaisyUI ``drawer`` chrome, with the approvals bell in its notification
+  slot.
 * Sidebar links to every one of the five G10.x surfaces.
-* Alpine.js ``x-data`` wiring for the sidebar collapse + user menu.
+* Alpine.js ``x-data`` wiring for the sidebar collapse.
 * A ``{% block content %}`` slot the surface templates can override.
 * A footer rendering the deployed-build label (``app_version`` global,
   bound from the same ``CHART_VERSION`` / ``GIT_SHA`` env metadata
@@ -160,15 +162,19 @@ def test_base_template_version_label_degrades_to_unknown(
     assert __version__ not in html
 
 
-def test_base_template_renders_navbar_and_drawer(ui_env: Environment) -> None:
-    """DaisyUI primitives render in the expected positions.
+def test_base_template_renders_top_bar_and_drawer(ui_env: Environment) -> None:
+    """One shared top bar, then the DaisyUI drawer (#1436).
 
-    Asserting the class names directly is brittler than a
+    Asserting the markers directly is brittler than a
     visual-regression test but cheaper than spinning up a headless
     browser; the trade is acceptable for a chassis-shape test.
     """
     html = ui_env.get_template("base.html").render(ready=True)
-    assert 'class="navbar' in html or "navbar bg-base-100" in html
+    # Exactly one bar, and the old phone-only navbar is gone: no page
+    # has two top bars.
+    assert html.count("data-meho-topbar") == 1
+    assert 'class="navbar' not in html
+    assert html.index("data-meho-topbar") < html.index("drawer-toggle")
     assert "drawer-toggle" in html
     assert "drawer-content" in html
     assert "drawer-side" in html
@@ -182,18 +188,18 @@ def test_base_template_links_every_surface(ui_env: Environment) -> None:
 
 
 def test_base_template_wires_alpine_directives(ui_env: Environment) -> None:
-    """Alpine.js sidebar-collapse + user-menu state is wired in markup.
+    """Alpine.js sidebar-collapse state is wired in markup.
 
     Alpine reads its directives from HTML attributes at parse time; if
     these attribute names get renamed in a refactor the interactive
-    bits go dead silently. The assertions below catch that.
+    bits go dead silently. The assertions below catch that. The user
+    menu needs no Alpine any more: it is the top bar's native popover.
     """
     html = ui_env.get_template("base.html").render(ready=True)
     assert "x-data=" in html
     assert "sidebarOpen" in html
-    assert "userMenuOpen" in html
-    assert 'x-show="userMenuOpen"' in html
-    assert "x-cloak" in html
+    assert "userMenuOpen" not in html
+    assert 'popovertarget="meho-topbar-user"' in html
 
 
 def test_base_template_exposes_content_block(ui_env: Environment) -> None:
@@ -708,107 +714,120 @@ def test_forms_with_find_disabled_elt_disinherit_it() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar account-row overflow / approvals-badge clip (#2445)
+# The shared top bar (#1436)
 #
-# The approvals bell renders its pending-count badge as an absolute overlay
-# on the bell button (``approvals/_badge.html``); that overlay pattern is
-# correct. The bug was the sidebar *account row* overflowing horizontally:
-# DaisyUI 5's ``.btn`` sets ``flex-shrink: 0``, so the operator chip (avatar +
-# mono ``sub`` label + chevron) plus the two fixed theme/bell ``btn-square``
-# buttons exceeded the ``w-64`` nav's ~216px content width. The row overflowed
-# rightward, and the drawer-side's ``:where(.drawer-side){ overflow-x: hidden }``
-# clipped the bell's right portion and the entire badge at the sidebar edge --
-# identically at every ``lg+`` viewport because the sidebar is a fixed width.
-#
-# The fix lets the operator chip absorb the deficit instead of pushing the bell
-# off-canvas: the flex wrapper and the chip button carry ``min-w-0`` and the
-# button carries ``shrink`` (overriding ``.btn { flex-shrink: 0 }``), while the
-# mono label keeps ``min-w-0 truncate`` so it ellipsises and the avatar +
-# chevron stay pinned with ``shrink-0``. The theme/bell buttons are untouched,
-# so the badge overlay stays fully inside the visible sidebar.
-#
-# The console has no browser harness, so these server-side assertions pin the
-# load-bearing class contract on the raw ``base.html`` source (Jinja comments
-# stripped) so a future restyle cannot silently reintroduce the overflow.
+# meho renders meho-ui's ``top_bar`` on every page that extends
+# ``base.html``. The approvals count moved from the side menu's account row
+# and the phone-only navbar into the bar's notification slot. The part that
+# regresses quietly is the live wiring: a badge that paints once and then
+# never updates looks exactly like "no new approvals". These tests pin the
+# badge's three triggers inside the slot, and that the old chrome is gone.
+# (The #2445 account-row overflow tests went with the account row.)
 # ---------------------------------------------------------------------------
 
-#: The account-row operator-chip button is uniquely identified by its
-#: ``aria-haspopup="menu"`` (the only popup-menu trigger in ``base.html``).
-_OPERATOR_CHIP_BUTTON_RE = re.compile(
-    r'<button\b[^>]*aria-haspopup="menu"[^>]*>', re.IGNORECASE | re.DOTALL
+_LIVE_BADGE_TRIGGER = (
+    'hx-trigger="load, meho:approval-badge-poll from:body, meho:approval-bump from:body"'
 )
 
 
-def _base_html_source() -> str:
-    return _JINJA_COMMENT_RE.sub("", (templates_dir() / "base.html").read_text(encoding="utf-8"))
+def _topbar(html: str) -> str:
+    m = re.search(r"<header\b[^>]*data-meho-topbar[^>]*>.*?</header>", html, re.S)
+    assert m is not None, "shared top bar not rendered"
+    return m.group(0)
 
 
-def test_operator_chip_button_shrinks_below_its_content(ui_env: Environment) -> None:
-    """The account-row operator chip carries ``shrink`` + ``min-w-0`` (#2445).
+def _topbar_slot(html: str, slot: str) -> str:
+    """The inner HTML of the bar's ``meho-topbar__<slot>`` div.
 
-    DaisyUI 5's ``.btn`` sets ``flex-shrink: 0``; without an explicit
-    override the chip cannot give up space, so the account row overflows the
-    ``w-64`` nav and the drawer-side's ``overflow-x: hidden`` clips the
-    approvals-bell badge. The chip button must carry ``shrink`` (to beat the
-    ``.btn`` rule) and ``min-w-0`` (so it can shrink below its min-content).
+    meho fills both slots with markup that has no ``<div>`` of its own, so
+    the first ``</div>`` closes the slot.
     """
-    source = _base_html_source()
-    m = _OPERATOR_CHIP_BUTTON_RE.search(source)
-    assert m is not None, "operator-chip user-menu button (aria-haspopup=menu) not found"
-    class_m = re.search(r'class="([^"]*)"', m.group(0))
-    assert class_m is not None, f"operator-chip button has no class attribute: {m.group(0)!r}"
-    chip_classes = class_m.group(1).split()
-    assert "shrink" in chip_classes, (
-        "operator-chip button must carry `shrink` to override DaisyUI 5's "
-        f"`.btn {{ flex-shrink: 0 }}`; classes: {chip_classes}"
-    )
-    assert "min-w-0" in chip_classes, (
-        "operator-chip button must carry `min-w-0` so it can shrink below its "
-        f"min-content instead of clipping the approvals badge; classes: {chip_classes}"
-    )
+    m = re.search(rf'<div class="meho-topbar__{slot}">(.*?)</div>', _topbar(html), re.S)
+    assert m is not None, f"top bar {slot} slot not rendered"
+    return m.group(1)
 
 
-def test_operator_chip_wrapper_and_label_allow_truncation() -> None:
-    """The chip's flex wrapper + name label let the label truncate (#2445).
+def test_top_bar_notification_slot_carries_the_live_approvals_count(
+    ui_env: Environment,
+) -> None:
+    """The one approvals badge sits in the bar's slot with all three triggers.
 
-    The chip button's flex wrapper (``div.relative``) needs ``min-w-0`` so it
-    can shrink within the account row, and the name label
-    (``data-field="user-label"``) needs ``min-w-0 truncate`` so it
-    ellipsises (its ``max-w-[7.5rem]`` cap alone
-    sets a flex min-width floor that would keep the row over-wide). This is
-    what makes the chip -- not the bell -- absorb the width deficit.
-    """
-    source = _base_html_source()
-    # The user-menu wrapper is the relative-positioned div that owns the
-    # click-outside close handler; it must be shrinkable.
-    assert re.search(
-        r'<div\b[^>]*class="[^"]*\bmin-w-0\b[^"]*"[^>]*x-on:click\.outside="userMenuOpen',
-        source,
-    ), "user-menu wrapper div must carry min-w-0 so the chip can shrink in the row"
-    # The name label carries both min-w-0 and truncate on the same element.
-    labels_with_truncate = [
-        tag
-        for tag in re.findall(r"<span\b[^>]*>", source)
-        if 'data-field="user-label"' in tag and "truncate" in tag and "max-w-[7.5rem]" in tag
-    ]
-    assert labels_with_truncate, "user-menu name label (truncate + max-w-[7.5rem]) not found"
-    for tag in labels_with_truncate:
-        assert "min-w-0" in tag, (
-            "the user-menu name label must carry min-w-0 alongside truncate so its "
-            f"ellipsis engages when the chip shrinks; tag: {tag!r}"
-        )
-
-
-def test_account_row_renders_both_bell_badge_targets(ui_env: Environment) -> None:
-    """Both bell instances still render their badge swap targets (#2445 AC #4).
-
-    The fix touches only the sidebar account row; the mobile top-bar bell must
-    render unchanged. Both bells expose their prefixed badge target so the
-    ``load`` / ``meho:approval-bump`` swap still lands the count.
+    ``load`` paints the server's count, ``meho:approval-badge-poll`` (the
+    five-second timer of ``approvals-bell.js``) and ``meho:approval-bump``
+    (after a decision) refresh it. Dropping either event leaves a count
+    that never changes.
     """
     html = ui_env.get_template("base.html").render(ready=True)
-    assert 'id="mobile-approvals-badge"' in html
-    assert 'id="sidebar-approvals-badge"' in html
+    slot = _topbar_slot(html, "slot")
+    assert 'id="topbar-approvals-badge"' in slot
+    assert 'hx-get="/ui/approvals/badge"' in slot
+    assert _LIVE_BADGE_TRIGGER in slot
+    assert 'aria-label="Open approvals"' in slot
+    # One bell on the page: the old mobile-navbar and side-menu bells are gone.
+    assert html.count("-approvals-badge") == 1
+    assert html.count(_LIVE_BADGE_TRIGGER) == 1
+    # The badge id keeps the ending approvals-bell.js matches on.
+    script = (static_src_dir() / "app" / "approvals-bell.js").read_text(encoding="utf-8")
+    assert 'endsWith("-approvals-badge")' in script
+    assert '"meho:approval-badge-poll"' in script
+    assert '"meho:approval-bump"' in script
+
+
+def test_top_bar_poll_timer_root_still_renders(ui_env: Environment) -> None:
+    """The ``approvalsBell`` root that runs the five-second timer is on the page.
+
+    Without it nothing dispatches ``meho:approval-badge-poll`` and the badge
+    in the bar would paint once and stop.
+    """
+    html = ui_env.get_template("base.html").render(ready=True)
+    assert html.count('x-data="approvalsBell()"') == 1
+    assert 'src="/ui/static/src/app/approvals-bell.js"' in html
+    assert 'id="meho-approvals-modal-container"' in html
+
+
+def test_top_bar_start_slot_holds_the_phone_menu_button(ui_env: Environment) -> None:
+    """The hamburger that opens the side menu is in the bar, below lg only."""
+    html = ui_env.get_template("base.html").render(ready=True)
+    start = _topbar_slot(html, "start")
+    assert 'for="meho-drawer-toggle"' in start
+    assert "lg:hidden" in start
+    assert 'aria-label="Toggle navigation sidebar"' in start
+
+
+def test_top_bar_user_menu_links(ui_env: Environment) -> None:
+    """The bar's user menu carries meho's Account and Sign-out links."""
+    bar = _topbar(ui_env.get_template("base.html").render(ready=True))
+    assert 'href="/ui/account"' in bar
+    assert 'href="/ui/auth/logout"' in bar
+    assert 'href="/ui/"' in bar  # the logo goes home
+    assert "Operator Console" in bar
+    # No app list is passed in this iteration, so no switcher (#1430).
+    assert "meho-topbar__switcher" not in bar
+
+
+def test_side_menu_keeps_nav_tenant_and_version_but_not_the_bar_duplicates(
+    ui_env: Environment,
+) -> None:
+    """The side menu keeps its own content; the bar's controls are not repeated."""
+    html = ui_env.get_template("base.html").render(ready=True)
+    side = html[html.index('class="drawer-side') :]
+    assert "Surfaces" in side
+    assert "Tenant" in side
+    assert "ready" in side
+    assert "/ui/auth/logout" not in side
+    assert "approvals-badge" not in side
+    assert 'aria-haspopup="menu"' not in html
+
+
+def test_base_template_links_the_top_bar_stylesheet_after_the_tokens(
+    ui_env: Environment,
+) -> None:
+    """``meho-topbar.css`` reads the ``--evoila-*`` tokens, so it loads after them."""
+    html = ui_env.get_template("base.html").render(ready=True)
+    assert '<link rel="stylesheet" href="/ui/static/shell/meho-topbar.css" />' in html
+    assert html.index("/ui/static/brand/evoila-tokens.css") < html.index(
+        "/ui/static/shell/meho-topbar.css"
+    )
 
 
 def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:

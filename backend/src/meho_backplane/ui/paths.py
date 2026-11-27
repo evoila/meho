@@ -144,6 +144,19 @@ def brand_fonts_dir() -> Path:
     return fonts.fonts_dir()
 
 
+def shell_css_dir() -> Path:
+    """Return the directory of page-chrome stylesheets inside ``meho-ui``.
+
+    Holds ``meho-topbar.css``, the shared top bar's own precompiled
+    stylesheet (#1436). Served at ``/ui/static/shell`` straight out of the
+    package, for the same reason as :func:`brand_css_dir`: one copy of
+    the file, bumped with the package.
+    """
+    from meho_ui.shell import shell_css_dir as shared_shell_css_dir
+
+    return shared_shell_css_dir()
+
+
 def static_mounts() -> tuple[tuple[str, Path], ...]:
     """Return the console's static mount table, in registration order.
 
@@ -157,13 +170,15 @@ def static_mounts() -> tuple[tuple[str, Path], ...]:
     Order matters and is not cosmetic. A Starlette mount miss does not
     fall through to a later, more specific mount, so the two brand
     prefixes have to be registered before the broad ``/ui/static`` one
-    or every brand URL 404s. ``test_ui_static_assets`` asserts the
+    or every brand URL 404s. The same holds for the ``/ui/static/shell``
+    prefix (the top bar's stylesheet). ``test_ui_static_assets`` asserts the
     running app's mount table matches this one, which is what keeps the
     two from drifting apart.
     """
     return (
         ("/ui/static/brand", brand_css_dir()),
         ("/ui/static/fonts", brand_fonts_dir()),
+        ("/ui/static/shell", shell_css_dir()),
         ("/ui/static", static_root_dir()),
     )
 

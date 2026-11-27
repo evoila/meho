@@ -185,7 +185,7 @@ print(f'connector kit: {len(kit.__all__)} names import')"
 # catch the ~35 KB preflight-only bundle, so the gate asserts BOTH a size
 # floor (>= 60 KB; the empty bundle was 35 KB, a healthy one ~150 KB) AND
 # the presence of several distinct utility/component selectors the console
-# templates author (`.btn`, `.card`, `.navbar`, `bg-base`, `badge-error`).
+# templates author (`.btn`, `.card`, `.drawer`, `bg-base`, `badge-error`).
 # The empty bundle carried zero of these, so the class checks -- not the
 # coarse size floor -- are the load-bearing guard.
 #
@@ -299,7 +299,7 @@ if [ "${CSS_BYTES}" -lt 61440 ]; then
   echo "ERROR: compiled tailwind bundle is only ${CSS_BYTES} B (< 60 KB floor) -- the @source content scan reached (near) no templates and shipped a preflight-only bundle. See evoila/meho#3647." >&2
   exit 1
 fi
-for cls in '\.btn' '\.card' '\.navbar' 'bg-base' 'badge-error'; do
+for cls in '\.btn' '\.card' '\.drawer' 'bg-base' 'badge-error'; do
   grep -q "${cls}" "${CSS}" \
     || { echo "ERROR: compiled tailwind bundle is missing selector '${cls}' -- the @source content scan reached no templates. See evoila/meho#3647." >&2; exit 1; }
 done

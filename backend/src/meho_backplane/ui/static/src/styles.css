@@ -393,66 +393,6 @@ a.meho-card:hover,
   box-shadow: 0 12px 32px -16px oklch(0% 0 0 / 0.5);
 }
 
-/*
- * Wordmark caret — the brand mark: a terminal insertion cursor after
- * "meho", as if the console is mid-keystroke. Blinks with hard steps
- * (authentic terminal cadence) unless the operator prefers reduced
- * motion, in which case it stays solid.
- */
-.meho-caret {
-  display: inline-block;
-  /* Thin italic beam, not a block — width scales with the wordmark
-     (≈2px at the sidebar size); the slight skew echoes a cursive
-     insertion point. */
-  width: 0.09em;
-  height: 0.84em;
-  margin-left: 0.18ch;
-  border-radius: 1px;
-  background: var(--color-primary);
-  transform: skewX(-12deg);
-  vertical-align: -0.04em;
-}
-
-/*
- * Wordmark type-on: each letter is an inline-block that snaps from
- * max-width 0 to full width at a staggered delay (steps(1) = no
- * tween, a discrete keystroke). Because the caret sits in flow after
- * the letters, it rides along as the word grows — the cursor
- * "types" the brand on every page load. Letters are aria-hidden;
- * an sr-only "meho" carries the accessible name.
- */
-.meho-type > span {
-  display: inline-block;
-  overflow: hidden;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  @keyframes meho-type-in {
-    from { max-width: 0; }
-    to { max-width: 1.6ch; }
-  }
-
-  .meho-type > span {
-    animation: meho-type-in 1ms steps(1, end) both;
-  }
-
-  .meho-type > span:nth-child(1) { animation-delay: 75ms; }
-  .meho-type > span:nth-child(2) { animation-delay: 150ms; }
-  .meho-type > span:nth-child(3) { animation-delay: 225ms; }
-  .meho-type > span:nth-child(4) { animation-delay: 300ms; }
-
-  @keyframes meho-caret-blink {
-    0%, 54% { opacity: 1; }
-    55%, 100% { opacity: 0; }
-  }
-
-  .meho-caret {
-    /* Solid while "typing", blinking once idle. */
-    animation: meho-caret-blink 1.2s steps(1, end) infinite;
-    animation-delay: 400ms;
-  }
-}
-
 /* Quiet uppercase-mono section label ("SURFACES", drawer headings…). */
 .meho-overline {
   font-family: var(--font-mono);
@@ -463,11 +403,36 @@ a.meho-card:hover,
   color: var(--meho-text-subtle);
 }
 
-/* Navbar glass: translucent over the glow, hairline bottom border. */
-.meho-glass {
-  background: color-mix(in oklch, var(--color-base-200) 78%, transparent);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 9%, transparent);
+/*
+ * The shared top bar (#1436). Its look is meho-ui's `meho-topbar.css`;
+ * these rules only place it in the console's layout. Unlayered, like the
+ * bar's own stylesheet, so they win over DaisyUI's layered `drawer` rules
+ * and beat `.meho-topbar__start { display: flex }` on specificity.
+ *
+ * - The bar stays at the top of the window while the page scrolls. Under
+ *   the side menu's overlay (z-40) on a phone, so the open menu covers it.
+ * - The `start` slot holds only the hamburger, which is `lg:hidden`; from
+ *   lg up the empty slot is hidden too, or its gap would push the logo
+ *   right.
+ * - From lg up the side menu sits under the bar: it sticks at the bar's
+ *   height and is that much shorter than the window. Below lg it stays a
+ *   full-height overlay, as DaisyUI draws it.
+ */
+.meho-console-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+@media (min-width: 64rem) {
+  .meho-console-topbar .meho-topbar__start {
+    display: none;
+  }
+
+  .meho-console-drawer > .drawer-side {
+    top: var(--meho-topbar-height);
+    height: calc(100dvh - var(--meho-topbar-height));
+  }
 }
 
 /*

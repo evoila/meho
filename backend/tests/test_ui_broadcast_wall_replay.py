@@ -213,7 +213,7 @@ class TestWallMode:
     """``GET /ui/broadcast?wall=1`` -- the no-chrome wall view."""
 
     def test_wall_view_drops_base_chrome(self) -> None:
-        """The wall layout hides the sidebar + top navbar + filter bar."""
+        """The wall layout hides the sidebar + top bar + filter bar."""
         session_id = _seed_session_sync(tenant_id=_TENANT_A)
         with respx.mock(assert_all_called=False):
             client = _authenticated_client(session_id)
@@ -221,8 +221,10 @@ class TestWallMode:
         assert response.status_code == 200, response.text
         body = response.text
         # The wall page is a standalone document, not the base.html shell:
-        # no DaisyUI drawer chrome, no sidebar "Surfaces" nav, no filter bar.
+        # no DaisyUI drawer chrome, no shared top bar (#1436), no sidebar
+        # "Surfaces" nav, no filter bar.
         assert "drawer-toggle" not in body
+        assert "data-meho-topbar" not in body
         assert "Surfaces" not in body
         assert "Filter broadcast events" not in body
         # It is its own <title>, distinct from the in-chrome view.

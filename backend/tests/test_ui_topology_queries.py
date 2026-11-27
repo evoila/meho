@@ -505,7 +505,7 @@ def test_htmx_fragment_returns_data_island_wrapper_only() -> None:
     body = response.text
     # The fragment is the wrapper only -- no <title>, no <body>, no nav chrome.
     assert "<title>" not in body
-    assert "navbar" not in body
+    assert "data-meho-topbar" not in body
     # But it carries the data islands the controller reads.
     assert 'id="topology-graph-data-wrapper"' in body
     assert 'id="topology-graph-data"' in body

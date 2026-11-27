@@ -445,8 +445,8 @@ async def explain(
     """Why a call runs, waits or is denied, and who may approve it. Runs nothing.
 
     The answer is today's answer (the policy gate, decide-only), the policy
-    evaluator's answer with every rule it matched (with
-    ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
+    evaluator's answer with every rule it matched (with ``CUSTOM_POLICY``
+    or ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
     the groups that may approve. No audit row for a call, no approval
     request, no call to an outside system. A caller who is not a tenant
     admin or a platform admin gets the answer without the policy's entries

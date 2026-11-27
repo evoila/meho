@@ -46,9 +46,11 @@ for an unknown state.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -56,7 +58,9 @@ from datetime import UTC, datetime
 from typing import Any, Final, cast
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import Insert, delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
@@ -65,6 +69,7 @@ from meho_backplane.auth.principal_block_run import (
     run_login,
     step_refused_in_run,
 )
+from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -80,6 +85,7 @@ __all__ = [
     "PrincipalBlockUnavailableError",
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
+    "SignInAlreadyUsedError",
     "block_principal",
     "checking_logins_for_steps",
     "first_blocked_step_login",
@@ -131,6 +137,14 @@ class PrincipalNotBlockedError(Exception):
 
 class OwnBlockStaysError(Exception):
     """An admin tried to remove a block on their own login that they may not remove."""
+
+
+class SignInAlreadyUsedError(Exception):
+    """The fresh sign-in of an own-login unblock already approved a request."""
+
+
+class BlockSetChangedError(Exception):
+    """The blocks of the login are not the blocks the admin was shown."""
 
 
 @dataclass(frozen=True)
@@ -322,21 +336,35 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     """Block *sub*. The block row and its audit row commit together.
 
     Blocking a login that is already blocked in the same scope updates
-    the reason. Raises :class:`CannotBlockSelfError` for the admin's own login.
+    the reason. The row is written in one statement (insert, or update
+    when the row is there). While an unblock of the login holds the row,
+    the statement waits; when the unblock removed the row, the statement
+    writes a new one. So a block is always written. Raises
+    :class:`CannotBlockSelfError` for the admin's own login.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError
     scope = _scope_of(operator)
     now = datetime.now(UTC)
+    values = {
+        "sub": sub,
+        "scope": scope,
+        "tenant_id": None if scope == BLOCK_SCOPE_ALL else operator.tenant_id,
+        "reason": reason,
+        "blocked_by_sub": operator.sub,
+        "blocked_at": now,
+    }
+    changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
     async with get_sessionmaker()() as session:
-        row = await session.get(PrincipalBlock, (sub, scope))
-        if row is None:
-            row = PrincipalBlock(sub=sub, scope=scope)
-            session.add(row)
-        row.tenant_id = None if scope == BLOCK_SCOPE_ALL else operator.tenant_id
-        row.reason = reason
-        row.blocked_by_sub = operator.sub
-        row.blocked_at = now
+        conn = await session.connection()
+        stmt: Insert
+        if conn.dialect.name == "postgresql":
+            pg = pg_insert(PrincipalBlock).values(**values)
+            stmt = pg.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+        else:
+            lite = sqlite_insert(PrincipalBlock).values(**values)
+            stmt = lite.on_conflict_do_update(index_elements=["sub", "scope"], set_=changed)
+        await session.execute(stmt)
         add_audit_row(
             session,
             operator,
@@ -350,18 +378,82 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
     return BlockedPerson(sub, scope, reason, operator.sub, now)
 
 
-async def _read_blocks(session: AsyncSession, sub: str) -> list[tuple[str, str]]:
-    """Every block of *sub* as ``(scope, reason)``, read from the table.
+def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
+    """A short text that names a set of blocks.
 
+    It changes when a block is added or removed, and when a block is set
+    again (a new reason, admin or time).
+    """
+    rows = sorted(
+        [b.sub, b.scope, b.reason, b.blocked_by_sub, b.blocked_at.isoformat()] for b in blocks
+    )
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+
+
+async def _read_blocks(session: AsyncSession, sub: str) -> list[BlockedPerson]:
+    """Every block of *sub*, sorted by scope, read from the table.
+
+    The rows stay locked until the transaction ends, so a block that is
+    set again in the meantime waits, and the delete removes the rows read.
+    The rows are locked in the order of their scope, so two unblocks of
+    one login wait for each other and never for each other in a circle.
     Raises :class:`PrincipalBlockUnavailableError` when the table cannot be read.
     """
-    query = select(PrincipalBlock.scope, PrincipalBlock.reason).where(PrincipalBlock.sub == sub)
+    query = (
+        select(PrincipalBlock)
+        .where(PrincipalBlock.sub == sub)
+        .order_by(PrincipalBlock.scope)
+        .with_for_update()
+    )
     try:
-        rows = (await session.execute(query)).tuples()
-        return sorted((str(scope), str(reason)) for scope, reason in rows)
+        rows = (await session.execute(query)).scalars().all()
     except Exception as exc:
         _log.warning("principal_block_read_failed", exc_info=True)
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    blocks = [BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows]
+    return sorted(blocks, key=lambda b: b.scope)
+
+
+async def _delete_read_blocks(session: AsyncSession, blocks: list[BlockedPerson]) -> int:
+    """Delete each block only while it is still the block that was read; return how many."""
+    deleted = 0
+    for block in blocks:
+        result = await session.execute(
+            delete(PrincipalBlock).where(
+                PrincipalBlock.sub == block.sub,
+                PrincipalBlock.scope == block.scope,
+                PrincipalBlock.reason == block.reason,
+                PrincipalBlock.blocked_by_sub == block.blocked_by_sub,
+                PrincipalBlock.blocked_at == block.blocked_at,
+            )
+        )
+        deleted += int(result.rowcount or 0)  # type: ignore[attr-defined]
+    return deleted
+
+
+async def _refuse_used_sign_in(
+    session: AsyncSession, operator: Operator, sign_in: dict[str, Any]
+) -> None:
+    """Raise :class:`SignInAlreadyUsedError` when an approve already used the sign-in.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the lock or the
+    audit rows cannot be read, so nothing is removed.
+    """
+    # Imported here: the approval queue imports this module.
+    from meho_backplane.operations import approval_queue
+
+    key = str(sign_in["sign_in_key"])
+    try:
+        await approval_queue.take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
+        uses = await earlier_sign_in_uses(
+            session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
+        )
+    except Exception as exc:
+        _log.warning("principal_unblock_sign_in_check_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    if any(use.kind == "approval" for use in uses):
+        _log.warning("principal_unblock_sign_in_reused", operator_sub=operator.sub)
+        raise SignInAlreadyUsedError
 
 
 async def unblock_principal(
@@ -370,6 +462,7 @@ async def unblock_principal(
     *,
     reason: str | None = None,
     sign_in: dict[str, Any] | None = None,
+    shown: str | None = None,
 ) -> int:
     """Remove the blocks of *sub* the admin may remove, and return how many.
 
@@ -380,31 +473,46 @@ async def unblock_principal(
     admin a block in this tenant, raises :class:`OwnBlockStaysError` and
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
-    is none, and :class:`PrincipalBlockUnavailableError` when the table
-    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given.
+    is none, and :class:`PrincipalBlockUnavailableError` when the table,
+    the lock of the sign-in or the audit rows cannot be read. *reason* and
+    *sign_in* (the proof of a fresh sign-in) go into the audit row when
+    they are given. A *sign_in* that an
+    ``approval.decision`` audit row already names is used up: the call
+    raises :class:`SignInAlreadyUsedError` and removes nothing. The scan
+    and the removal run under the advisory lock of the sign-in
+    (:mod:`meho_backplane.auth.sign_in_use`). When *shown* is given (the
+    :func:`block_set_digest` of the blocks the admin was shown), MEHO
+    removes the blocks only when they are still exactly those blocks, and
+    else raises :class:`BlockSetChangedError` and removes nothing. The
+    delete also removes a block only while it is still the block that
+    was read (same reason, admin and time). When one was changed in the
+    meantime, MEHO removes nothing and raises :class:`BlockSetChangedError`.
     """
     tenant_scope = str(operator.tenant_id)
     own_login = sub == operator.sub
     only_this_tenant = own_login or not operator.platform_admin
-    condition = PrincipalBlock.sub == sub
-    if only_this_tenant:
-        condition = condition & (PrincipalBlock.scope == tenant_scope)
     async with get_sessionmaker()() as session:
+        if sign_in is not None:
+            await _refuse_used_sign_in(session, operator, sign_in)
         blocks = await _read_blocks(session, sub)
-        scopes = {scope for scope, _reason in blocks}
+        scopes = {b.scope for b in blocks}
         if own_login and (
             BLOCK_SCOPE_ALL in scopes or (not operator.platform_admin and tenant_scope in scopes)
         ):
             raise OwnBlockStaysError
-        removed = [b for b in blocks if b[0] == tenant_scope] if only_this_tenant else blocks
+        removed = [b for b in blocks if b.scope == tenant_scope] if only_this_tenant else blocks
         if not removed:
             raise PrincipalNotBlockedError
-        await session.execute(delete(PrincipalBlock).where(condition))
+        if shown is not None and shown != block_set_digest(removed):
+            raise BlockSetChangedError
+        if await _delete_read_blocks(session, removed) != len(removed):
+            await session.rollback()
+            raise BlockSetChangedError
+        removed_scopes = [b.scope for b in removed]
         payload: dict[str, Any] = {
             "unblocked_sub": sub,
-            "scopes": [scope for scope, _reason in removed],
-            "removed_blocks": [{"scope": scope, "reason": why} for scope, why in removed],
+            "scopes": removed_scopes,
+            "removed_blocks": [{"scope": b.scope, "reason": b.reason} for b in removed],
         }
         if reason is not None:
             payload["reason"] = reason

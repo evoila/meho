@@ -1138,8 +1138,10 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
    - It reads the row once more before it gives up at the deadline.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`
-   in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
-   the policy gate; the durable approval-decision row is the authorization.
+   in `operations/meta_tools.py`). The dispatcher does not ask for the
+   approval again, but it checks the agent's rights as for a new call made
+   now (`operations/approved_run_rights.py`): a `deny` grant, or no grant
+   with the switch `on`, refuses the run.
    If the waiting row is a composite sub-op (`resume_parent` set), the waiter
    runs the parent composite again with the approved sub-op cleared, through
    the same helper the operator surface uses. That re-run uses the target the

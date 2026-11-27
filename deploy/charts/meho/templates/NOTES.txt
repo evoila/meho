@@ -209,5 +209,14 @@ WARNING: approvalHandoff.enabled=false, so APPROVAL_HANDOFF_ENCRYPTION_KEY is no
        then run helm upgrade.
 
   Check the state any time on GET /ready under features.approval_custody.
+{{- if .Values.metricsAuth.enabled }}
+  /ready shows it only when you send the metrics token from the Secret
+  {{ include "meho.metricsAuthSecretName" . }} (key {{ .Values.metricsAuth.secretKey }}).
+  This command gives it to curl on standard input, never on the command line
+  (curl 7.55.0 or newer):
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "meho.metricsAuthSecretName" . }} -o jsonpath='{{ printf "{.data.%s}" .Values.metricsAuth.secretKey }}' \
+      | base64 -d | sed 's/^/Authorization: Bearer /' \
+      | curl -s -H @- https://<your-backplane>/ready
+{{- end }}
   Steps and key rotation: docs/codebase/approvals.md.
 {{- end }}

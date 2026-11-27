@@ -707,6 +707,10 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 _SAFETY_RANK: dict[str, int] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 _VALID_SAFETY_LEVELS: frozenset[str] = frozenset(_SAFETY_RANK)
 
+# The three kinds of call that no later call of the same connector undoes.
+# Mirrors the DB CHECK on :attr:`EndpointDescriptor.hard_to_undo`.
+_HARD_TO_UNDO_KINDS: frozenset[str] = frozenset({"deletes", "stops", "overwrites"})
+
 
 class HandlerRefError(ValueError):
     """Raised when a typed handler's identity cannot be serialised to a dotted path.
@@ -999,6 +1003,27 @@ def _validate_safety_level(safety_level: str) -> str:
     return safety_level
 
 
+def _validate_hard_to_undo(op_id: str, *, hard_to_undo: str | None, safety_level: str) -> None:
+    """Refuse a ``hard_to_undo`` value MEHO does not know, or one on a ``safe`` op.
+
+    A ``safe`` operation changes nothing, so it cannot delete, stop or
+    overwrite anything. The message names the op and says why.
+    """
+    if hard_to_undo is None:
+        return
+    if hard_to_undo not in _HARD_TO_UNDO_KINDS:
+        raise ValueError(
+            f"op {op_id!r}: hard_to_undo must be one of {sorted(_HARD_TO_UNDO_KINDS)} "
+            f"or None (received {hard_to_undo!r})"
+        )
+    if safety_level == "safe":
+        raise ValueError(
+            f"op {op_id!r} declares hard_to_undo={hard_to_undo!r} but safety_level='safe'; "
+            "a safe operation changes nothing, so it cannot be hard to undo. "
+            "Give it a higher safety_level or leave hard_to_undo out"
+        )
+
+
 def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
     """Validate the ``group_key`` / ``when_to_use`` pairing at the boundary.
 
@@ -1244,6 +1269,8 @@ async def register_typed_operation(
     tags: list[str] | None = None,
     safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "safe",
     requires_approval: bool = False,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,
     session: AsyncSession | None = None,
@@ -1329,6 +1356,15 @@ async def register_typed_operation(
         When ``True``, the dispatcher writes an audit row in
         ``status='pending'`` and waits for operator decision before
         executing. Independent of ``safety_level``.
+    hard_to_undo
+        ``"deletes"``, ``"stops"`` or ``"overwrites"`` when a call can
+        delete, stop or overwrite something and no later call of the same
+        connector brings it back. ``None`` (default) otherwise. Refused on
+        a ``safe`` op and for any other value. Stored on the row; see
+        ``docs/codebase/policy-classification.md``.
+    changes_rights
+        ``True`` when a call gives or takes rights, a login or an access
+        policy in the target system. Default ``False``. Stored on the row.
     llm_instructions
         Optional structured agent guidance ("when to call",
         "parameter hints", "output format"). The agent prompt
@@ -1367,7 +1403,8 @@ async def register_typed_operation(
         G0.9-T4a #731).
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
-        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        bounded enum, ``hard_to_undo`` unknown or set on a ``safe`` op,
+        or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see ``when_to_use`` param description).
     HandlerRefError
         Handler is a closure, lambda, partial, or non-coroutine
@@ -1402,6 +1439,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1435,6 +1473,8 @@ async def register_typed_operation(
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1461,6 +1501,8 @@ async def register_typed_operation(
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1488,6 +1530,8 @@ async def register_composite_operation(
     tags: list[str] | None = None,
     safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "dangerous",
     requires_approval: bool = True,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,
     session: AsyncSession | None = None,
@@ -1548,6 +1592,8 @@ async def register_composite_operation(
         (one composite call ⇒ N sub-ops dispatched), so the policy
         gate's approval-queue path is the right default. Read-only
         composites override at the call site.
+    hard_to_undo, changes_rights
+        Identical to :func:`register_typed_operation`.
     llm_instructions, custom_description, session, embedding_service
         Identical to :func:`register_typed_operation`.
 
@@ -1564,7 +1610,8 @@ async def register_composite_operation(
         kwarg from G0.9-T4a #731).
     ValueError
         ``op_id`` empty / whitespace, ``safety_level`` not in the
-        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        bounded enum, ``hard_to_undo`` unknown or set on a ``safe`` op,
+        or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
         Handler accepts neither a ``dispatch_child`` nor a
@@ -1604,6 +1651,7 @@ async def register_composite_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    _validate_hard_to_undo(op_id, hard_to_undo=hard_to_undo, safety_level=safety_level)
     when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
@@ -1637,6 +1685,8 @@ async def register_composite_operation(
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1663,6 +1713,8 @@ async def register_composite_operation(
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=llm_instructions,
             custom_description=custom_description,
             embedding_service=embedding_service,
@@ -1693,6 +1745,8 @@ async def _register_in_session(
     tags_list: list[str],
     safety_level: str,
     requires_approval: bool,
+    hard_to_undo: str | None,
+    changes_rights: bool,
     llm_instructions: dict[str, Any] | None,
     custom_description: str | None,
     embedding_service: EmbeddingService | None,
@@ -1840,6 +1894,10 @@ async def _register_in_session(
             safety_level=safety_level,
             requires_approval=requires_approval,
         )
+        # The two facts follow the code on every start, also when a later
+        # release takes one away. Nothing else writes them.
+        existing.hard_to_undo = hard_to_undo
+        existing.changes_rights = changes_rights
 
         existing_text = build_embedding_text(
             summary=existing.summary or "",
@@ -1941,6 +1999,8 @@ async def _register_in_session(
         llm_instructions=llm_instructions,
         safety_level=safety_level,
         requires_approval=requires_approval,
+        hard_to_undo=hard_to_undo,
+        changes_rights=changes_rights,
         is_enabled=True,
         embedding=embedding,
         custom_description=custom_description,

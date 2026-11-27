@@ -245,22 +245,35 @@ def _argument_text(part: Any) -> str | None:
     return str(part)
 
 
-def _hide_apply_item(text: str, previous: str, *, p_program: bool) -> tuple[str, str | None]:
+def _hide_apply_item(
+    text: str, previous: str, *, p_program: bool, p_any_program: bool
+) -> tuple[str, str | None]:
     """One item of a ``k8s.apply`` command line with its secret values hidden.
 
-    ``-p`` takes a password only in a command of a program that takes one
-    there (:func:`~meho_backplane.redaction.command_line.takes_password_after_p`,
-    *p_program* for the items before this one). There a value glued to it
-    (``-pVALUE``) is hidden too. ``-uuser:password`` hides the password.
-    Returned with the text is the secret flag that waits for the next item.
+    A value glued to ``-p`` (``-pVALUE``) is hidden only in a command of a
+    program that takes a password there
+    (:func:`~meho_backplane.redaction.command_line.takes_password_after_p`,
+    *p_program* for the items before this one). The argument after ``-p``
+    is hidden there too, and with *p_any_program* (the card) after any
+    program. ``-uuser:password`` hides the password. Returned with the text
+    is the secret flag that waits for the next item.
     """
     shell = reads_shell_script(previous)
-    if p_program and not shell and text.startswith("-p"):
+    if not shell and text.startswith("-p") and (p_program or (p_any_program and text == "-p")):
         return (text, "secret") if text == "-p" else (f"-p{HIDDEN}", None)
-    return hide_command_text(hide_in_text(text), None, shell=shell, p_programs=PASSWORD_P_PROGRAMS)
+    return hide_command_text(
+        hide_in_text(text),
+        None,
+        shell=shell,
+        p_programs=PASSWORD_P_PROGRAMS,
+        p_any_program=p_any_program,
+        p_program_before=p_program and not shell,
+    )
 
 
-def hide_command_secrets(parts: list[Any], *, p_after_programs: bool = False) -> list[Any]:
+def hide_command_secrets(
+    parts: list[Any], *, p_after_programs: bool = False, p_any_program: bool = False
+) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
     The words stay, so the approver still reads what runs. Hidden are: what
@@ -281,13 +294,16 @@ def hide_command_secrets(parts: list[Any], *, p_after_programs: bool = False) ->
     backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
     shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
 
-    *p_after_programs* is the rule of ``k8s.apply`` (its card and the
-    check of its stored request, :func:`_hide_apply_item`): ``-p`` is a
-    secret flag only after a program that takes a password there
-    (``mysql -p x``, ``mysql -pVALUE``; ``mkdir -p /data`` stays), a
-    password glued to ``-u`` is hidden (``curl -uuser:password``), and the
-    item after a secret flag is its value also when it starts with a dash
-    (``--password -x``).
+    *p_after_programs* is the rule of ``k8s.apply`` (:func:`_hide_apply_item`):
+    a value glued to ``-p`` is hidden after a program that takes a password
+    there (``mysql -pVALUE``), a password glued to ``-u`` is hidden
+    (``curl -uuser:password``), and the item after a secret flag is its
+    value also when it starts with a dash (``--password -x``). Alone, it is
+    the rule of the check of the stored request: ``-p`` is a secret flag
+    only after such a program (``mysql -p x``; ``mkdir -p /data`` stays).
+    With *p_any_program* it is the rule of the approval card: the argument
+    after ``-p`` is hidden after any program, as in the Job previews
+    (``mkdir -p /data`` shows ``-p`` and the hidden mark).
     """
     hidden: list[Any] = []
     pending: str | None = None
@@ -305,7 +321,9 @@ def hide_command_secrets(parts: list[Any], *, p_after_programs: bool = False) ->
             shown = hide_flag_value(pending, text)
             pending = None
         elif p_after_programs:
-            shown, pending = _hide_apply_item(text, previous, p_program=p_program)
+            shown, pending = _hide_apply_item(
+                text, previous, p_program=p_program, p_any_program=p_any_program
+            )
         else:
             shown, pending = hide_command_text(
                 hide_in_text(text), pending, shell=reads_shell_script(previous)
@@ -363,10 +381,11 @@ def _children(node: Any, *, skip_items: bool) -> list[Any]:
 
 
 class _SecretValueCheck:
-    """A check for one manifest: True when an object holds a value the approval card hides.
+    """The storage rule for one manifest: True when an object holds a value it counts.
 
-    The check and the card follow one rule, so a value the card hides as a
-    secret is never in the stored params. An object holds such a value when:
+    Such a manifest is kept only in the encrypted hand-off of the run. The
+    approval card hides each value this rule counts, and more (every ``env``
+    value, for example). An object holds such a value when:
 
     * it holds a Secret object at any depth (:func:`_is_nested_secret`), or
       a key of its ``data``, ``stringData`` or ``binaryData`` has a secret
@@ -378,9 +397,9 @@ class _SecretValueCheck:
       secret name of the command-line rule and a value
       (:func:`_is_secret_env_entry`);
     * the ``command`` and ``args`` of a map at any depth, read as one
-      command line, hold a value the card hides (:func:`hide_command_secrets`
-      with the ``k8s.apply`` rule: the argument after ``--password``, for
-      example);
+      command line, hold a value :func:`hide_command_secrets` hides with
+      ``p_after_programs`` (the argument after ``--password``, for example;
+      ``-p`` only after a program that takes a password there);
     * a text at any depth has a secret shape (:func:`_is_secret_shaped`).
 
     Each value of the manifest is read once, and the names of each

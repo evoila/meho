@@ -86,13 +86,14 @@ a word of the YAML grammar, or fixed text of the parser such as the `'.'`
 of "expected a digit or '.'", becomes `'…'`; a `%` escape in a tag that
 is not UTF-8 gives "a %-escape in a tag is not valid UTF-8", with no byte
 value. So the error never quotes text of the manifest. The run after approval answers with the same error.
-The card and the stored request of a `k8s.apply` hide secret values by
-one rule (`manifest_holds_credential` in `op_classes.py`): whatever the
-card hides as a secret also makes the stored request keep the manifest
-only in the encrypted one-time handoff of the run, as a credential write
-does. So a value the card hides as a secret is never in
-`approval_request.params`. The run after approval applies the manifest
-the caller sent, unchanged. The manifest is kept only in the handoff when:
+The storage rule of a `k8s.apply` (`manifest_holds_credential` in
+`op_classes.py`) decides when the stored request keeps the manifest only
+in the encrypted one-time handoff of the run, as a credential write does.
+The card hides each value this rule counts. The card also hides every
+`env` and `httpHeaders` value, a whole map or list under a secret name,
+and the `kubectl.kubernetes.io/last-applied-configuration` annotation.
+The run after approval applies the manifest the caller sent, unchanged.
+The manifest is kept only in the handoff when:
 
 - it holds a Secret object, at the top or at any depth, for example as a
   template: a map with the kind `Secret` and either its own `metadata` or
@@ -114,9 +115,9 @@ the caller sent, unchanged. The manifest is kept only in the handoff when:
   (`valueFrom`) does not count. The card hides every `env` value, with
   any name;
 - the `command` and `args` of a map at any depth, read as one command
-  line, hold a value the card hides (`hide_command_secrets` with
-  `p_after_programs=True`, the rule of the card's list of what each
-  container runs):
+  line, hold one of these values (`hide_command_secrets` with
+  `p_after_programs=True`; the card's list of what each container runs
+  hides each of them too):
   - the value after `NAME=` or `--name=` whose name holds one of the
     words above (`PGPASSWORD=x`, `--auth-mode=rbac`,
     `KEYCLOAK_URL=...`);
@@ -128,8 +129,13 @@ the caller sent, unchanged. The manifest is kept only in the handoff when:
     password there: `sshpass`, a word that starts with `mysql`,
     `mariadb` or `mongo`, or the word `login` (the rule of
     `hide_shell_script` in `redaction/command_line.py`). There a value
-    glued to `-p` (`-pVALUE`) is hidden too. `mkdir -p /data`,
-    `-p 8080`, `nc -l -p 8080`, `psql -p 5432` and `ssh -p 22` show;
+    glued to `-p` (`-pVALUE`) counts too. `mkdir -p /data`, `-p 8080`,
+    `nc -l -p 8080`, `psql -p 5432` and `ssh -p 22` do not count: such a
+    call waits for approval with its params on the row, also without the
+    key. The card's `-p` rule is wider: its list of what each container
+    runs hides the argument after `-p` after any program, as the Job
+    previews do (`p_any_program=True`), so it shows `mkdir -p` and then
+    the hidden mark;
   - the password of `user:password` after `-u` or `--user`, also glued
     to `-u` (`curl -uroot:x`);
   - inside the item after `sh -c` (or `-ec`, `-lc`), the same rules,

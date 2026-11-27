@@ -194,6 +194,8 @@ def hide_command_text(
     *,
     shell: bool,
     p_programs: re.Pattern[str] | None = None,
+    p_any_program: bool = False,
+    p_program_before: bool = False,
 ) -> tuple[str, str | None]:
     """One command-line string with its secret values hidden.
 
@@ -233,20 +235,26 @@ def hide_command_text(
     ``mysql``), and there a value glued to it (``-pVALUE``) is hidden too.
     So ``mkdir -p /tmp/x`` stays as it is. With *p_programs* a new line
     also ends a command, as a shell operator does.
+
+    *p_any_program* (with *p_programs*) keeps ``-p`` a secret flag after any
+    program, as without *p_programs*; only a value glued to it needs a word
+    of *p_programs*. *p_program_before* says that a word of *p_programs*
+    came before the text, in an earlier item of the same command line.
     """
     words = (_SHELL_TOKEN if shell else _ARGUMENT_TOKEN).findall(text)
     previous = ""
-    p_rule = _P_FLAG if p_programs is None else _P_NONE
+    p_start = _P_FLAG if p_programs is None or p_any_program else _P_NONE
+    p_rule = _P_GLUED if p_programs is not None and p_program_before else p_start
     for index, word in enumerate(words):
         if word.isspace() or (shell and _SHELL_SPACE_TOKEN.fullmatch(word)):
             if p_programs is not None and "\n" in word.replace("\\\n", ""):
                 pending = None
-                p_rule = _P_NONE
+                p_rule = p_start
             continue
         if shell and word[0] in _OPERATOR_CHARS:
             pending = None
             previous = ""
-            p_rule = _P_FLAG if p_programs is None else _P_NONE
+            p_rule = p_start
             continue
         if shell and not _QUOTED_STRING.fullmatch(word):
             # The shell removes a line continuation inside a word too: ``-u\\``
@@ -262,6 +270,7 @@ def hide_command_text(
             shell=shell,
             p_rule=p_rule,
             p_programs=p_programs,
+            p_any_program=p_any_program,
         )
         if p_programs is not None and p_programs.fullmatch(word.rsplit("/", 1)[-1]):
             p_rule = _P_GLUED
@@ -283,6 +292,7 @@ def _hide_word(
     shell: bool,
     p_rule: str,
     p_programs: re.Pattern[str] | None,
+    p_any_program: bool,
 ) -> tuple[str | None, str | None]:
     """One word of a command line: its hidden form, or ``None`` when it is shown.
 
@@ -303,7 +313,9 @@ def _hide_word(
     script = reads_shell_script(prior)
     quoted_assignment = assignment is not None and assignment.start() == 1 and not script
     if shell and not quoted_assignment and _QUOTED_STRING.fullmatch(word):
-        inner, waiting = hide_command_text(word[1:-1], None, shell=script, p_programs=p_programs)
+        inner, waiting = hide_command_text(
+            word[1:-1], None, shell=script, p_programs=p_programs, p_any_program=p_any_program
+        )
         return f"{word[0]}{inner}{word[0]}", waiting
     if assignment is not None:
         return _hide_assignment(value(), assignment), None

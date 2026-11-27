@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The card and the stored request of ``k8s.apply`` hide secret values by one rule.
+"""The storage rule of ``k8s.apply`` and the card that hides each value it counts.
 
 Each call goes through ``dispatch`` to the stored approval request, over the
 stand-in Kubernetes API server of ``test_k8s_apply_card_through_dispatch``.
 Each value is made up, with no word a hide rule knows.
 
-* A value the card hides as a secret makes the stored request keep the
+* A value the storage rule counts makes the stored request keep the
   manifest only in the encrypted hand-off: the value is on no card, in no
   view, not in the stored params, not in the audit rows and not in the logs.
-* ``-p`` takes a password only after a program that takes one there
-  (``mysql``, ``sshpass``). ``mkdir -p /data`` and ``-p 8080`` show on the
-  card, and such a call keeps its params on the row, also without the key.
+* The card hides the argument after ``-p`` after any program. For the
+  stored request ``-p`` counts only after a program that takes a password
+  there (``mysql``, ``sshpass``): ``mkdir -p /data`` and ``-p 8080`` keep
+  their params on the row, also without the key.
 * Without the hand-off key, MEHO refuses such an apply at once with a text
   that says what to set.
 * The run after approval applies the manifest the caller sent, unchanged.
@@ -198,19 +199,21 @@ def test_after_a_database_client_the_argument_of_p_is_hidden_on_the_card(
     assert value not in _everything_shown(row)
 
 
-#: Forms with no secret. The card shows them, and the call keeps its params
-#: on the row, also without the hand-off key.
+#: Forms with no secret for the stored request. The call keeps its params on
+#: the row, also without the hand-off key. The card hides the argument after
+#: ``-p`` after any program.
+_H = "***REDACTED***"
 _PLAIN_FORMS: dict[str, tuple[str, list[Any]]] = {
-    "mkdir -p": ("command: [mkdir, -p, /data]", ["mkdir", "-p", "/data"]),
+    "mkdir -p": ("command: [mkdir, -p, /data]", ["mkdir", "-p", _H]),
     "mkdir -p inside sh -c": (
         "command: [sh, -c, 'mkdir -p /data && exec app']",
-        ["sh", "-c", "mkdir -p /data && exec app"],
+        ["sh", "-c", f"mkdir -p {_H} && exec app"],
     ),
-    "-p with a number": ("args: [-p, 8080]", ["-p", 8080]),
-    "-p with a text": ("args: [-p, '8080']", ["-p", "8080"]),
-    "nc -l -p": ("command: [nc, -l, -p, 8080]", ["nc", "-l", "-p", 8080]),
-    "psql -p": ("command: [psql, -h, db, -p, 5432]", ["psql", "-h", "db", "-p", 5432]),
-    "ssh -p": ("command: [ssh, -p, 22, host]", ["ssh", "-p", 22, "host"]),
+    "-p with a number": ("args: [-p, 8080]", ["-p", _H]),
+    "-p with a text": ("args: [-p, '8080']", ["-p", _H]),
+    "nc -l -p": ("command: [nc, -l, -p, 8080]", ["nc", "-l", "-p", _H]),
+    "psql -p": ("command: [psql, -h, db, -p, 5432]", ["psql", "-h", "db", "-p", _H]),
+    "ssh -p": ("command: [ssh, -p, 22, host]", ["ssh", "-p", _H, "host"]),
     "-u with a user": ("args: [-u, root]", ["-u", "root"]),
     "redis --port": ("command: [redis-server, --port, 6379]", ["redis-server", "--port", 6379]),
 }
@@ -273,6 +276,7 @@ _REFUSED_WITHOUT_THE_KEY: dict[str, str] = {
     "--api-key-file": "args: [--api-key-file, /run/app/key]",
     "--password with a value": "args: [--password, '{v}']",
     "mysql -p glued": "command: [mysql, -uroot, '-p{v}']",
+    "mysql -p and the value as two items": "command: [mysql, -u, root, -p, '{v}']",
 }
 
 

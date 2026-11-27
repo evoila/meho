@@ -266,19 +266,21 @@ _NAME_VALUE_LISTS = ("env", "httpHeaders")
 _COMMAND_LISTS = ("command", "args")
 
 
-def _hide_command_line(
-    node: dict[str, Any], *, p_after_programs: bool = False
-) -> dict[str, list[Any]]:
+def _hide_command_line(node: dict[str, Any], *, apply_card: bool = False) -> dict[str, list[Any]]:
     """The ``command`` and ``args`` lists of *node* with their secret values hidden.
 
     Both lists are read as one command line, so a secret flag that ends
     ``command`` hides the first argument of ``args``. Keys whose value is
-    not a list are left out. *p_after_programs* is the ``k8s.apply`` rule
-    (:func:`~.op_classes.hide_command_secrets`).
+    not a list are left out. *apply_card* is the rule of the ``k8s.apply``
+    card (:func:`~.op_classes.hide_command_secrets` with ``p_after_programs``
+    and ``p_any_program``): the argument after ``-p`` is hidden after any
+    program, as in the Job previews.
     """
     lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
     hidden = hide_command_secrets(
-        [part for parts in lists.values() for part in parts], p_after_programs=p_after_programs
+        [part for parts in lists.values() for part in parts],
+        p_after_programs=apply_card,
+        p_any_program=apply_card,
     )
     out: dict[str, list[Any]] = {}
     start = 0
@@ -678,7 +680,7 @@ def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
     left out.
     """
     commands = {
-        where: _hide_command_line(handler["exec"], p_after_programs=True).get("command")
+        where: _hide_command_line(handler["exec"], apply_card=True).get("command")
         for where, handler in _exec_handlers(container).items()
     }
     return {where: command for where, command in commands.items() if command is not None}
@@ -690,7 +692,7 @@ def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {"object": label, "container": container.get("name")}
     if "image" in container:
         entry["image"] = container.get("image")
-    entry.update(_hide_command_line(container, p_after_programs=True))
+    entry.update(_hide_command_line(container, apply_card=True))
     exec_commands = _exec_commands(container)
     if exec_commands:
         entry["exec_commands"] = exec_commands

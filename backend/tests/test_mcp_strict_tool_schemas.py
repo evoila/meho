@@ -298,6 +298,48 @@ def test_a_ref_key_that_is_data_or_a_name_is_not_followed(a: dict[str, Any]) -> 
     assert sent["properties"]["b"] == {"enum": ["x"]}
 
 
+_NAME_KEY_VALUES: list[Any] = [
+    {},
+    {"b": None},
+    {"b": "x"},
+    {"$id": 1},
+    {"$id": 1, "b": None},
+    {"$id": 1, "b": "x"},
+    {"a": {"$ref": 1}},
+    {"a": {"$ref": 1, "b": "x"}},
+    {"a": {}, "b": None},
+]
+
+
+@pytest.mark.parametrize(
+    ("name_map", "value"),
+    [
+        ("dependentRequired", {"$id": ["b"]}),
+        ("dependencies", {"$id": {"type": "object"}}),
+        ("$vocabulary", {"$id": True}),
+    ],
+)
+def test_a_key_of_a_name_map_is_a_name_and_not_an_id(name_map: str, value: Any) -> None:
+    schema = {"properties": _B, name_map: value}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+    assert sent[name_map] == value
+    for candidate in _NAME_KEY_VALUES:
+        if _accepts(sent, candidate):
+            assert _accepts(schema, candidate), candidate
+
+
+def test_a_ref_key_under_dependent_required_inside_not_is_a_name() -> None:
+    a = {"not": {"dependentRequired": {"$ref": ["b"]}}}
+    schema = {"properties": {"a": a, **_B}}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["a"] == a
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+    for candidate in _NAME_KEY_VALUES:
+        if _accepts(sent, candidate):
+            assert _accepts(schema, candidate), candidate
+
+
 def _sample(schema: dict[str, Any]) -> Any:
     """A valid value for *schema*, enough for the required inputs."""
     if "enum" in schema:

@@ -345,10 +345,21 @@ _LITERAL_KEYWORDS: frozenset[str] = frozenset({"default", "const", "enum", "exam
 #: ``$ref``. ``contains`` is the same when ``maxContains`` is next to it.
 _KEPT_KEYWORDS: frozenset[str] = frozenset({"not", "if", "oneOf"})
 
-#: Keywords whose value maps a name to a schema. The names are free text (a
-#: property may be called ``default``), so they are never read as keywords.
-_SCHEMA_MAP_KEYWORDS: frozenset[str] = frozenset(
-    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+#: Keywords whose value maps a name to a schema or to plain data (a list of
+#: property names for ``dependentRequired``, ``true`` or ``false`` for
+#: ``$vocabulary``). The names are free text (a property may be called
+#: ``default`` or ``$ref``), so they are never read as keywords.
+_NAME_MAP_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependentRequired",
+        "dependencies",
+        "$vocabulary",
+    }
 )
 
 
@@ -422,16 +433,19 @@ def _kept_subschemas(node: Any, *, names_are_keys: bool = False) -> Iterator[Any
                 yield value
                 continue
             yield from _kept_subschemas(
-                value, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+                value, names_are_keys=not names_are_keys and key in _NAME_MAP_KEYWORDS
             )
 
 
 def _values_of(node: Any, wanted: frozenset[str], *, names_are_keys: bool = False) -> Iterator[Any]:
     """Yield the value of every schema keyword in *wanted*, at any depth under *node*.
 
-    Only schema objects are read. The value of ``default``, ``const`` and the
-    like is data, so a key in it is not a keyword. A key under ``properties``
-    and the like is a name, not a keyword.
+    A key counts in every place but two. A key inside the value of
+    ``default``, ``const``, ``enum``, ``examples`` or ``example`` is data. A
+    key of the value of ``properties``, ``patternProperties``, ``$defs``,
+    ``definitions``, ``dependentSchemas``, ``dependentRequired``,
+    ``dependencies`` or ``$vocabulary`` is a name (see
+    :data:`_NAME_MAP_KEYWORDS`). Neither is a keyword.
     """
     if isinstance(node, dict):
         for key, value in node.items():
@@ -440,7 +454,7 @@ def _values_of(node: Any, wanted: frozenset[str], *, names_are_keys: bool = Fals
             if not names_are_keys and key in wanted:
                 yield value
             yield from _values_of(
-                value, wanted, names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS
+                value, wanted, names_are_keys=not names_are_keys and key in _NAME_MAP_KEYWORDS
             )
     elif isinstance(node, list):
         for item in node:
@@ -483,18 +497,24 @@ def _has_nested_id(schema: Any) -> bool:
         True
         for key, value in schema.items()
         if key not in _LITERAL_KEYWORDS
-        for _ in _values_of(value, _ID_KEYWORD, names_are_keys=key in _SCHEMA_MAP_KEYWORDS)
+        for _ in _values_of(value, _ID_KEYWORD, names_are_keys=key in _NAME_MAP_KEYWORDS)
     )
 
 
 def _kept_paths(schema: Any) -> set[tuple[str, ...]]:
     """The path of each schema a kept schema points to, also through other ``$ref``.
 
-    A ``$ref`` that is not a plain local path (``#name``, another file,
-    ``$dynamicRef``), or any ``$id`` below the top, makes the whole schema kept:
-    the path a ``$ref`` points to is then not known for sure. Only schema
-    keywords count: a ``$ref`` or ``$id`` key inside a ``default``, ``const``
-    or ``enum`` value, or a property with that name, does not.
+    A ``$ref``, ``$dynamicRef`` or ``$recursiveRef`` with a plain local path
+    (``#/...``) is followed. Any of them in another form (``#name``, another
+    file), or an ``$id`` in a schema object below the top, keeps the whole
+    schema: the path a reference points to is then not known for sure.
+
+    A ``$ref`` or ``$id`` key does not count in two places only: inside the
+    value of ``default``, ``const``, ``enum``, ``examples`` or ``example``, and
+    as a key under ``properties``, ``patternProperties``, ``$defs``,
+    ``definitions``, ``dependentSchemas``, ``dependentRequired``,
+    ``dependencies`` or ``$vocabulary``. Every other ``$ref`` or ``$id`` key
+    counts.
     """
     if _has_nested_id(schema):
         return {()}
@@ -527,7 +547,10 @@ def _without_null_enum_members(schema: Any, *, accept_null: bool = False) -> Any
     In an input schema some parts are left as they are, because there the
     rewrite could make the sent copy accept a value that the full schema
     refuses: the schema under ``not``, ``if`` and ``oneOf``, under ``contains``
-    next to ``maxContains``, and each schema these point to with ``$ref``.
+    next to ``maxContains``, and each schema these point to with a reference
+    (``$ref``, ``$dynamicRef`` or ``$recursiveRef``). The whole schema stays
+    as it is when such a reference is not a plain local path (``#/...``), or
+    when a schema object below the top has an ``$id`` (see :func:`_kept_paths`).
 
     *accept_null* is true for an output schema: there ``null`` still passes
     (see :func:`_enum_rule_still_accepting_null`), so the meaning stays the
@@ -575,7 +598,7 @@ def _drop_null_members(
                 value,
                 (*path, key),
                 kept,
-                names_are_keys=not names_are_keys and key in _SCHEMA_MAP_KEYWORDS,
+                names_are_keys=not names_are_keys and key in _NAME_MAP_KEYWORDS,
                 accept_null=accept_null,
             )
             changed = changed or new_value is not value
@@ -601,10 +624,16 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     an ``enum`` goes at any depth, and an ``enum`` of only ``null`` becomes
     ``const: null``, except next to a ``const`` that is not ``null`` (see
     :func:`_without_null_enum_members`). Nested combinators stay: the
-    restriction is top-level only. An ``enum`` under ``not``, ``if`` or
-    ``oneOf``, and in each schema these point to with ``$ref``, stays too,
-    because a change there could let the sent copy accept a value that the full
-    schema refuses. A tool whose sent schema still holds ``null`` in an
+    restriction is top-level only.
+
+    An ``enum`` keeps its ``null`` in these parts, because a change there could
+    let the sent copy accept a value that the full schema refuses: the schema
+    under ``not``, ``if`` and ``oneOf``, under ``contains`` next to
+    ``maxContains``, and each schema these point to with a reference
+    (``$ref``, ``$dynamicRef`` or ``$recursiveRef``). The whole schema stays as
+    it is in two cases: such a reference is not a plain local path
+    (``#/...``), or a schema object below the top has an ``$id`` (see
+    :func:`_kept_paths`). A tool whose sent schema still holds ``null`` in an
     ``enum`` is caught by the test of the registry.
 
     *schema* is not mutated. When there is nothing to change (no top-level

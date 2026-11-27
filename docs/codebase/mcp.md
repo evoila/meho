@@ -2335,13 +2335,15 @@ The read checks no agent grant.
 A strict model gateway refuses a tool schema that holds `null` inside an
 `enum`, and then refuses the whole tool list. 16 fields in 11 tools are
 written as `{"type": ["string", "null"], "enum": [..., null]}`. There is no
-switch. The copy of an input schema and of an output schema that `tools/list`
-sends never has `null` in an `enum`. One output field has the form: `delivery`
-of `call_operation`.
+switch. For every registered tool, the copy of the input schema and of the
+output schema that `tools/list` sends has no `null` in an `enum`. The registry
+tests stop a tool whose sent copy would have one. One output field has the
+form: `delivery` of `call_operation`.
 
 - `_wire_safe_input_schema` in `mcp/registry.py` walks the whole schema
   (`properties`, `items`, `$defs`, and so on) and drops `None` from each
-  `enum`. Nothing else changes: a `type` list such as `["string", "null"]`
+  `enum` outside the parts of an input schema that stay as they are (the next
+  bullet names them). Nothing else changes: a `type` list such as `["string", "null"]`
   stays. Values under `default`, `const` and `examples` are data and stay as
   they are. The members of an `enum` are data too: only a direct `null` member
   goes, and an object among the members stays as it is. An `enum` of only
@@ -2355,9 +2357,12 @@ of `call_operation`.
   the schema under `not`, `if` and `oneOf`, under `contains` next to
   `maxContains`, and each schema these point to with `$ref` (also through
   another `$ref`). When such a `$ref` is not a plain local path, or a schema
-  object below the top has an `$id`, the whole schema stays as it is. Only
-  schema keywords count: a `$ref` or `$id` key inside the value of a
-  `default`, `const` or `enum`, or a property with that name, does not. The
+  object below the top has an `$id`, the whole schema stays as it is. A `$ref`
+  or `$id` key does not count in two places only: inside the value of
+  `default`, `const`, `enum`, `examples` or `example`, and as a key under
+  `properties`, `patternProperties`, `$defs`, `definitions`,
+  `dependentSchemas`, `dependentRequired`, `dependencies` or `$vocabulary`
+  (there a key is a name). Every other `$ref` or `$id` key counts. The
   registry test shows any tool whose sent schema still has `null` in an
   `enum`.
 - `_wire_safe_output_schema` does the same walk for `outputSchema`, with one

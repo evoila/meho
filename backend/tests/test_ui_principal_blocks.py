@@ -1144,6 +1144,9 @@ def test_the_way_back_rule_is_the_same_in_the_seven_places() -> None:
 @pytest.mark.parametrize("place", sorted(_rule_places()))
 def test_the_seven_places_check_notices_a_changed_rule_sentence(place: str) -> None:
     text, sentences = _rule_places()[place]
-    changed = re.sub(r"cannot\s+remove", "can remove", text, count=1)
-    assert changed != text
+    rule = r"\s+".join(re.escape(word) for word in _TENANT_ADMIN_SENTENCES[0].split())
+    changed, count = re.subn(
+        rule, lambda m: re.sub(r"cannot\s+remove", "can remove", m.group()), text, count=1
+    )
+    assert count == 1
     assert _missing_rule_sentences(changed, sentences) == [_TENANT_ADMIN_SENTENCES[0]]

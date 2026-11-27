@@ -22,6 +22,7 @@ Kubernetes API server that records every request.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -32,7 +33,6 @@ import pytest
 import yaml
 from sqlalchemy import func, select
 
-import meho_backplane.mcp.tools.operations  # noqa: F401 — registers the tool
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -317,6 +317,7 @@ def test_the_tool_text_names_the_dry_run_only_with_the_switch_on(
     if on:
         _switch_on(monkeypatch)
     get_settings.cache_clear()
+    importlib.import_module("meho_backplane.mcp.tools.operations")  # registers the tool
     definition = mcp_registry._TOOLS["preview_operation"][0]
     old, new = K8S_APPLY_DRY_RUN_TEXT_SWAP
 

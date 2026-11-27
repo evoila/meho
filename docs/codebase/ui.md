@@ -1449,7 +1449,8 @@ body (`_require_ui_role`):
   "<the sentence>"}`, the same answer as REST
   ([agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy)).
   A `POST` form that only reads (the operation preview, the knowledge
-  search, the retrieval pages) uses `require_ui_operator_read` and keeps
+  search and the editor preview, the corpus search, a docs text read, the
+  retrieval pages) uses `require_ui_operator_read` and keeps
   `operator_required`. It is the console twin of
   the REST `require_role(TenantRole.OPERATOR)` floor and the MCP
   `required_role=OPERATOR` on `call_operation`. Every console route that

@@ -278,7 +278,7 @@ async def _verdicts(
                     "decide_only": True,
                 }
                 key = (caller.name, *_key(row))
-                gate[key], _reason = await policy_gate(**ask)
+                gate[key] = (await policy_gate(**ask))[0]
                 if evaluator:
                     evaluated[key] = (await evaluate_call(**ask)).verdict
     return gate, evaluated

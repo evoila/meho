@@ -140,8 +140,8 @@ SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "
 #: switch is off, so those answers stay exactly as they were.
 CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 
-#: The classes of an operation that writes or makes a credential. When the
-#: code turns approval on for such an operation, no override turns it off.
+#: The classes of an operation that writes or makes a credential. Such an
+#: operation always waits for approval: no connector and no override turns it off.
 _CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
     {"credential_write", "credential_mint"}
 )
@@ -477,9 +477,10 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
     :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
-    An operation that writes or makes a credential keeps the approval its
-    code turns on, also when an install or tenant override turns it off. So
-    does an operation a connector marked with
+    An operation that writes or makes a credential always waits for
+    approval: also when its connector registered it without the approval
+    flag, and also when an install or tenant override turns it off. So does
+    an operation a connector marked with
     :func:`~meho_backplane.op_classes.declare_credential_capable`.
     """
     stored_op_class = getattr(row, "op_class", None)
@@ -489,7 +490,7 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if row.requires_approval and (
+    if (
         is_credential_capable(row.op_id)
         or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
     ):

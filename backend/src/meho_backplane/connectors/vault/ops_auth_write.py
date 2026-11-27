@@ -457,6 +457,7 @@ _AUTH_WRITE_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_AUTH_APPROLE_WRITE_PARAMETER_SCHEMA,
         "response_schema": VAULT_AUTH_APPROLE_WRITE_RESPONSE_SCHEMA,
+        "hard_to_undo": "overwrites",
         "changes_rights": True,
         "tags": ["write", "auth", "identity"],
         "safety_level": "dangerous",

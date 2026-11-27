@@ -281,6 +281,7 @@ AUTH_JWT_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_AUTH_JWT_ROLE_WRITE_PARAMETER_SCHEMA,
         "response_schema": VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA,
+        "hard_to_undo": "overwrites",
         "changes_rights": True,
         "tags": ["write", "auth", "identity", "jwt", "oidc"],
         "safety_level": "dangerous",

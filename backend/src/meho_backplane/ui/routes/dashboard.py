@@ -269,7 +269,6 @@ async def _render_dashboard(
         "ready": readiness["ready"],
         "readiness_checks": readiness["checks"],
         "surface_tiles": _SURFACE_TILES,
-        "operator_sub": session.operator_sub,
         "tenant_id": str(session.tenant_id),
         "csrf_token": csrf_token,
         **recent_ops,

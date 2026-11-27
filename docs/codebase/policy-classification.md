@@ -350,9 +350,13 @@ connector kit (kit 1.7 or higher).
 - MEHO leaves an operation whose mark does not fit its risk level out at
   registration, and the log line names it. Every other operation
   registers, and the start goes on. The first such mark is
-  `hard_to_undo` on a `safe` operation. The checks are in
-  `_MARK_FIT_CHECKS` in `operations/typed_register.py`; a new check is
-  one more entry there.
+  `hard_to_undo` on a `safe` operation.
+- MEHO leaves an operation that sets `changes_rights` at the risk level
+  `safe` out at registration, and the log line names it. Every other
+  operation registers. This holds for a typed and for a multi-step
+  operation, with the switch `CUSTOM_POLICY` off and on.
+- The checks are in `_MARK_FIT_CHECKS` in `operations/typed_register.py`;
+  a new check is one more entry there.
 - For a left-out operation, no row is written or deleted. A row that an
   earlier start, an import or a tenant stored under that key stays as it
   is, with the operator's settings on it. The start keeps the key in
@@ -390,8 +394,17 @@ connector kit (kit 1.7 or higher).
   stores the values of the code for every built-in operation, also on an
   upgraded database. It reads the values from the definitions in code, so
   it fails when a connector's register call does not pass the two fields on.
-- No rule of MEHO reads the two fields. No call waits, runs or is refused
-  because of them.
+- With the switch `CUSTOM_POLICY` on, an operation with `hard_to_undo` has
+  a delete sign, the same as a `DELETE` call. So a standing grant of a
+  service login and a run approval do not cover a direct call of it: the
+  call waits for a person. In sandbox mode a delete grant covers it, as for
+  an operation with another delete sign, except for an operation that
+  waits on every call because it can read, write or make a credential. The one
+  read site is `_delete_shaped_reason_by_descriptor` in
+  `operations/service_grants.py`. With the switch off, `hard_to_undo`
+  changes no answer.
+- No rule of MEHO reads `changes_rights`. No call waits, runs or is
+  refused because of it.
 - A delivery call of the Argo CD or Kubernetes connector (it deploys or
   runs a workload) carries no `hard_to_undo` on the whole operation. Its
   `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`

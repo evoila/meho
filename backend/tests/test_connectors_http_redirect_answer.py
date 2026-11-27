@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import secrets
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -38,7 +40,10 @@ from structlog.testing import capture_logs
 
 import meho_backplane.flight_recorder.agent_read as agent_read_mod
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors._shared.log_host import UNREADABLE_LOCATION_MESSAGE
+from meho_backplane.connectors._shared.log_host import (
+    UNPARSEABLE_ADDRESS,
+    UNREADABLE_LOCATION_MESSAGE,
+)
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -106,11 +111,12 @@ async def _start_server(
     *,
     status: str = "302 Found",
     short_body: frozenset[str] = frozenset(),
+    bodies: dict[str, tuple[str, str]] | None = None,
 ) -> _Server:
     """A local HTTP/1.1 server; each route (path with query) answers *status* with its headers.
 
     A path in *short_body* answers a 200 whose body ends before its
-    ``Content-Length``.
+    ``Content-Length``. A path in *bodies* sends that content type and body.
     """
     state = _Server(server=None, port=0)  # type: ignore[arg-type]
 
@@ -128,9 +134,12 @@ async def _start_server(
                 return
             headers = routes.get(path)
             line = status if headers is not None else "404 Not Found"
-            head = f"HTTP/1.1 {line}\r\nContent-Length: 0\r\nConnection: close\r\n"
+            content_type, body = (bodies or {}).get(path, ("text/plain", ""))
+            data = body.encode()
+            head = f"HTTP/1.1 {line}\r\nContent-Length: {len(data)}\r\nConnection: close\r\n"
+            head += f"Content-Type: {content_type}\r\n"
             head += "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
-            writer.write((head + "\r\n").encode("latin-1"))
+            writer.write((head + "\r\n").encode("latin-1") + data)
             await writer.drain()
         finally:
             writer.close()
@@ -240,7 +249,7 @@ def _operator() -> Operator:
     )
 
 
-async def _register(session: AsyncSession) -> None:
+async def _register(session: AsyncSession, *, trace: bool = True) -> None:
     await register_typed_operation(
         product=_PRODUCT,
         version=_VERSION,
@@ -257,7 +266,7 @@ async def _register(session: AsyncSession) -> None:
     )
     session.add(
         Tenant(
-            id=_TENANT_ID, slug="redirect-demo", name="redirect-demo", flight_recorder_enabled=True
+            id=_TENANT_ID, slug="redirect-demo", name="redirect-demo", flight_recorder_enabled=trace
         )
     )
     await session.commit()
@@ -271,13 +280,16 @@ def _row_text(row: Any) -> str:
     )
 
 
-async def _stored_text(audit_id: UUID) -> tuple[str, str]:
+async def _stored_text(audit_id: UUID, *, trace_on: bool = True) -> tuple[str, str]:
     """All columns of the audit row, and of the stored trace and its spans."""
     async with get_sessionmaker()() as s:
         audit = (await s.execute(select(AuditLog).where(AuditLog.id == audit_id))).scalar_one()
         trace = (
             await s.execute(select(DispatchTrace).where(DispatchTrace.audit_id == audit_id))
-        ).scalar_one()
+        ).scalar_one_or_none()
+        assert (trace is not None) is trace_on
+        if trace is None:
+            return _row_text(audit), ""
         spans = (
             (
                 await s.execute(
@@ -296,10 +308,12 @@ async def _run(
     session: AsyncSession,
     caplog: pytest.LogCaptureFixture,
     routes: dict[str, dict[str, str]],
+    *,
+    trace: bool = True,
     **server_options: Any,
 ) -> tuple[Any, dict[str, str], list[dict[str, Any]]]:
     """Dispatch the operation; return the result, each place as text, and the log events."""
-    await _register(session)
+    await _register(session, trace=trace)
     server = await _start_server(routes, **server_options)
     caplog.set_level(logging.DEBUG)
     try:
@@ -315,7 +329,7 @@ async def _run(
         server.server.close()
         await server.server.wait_closed()
     assert result.audit_id is not None
-    audit_text, trace_text = await _stored_text(result.audit_id)
+    audit_text, trace_text = await _stored_text(result.audit_id, trace_on=trace)
     places = {
         "answer": result.model_dump_json(),
         "audit row": audit_text,
@@ -437,6 +451,99 @@ def test_redirect_without_location_names_only_the_host() -> None:
     )
     assert result.extras["http_status"] == 304
     _assert_absent([path, query], {"answer": result.model_dump_json()})
+
+
+# The vendor's words around each address in a 3xx body. Each ``{}`` is one
+# way to write the address.
+_BODY_WORDS = (
+    "The document has moved to {}. Old link: {}; next {} (this one). "
+    "Escaped {} and {}, encoded {} or {}. Please sign in again."
+)
+
+
+def _address_forms(location: str, relative: str) -> list[str]:
+    """The ways a vendor body writes ``location`` and its part from the path on."""
+    double_slash = location[location.index("//") :]
+    return [
+        location,
+        double_slash,
+        relative,
+        location.replace("&", "&amp;"),
+        relative.replace("&", "&amp;"),
+        quote(location, safe=""),
+        quote(relative, safe=""),
+    ]
+
+
+def _redirect_body(kind: str, words: str) -> tuple[str, str]:
+    """A 3xx body of one kind, with ``words`` as its text."""
+    if kind == "html link":
+        link = words.split(" ")[5].rstrip(".")
+        html = f'<html><body><p>Found. <a href="{link}">here</a></p><p>{words}</p></body></html>'
+        return "text/html", html
+    if kind == "json message":
+        return "application/json", json.dumps({"message": words})
+    if kind == "json other key":
+        return "application/json", json.dumps({"detail": words, "status": 302})
+    return "text/plain", words
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["html link", "json message", "json other key", "plain text"])
+async def test_refused_redirect_body_names_each_address_only_by_its_host_name(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    """Each address in the vendor text of a 3xx shows only its host name; the words stay."""
+    user, password, path, query, ticket, fragment = (_made_up() for _ in range(6))
+    port = random.randint(20000, 60999)
+    relative = f"/{path}?q={query}&ticket={ticket}#{fragment}"
+    location = f"http://{user}:{password}@{_OTHER_HOST}:{port}{relative}"
+    forms = _address_forms(location, relative)
+    content_type, body = _redirect_body(kind, _BODY_WORDS.format(*forms))
+    _, expected = _redirect_body(kind, _BODY_WORDS.format(*[_OTHER_HOST] * len(forms)))
+    if kind == "json message":
+        expected = json.loads(expected)["message"]
+    routes = {_START: {"Location": location}}
+
+    result, places, _ = await _run(
+        session, caplog, routes, trace=False, bodies={_START: (content_type, body)}
+    )
+
+    assert result.extras["http_status"] == 302
+    assert result.extras["upstream_message"] == expected
+    assert json.dumps(expected) in places["audit row"]
+    made_up = [user, password, path, query, ticket, fragment, f":{port}"]
+    _assert_absent(made_up, {"answer": places["answer"], "audit row": places["audit row"]})
+
+
+def test_relative_location_in_a_3xx_body_gives_the_fixed_mark() -> None:
+    """A relative Location in the body, in each form, becomes the fixed mark."""
+    path, query, ticket, fragment = (_made_up() for _ in range(4))
+    location = f"/{path}?q={query}&ticket={ticket}#{fragment}"
+    forms = [location, location.replace("&", "&amp;"), quote(location, safe="")]
+    words = "Moved to {}, or {} and {}. Sign in again."
+    request = httpx.Request("GET", f"https://appliance.test.invalid{_START}")
+    response = httpx.Response(
+        302, request=request, headers={"Location": location}, text=words.format(*forms)
+    )
+    error = httpx.HTTPStatusError("302", request=request, response=response)
+
+    result = result_connector_error(_OP_ID, error, 1.0)
+
+    assert result.extras["upstream_message"] == words.format(*[UNPARSEABLE_ADDRESS] * 3)
+    _assert_absent([path, query, ticket, fragment], {"answer": result.model_dump_json()})
+
+
+def test_upstream_message_of_a_non_redirect_answer_keeps_its_addresses() -> None:
+    """Only a 3xx answer reduces addresses; a 500 keeps the vendor text as it is."""
+    text = "Upstream failed at https://appliance.test.invalid:8443/api/x?q=1, try later."
+    request = httpx.Request("GET", f"https://appliance.test.invalid{_START}")
+    response = httpx.Response(500, request=request, text=text)
+    error = httpx.HTTPStatusError("500", request=request, response=response)
+
+    result = result_connector_error(_OP_ID, error, 1.0)
+
+    assert result.extras["upstream_message"] == text
 
 
 @pytest.mark.asyncio

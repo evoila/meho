@@ -2176,6 +2176,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "nat", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_NAT_DELETE_LLM_INSTRUCTIONS,
     ),
     PfSenseOp(
@@ -2293,6 +2294,7 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "alias", "member", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_ALIAS_MEMBER_REMOVE_LLM_INSTRUCTIONS,
     ),
 )

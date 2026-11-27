@@ -1418,6 +1418,7 @@ FILTER_RULE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "firewall", "filter-rule", "delete", "destructive", "pfsense"),
         safety_level="destructive",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_RULE_DELETE_LLM_INSTRUCTIONS,
     ),
 )

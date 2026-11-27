@@ -74,11 +74,12 @@ classifications:
   report. A test fails when a reader builds the id itself
   (`test_policy_connector_without_version.py`).
   - With `CUSTOM_POLICY` off (`product_form_on()` is false), a connector
-    with no version has the id `-` in every answer except the carry-over
-    dry run. The overrides report names it by its `impl_id`, the empty
-    text. `test_policy_connector_without_version_switch_off.py` checks
+    with no version has the id `-` in every answer except two: the
+    carry-over dry run names it by its product, and the overrides report
+    names it by its implementation id, the empty text. `test_policy_connector_without_version_switch_off.py` checks
     these answers.
-  - The carry-over dry run reads no switch. It names such a connector by
+  - The carry-over dry run's list reads no switch; only its first field,
+    `custom_policy_on`, says whether `CUSTOM_POLICY` is on. It names such a connector by
     its product with every switch state: it calls `connector_id_of` and
     `coordinates_of` with `product_form=True`.
   - With `CUSTOM_POLICY` on, such a connector is named by its product.
@@ -88,8 +89,10 @@ classifications:
     the stricter result: `always_wait` when either form waits, the higher
     `risk` (no level is the lowest), the conflict of either form; the
     `category`, `install_category` and `labels` of the form with the
-    dash; the `rule_ref` of the form with the dash, so the approval card
-    names the entry that gave its category and labels. So an entry that
+    dash. The `rule_ref` (the approval card's `classification_rule`) is
+    the entry of the form with the dash that gave the category, else the
+    most specific one that gave a shown label, else `taxonomy.default`
+    (`_shown_ref`). So an entry that
     matches only by the product can add a wait or raise a level, and never
     takes a wait away, lowers a level or changes the category or the
     labels. `meho policy explain` names the entry that makes the operation
@@ -97,8 +100,14 @@ classifications:
     first (`_wait_path` in `policy/explain.py`). The import check and the
     single edit (`install_wait_undone`, `install_risk_lowered`) compare a
     tenant entry with the install's wait and level of both forms, so a
-    tenant entry that matches one form cannot end a wait or lower a level
-    that an install entry sets on the other form. The carry-over dry run
+    tenant entry that matches one form cannot end a wait that an install
+    entry sets on the other form. For the level, each side's level is the
+    higher of its two forms, each form decided by that side's own
+    entries; a tenant entry is refused only when it decides the tenant's
+    level in a form and the tenant's level is below the install's. An
+    override row's category and labels count only for its own connector
+    (`ClassificationEntry.for_connector`), also where two connectors share
+    the form with the dash. The carry-over dry run
     lists the operation under every entry that makes it wait in either
     form. `test_policy_connector_product_form.py` runs the cases.
 - **Taxonomy.** One category list per install. Without an install

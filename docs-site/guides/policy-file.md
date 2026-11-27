@@ -103,10 +103,14 @@ classifications:
   stricter result counts. So an entry that matches only by the product can
   add a wait or raise the risk level. It never takes a wait away, lowers a
   level, or changes the category or the labels. A tenant entry that ends
-  an install wait or lowers an install level is refused, whichever of the
-  two forms each entry matches.
+  an install wait is refused, whichever of the two forms each entry
+  matches. A tenant entry that sets a risk level is refused when it
+  decides the tenant's level and the tenant's level is below the
+  install's: each side's level is the higher of its two forms.
 - With `CUSTOM_POLICY` off, a connector with no version has the id `-` in
-  every answer except the carry-over dry run.
+  every answer except two: the carry-over dry run names it by its product,
+  and the overrides report names it by its implementation id, the empty
+  text.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
@@ -537,8 +541,10 @@ file entry with `always_wait: true`.
 
 The dry run lists every saved "always wait" and what changes for each
 setting if MEHO reads it as `destructive`. It only reads: it changes no
-setting and no answer, and it reads no setting switch. It writes only its
-audit row.
+setting and no answer. The list reads no setting switch; only the first
+field of the answer, `custom_policy_on`, says whether `CUSTOM_POLICY` is
+on at that moment. `meho policy carry-over --dry-run` prints it as its
+first line. It writes only its audit row.
 
 ```bash
 meho policy carry-over --dry-run                   # your tenant's settings
@@ -564,9 +570,12 @@ For each setting it shows:
   When the operation is turned on again, the entry counts for it again.
   A connector with no version is listed by its product name, with every
   switch state, one line per product, under every entry that makes it wait
-  by `-` or by the product. A policy file entry makes an
-  operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
-  the dry run lists its matches with every switch;
+  by `-` or by the product. The list shows what waits once
+  `CUSTOM_POLICY` is on. An entry that names a connector with no version
+  by its product makes a call wait only with `CUSTOM_POLICY` on; any other
+  entry makes a call wait with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY`
+  on. The first field of the answer, `custom_policy_on`, says whether
+  `CUSTOM_POLICY` is on at that moment;
 - a warning when the setting makes a step of a multi-step operation
   wait, with every multi-step operation that runs it, at every level. A
   setting of the install counts when it makes the step wait for at least

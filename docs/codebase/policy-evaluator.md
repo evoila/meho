@@ -81,9 +81,13 @@ no delete sign. It reads the code's own values, so an admin's edit never
 looks like the code's mark. The caller-address check reads the stored
 schema, as the approval floor does, so a field that a switch hides still
 counts. A delete sign is the code's `destructive` level, the HTTP verb
-`DELETE`, the `destructive` tag or a delete name. The built-in delete names
-always count; the install's own names (`SERVICE_GRANT_DELETE_SHAPED_PATTERNS`)
-only add to them. It reads no database. Nothing decides on it yet.
+`DELETE`, the `destructive` tag or a delete name. It reads the delete
+names from the one setting `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, as
+every other reader of that setting does. With `CUSTOM_POLICY` on, the
+setting holds the built-in names and the install's own names. With the
+switch off, an install's own list takes the place of the built-in names.
+`has_plain_mark` is read only where `CUSTOM_POLICY` is on. It reads no
+database. Nothing decides on it yet.
 
 The op class marks of `Asked` come from the code: `root_shell`,
 `credential_read`, `per_call_approval`, `delete_shaped`,

@@ -293,6 +293,9 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     It reads the delete names from the one setting
     ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``, as every other reader of
     that setting does. No database.
+
+    ``has_plain_mark`` is read only where ``CUSTOM_POLICY`` is on; a
+    reader with the switch off is a fault.
     """
     from meho_backplane.operations.service_grants import (
         delete_grant_reason,

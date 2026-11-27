@@ -238,6 +238,8 @@ _MARKED_TYPES = {
     "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
+    # Keycloak: a fixed sentence about a refused read of the managed realm (HTTP 403).
+    "ManagedRealmReadRefusedError",
 }
 
 

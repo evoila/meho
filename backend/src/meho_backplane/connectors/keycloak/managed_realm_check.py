@@ -15,7 +15,10 @@ else nothing more is sent.
 Every admin login with at least one ``realm-management`` role in the realm
 can read the name: without the right to view the realm, Keycloak answers with
 a short form that has it. When Keycloak refuses the read with 403,
-:class:`ManagedRealmReadRefusedError` says so and names that right.
+:func:`read_managed_realm` raises :class:`ManagedRealmReadRefusedError`. It
+is still the HTTP 403 error, so the caller gets the usual
+``connector_http_403`` result, and its ``error`` text starts with the fixed
+sentence of this module: which read failed, and which right the login needs.
 
 A passed check counts only inside one run of an operation
 (:meth:`ManagedRealmChecks.run`, opened by
@@ -40,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Final
 import httpx
 
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors.base import ConnectorUpstreamError
+from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.keycloak._paths import _ADMIN_REALM_PATH, fill_path
 from meho_backplane.connectors.keycloak.realm_params import check_answered_realm
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
@@ -50,23 +53,56 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.keycloak.connector import KeycloakConnector
     from meho_backplane.connectors.keycloak.session import KeycloakTargetLike
 
-__all__ = ["CHECK_SECONDS", "ManagedRealmChecks", "ManagedRealmReadRefusedError"]
+__all__ = [
+    "CHECK_SECONDS",
+    "ManagedRealmChecks",
+    "ManagedRealmReadRefusedError",
+    "read_managed_realm",
+]
 
 #: How long one passed check counts inside one run.
 CHECK_SECONDS: Final = 5.0
 
 _REFUSED_TEXT: Final = (
-    "Keycloak refused the read of the managed realm that MEHO makes before every "
-    "operation (HTTP 403). The MEHO login needs at least one realm-management role "
-    "in that realm, for example view-realm."
+    "Keycloak refused MEHO's read of the managed realm (HTTP 403). MEHO reads "
+    "the realm before it uses or changes anything in it. The MEHO login needs at "
+    "least one realm-management role in that realm, for example view-realm."
 )
 
 
-class ManagedRealmReadRefusedError(ConnectorUpstreamError):
-    """Keycloak answered 403 to the read of the managed realm."""
+class ManagedRealmReadRefusedError(ConnectorOwnMessage, httpx.HTTPStatusError):
+    """Keycloak answered 403 to the read of the managed realm.
 
-    def __init__(self) -> None:
-        super().__init__(_REFUSED_TEXT, http_status=403, upstream_message=None)
+    The message is the fixed sentence :data:`_REFUSED_TEXT`; it holds no
+    vendor text and no value of the call. Request and response are the ones
+    of the refused read, so the 403 result keeps its usual fields.
+    """
+
+    def __init__(self, refused: httpx.HTTPStatusError) -> None:
+        super().__init__(_REFUSED_TEXT, request=refused.request, response=refused.response)
+
+
+@contextmanager
+def _refusal_explained() -> Iterator[None]:
+    """Raise :class:`ManagedRealmReadRefusedError` for a 403 of the realm read inside."""
+    try:
+        yield
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            raise
+        raise ManagedRealmReadRefusedError(exc) from exc
+
+
+async def read_managed_realm(
+    connector: KeycloakConnector, target: KeycloakTargetLike, operator: Operator, path: str
+) -> Any:
+    """Read the realm at *path* (``GET /admin/realms/{realm}``) for an operation.
+
+    For an operation that reads the managed realm itself before it changes
+    it. Raises :class:`ManagedRealmReadRefusedError` when Keycloak answers 403.
+    """
+    with _refusal_explained():
+        return await connector._get_admin_json(target, path, operator=operator)
 
 
 _Passed = dict[tuple[tuple[str, str], str], float]
@@ -140,12 +176,8 @@ class ManagedRealmChecks:
         passed = _RUN_CHECKS.get()
         if passed is not None and passed.get(key, 0.0) > time.monotonic():
             return
-        try:
+        with _refusal_explained():
             answer = await _read_realm(connector, target, operator, _realm_path(target))
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 403:
-                raise
-            raise ManagedRealmReadRefusedError from exc
         check_answered_realm("keycloak", answer, target)
         if passed is not None:
             passed[key] = time.monotonic() + CHECK_SECONDS

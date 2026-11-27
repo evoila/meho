@@ -2347,6 +2347,14 @@ def result_connector_http_403(
     (:data:`_HTTP_403_ECHOED_HEADERS`) that were present -- echoed,
     never required, so a non-GitHub 403 still yields the structured
     cause with an empty ``permission_headers``.
+
+    An error with the
+    :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark holds
+    a fixed sentence of the connector: which request was refused and which
+    right is missing. The ``error`` text then gives that sentence instead of
+    the general one. It stays in front of the vendor's text, so an
+    operation that sends a secret keeps it when the vendor's text is
+    hidden. The ``extras`` are the same.
     """
     response = exc.response
     upstream_message = _http_upstream_message(response)
@@ -2368,6 +2376,8 @@ def result_connector_http_403(
         "the upstream sent it). See docs/codebase/error-message-shape.md for "
         "the dispatch error convention."
     )
+    if isinstance(exc, ConnectorOwnMessage):
+        summary = f"connector_http_403: {exc}"
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {

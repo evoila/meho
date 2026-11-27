@@ -317,23 +317,51 @@ async def test_a_passed_check_does_not_count_for_the_next_call(
         assert rest.call_count + secret.call_count + clients.call_count == sent
 
 
-@pytest.mark.parametrize("op_id", ["keycloak.user.list", "keycloak.group.create"])
+_VENDOR_403 = "example vendor text of the refusal"
+
+#: Calls whose realm read Keycloak refuses: a read, a write, the realm update
+#: (it reads the realm itself before the write) and the login check.
+_REFUSED_CALLS: dict[str, dict[str, Any]] = {
+    "keycloak.user.list": {},
+    "keycloak.group.create": _WRITES["keycloak.group.create"],
+    "keycloak.realm.update": {"representation": {"enabled": True}},
+    _CHECK_LOGIN: {"username": "someone", "password_secret_ref": "example/ref"},
+}
+
+#: Of these, the calls that send a secret: the vendor's text is hidden for them.
+_SENDS_SECRET = {"keycloak.realm.update", _CHECK_LOGIN}
+
+
+@pytest.mark.parametrize("op_id", list(_REFUSED_CALLS))
 async def test_a_refused_realm_read_names_the_step_and_the_right(
     operator: Operator,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
     op_id: str,
 ) -> None:
+    from meho_backplane.connectors.keycloak import ops_login_check
+
+    async def _password(*_args: Any, **_kwargs: Any) -> str:
+        return "example-password"
+
+    monkeypatch.setattr(ops_login_check, "_read_password_from_vault", _password)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
-        mock.get(_REALM_PATH).respond(403, json={"error": "HTTP 403 Forbidden"})
+        mock.get(_REALM_PATH).respond(403, json={"error": _VENDOR_403})
         rest = mock.route(url__regex=r".*").mock(return_value=httpx.Response(200, json=[]))
-        params = _WRITES.get(op_id, {})
-        result = await _dispatch(operator, op_id, params, approved=True)
+        result = await _dispatch(operator, op_id, _REFUSED_CALLS[op_id], approved=True)
 
     assert result.status == "error", result
+    assert result.extras["error_code"] == "connector_http_403"
     assert result.extras["http_status"] == 403
-    assert result.extras["error_code"] == "connector_error"
-    text = result.extras["exception_message"]
-    assert "read of the managed realm" in text
-    assert "at least one realm-management role" in text
-    assert _TARGET_NAME not in text
+    assert result.extras["permission_headers"] == {}
+    assert "exception_message" not in result.extras
+    assert "exception_class" not in result.extras
+    error = result.error or ""
+    assert error.startswith("connector_http_403: Keycloak refused MEHO's read of the managed realm")
+    assert "at least one realm-management role in that realm" in error
+    assert _TARGET_NAME not in error
+    if op_id in _SENDS_SECRET:
+        assert _VENDOR_403 not in repr(result.model_dump(mode="json"))
+    else:
+        assert _VENDOR_403 in result.extras["upstream_message"]
     assert not rest.called

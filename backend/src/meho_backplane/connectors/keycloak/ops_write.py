@@ -128,6 +128,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.managed_realm_check import read_managed_realm
 from meho_backplane.connectors.keycloak.ops_meho_own_login_guard import (
     refuse_login_realm_write,
     refuse_own_client_write,
@@ -356,6 +357,8 @@ async def keycloak_realm_update(
     be plain names (:mod:`.realm_params`) and are percent-encoded as one
     path segment. A read that answers with another realm than the managed
     realm is refused before anything is sent (:func:`.check_answered_realm`).
+    A 403 on that read is refused before anything is sent too, with the
+    fixed explanation of :func:`.read_managed_realm`.
 
     The realm's SMTP password comes only from ``smtp_password_secret_ref``
     (see :mod:`.ops_write_realm_smtp`): it is read here and set as
@@ -373,7 +376,7 @@ async def keycloak_realm_update(
     )
     representation = dict(params["representation"])
     path = fill_path(_ADMIN_REALM_PATH, {"realm": realm_name})
-    current = await self._get_admin_json(target, path, operator=operator)
+    current = await read_managed_realm(self, target, operator, path)
     refuse_login_realm_write(realm_name, current, representation)
     check_answered_realm("keycloak.realm.update", current, target)
     if params.get(SMTP_PASSWORD_REF_PARAM):

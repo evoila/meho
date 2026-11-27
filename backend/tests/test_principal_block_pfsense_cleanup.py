@@ -14,7 +14,8 @@ command: the removal of the staged script is a clean-up, so it is sent, and
 MEHO keeps the firewall's reply to the create, so it can remove the new user.
 When that removal fails because the SSH connection is lost, MEHO still keeps
 the reply: it stores the password, or removes the new user when the caller
-is blocked.
+is blocked. When the call is cancelled during that removal, MEHO removes the
+new user the reply names, then passes the cancel on.
 
 The firewall is a scripted SSH connection under the real ``_run_command``
 and ``run_capped``; it keeps its users. Vault is the stand-in HTTP server
@@ -23,6 +24,7 @@ with the real ``hvac`` client. All names and values are made up.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -121,11 +123,13 @@ class _ScriptedPfSense(PfSenseConnector):
         *,
         block_after_create: bool = False,
         lose_script_removal: bool = False,
+        cancel_script_removal: bool = False,
     ) -> None:
         super().__init__()
         self.firewall = firewall
         self.block_after_create = block_after_create
         self.lose_script_removal = lose_script_removal
+        self.cancel_script_removal = cancel_script_removal
 
     async def _connect(self, target: Any, operator: Operator | None = None) -> Any:
         return self.firewall
@@ -138,6 +142,13 @@ class _ScriptedPfSense(PfSenseConnector):
         ):
             self.firewall.commands.append(cmd)
             raise ConnectorUnreachableError("made-up lost SSH connection")
+        if (
+            self.cancel_script_removal
+            and cmd.startswith("rm -f ")
+            and "meho_openvpn_user_create_" in cmd
+        ):
+            self.firewall.commands.append(cmd)
+            raise asyncio.CancelledError
         answer = await super()._run_command(target, cmd, **kwargs)
         if self.block_after_create and cmd.startswith(
             "pfSsh.php playback meho_openvpn_user_create_"
@@ -197,7 +208,11 @@ def _caller() -> Operator:
 
 
 async def _connector(
-    firewall: _Firewall, *, block_after_create: bool = False, lose_script_removal: bool = False
+    firewall: _Firewall,
+    *,
+    block_after_create: bool = False,
+    lose_script_removal: bool = False,
+    cancel_script_removal: bool = False,
 ) -> _ScriptedPfSense:
     if ("pfsense", "2.7", "pfsense-ssh") not in all_connectors_v2():
         register_connector_v2(
@@ -205,7 +220,10 @@ async def _connector(
         )
     await PfSenseConnector.register_operations()
     connector = _ScriptedPfSense(
-        firewall, block_after_create=block_after_create, lose_script_removal=lose_script_removal
+        firewall,
+        block_after_create=block_after_create,
+        lose_script_removal=lose_script_removal,
+        cancel_script_removal=cancel_script_removal,
     )
     _CONNECTOR_INSTANCE_CACHE[PfSenseConnector] = connector  # type: ignore[assignment]
     return connector
@@ -365,3 +383,36 @@ async def test_new_user_is_removed_when_the_script_removal_loses_the_connection_
     assert firewall.played("meho_openvpn_user_undo_") == 1
     assert firewall.users == {}
     assert vault.sent("POST", "/v1/secret/data/") == 0
+
+
+async def test_new_user_is_removed_when_the_call_is_cancelled_during_the_script_removal(
+    vault: VaultStandIn,
+) -> None:
+    firewall = _Firewall()
+    await _connector(firewall, cancel_script_removal=True)
+
+    with pytest.raises(asyncio.CancelledError) as err:
+        await _run("pfsense.openvpn.user.create", _CREATE)
+
+    assert "the new user 'guest-1' was removed again" in str(err.value)
+    assert _script_removals(firewall, "meho_openvpn_user_create_") == 1
+    assert firewall.played("meho_openvpn_user_undo_") == 1
+    assert firewall.users == {}
+    assert vault.sent("POST", "/v1/secret/data/") == 0
+    assert _PASSWORD not in str(err.value)
+
+
+async def test_a_failed_undo_after_a_cancel_during_the_script_removal_names_the_user(
+    vault: VaultStandIn,
+) -> None:
+    firewall = _Firewall(undo_fails=True)
+    await _connector(firewall, cancel_script_removal=True)
+
+    with pytest.raises(asyncio.CancelledError) as err:
+        await _run("pfsense.openvpn.user.create", _CREATE)
+
+    assert "the new user 'guest-1' could not be removed again" in str(err.value)
+    assert firewall.played("meho_openvpn_user_undo_") == 1
+    assert firewall.users == {"guest-1": "2000"}
+    assert vault.sent("POST", "/v1/secret/data/") == 0
+    assert _PASSWORD not in str(err.value)

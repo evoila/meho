@@ -152,6 +152,7 @@ from meho_backplane.connectors.pfsense.ops_user_write import (
     _user_rows,
 )
 from meho_backplane.connectors.pfsense.ops_write import (
+    PlaybackCancelledAfterRunError,
     _apply_playback,
     _php_squote,
     _read_config_xml,
@@ -756,7 +757,8 @@ async def _play_create(
 
     The removal of the staged script is a clean-up with no block check. The
     firewall's reply is kept also when that removal fails, so the handler can
-    store the password or remove the new user.
+    store the password or remove the new user. A cancel during that removal
+    removes the user the reply names, then passes the cancel on.
     """
     try:
         return await _apply_playback(
@@ -767,12 +769,31 @@ async def _play_create(
             operator=operator,
             script_removal_is_cleanup=True,
         )
+    except PlaybackCancelledAfterRunError as exc:
+        made = _made_user(exc.output, name) if exc.exit_status == 0 else None
+        if made is None:
+            raise asyncio.CancelledError(
+                f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
+            ) from exc
+        undone = await _undo_create(self, target, made[0], made[1], operator)
+        raise asyncio.CancelledError(
+            f"openvpn.user.create was cancelled after the firewall made the user; {undone}"
+        ) from exc
     except asyncio.CancelledError as exc:
         raise asyncio.CancelledError(
             f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"openvpn.user.create: {exc}. {_may_exist(name)}") from exc
+
+
+def _made_user(played: str, name: str) -> tuple[str, str] | None:
+    """The name and uid of the user the create reply names, or ``None``."""
+    created = _CREATED_RE.search(played)
+    made_name = _CREATED_NAME_RE.search(played)
+    if created is None or made_name is None or made_name.group(1) != name:
+        return None
+    return made_name.group(1), created.group(1)
 
 
 @serialized_config_write

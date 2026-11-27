@@ -87,6 +87,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import ipaddress
@@ -110,6 +111,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "WRITE_OPS",
+    "PlaybackCancelledAfterRunError",
     "assert_only_own_object_changed",
     "parse_static_routes_xml",
     "pfsense_gateway_add",
@@ -412,6 +414,20 @@ async def _read_config_xml(self: PfSenseConnector, target: Any, operator: Operat
     return content
 
 
+class PlaybackCancelledAfterRunError(asyncio.CancelledError):
+    """A cancel during the clean-up removal of a staged script, after the playback ran.
+
+    It is a cancel, so it ends the call like one. It keeps the playback's
+    reply, so the caller can undo what the playback made before it passes the
+    cancel on.
+    """
+
+    def __init__(self, output: str, exit_status: int | None) -> None:
+        super().__init__("cancelled while the staged playback script was removed")
+        self.output = output
+        self.exit_status = exit_status
+
+
 async def _apply_playback(
     self: PfSenseConnector,
     target: Any,
@@ -432,7 +448,8 @@ async def _apply_playback(
     clean-up: it runs with no block check
     (:func:`~meho_backplane.auth.principal_block_run.cleanup_without_block_check`),
     and when it fails after the playback ran (for example the SSH connection
-    is lost), the caller still gets the playback's reply.
+    is lost), the caller still gets the playback's reply. A cancel during that
+    removal raises :class:`PlaybackCancelledAfterRunError` with the reply.
     """
     path = f"{_PHPSHELLSESSIONS_DIR}/{script_name}"
     staged = await self._run_command(
@@ -449,16 +466,22 @@ async def _apply_playback(
     except BaseException:
         await _remove_staged_script(self, target, path, operator, script_removal_is_cleanup)
         raise
+    played_out = played.stdout if hasattr(played, "stdout") else ""
+    played_text = played_out if isinstance(played_out, str) else ""
     try:
         await _remove_staged_script(self, target, path, operator, script_removal_is_cleanup)
+    except asyncio.CancelledError as exc:
+        if not script_removal_is_cleanup:
+            raise
+        _log.warning("pfsense_staged_script_not_removed", script=path, cancelled=True)
+        raise PlaybackCancelledAfterRunError(played_text, played.exit_status) from exc
     except Exception:
         if not script_removal_is_cleanup:
             raise
         _log.warning("pfsense_staged_script_not_removed", script=path)
     if played.exit_status != 0:
         raise RuntimeError(f"pfSsh.php playback {script_name!r} failed: exit {played.exit_status}")
-    played_out = played.stdout if hasattr(played, "stdout") else ""
-    return played_out if isinstance(played_out, str) else ""
+    return played_text
 
 
 async def _remove_staged_script(

@@ -38,7 +38,7 @@ import tomllib
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 from unittest.mock import AsyncMock
 
 import meho_connector_kit as kit
@@ -49,7 +49,9 @@ from scripts.write_connector_kit_names import (
     Entry,
     build_names,
     check_message,
+    compare,
     describe,
+    describe_changes,
     read_names_file,
     read_pyproject_version,
     write,
@@ -113,6 +115,22 @@ def _list_after(value: str, limit: int = 10) -> int:
     return min(len(value), limit)
 
 
+def _named_before(value: str, *, size: int = 1) -> int:
+    return len(value) * size
+
+
+def _named_with_default(value: str, *, size: int = 1, limit: int = 10) -> int:
+    return min(len(value) * size, limit)
+
+
+def _named_without_default(value: str, *, size: int = 1, limit: int) -> int:
+    return min(len(value) * size, limit)
+
+
+def _positional_with_default(value: str, limit: int = 10, *, size: int = 1) -> int:
+    return min(len(value) * size, limit)
+
+
 def _names(**functions: Any) -> dict[str, Entry]:
     return {name: describe(function) for name, function in functions.items()}
 
@@ -136,6 +154,126 @@ def test_an_added_name_asks_for_the_second_number() -> None:
     assert "second number" in message
 
 
+def test_a_new_optional_named_input_asks_for_the_second_number() -> None:
+    message = check_message(_names(a=_named_before), _names(a=_named_with_default))
+    assert message is not None
+    assert "new optional inputs of a: limit: int = 10" in message
+    assert "second number" in message
+
+
+@pytest.mark.parametrize("after", [_named_without_default, _positional_with_default])
+def test_a_new_input_that_a_call_may_need_asks_for_the_first_number(after: Any) -> None:
+    message = check_message(_names(a=_named_before), _names(a=after))
+    assert message is not None
+    assert "changed: a" in message
+    assert "first number" in message
+
+
+# The cases of the rule for new inputs. Each pair is the function before
+# and after; the same cases run for the release check in
+# tests/test_ci_check_connector_kit_release.py.
+
+
+def _f_plain(value: str) -> str:
+    return value
+
+
+def _f_plain_plus_named(value: str, *, opt: int = 1) -> str:
+    return value * opt
+
+
+def _f_args(value: str, *items: str) -> str:
+    return value + "".join(items)
+
+
+def _f_args_plus_named(value: str, *items: str, opt: int = 1) -> str:
+    return (value + "".join(items)) * opt
+
+
+def _f_named(value: str, *, size: int = 1) -> str:
+    return value * size
+
+
+def _f_named_plus_default(value: str, *, size: int = 1, limit: int = 10) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_plus_required(value: str, *, size: int = 1, limit: int) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_plus_required_eq_in_type(value: str, *, size: int = 1, expr: Literal["a = b"]) -> str:
+    return value * size + expr
+
+
+def _f_named_plus_eq_in_default(value: str, *, size: int = 1, sep: str = " = ") -> str:
+    return sep.join([value] * size)
+
+
+def _f_named_plus_by_place(value: str, limit: int = 10, *, size: int = 1) -> str:
+    return (value * size)[:limit]
+
+
+def _f_named_new_default(value: str, *, size: int = 2) -> str:
+    return value * size
+
+
+def _f_named_new_type(value: str, *, size: float = 1) -> str:
+    return value * int(size)
+
+
+def _f_named_plus_default_new_return(value: str, *, size: int = 1, limit: int = 10) -> int:
+    return min(len(value) * size, limit)
+
+
+def _f_named_plus_default_old_input_changed(value: bytes, *, size: int = 1, limit: int = 10) -> str:
+    return (value.decode() * size)[:limit]
+
+
+def _f_kwargs(value: str, *, size: int = 1, **options: Any) -> str:
+    return value * size + str(options)
+
+
+def _f_kwargs_plus_named(value: str, *, size: int = 1, mode: int = 0, **options: Any) -> str:
+    return value * size + str(options) + str(mode)
+
+
+_RULE_CASES = [
+    pytest.param(_f_plain, _f_plain_plus_named, "second", id="no-star-before"),
+    pytest.param(_f_args, _f_args_plus_named, "second", id="named-after-args"),
+    pytest.param(_f_named, _f_named_plus_default, "second", id="named-with-default"),
+    pytest.param(_f_named, _f_named_plus_eq_in_default, "second", id="eq-in-default"),
+    pytest.param(_f_named, _f_named_plus_required_eq_in_type, "first", id="eq-in-type"),
+    pytest.param(_f_named, _f_named_plus_required, "first", id="named-without-default"),
+    pytest.param(_f_named, _f_named_plus_by_place, "first", id="by-place-with-default"),
+    pytest.param(_f_named, _f_named_new_default, "first", id="changed-default"),
+    pytest.param(_f_named, _f_named_new_type, "first", id="changed-type"),
+    pytest.param(_f_named, _f_named_plus_default_new_return, "first", id="plus-new-return"),
+    pytest.param(_f_named, _f_named_plus_default_old_input_changed, "first", id="plus-old-changed"),
+    pytest.param(_f_kwargs, _f_kwargs_plus_named, "first", id="next-to-kwargs"),
+    pytest.param(_f_named, _f_plain, "first", id="last-named-removed"),
+]
+
+
+@pytest.mark.parametrize(("before", "after", "level"), _RULE_CASES)
+def test_the_rule_for_new_inputs(before: Any, after: Any, level: str) -> None:
+    changes = compare(_names(f=before), _names(f=after))
+    assert changes.level == level
+    message = check_message(_names(f=before), _names(f=after))
+    assert message is not None
+    assert f"{level} number" in message
+
+
+def test_a_name_both_extended_and_marked_as_old_is_listed_in_both_groups() -> None:
+    old = _names(f=_f_named)
+    new = _names(f=_f_named_plus_default)
+    new["f"]["old"] = "Use g."
+    changes = compare(old, new)
+    assert (changes.extended, changes.marked_old, changes.changed) == (["f"], ["f"], [])
+    lines = describe_changes(changes, old, new).splitlines()
+    assert lines == ["- new optional inputs of f: limit: int = 10", "- marked as old: f (Use g.)"]
+
+
 @pytest.fixture
 def kit_files(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
     names_file = tmp_path / "kit-names.json"
@@ -157,6 +295,17 @@ def test_command_raises_the_second_number_for_an_added_name(
     exit_code = write(new, *kit_files)
     assert exit_code == 0
     assert _written(*kit_files) == ("1.4", "1.4", new)
+
+
+def test_command_raises_the_second_number_for_a_new_optional_named_input(
+    kit_files: tuple[Path, Path],
+) -> None:
+    names_file, pyproject = kit_files
+    names_file.write_text(json.dumps({"kit_version": "1.3", "names": _names(a=_named_before)}))
+    new = _names(a=_named_with_default)
+    exit_code = write(new, names_file, pyproject)
+    assert exit_code == 0
+    assert _written(names_file, pyproject) == ("1.4", "1.4", new)
 
 
 def test_command_raises_the_first_number_for_a_changed_name(
@@ -483,6 +632,43 @@ async def test_connector_without_execute_registers_and_runs_a_typed_operation() 
 
     assert result.status == "ok", result
     assert result.result == {"widgets": ["kitdemo-target"], "limit": 5}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_a_kit_package_sets_hard_to_undo_and_changes_rights_on_its_op() -> None:
+    from sqlalchemy import select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import EndpointDescriptor
+
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await kit.register_typed_operation(
+        product="kitdemo",
+        version="1.x",
+        impl_id="kitdemo",
+        op_id="kitdemo.widget.reset",
+        handler=_list_widgets,
+        summary="Reset a widget.",
+        description="Resets one widget of a made-up product to its first state.",
+        parameter_schema={"type": "object", "properties": {}},
+        when_to_use=None,
+        safety_level="dangerous",
+        requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
+        embedding_service=embedding,
+    )
+    async with get_sessionmaker()() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "kitdemo.widget.reset")
+            )
+        ).scalar_one()
+    assert (row.hard_to_undo, row.changes_rights) == ("overwrites", True)
 
 
 @pytest.mark.asyncio

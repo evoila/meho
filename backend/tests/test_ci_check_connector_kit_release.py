@@ -12,6 +12,7 @@ subprocess, with ``--old-names`` in place of git.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -29,6 +30,17 @@ _SCRIPT = _repo_root() / "scripts" / "release" / "check_connector_kit_release.py
 
 _ENTRY = {"kind": "function", "inputs": ["value: str"], "returns": "str"}
 _CHANGED = {"kind": "function", "inputs": ["value: str", "*", "limit: int"], "returns": "str"}
+_NAMED = {"kind": "function", "inputs": ["value: str", "*", "size: int = 1"], "returns": "str"}
+_NAMED_PLUS_DEFAULT = {
+    "kind": "function",
+    "inputs": ["value: str", "*", "size: int = 1", "limit: int = 10"],
+    "returns": "str",
+}
+_NAMED_PLUS_REQUIRED = {
+    "kind": "function",
+    "inputs": ["value: str", "*", "size: int = 1", "limit: int"],
+    "returns": "str",
+}
 
 
 def _names(version: str, **entries: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +131,143 @@ def test_changed_name_needs_the_first_number(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "first number" in result.stderr
+
+
+def test_new_optional_named_input_needs_only_the_second_number(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.1", a=_NAMED_PLUS_DEFAULT),
+        "- Kit version 1.1 gives `a` the input `limit`.",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_new_optional_named_input_still_needs_a_new_version(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.0", a=_NAMED_PLUS_DEFAULT),
+        "- Kit version 1.0 gives `a` the input `limit`.",
+    )
+    assert result.returncode == 1
+    assert "must go up" in result.stderr
+
+
+def test_new_named_input_without_a_default_needs_the_first_number(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("1.1", a=_NAMED_PLUS_REQUIRED),
+        "- Kit version 1.1 gives `a` the input `limit`.",
+    )
+    assert result.returncode == 1
+    assert "first number" in result.stderr
+
+
+def _load_script() -> Any:
+    spec = importlib.util.spec_from_file_location("check_connector_kit_release", _SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_KIT_PROBLEMS = _load_script().kit_problems
+
+
+def _fn(*inputs: str, returns: str = "str") -> dict[str, Any]:
+    return {"kind": "function", "inputs": list(inputs), "returns": returns}
+
+
+# The cases of the rule for new inputs. The same cases run for the writer in
+# tests/test_connector_kit.py.
+_F_NAMED = _fn("value: str", "*", "size: int = 1")
+_RULE_CASES = [
+    pytest.param(
+        _fn("value: str"), _fn("value: str", "*", "opt: int = 1"), "second", id="no-star-before"
+    ),
+    pytest.param(
+        _fn("value: str", "*items: str"),
+        _fn("value: str", "*items: str", "opt: int = 1"),
+        "second",
+        id="named-after-args",
+    ),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "*", "size: int = 1", "limit: int = 10"),
+        "second",
+        id="named-with-default",
+    ),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "*", "size: int = 1", "sep: str = ' = '"),
+        "second",
+        id="eq-in-default",
+    ),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "*", "size: int = 1", "expr: Literal['a = b']"),
+        "first",
+        id="eq-in-type",
+    ),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "*", "size: int = 1", "limit: int"),
+        "first",
+        id="named-without-default",
+    ),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "limit: int = 10", "*", "size: int = 1"),
+        "first",
+        id="by-place-with-default",
+    ),
+    pytest.param(_F_NAMED, _fn("value: str", "*", "size: int = 2"), "first", id="changed-default"),
+    pytest.param(_F_NAMED, _fn("value: str", "*", "size: float = 1"), "first", id="changed-type"),
+    pytest.param(
+        _F_NAMED,
+        _fn("value: str", "*", "size: int = 1", "limit: int = 10", returns="int"),
+        "first",
+        id="plus-new-return",
+    ),
+    pytest.param(
+        _fn("value: str", "*", "size: int = 1", "**options: Any"),
+        _fn("value: str", "*", "size: int = 1", "mode: int = 0", "**options: Any"),
+        "first",
+        id="next-to-kwargs",
+    ),
+    pytest.param(_F_NAMED, _fn("value: str"), "first", id="last-named-removed"),
+]
+
+
+@pytest.mark.parametrize(("before", "after", "level"), _RULE_CASES)
+def test_the_rule_for_new_inputs(before: dict[str, Any], after: dict[str, Any], level: str) -> None:
+    old = _names("1.0", f=before)
+    assert _KIT_PROBLEMS(old, _names("2.0", f=after)) == []
+    second = _KIT_PROBLEMS(old, _names("1.1", f=after))
+    if level == "second":
+        assert second == []
+    else:
+        assert len(second) == 1
+        assert "first number" in second[0]
+
+
+def test_removing_the_last_named_input_with_the_first_number_up_passes(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        _names("1.0", a=_NAMED),
+        _names("2.0", a=_ENTRY),
+        "- Kit version 2.0: `a` no longer takes `size`. Leave `size` out.",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_name_both_extended_and_marked_as_old_is_named_once() -> None:
+    marked = {**_NAMED_PLUS_DEFAULT, "old": "Use b."}
+    problems = _KIT_PROBLEMS(_names("1.0", widget_list=_NAMED), _names("1.0", widget_list=marked))
+    assert len(problems) == 1
+    assert problems[0].count("widget_list") == 1
 
 
 def test_added_name_needs_a_new_version(tmp_path: Path) -> None:

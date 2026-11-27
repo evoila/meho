@@ -69,6 +69,7 @@ from meho_backplane.auth.principal_block_run import (
     run_login,
     step_refused_in_run,
 )
+from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
@@ -84,6 +85,7 @@ __all__ = [
     "PrincipalBlockUnavailableError",
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
+    "SignInAlreadyUsedError",
     "block_principal",
     "checking_logins_for_steps",
     "first_blocked_step_login",
@@ -135,6 +137,10 @@ class PrincipalNotBlockedError(Exception):
 
 class OwnBlockStaysError(Exception):
     """An admin tried to remove a block on their own login that they may not remove."""
+
+
+class SignInAlreadyUsedError(Exception):
+    """The fresh sign-in of an own-login unblock already approved a request."""
 
 
 class BlockSetChangedError(Exception):
@@ -425,6 +431,31 @@ async def _delete_read_blocks(session: AsyncSession, blocks: list[BlockedPerson]
     return deleted
 
 
+async def _refuse_used_sign_in(
+    session: AsyncSession, operator: Operator, sign_in: dict[str, Any]
+) -> None:
+    """Raise :class:`SignInAlreadyUsedError` when an approve already used the sign-in.
+
+    Raises :class:`PrincipalBlockUnavailableError` when the lock or the
+    audit rows cannot be read, so nothing is removed.
+    """
+    # Imported here: the approval queue imports this module.
+    from meho_backplane.operations import approval_queue
+
+    key = str(sign_in["sign_in_key"])
+    try:
+        await approval_queue.take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
+        uses = await earlier_sign_in_uses(
+            session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
+        )
+    except Exception as exc:
+        _log.warning("principal_unblock_sign_in_check_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+    if any(use.kind == "approval" for use in uses):
+        _log.warning("principal_unblock_sign_in_reused", operator_sub=operator.sub)
+        raise SignInAlreadyUsedError
+
+
 async def unblock_principal(
     operator: Operator,
     sub: str,
@@ -442,9 +473,14 @@ async def unblock_principal(
     admin a block in this tenant, raises :class:`OwnBlockStaysError` and
     nothing is removed. The audit row names each removed block with its
     scope and reason. Raises :class:`PrincipalNotBlockedError` when there
-    is none, and :class:`PrincipalBlockUnavailableError` when the table
-    cannot be read. *reason* and *sign_in* (the proof of a fresh sign-in)
-    go into the audit row when they are given. When *shown* is given (the
+    is none, and :class:`PrincipalBlockUnavailableError` when the table,
+    the lock of the sign-in or the audit rows cannot be read. *reason* and
+    *sign_in* (the proof of a fresh sign-in) go into the audit row when
+    they are given. A *sign_in* that an
+    ``approval.decision`` audit row already names is used up: the call
+    raises :class:`SignInAlreadyUsedError` and removes nothing. The scan
+    and the removal run under the advisory lock of the sign-in
+    (:mod:`meho_backplane.auth.sign_in_use`). When *shown* is given (the
     :func:`block_set_digest` of the blocks the admin was shown), MEHO
     removes the blocks only when they are still exactly those blocks, and
     else raises :class:`BlockSetChangedError` and removes nothing. The
@@ -456,6 +492,8 @@ async def unblock_principal(
     own_login = sub == operator.sub
     only_this_tenant = own_login or not operator.platform_admin
     async with get_sessionmaker()() as session:
+        if sign_in is not None:
+            await _refuse_used_sign_in(session, operator, sign_in)
         blocks = await _read_blocks(session, sub)
         scopes = {b.scope for b in blocks}
         if own_login and (

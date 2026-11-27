@@ -110,7 +110,7 @@ _SPECS: tuple[_Spec, ...] = (
         s.DISABLE_GUIDANCE,
         _WRITE_TAGS,
         "caution",
-        None,
+        "stops",
         False,
     ),
     (
@@ -126,7 +126,7 @@ _SPECS: tuple[_Spec, ...] = (
         import_op.IMPORT_GUIDANCE,
         _WRITE_TAGS,
         "caution",
-        None,
+        "overwrites",
         False,
     ),
     (

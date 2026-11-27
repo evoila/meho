@@ -5,7 +5,9 @@
 
 The console twin of ``test_reader_change_controls.py``. Each case runs one
 kind of change through one way in: the real ``dispatch`` with a console
-login, and the console call form ``POST /ui/operations/call``. It checks
+login, and the console call form ``POST /ui/operations/call``. The kinds,
+with the risk level and the approval flag of each stand-in, are the table
+``KINDS`` of that file. It checks
 the status, the code, the number of stored approval requests and whether
 the stand-in ran. The expected values are the ones the same cases give on
 a MEHO without the Reader rule.
@@ -21,17 +23,12 @@ import pytest
 from sqlalchemy import func, select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
-from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, Target
-from meho_backplane.op_classes import declare_op_classes
-from meho_backplane.operations import dispatch, register_typed_operation
-from meho_backplane.operations.grant_approval import register_rights_change_op
-from tests import _composite_wait_audit_helpers as h
+from meho_backplane.operations import dispatch
 from tests._people_behind_helpers import give_known_person
-from tests.test_agent_grant_required import _TENANT, _seed_vault_target, stub_embedding_service
-from tests.test_operations_dispatcher import _NoOpVaultConnector
-from tests.test_reader_change_controls import KINDS, RUNS, run_stand_in
+from tests.test_agent_grant_required import _TENANT, stub_embedding_service
+from tests.test_reader_change_controls import KINDS, RUNS, register_stand_ins
 from tests.test_ui_operations import (
     _bff_env,
     _client_with_role_and_csrf,
@@ -50,6 +47,7 @@ _NO_PREVIEW = ("denied", "preview_binding_required", 0, False)
 #: (way, kind) -> (status, code, stored approval requests, ran). These are
 #: the answers without the Reader rule.
 _PER_KIND: dict[str, tuple[str, str | None, int, bool]] = {
+    "write_safe": _RUNS_AT_ONCE,
     "write_caution": _RUNS_AT_ONCE,
     "write_dangerous": _WAITS,
     "rights_change": _WAITS,
@@ -69,35 +67,7 @@ def _set_up(embedding: Any) -> None:
 
     async def _do() -> None:
         RUNS.clear()
-        register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-        declare_op_classes(credential_write=[KINDS["credential_write"][0]])
-        register_rights_change_op(KINDS["rights_change"][0])
-        for kind, (op_id, level) in KINDS.items():
-            if kind == "multi_step":
-                continue
-            await register_typed_operation(
-                product="vault",
-                version="1.x",
-                impl_id="vault",
-                op_id=op_id,
-                handler=run_stand_in,
-                summary="Stand-in op.",
-                description="Counts its runs.",
-                parameter_schema={"type": "object"},
-                safety_level=level,
-                requires_approval=level == "destructive",
-                when_to_use=None,
-                embedding_service=embedding,
-            )
-        async with get_sessionmaker()() as session:
-            await h.register_composite(
-                session,
-                KINDS["multi_step"][0],
-                "multi_step_composite",
-                safety_level="caution",
-                module="tests.test_reader_change_controls",
-            )
-        await _seed_vault_target()
+        await register_stand_ins(embedding, module="tests.test_reader_change_controls")
 
     _seed_tenant(_TENANT, "console-controls")
     asyncio.run(_do())

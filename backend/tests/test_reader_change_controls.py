@@ -13,9 +13,11 @@ the same cases give on a MEHO without the Reader rule.
   the Admin role, an agent login with a grant, and a service login with
   the Operator role. The person in the web console is in
   ``test_reader_change_controls_console.py``.
-* Kinds (stand-in operations that count their runs): a ``caution`` write,
-  a ``dangerous`` write, a change of rights, a credential write, a
-  ``caution`` multi-step operation and a delete without a preview.
+* Kinds (stand-in operations that count their runs): a write at ``safe``
+  with no approval flag, a write at ``caution``, a write at
+  ``dangerous``, a change of rights, a credential write, a multi-step
+  operation at ``caution`` and a delete without a preview. The table
+  ``KINDS`` names the risk level and the approval flag of each one.
 * Ways in: the real ``dispatch``, the REST call route and the MCP tool
   ``call_operation``.
 """
@@ -59,14 +61,17 @@ _CONNECTOR = "vault-1.x"
 _TARGET = "vault-grant-test"
 _PARAMS: dict[str, Any] = {"path": "app/config"}
 
-#: kind -> (op_id, risk level). The multi-step operation is a composite.
-KINDS: dict[str, tuple[str, str]] = {
-    "write_caution": ("vault.control.write_caution", "caution"),
-    "write_dangerous": ("vault.control.write_dangerous", "dangerous"),
-    "rights_change": ("vault.control.rights_change", "safe"),
-    "credential_write": ("vault.control.credential_write", "safe"),
-    "multi_step": ("vault.control.multi_step", "caution"),
-    "delete_no_preview": ("vault.control.delete", "destructive"),
+#: kind -> (op_id, risk level, approval flag). The multi-step operation is
+#: a composite. The approval flag is the ``requires_approval`` of the
+#: stand-in: with it, every call waits for a second person.
+KINDS: dict[str, tuple[str, str, bool]] = {
+    "write_safe": ("vault.control.write_safe", "safe", False),
+    "write_caution": ("vault.control.write_caution", "caution", False),
+    "write_dangerous": ("vault.control.write_dangerous", "dangerous", False),
+    "rights_change": ("vault.control.rights_change", "safe", False),
+    "credential_write": ("vault.control.credential_write", "safe", False),
+    "multi_step": ("vault.control.multi_step", "caution", False),
+    "delete_no_preview": ("vault.control.delete", "destructive", True),
 }
 
 #: Every run of a stand-in operation.
@@ -87,14 +92,14 @@ async def multi_step_composite(operator: Operator, target: Any, params: dict[str
     return {"done": True}
 
 
-@pytest.fixture
-async def stand_ins(stub_embedding_service: AsyncMock) -> AsyncIterator[None]:
+async def register_stand_ins(embedding: Any, module: str = __name__) -> None:
     """One stand-in operation per kind, and the target they run on."""
-    RUNS.clear()
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
-    declare_op_classes(credential_write=[KINDS["credential_write"][0]])
+    declare_op_classes(
+        credential_write=[KINDS["credential_write"][0]], write=[KINDS["write_safe"][0]]
+    )
     register_rights_change_op(KINDS["rights_change"][0])
-    for kind, (op_id, level) in KINDS.items():
+    for kind, (op_id, level, needs_approval) in KINDS.items():
         if kind == "multi_step":
             continue
         await register_typed_operation(
@@ -107,19 +112,26 @@ async def stand_ins(stub_embedding_service: AsyncMock) -> AsyncIterator[None]:
             description="Counts its runs.",
             parameter_schema={"type": "object"},
             safety_level=level,
-            requires_approval=level == "destructive",
+            requires_approval=needs_approval,
             when_to_use=None,
-            embedding_service=stub_embedding_service,
+            embedding_service=embedding,
         )
     async with get_sessionmaker()() as session:
         await h.register_composite(
             session,
             KINDS["multi_step"][0],
             "multi_step_composite",
-            safety_level="caution",
-            module=__name__,
+            safety_level=KINDS["multi_step"][1],
+            module=module,
         )
     await _seed_vault_target()
+
+
+@pytest.fixture
+async def stand_ins(stub_embedding_service: AsyncMock) -> AsyncIterator[None]:
+    """The stand-ins of :func:`register_stand_ins`, with a clean run count."""
+    RUNS.clear()
+    await register_stand_ins(stub_embedding_service)
     yield
     RUNS.clear()
 
@@ -256,24 +268,28 @@ _NO_PREVIEW = ("denied", "preview_binding_required", 0, False)
 #: (caller, kind) -> (status, code, stored approval requests, ran), the same
 #: on every way in. These are the answers without the Reader rule.
 EXPECTED: dict[tuple[str, str], tuple[str, str | None, int, bool]] = {
+    ("person_operator", "write_safe"): _RUNS_AT_ONCE,
     ("person_operator", "write_caution"): _WAITS,
     ("person_operator", "write_dangerous"): _WAITS,
     ("person_operator", "rights_change"): _WAITS,
     ("person_operator", "credential_write"): _RUNS_AT_ONCE,
     ("person_operator", "multi_step"): _WAITS,
     ("person_operator", "delete_no_preview"): _NO_PREVIEW,
+    ("person_admin", "write_safe"): _RUNS_AT_ONCE,
     ("person_admin", "write_caution"): _WAITS,
     ("person_admin", "write_dangerous"): _WAITS,
     ("person_admin", "rights_change"): _WAITS,
     ("person_admin", "credential_write"): _RUNS_AT_ONCE,
     ("person_admin", "multi_step"): _WAITS,
     ("person_admin", "delete_no_preview"): _NO_PREVIEW,
+    ("agent", "write_safe"): _WAITS,
     ("agent", "write_caution"): _WAITS,
     ("agent", "write_dangerous"): _WAITS,
     ("agent", "rights_change"): _WAITS,
     ("agent", "credential_write"): _WAITS,
     ("agent", "multi_step"): _WAITS,
     ("agent", "delete_no_preview"): _NO_PREVIEW,
+    ("service", "write_safe"): _RUNS_AT_ONCE,
     ("service", "write_caution"): _WAITS,
     ("service", "write_dangerous"): _WAITS,
     ("service", "rights_change"): _WAITS,

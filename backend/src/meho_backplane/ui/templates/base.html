@@ -112,6 +112,9 @@
     ``StrictUndefined``. -#}
 {% set session_display_name = session_display_name | default(none) %}
 {% set session_initials = session_initials | default(none) %}
+{#- ``session_is_tenant_admin`` comes from the same processor; the menu
+    shows the entries that only a tenant admin can open from it. -#}
+{% set session_is_tenant_admin = session_is_tenant_admin | default(false) %}
 {% extends "_page_frame.html" %}
 
 {#- The document skeleton -- <html>, <head>, <body> -- comes from
@@ -300,7 +303,7 @@
                 signal to assistive tech. ``active_surface`` is set by
                 the rendering route. -#}
             <ul class="menu menu-vertical w-full gap-1 p-0">
-              {% for key, href, icon_name, label in nav_surfaces %}
+              {% for key, href, icon_name, label in nav_surfaces if key != "blocked-people" or session_is_tenant_admin %}
               <li>
                 <a
                   href="{{ href }}"

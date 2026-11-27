@@ -222,6 +222,18 @@ def person_initials(name: str | None) -> str | None:
     return firsts[0] + firsts[-1]
 
 
+def _session_is_menu_admin(session_ctx: Any) -> bool:
+    """Whether the last token check showed a person with ``tenant_admin`` here.
+
+    The menu shows the admin-only entries from it. It is read from the
+    server-side map, never from the request. The pages keep their own 403.
+    """
+    # Imported here: the auth package imports this module.
+    from meho_backplane.ui.auth.revalidation import session_is_tenant_admin
+
+    return session_is_tenant_admin(session_ctx.session_id, session_ctx.tenant_id)
+
+
 def _ui_session_context_processor(request: Request) -> dict[str, Any]:
     """Surface the BFF session tenant + live readiness into every template.
 
@@ -295,6 +307,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
             "session_tenant": None,
             "session_display_name": None,
             "session_initials": None,
+            "session_is_tenant_admin": False,
             "ready": ready,
             "policy_menu": False,
             **sandbox,
@@ -318,6 +331,8 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         # to an identifier.
         "session_display_name": session_ctx.display_name,
         "session_initials": person_initials(session_ctx.display_name),
+        # Whether the menu shows the entries only a tenant admin can open.
+        "session_is_tenant_admin": _session_is_menu_admin(session_ctx),
         "ready": ready,
         # The "Policy" menu entry: only with the switch CUSTOM_POLICY on.
         # Read here, for a signed-in page, where the settings are loaded.

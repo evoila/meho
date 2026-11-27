@@ -53,6 +53,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.reason import MAX_REASON_CHARS
 from meho_backplane.ui.routes.connectors.operator import (
     OperatorRoleProbe,
     resolve_operator_or_403,
@@ -133,7 +134,7 @@ async def _edit_handler(
     requires_approval: str | None = Form(default=None),
     is_enabled: str | None = Form(default=None),
     # #4711: the reason a platform admin gives for turning approval off.
-    reason: str | None = Form(default=None, max_length=1024),
+    reason: str | None = Form(default=None, max_length=MAX_REASON_CHARS),
     session_ctx: UISessionContext = _require_operator_dep,
     operator: Operator = _require_admin_dep,
 ) -> HTMLResponse:

@@ -56,10 +56,13 @@ func newExplainCmd() *cobra.Command {
 			"whether the target's connector takes ingested operations. The " +
 			"last line names each check after the policy rules that explain " +
 			"does not ask and that can still refuse the call.\n\n" +
-			"explain works with POLICY_ENGINE_SHADOW off: it then shows today's " +
-			"answer only. Today's checks decide while the policy evaluator is off " +
-			"or in shadow mode. With POLICY_ENGINE_SHADOW on, the answer also lists " +
-			"every rule the evaluator matched, in order, and the floor that decided.\n\n" +
+			"explain works with CUSTOM_POLICY and POLICY_ENGINE_SHADOW off: it then " +
+			"shows today's answer only. Today's checks decide while the policy " +
+			"evaluator is off or in shadow mode. With CUSTOM_POLICY or " +
+			"POLICY_ENGINE_SHADOW on, the answer also lists every rule the " +
+			"evaluator matched, in order, and the floor that decided. Each older " +
+			"switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, " +
+			"POLICY_APPROVER_ROUTING) still turns on its own part alone.\n\n" +
 			"Who may approve is a list of MEHO group kinds (MEHO-<kind>), not " +
 			"the names of the login groups of your install.\n\n" +
 			"Only a tenant admin or a platform admin sees the entries of the " +
@@ -230,7 +233,7 @@ func printExplain(w io.Writer, a api.PolicyExplainResponse) {
 		fmt.Fprintf(w, "Today: %s\n", sanitize(line))
 	}
 	if a.Evaluator == nil {
-		fmt.Fprintln(w, "Policy evaluator: off (POLICY_ENGINE_SHADOW is off)")
+		fmt.Fprintln(w, "Policy evaluator: off (CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off)")
 	} else {
 		printEvaluator(w, *a.Evaluator)
 	}

@@ -84,6 +84,10 @@ from meho_backplane.connectors.kubernetes._apply_manifest import (
     ApplyManifestError,
     _parse_manifest,
 )
+from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+    apply_summaries_var,
+    summarize_applied_object,
+)
 from meho_backplane.redaction import get_default_policy, redact
 
 if TYPE_CHECKING:
@@ -177,6 +181,14 @@ class KubernetesSecretRefError(ValueError):
     ``extras.exception_class="KubernetesSecretRefError"``, like the sibling
     manifest / kind errors above.
     """
+
+
+def error_subject(doc: dict[str, Any]) -> str:
+    """How an error names the object of *doc*: ``<apiVersion>/<kind> <namespace>/<name>``."""
+    metadata = doc.get("metadata") or {}
+    namespace = metadata.get("namespace")
+    place = f"{namespace}/" if namespace else ""
+    return f"{doc.get('apiVersion')}/{doc.get('kind')} {place}{metadata.get('name')}"
 
 
 def _status_message(body: str) -> str | None:
@@ -364,7 +376,7 @@ async def _apply_one(
     namespace = metadata.get("namespace")
 
     resource = await dyn.resources.get(api_version=api_version, kind=kind)
-    subject = f"{api_version}/{kind} {namespace + '/' if namespace else ''}{name}"
+    subject = error_subject(doc)
     takes_over: list[dict[str, str]] = []
     if dry_run and force_conflicts:
         takes_over = await _preview_takeover(dyn, resource, doc, subject)
@@ -392,6 +404,19 @@ async def _apply_one(
             f"returned no resourceVersion -- the object was not persisted (the "
             f"response is indistinguishable from a dry-run preview). Refusing to "
             f"report success for an apply that created nothing."
+        )
+    summaries = apply_summaries_var.get()
+    if dry_run and summaries is not None:
+        # Only the card of a person turns this on (ops_write_apply_summary).
+        summaries.entries.append(
+            await summarize_applied_object(
+                dyn,
+                resource,
+                doc,
+                applied,
+                field_manager=FIELD_MANAGER,
+                read_live=summaries.read_live,
+            )
         )
     return {
         "api_version": api_version,

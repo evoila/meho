@@ -914,7 +914,7 @@ meho audit query [flags]
 - `--op-id` — narrow to one op-id (glob with * wildcards)
 - `--parent-audit-id` — narrow to the rows whose parent is this audit-id (UUID); e.g. the decision and run rows of one approval request
 - `--principal` — narrow to one operator (part of the user id or the name; case does not matter)
-- `--result-status` — narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now
+- `--result-status` — narrow to one result-status (ok|error|denied|pending|withdrawn); pending is history: the run stopped to wait for approval and the row stays pending after the decision; use 'meho approvals list' to see what waits now; a retry row (approval.reuse) reads by the state of the request it found, so a failed run reads error
 - `--session-id` — narrow to one agent session (UUID); the flat companion to `meho audit replay`
 - `--since` — earliest occurred_at; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601
 - `--target` — narrow to one target (name or alias; server-side resolution)
@@ -4217,11 +4217,24 @@ meho pfsense version [flags]
 
 ## `meho policy`
 
-Manage the policy file (validate / diff / import / export / history / explain)
+Manage the policy file (validate / diff / import / export / history / explain / carry-over)
 
 ```
 meho policy
 ```
+
+### `meho policy carry-over`
+
+List every saved "always wait" and what changes if MEHO reads it as destructive
+
+```
+meho policy carry-over --dry-run [flags]
+```
+
+- `--backplane` — backplane URL to call (defaults to the URL recorded by the most recent `meho login`)
+- `--dry-run` — list the settings; change nothing (required)
+- `--json` — print the server's answer as JSON
+- `--scope` — tenant (your tenant's policy) or install (the whole install; platform admins only)
 
 ### `meho policy diff`
 

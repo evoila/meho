@@ -116,6 +116,7 @@ def _operator_of(row: PushSubscription) -> Operator | None:
         self_approver=row.self_approver,
         platform_admin=row.platform_admin,
         web_session=True,
+        in_code_kind="person",
     )
 
 

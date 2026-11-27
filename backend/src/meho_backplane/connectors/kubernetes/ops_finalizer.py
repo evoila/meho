@@ -400,6 +400,7 @@ FINALIZER_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "finalizer", "delete", "destructive"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_FINALIZER_LLM,
     ),
 )

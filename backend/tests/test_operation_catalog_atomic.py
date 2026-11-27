@@ -129,6 +129,9 @@ def stub_embedding_service() -> AsyncMock:
 
 def _use_registrars(monkeypatch: pytest.MonkeyPatch, *registrars: Any) -> None:
     monkeypatch.setattr(typed_register, "_TYPED_OP_REGISTRARS", list(registrars))
+    # The shipped connectors write no rows here, so their declared test reads
+    # would be missing. This test is about the transaction, not about them.
+    monkeypatch.setattr(typed_register, "assert_connector_declarations_valid", AsyncMock())
 
 
 async def _built_in_rows() -> dict[str, dict[str, Any]]:

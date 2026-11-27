@@ -182,6 +182,61 @@ async def test_dispose_engine_is_awaitable_and_resets_cache(
 
 
 # ---------------------------------------------------------------------------
+# SQLite: a savepoint sits inside a real transaction
+# ---------------------------------------------------------------------------
+
+
+async def _sqlite_table(tmp_path: Path) -> AsyncEngine:
+    engine = create_engine_for_url(
+        f"sqlite+aiosqlite:///{tmp_path / 'savepoint.db'}", pool_size=1, pool_timeout=1.0
+    )
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE item (n INTEGER)"))
+    return engine
+
+
+async def _stored(engine: AsyncEngine) -> list[int]:
+    async with engine.connect() as conn:
+        return list((await conn.execute(text("SELECT n FROM item ORDER BY n"))).scalars())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write_first", [False, True], ids=["savepoint-first", "write-first"])
+async def test_sqlite_rollback_undoes_released_savepoints(
+    tmp_path: Path, write_first: bool
+) -> None:
+    engine = await _sqlite_table(tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            async with async_sessionmaker(engine)() as session, session.begin():
+                if write_first:
+                    await session.execute(text("INSERT INTO item VALUES (1)"))
+                async with session.begin_nested():
+                    await session.execute(text("INSERT INTO item VALUES (2)"))
+                async with session.begin_nested():
+                    await session.execute(text("INSERT INTO item VALUES (3)"))
+                raise RuntimeError("later step failed")
+        assert await _stored(engine) == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_pragma_before_a_savepoint_still_applies(tmp_path: Path) -> None:
+    engine = await _sqlite_table(tmp_path)
+    try:
+        async with async_sessionmaker(engine)() as session, session.begin():
+            await session.execute(text("PRAGMA foreign_keys = ON"))
+            async with session.begin_nested():
+                await session.execute(text("INSERT INTO item VALUES (4)"))
+            pragma = await session.execute(text("PRAGMA foreign_keys"))
+            assert pragma.scalar_one() == 1
+        assert await _stored(engine) == [4]
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # alembic upgrade head against an aiosqlite DB
 # ---------------------------------------------------------------------------
 

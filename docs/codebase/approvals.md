@@ -226,8 +226,8 @@ or `"target_gone_since_approval"` and the `target_id`.
 This covers a request that was approved just before an update and had
 not run yet. A remote-write mint for a satellite runner checks the same
 rule: an approval from an older release mints nothing
-(`REMOTE_WRITE_GATE_UNSATISFIED`, logged like the other mint refusals,
-and the approval stays unused).
+(`REMOTE_WRITE_GATE_UNSATISFIED`). Like the other refused remote-write
+mints, the refusal writes one audit row, and the approval stays unused.
 
 **No release identity.** A build with no `GIT_SHA` (or `GIT_SHA=unknown`)
 has no release identity. Only local development runs like this; every
@@ -425,7 +425,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
     Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
-    call instead of letting it wait.
+    call instead of letting it wait. A `k8s.apply` gets its own refusal
+    text, which says what to set (`declare_hidden_stored_param(...,
+    refusal=...)`).
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
@@ -929,6 +931,16 @@ boundary (`except McpInvalidParamsError` in both `handle_tools_call` and
 branches that already set `400`/`403`/`404` pass through untouched, and a
 genuine handler fault still records `500`.
 
+## The fixed rules
+
+Some approval rules are fixed: no policy and no admin can lower them. They
+are in one list, `policy/fixed_rules.py` (`credential_waits`,
+`rights_change_waits`, `policy_change_waits`, `agent_never_approves`,
+`destructive_waits`, `delete_waits`, `caller_address_waits`). The call
+gate asks this list before it reads a standing grant or a run approval.
+Each rule and its sentence:
+[policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
+
 ## A credential call always waits for a person
 
 A call that reads, writes or makes a credential (the classes
@@ -1113,11 +1125,19 @@ model, or resume endpoint):
    or per-tenant override may surface the credential on the feed. See
    `docs/codebase/broadcast.md`.
 
-The `_approved=True` re-dispatch gate-bypass (the resume authorization)
-is unchanged in mechanism but now matters for humans too: with humans
-routed to `NEEDS_APPROVAL`, re-running the gate on resume would re-queue
-the call instead of executing it, so the bypass is what lets the
-approved op run.
+**An approved request is checked again when it runs.** The
+`_approved=True` re-dispatch does not ask for the approval again.
+This matters for humans too: with humans routed to `NEEDS_APPROVAL`, the
+full gate on resume would make the call wait again instead of running it.
+The run still checks what can change while the call waits
+(`operations/approved_run_rights.py`): the grants of an agent that asked,
+a revoked agent login (also the acting agent of a hosted agent run), a
+blocked login, and the risk level. An approved step of a multi-step
+operation gets the same checks before it clears. When a person runs an
+approved call from an approvals surface, the call runs as that person.
+MEHO does not read the role of the login that asked again then, because
+it has no newer token of that login. A role lowered while the request
+waits counts at a re-run. To stop a login at once, block it.
 
 ## The approval groups and how a person approves (#3325)
 
@@ -2496,6 +2516,9 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
+| The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 
 The operation, connector and target always come from the request, so the
 caller cannot change them. A refused re-run runs nothing.
@@ -2522,11 +2545,21 @@ old `rerun_count`, so its claim does not match and it must read the
 request again. While the re-run runs, `result_state` reads `started`.
 
 **Who runs it.** The run uses the requester's identity, like the agent's
-own resume after approval. The approval is the authorization
-(`dispatch(..., _approved=True)`), through the same
-`_dispatch_resume_with_bound_context` the approve paths use. So the work
-reference, the session link and the result-handle owner are bound the same
-way.
+own resume after approval (`dispatch(..., _approved=True)`), through the
+same `_dispatch_resume_with_bound_context` the approve paths use. So the
+work reference, the session link and the result-handle owner are bound the
+same way. A request made inside a hosted agent run binds that acting agent
+again. The approval is not asked for again. The re-run checks what the
+first run checks (the grants of an agent that asked, a revoked agent
+login, a blocked login and the risk level), and also the caller's role
+and grants from the caller's token now: it needs the `operator` role, the
+same role as the call route (else 403 `insufficient_role`), and a call
+that a new call of the caller would refuse is refused
+(`operations/approved_run_rights.py`, see `agent-permission-model.md`).
+This is checked before the claim, so a refused re-run does not change the
+request. A refused request stays approved and can run again later, when
+the rights allow it. The dispatcher checks the same rules again when the
+run starts.
 
 **Result.** The new result replaces `resume_result`, so `/result`,
 `result_state` and `resume_outcome` show the latest attempt. When the run
@@ -2540,7 +2573,13 @@ parent: the request row), in the same transaction as the claim:
 first re-run is attempt 2. The run's own row also carries
 `approval_rerun_attempt` next to `approval_request_id`. A refused re-run
 writes an `approval.rerun` row with `result_status` `refused`, the reason
-in `refusal`, and `status_code` `409` or `422`.
+code in `refusal`, and `status_code` `403`, `409` or `422`. A refusal of
+the rights check also carries the full text in `reason`. A re-run refused
+to a caller who did not make the request (`insufficient_role` or
+`not_request_owner`) writes a row with the caller as `operator_sub` and
+`principal_sub`, the request id, and `requester_sub` set to `null`. It
+has no other field of the request, so no audit view shows the caller as
+the requester.
 
 **Response.** `RerunResponseBody`: `approval_request_id`, `attempt`,
 `dispatch_status`, `dispatch_op_id`, `dispatch_result`, `dispatch_error`.
@@ -2967,27 +3006,31 @@ second `approval.request` row:
   has `payload.request_state`, the state of the request it found, and a
   status code that fits it:
 
-  | `request_state` | Meaning | `status_code` |
-  |---|---|---|
-  | `waiting` | The request waits for approval. | 202 |
-  | `approved_not_started` | Approved, and the run has not started. | 200 |
-  | `approved_started` | Approved, and the run has started without a stored result. | 200 |
-  | `approved_executed` | Approved, and the run ended ok. | 200 |
-  | `approved_failed` | Approved, and the run failed. | 200 |
-  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 |
+  | `request_state` | Meaning | `status_code` | Shown as (`result_status`, console label) |
+  |---|---|---|---|
+  | `waiting` | The request waits for approval. | 202 | `pending`, "Awaiting approval" |
+  | `approved_not_started` | Approved, and the run has not started. | 200 | `pending`, "Approved, not run yet" |
+  | `approved_started` | Approved, and the run has started without a stored result. | 200 | `pending`, "Approved, run started, no result yet" |
+  | `approved_executed` | Approved, and the run ended ok. | 200 | `ok`, "Approved, run OK" |
+  | `approved_failed` | Approved, and the run failed. | 200 | `error`, "Approved, run failed" |
+  | `approved_uncertain` | Approved, and MEHO does not know if the run changed anything. | 200 | `error`, "Approved, result unknown: check the target before you run it again" |
 
-  An audit read shows an `approval.reuse` row by its status code. A row
-  with 202 reads as `pending`, and a row with 200 reads as `ok` in the
-  audit query (REST, CLI, MCP) and as "OK" in the web console
-  (`_derive_result_status` in `audit_query/query.py`, `resolve_status` in
-  `ui/references.py`). On this row, `ok` means that the retry got a request
-  a person approved. It does not say that the run went well:
-  `payload.request_state` holds the run state (for example
-  `approved_failed` or `approved_uncertain`).
+  An audit read shows an `approval.reuse` row by its `request_state`, not by
+  its status code. The table is `REUSE_STATES` in `audit_query/query.py`. The
+  audit query (REST, CLI, MCP) and its `result_status` filter use it, and so
+  does the web console (`ui/references.py`: the label, the colour and the
+  "what happened" line). The row says the state at the time of the retry, not
+  the state now: `pending` means the request had not finished then. The
+  "what happened" line of the drawer does not say "ran": the retry ran
+  nothing.
 
   The row of a call that gets the waiting request of the same call
   (`APPROVAL_SAME_CALL_REUSE`) is always for a waiting request. It has no
-  `request_state` and its status code is 202.
+  `request_state` and its status code is 202. It reads `pending`, and the
+  console shows "Awaiting approval". Its "what happened" line in the drawer
+  (`_build_what_happened`) is: "<who> asked again for <operation> on
+  <target>. At that time the same call was waiting for approval, and this
+  call got that request." It does not say "ran".
 - `payload.params_hash` is the hash of this call's params
   (`compute_audit_params_hash`: secret values are masked before the hash).
 - `agent_session_id` is the session of this call, not the session of the
@@ -3685,6 +3728,140 @@ each container runs" block under the warning that the preview failed
 preview has no such key, and the stored request it reads (MCP tools and
 the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
 
+For a person the `k8s.apply` preview also has `object_summary`: one short
+entry per object of the manifest, built by
+`connectors/kubernetes/ops_write_apply_summary.py`. It is information
+only. It changes no approval rule. Each entry has the API group (`core`
+for the old `v1` kinds), the kind, the namespace and the name, and:
+
+- `state`: `new` or `exists`, from one read of the live object. A read that
+  the cluster refuses or that fails gives `unknown` and a `state_note`; the
+  card says "not known if it exists", never "new". MEHO reads the live
+  object only when the login that asked has the role Operator or higher.
+  For any other login there is no read: `state` is `not_read`, the card
+  shows the badge "not read" and the line "The live object was not read:
+  the login that asked has a role below Operator."
+- `other_writers`: the managers in the live object's `managedFields`,
+  without `meho`. `null` when the live object was not read or could not be
+  read.
+- `risky_fields`: found in the object as the dry run returns it, so they
+  include what the workload already has and the manifest does not send.
+  MEHO reads only the places that Kubernetes defines, from one list
+  (`_PLACES` in `ops_write_apply_summary.py`): the pod spec of a Pod, a
+  PodTemplate, a ReplicationController, a Deployment, a ReplicaSet, a
+  StatefulSet, a DaemonSet, a Job and a CronJob; the `secrets` and
+  `imagePullSecrets` of a ServiceAccount; the volume source of a
+  PersistentVolume; the `spec` of a Service; the `spec.tls` of an Ingress;
+  and the `roleRef` of a RoleBinding and a ClusterRoleBinding. In a pod
+  spec these are the service account, the image pull Secrets, each volume
+  that names a Secret (also a CSI, projected or other volume with a
+  `secretRef`), each `secretKeyRef` and `secretRef` of a container, and
+  host access: `hostPath`, `hostNetwork`, `hostPID`, `hostIPC`, `hostPort`,
+  and "a container asks for full access to its host" (the flag of its
+  `securityContext` that gives it that access). A Service of type `NodePort` or `LoadBalancer`
+  or with external IPs is named too. No free-form field is read: not the
+  `data` or `binaryData` of a ConfigMap, not the `spec` of a kind outside
+  the Kubernetes groups, not the labels or annotations of a pod template.
+  A Secret object is named ("a Secret object (its values are not shown)")
+  and never read. `null` when the dry run returned no object.
+- `built_in`: `true` only for a kind that Kubernetes itself defines in that
+  API group. The group and the kind are always read together.
+  `cluster_wide`: `true` for a kind that is not in a namespace.
+
+The entries show names, and a name shows only when it passes its check;
+else the card shows "(name not shown)". A role name that starts with
+`system:` shows when each part between the colons passes the same check.
+The kind of a `roleRef` shows only as `Role` or `ClusterRole`. On purpose
+the summary also shows the path of a `hostPath` volume, a host port number
+and the manager names of the other writers of the live object, because the
+person needs them to decide. A manager name shows only when it has
+letters, digits, `.`, `-`, `_` and `/`, at most 63 characters, and its
+`operation` only as `Apply` or `Update` (else "(not shown)"). The summary
+never shows a Secret value, an `env` value or a command line, and it runs
+through the same redaction as the manifest echo. MEHO reads the whole live
+object once, with the target's login, and uses only its `managedFields`.
+Nothing else of it is kept or shown. The console card shows the list in a
+"What each object is" block (`approvals/_modal.html`), with the sentence
+"This is what the cluster held when the request was made. The run does not
+check it again." An agent never reads `object_summary`: its own preview
+has no such key and makes no extra read, and the stored request it reads
+leaves it out.
+
+When the dry run of a `k8s.apply` fails, the stored request has the
+`preview_unavailable` marker and no `object_summary`. For a person, it
+still has the `manifest` echo and the `subject` line, built from the
+manifest text with the same hiding as on a preview that worked
+(`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
+line and `dry_run_stop` take the names from the documents after that
+hiding, in their own shape, so a redaction rule for a field path such as
+`manifest.*.metadata.name` hides the name in both too. The error of the
+dry run (`preview_error`, for a person and for agents) names each object
+the same way: MEHO writes each object label and name in it as the card
+shows it (`names_as_on_card` in `ops_write_preview.py`). Before anything is
+hidden or measured, each value that YAML does not read as text becomes
+plain text (`card_documents` in `ops_write_preview.py`): a date or time
+becomes its ISO text, `.nan` and `.inf` become that YAML text, and
+`!!binary` becomes its base64 text. A null character in a text (`"\0"` in
+YAML) becomes the two characters `\0`. So each filter hides such a value
+as text, and the stored request holds only values the database accepts. In
+a Secret, also one inside another object, the card hides each value of
+`data`, `stringData` and `binaryData`: the same fields that make the
+stored request keep the manifest only in the encrypted handoff. In any
+object, a number or a yes/no value under a secret name (`password:
+123456`) is hidden, and so is the argument after a secret flag on a
+command line (`--password 123456`), whatever type YAML gives it. The
+field `automountServiceAccountToken` keeps its yes/no value. For a
+manifest of more than one
+document, `dry_run_stop` names the document the dry run stopped at and
+says that the documents after it had no dry run. A caller that is not a
+person (the agent REST view and the MCP approvals tools) reads the
+`preview_unavailable` marker and the `preview_error` text, without these
+keys.
+The console card shows these in a "What the apply sends" block, and from
+the `preview_unavailable` mark the sentence "The summary of the objects
+could not be made, because the dry run failed." A key that cannot be built
+(for example from a manifest that is not valid YAML) is left out; the mark
+and that sentence stay.
+
+When MEHO cannot read the manifest text (it is not valid YAML or JSON),
+MEHO keeps the manifest only in the encrypted hand-off, as for every
+manifest that holds a secret value (see `connectors-kubernetes.md`). With
+`APPROVAL_HANDOFF_ENCRYPTION_KEY` set, the call waits for approval.
+Without it, MEHO refuses the call at once with the refusal text of
+`HANDOFF_KEY_REFUSAL` ("MEHO cannot keep this request: ... Set
+APPROVAL_HANDOFF_ENCRYPTION_KEY on the MEHO server (in the Helm chart:
+approvalHandoff), then send the call again."). The `preview_error` of a
+waiting call is
+`ApplyManifestError: manifest is not valid YAML/JSON`, followed by one of
+these (`connectors/kubernetes/manifest_yaml.py`):
+
+- The explanation of the parser with the line and the column of each part,
+  for example `expected ',' or ']', but got '<stream end>' (line 1,
+  column 6)`. A quoted part stays when it names a token of the YAML
+  grammar, or when it is fixed text of the parser that says what it
+  wanted (`expected a digit or '.'`) and not the text it read (after
+  `found` or `got`). Any other quoted part (an alias name, a tag, a
+  character of the manifest) becomes `'…'`.
+- For a `%` escape in a tag that is not UTF-8 (`!<tag:%FF>`): `a
+  %-escape in a tag is not valid UTF-8`, with the line and the column and
+  no byte value.
+- For a character the reader refuses (a control character):
+  `unacceptable character: special characters are not allowed (position
+  N)`, where N counts the characters from the start of the text.
+- For a value that its tag cannot read (`!!int abc`): `a value cannot be
+  read as the type its tag names (line L, column C)`.
+- Nothing more for an error with no explanation (for example an object
+  nested too deep).
+
+In every `preview_error` (of any operation), a null character becomes
+the two characters `\0`, because PostgreSQL cannot store it in the row
+(`preview_failure_reason` in `operations/_preview.py`).
+
+The text quotes nothing of the manifest. The same text is in the stored
+request, the console card, the REST views, the MCP approvals tools, the
+audit rows, the log line `proposed_effect_preview_failed` and the answer
+of the run after approval.
+
 ## Credential writes: what the approver sees (#4850)
 
 A credential write is an op that `classify_op` (`broadcast/events.py`)
@@ -4078,7 +4255,9 @@ shown). At approve time `_load_pending_for_approval` re-verifies it
 raises `PreviewBindingMissingError` → HTTP 422 on every approve surface
 (REST `/approve`, `/decide`, the console). This extends the existing
 `params_hash` swap-defence to the preview binding. The resume path
-(`dispatch(..., _approved=True)`) skips the policy gate. Right before the
+(`dispatch(..., _approved=True)`) does not ask for the approval again. It
+checks the risk level again: a raise to `destructive` refuses the run, so
+a `destructive` run never starts with no preview. Right before the
 run, every resume path builds the preview again and compares its hash
 (`refuse_resume_if_preview_changed`, see
 [An approval covers one target and one preview](#an-approval-covers-one-target-and-one-preview)).
@@ -4574,7 +4753,9 @@ CLI) the token must prove it:
     (default 300), whatever the window is; else
     `ApprovalSignInTooOldError`, mapped to 401 `fresh_sign_in_required:`
     with `max_age=300`;
-  - the sign-in must not have approved anything else; else
+  - the sign-in must not have approved anything else, and must not have
+    removed the person's own block (`principal.unblock` audit row with the
+    same sign-in key; `auth/sign_in_use.py` reads both kinds of row); else
     `ApprovalSignInReusedError`, mapped to 401
     `fresh_sign_in_already_used:` with `max_age=300`;
   - after it, that sign-in approves nothing more: its audit row carries
@@ -5424,7 +5605,9 @@ result row, or a self-approval), so every reader finds the requester in
 `requester_sub`. Two readers use it: `audit_query/query.py:_build_audit_entry`
 (the audit REST API, `meho audit query` / `show` / `replay`, the MCP audit
 tools and the session replay) and the console's audit row drawer
-(`ui/routes/audit/routes.py:_build_drawer_context`).
+(`ui/routes/audit/routes.py:_build_drawer_context`). A row with a
+`requester_sub` key is never read as the older form, also when its value
+is `null`.
 
 ### Session-replay lineage (#2086)
 
@@ -6086,6 +6269,12 @@ service`). A person's call follows its own rule (`_person_park_reason`,
 Grants are operator-role REST at `/api/v1/service-principals/grants`;
 delete-shaped ops are refused at creation (the grant list is the *floor*
 of what runs unattended, never a bypass of a modeled destructive gate).
+With the switch `CUSTOM_POLICY` on, the setting
+`SERVICE_GRANT_DELETE_SHAPED_PATTERNS` only adds names to the built-in
+delete names. An empty setting, or one that lists other names, never
+removes a built-in one. So a call by a service login of an operation with
+a built-in delete name waits for a person: a standing grant does not
+cover it.
 Full design: [`service-principal-grants.md`](service-principal-grants.md).
 
 ## Sandbox mode (#4622)
@@ -6192,4 +6381,4 @@ repository, no operation made from an API file at run time.
 - `backend/src/meho_backplane/api/v1/approvals.py::get_approval_result` — `GET /api/v1/approvals/{id}/result` (#3209).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): reads the stored row until it is decided + re-dispatch on approval.
-- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).
+- `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the re-dispatch entry point of the agent's own wait; the dispatcher checks the agent's rights again).

@@ -2103,6 +2103,16 @@ class EndpointDescriptor(Base):
     #: accepts no value there (``operations/switch_params.py``).
     #: ``parameter_schema`` is then the shown schema, without it.
     parameter_check_schema = cast("dict[str, object] | None", None)
+    #: Not columns. The code's own risk level and approval flag (from the
+    #: code or the import), kept by ``apply_effective_policy`` and
+    #: ``apply_step_policy`` before they set the effective values. ``None``
+    #: on a row they did not return: its own columns hold the code's values.
+    code_safety_level = cast("str | None", None)
+    code_requires_approval = cast("bool | None", None)
+    #: Not a column. The stored parameter schema, kept by the same two steps
+    #: before a switch hides a field from ``parameter_schema``. ``None`` on a
+    #: row they did not return: ``parameter_schema`` is then the stored one.
+    code_parameter_schema = cast("dict[str, object] | None", None)
     is_enabled: Mapped[bool] = mapped_column(
         sa.Boolean(),
         nullable=False,
@@ -2156,6 +2166,15 @@ class EndpointDescriptor(Base):
     # from the op id. Stored on the row so every process applies it, also
     # after a restart.
     op_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # #6959: two facts from the op's own definition in code
+    # (``register_typed_operation`` / ``register_composite_operation``).
+    # ``hard_to_undo`` is ``deletes``, ``stops`` or ``overwrites`` when a call
+    # can do that and no later call of the same connector undoes it; NULL
+    # means no. ``changes_rights`` is true when a call gives or takes rights,
+    # a login or an access policy in the target; NULL reads as no. Ingested
+    # ops leave both NULL. See ``docs/codebase/policy-classification.md``.
+    hard_to_undo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changes_rights: Mapped[bool | None] = mapped_column(sa.Boolean(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -2206,6 +2225,10 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+        sa.CheckConstraint(
+            "hard_to_undo IN ('deletes', 'stops', 'overwrites')",
+            name="ck_endpoint_descriptor_hard_to_undo",
         ),
     )
 
@@ -5968,6 +5991,20 @@ class RunnerAssignmentRow(Base):
     # ``web_session.revoked_at`` (NULL = active). ``stale_at IS NOT NULL``
     # maps to the ``UNKNOWN`` state in #2416's five-state rollup (#2506).
     stale_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # How many result batches the runner has set aside (batches MEHO refuses
+    # on every try), as the runner last said, and when it set the newest one
+    # aside. 0 / NULL until a runner says so.
+    set_aside_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    set_aside_last_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         default=None,

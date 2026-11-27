@@ -72,9 +72,9 @@ and a service login's call wait for approval. The approval queue checks the appr
 floor at the decision: a person below it cannot approve the request, so
 the approved call, run by the agent itself or by the person from an
 approvals surface, was approved by a `tenant_admin`. The dispatcher
-checks the person who runs it from an approvals surface once more. The
-requester's own run is not checked again: the agent's resume, and the
-re-run of a failed approved call by the requester, also a service login.
+checks the person who runs it from an approvals surface once more. A
+re-run of a failed approved call also checks the caller's role from the
+caller's token now (`operations/approved_run_rights.py`).
 
 **REST writes are for people, and a token call waits for approval.**
 `POST`, `PATCH` and `DELETE /api/v1/targets` use one gate,

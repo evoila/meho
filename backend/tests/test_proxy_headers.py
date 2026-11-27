@@ -26,8 +26,8 @@ client's second hop. The fix has two halves:
    adds the flag; see ``backend/Dockerfile``.
 2. Restrict the trusted-proxies list to known in-cluster proxies via
    the ``FORWARDED_ALLOW_IPS`` env var. The Helm chart wires this via
-   ``config.forwardedAllowIps`` (default ``127.0.0.1``, operators
-   pin to their Ingress controller's pod CIDR). See
+   ``config.forwardedAllowIps`` (default ``127.0.0.1``; operators
+   set the ingress controller's own address). See
    ``deploy/charts/meho/values.yaml`` and
    ``docs/cross-repo/reverse-proxy-contract.md``.
 
@@ -93,10 +93,9 @@ def _make_redirect_app() -> FastAPI:
 def trusted_client() -> Iterator[TestClient]:
     """Driver for the trusted-upstream path.
 
-    ``trusted_hosts='*'`` mirrors the operator-configured
-    ``FORWARDED_ALLOW_IPS=*`` posture used by single-tenant labs /
-    ephemeral CI clusters; production overrides pin to the Ingress
-    controller's pod CIDR. The trust posture is documented in
+    ``trusted_hosts='*'`` is used here only to drive the trusted
+    path. Operators set ``FORWARDED_ALLOW_IPS`` to the ingress
+    controller's own address. The trust posture is documented in
     ``docs/cross-repo/reverse-proxy-contract.md``.
     """
     wrapped = ProxyHeadersMiddleware(_make_redirect_app(), trusted_hosts="*")

@@ -3,8 +3,9 @@
 You have a running MEHO and a login. These pages take you to real work:
 
 1. **Register a target.** A target is a system MEHO manages, such as a
-   vCenter. Keep its password in the password safe, not in MEHO:
-   [Targets and secrets](../guides/targets-and-secrets.md).
+   vCenter. Store its password through MEHO, with the CLI or the web
+   console. The write waits until a person approves it:
+   [Targets and secrets](../guides/targets-and-secrets.md#store-the-credential-through-meho).
 2. **Run a first operation:**
    [First operations](../guides/first-operations.md).
 3. **Watch something.** A sensor runs one check on a schedule:

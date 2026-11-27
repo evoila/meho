@@ -124,6 +124,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.machine_logins import is_machine_login
+from meho_backplane.auth.operator import PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -196,6 +197,7 @@ __all__ = [
     "RunNotFoundError",
     "RunbookRunService",
     "StepCallerRequiredError",
+    "check_step_caller",
 ]
 
 
@@ -1460,7 +1462,7 @@ class RunbookRunService:
         # A check step follows the token rule on every path: also when the
         # run is advanced from the web console, only a ``safe`` check runs
         # at once for a person; a ``caution`` or higher check waits.
-        token_caller = caller.model_copy(update={"web_session": False})
+        token_caller = check_step_caller(caller)
         try:
             return await call_operation(token_caller, call_arguments)
         finally:
@@ -1732,6 +1734,20 @@ async def _load_pinned_template_or_none(
     if row is None:
         return None
     return _template_body_from_row(row)
+
+
+def check_step_caller(caller: Operator) -> Operator:
+    """The copy of *caller* that a runbook check step runs as.
+
+    The step follows the token rule, also for a person in the web console,
+    so the copy has no web console session. MEHO runs the step for the
+    person, so a person's login is a ``personal_agent``. Every other login
+    keeps its own kind.
+    """
+    update: dict[str, Any] = {"web_session": False}
+    if caller.principal_kind is PrincipalKind.USER and caller.in_code_kind is None:
+        update["in_code_kind"] = "personal_agent"
+    return caller.model_copy(update=update)
 
 
 def _template_body_from_row(row: RunbookTemplate) -> RunbookTemplateBody:

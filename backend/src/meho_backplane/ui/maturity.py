@@ -93,7 +93,12 @@ SURFACE_FEATURE: dict[str, str] = {
     "vault": "write_surfaces",
     "approvals": "approvals",
     "grants": "approvals",
+    # The policy page shows which operations wait for approval.
+    "policy": "approvals",
+    "blocked-people": "auth_tenancy",
     "audit": "audit",
+    # The settings file page writes tenant policies, conventions and targets.
+    "settings": "auth_tenancy",
 }
 
 

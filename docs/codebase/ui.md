@@ -56,11 +56,13 @@ own page:
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
 | `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
+| `/ui/policy` (menu entry "Policy", only with the switch `CUSTOM_POLICY` on; else the address does not exist) | read only: the fixed rules (`policy/fixed_rules.py`) and the risk-level edits (the rows of `/ui/connectors/overrides`), for a tenant admin; `ui/routes/policy/` |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
 | `/ui/checks`, `/ui/conventions`, `/ui/operations`, `/ui/connectors/registry` (menu entry "Connectors") | the `meho_backplane.ui.routes` row of "Key types" below |
 | `/ui/event-sources` | no section yet (`ui/routes/event_source/`) |
+| `/ui/settings` | [`settings.md`](settings.md#the-settings-file-page-of-the-web-console) |
 
 ## List-surface detail-navigation convention (#2463)
 
@@ -4043,3 +4045,40 @@ through service history never changes the agent cursor. The agent section
 opens the established human-only elevation modal, including its required
 time-bounded expiry. Service principals have no registry or stored display
 name, so their stored JWT subject intentionally remains the fail-open label.
+
+## Blocked people (`/ui/blocked-people`)
+
+`meho_backplane.ui.routes.principal_blocks` ships the console page of the
+admin block list (`docs/codebase/principal-block.md`):
+
+- `GET /ui/blocked-people` -- the blocks the admin may see, and the
+  block form.
+- `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
+  303 back to the page. Refused: 422, the page again with the typed
+  values and the message next to its field.
+- `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
+  `confirm=yes`: 200, the confirm page with the login, its blocks and
+  the scope (all tenants for a platform admin). The confirm form carries
+  the set of blocks the page showed (`shown`). With `confirm=yes`, MEHO
+  removes only those blocks: 303 back to the page. When the blocks of the
+  login changed in between (a block was added, removed or set again),
+  MEHO removes nothing and answers 200 with the confirm page again, the
+  new blocks and a note, so the admin confirms again. The audit row
+  `principal.unblock` names only the removed blocks. The admin's own login: 403 `own_login`. A platform
+  admin removes a block on their own login with `meho principal unblock
+  <sub> --reason <text>`, run in the tenant of that block, with a fresh
+  sign-in. On their own login, MEHO removes only the block of the
+  current tenant. A block in every tenant stays until another platform
+  admin removes it.
+  No block to remove: 404. The blocks cannot be read: 503.
+
+Every form is a plain `POST` form with the CSRF token and the page's
+tenant (`meho_tenant`) in hidden fields, so it works without JavaScript.
+A form from a page of another tenant answers 409.
+
+The three routes need a person with `tenant_admin`
+(`resolve_human_admin_or_403`, with the session of the session cookie
+only). They call `list_blocked`,
+`block_principal` and `unblock_principal`, the same functions as the REST
+routes, so a tenant admin works in their own tenant, a platform admin in
+every tenant, and nobody blocks their own login. The page adds no MCP tool.

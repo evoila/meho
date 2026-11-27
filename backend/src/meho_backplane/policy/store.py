@@ -57,6 +57,7 @@ from meho_backplane.policy.classification import (
     label_text_ok,
     taxonomy_from_documents,
 )
+from meho_backplane.policy.switches import classification_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -82,14 +83,16 @@ class InvalidStoredPolicyError(ValueError):
 
 #: What every surface says while the switch is off.
 SWITCH_OFF_REFUSAL: Final[str] = (
-    "Classification is off on this MEHO. An admin turns it on with the "
-    "POLICY_CLASSIFICATION setting."
+    "Classification is off on this MEHO. An admin can turn it on in one of two ways. "
+    "The POLICY_CLASSIFICATION setting turns on classification only. The CUSTOM_POLICY "
+    "setting turns on all three policy parts: classification, the policy evaluator and "
+    "approver routing."
 )
 
 
 def classification_enabled() -> bool:
-    """True when the ``POLICY_CLASSIFICATION`` switch is on."""
-    return get_settings().policy_classification
+    """True when ``POLICY_CLASSIFICATION`` or ``CUSTOM_POLICY`` is on."""
+    return classification_on(get_settings())
 
 
 def connector_id_of(row: EndpointDescriptor) -> str:

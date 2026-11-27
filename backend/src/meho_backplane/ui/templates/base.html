@@ -60,8 +60,11 @@
   ("vault", "/ui/vault", "lock", "Vault"),
   ("approvals", "/ui/approvals", "bell", "Approvals"),
   ("grants", "/ui/grants", "shield-check", "Grants"),
+  ("blocked-people", "/ui/blocked-people", "ban", "Blocked people"),
   ("audit", "/ui/audit", "scroll-text", "Audit"),
+  ("settings", "/ui/settings", "table", "Settings file"),
 ] %}
+{% if policy_menu | default(false) %}{% set nav_surfaces = nav_surfaces + [("policy", "/ui/policy", "shield-check", "Policy")] %}{% endif %}
 {#- Notifications bell macro (G10.7-T3 #1778). Rendered in both chrome
     locations (mobile top bar + desktop sidebar account row); ``id_prefix``
     keeps the badge swap targets unique across the two instances. The badge

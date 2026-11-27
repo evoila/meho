@@ -611,6 +611,8 @@ async def _persist_session_from_tokens(
         expected_audience=settings.keycloak_audience,
         allow_unchosen=True,
     )
+    # The person signs in at the web console in this moment.
+    operator = operator.model_copy(update={"in_code_kind": "person"})
     lifetime = timedelta(seconds=max(tokens.expires_in - SESSION_TTL_MARGIN_SECONDS, 60))
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():

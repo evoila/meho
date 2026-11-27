@@ -117,10 +117,14 @@ __all__ = [
     "without_policy",
 ]
 
-#: The answer to ``file`` while the ``POLICY_CLASSIFICATION`` switch is off.
+#: The answer to ``file`` while classification is off: both
+#: ``POLICY_CLASSIFICATION`` and ``CUSTOM_POLICY`` are off.
 FILE_NEEDS_CLASSIFICATION: Final[str] = (
-    "A policy file counts only while the POLICY_CLASSIFICATION switch is on. "
-    "It is off, so the file would change no answer."
+    "A policy file counts only while classification is on. Classification is off, so "
+    "the file would change no answer. An admin can turn it on in one of two ways. The "
+    "POLICY_CLASSIFICATION setting turns on classification only. The CUSTOM_POLICY "
+    "setting turns on all three policy parts: classification, the policy evaluator and "
+    "approver routing."
 )
 
 #: The label of the entries of a file that is not imported.

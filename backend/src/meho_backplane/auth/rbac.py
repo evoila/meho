@@ -38,6 +38,7 @@ declaring `verify_jwt_and_bind` separately.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Final, cast
 from uuid import UUID
@@ -212,9 +213,7 @@ async def require_operator_for_call(
         from meho_backplane.operations.reader_call import reader_call_refusal
         from meho_backplane.operations.role_floors import READER_CHANGE_CODE
 
-        # FastAPI read and checked the JSON body before the dependencies run;
-        # the request keeps it, so this read does not wait on the client.
-        sentence = await reader_call_refusal(operator, await request.json())
+        sentence = await reader_call_refusal(operator, await _json_body_or_none(request))
         if sentence is not None:
             structlog.get_logger(__name__).warning(
                 "insufficient_role",
@@ -224,6 +223,22 @@ async def require_operator_for_call(
             )
             raise RoleRefusedError(READER_CHANGE_CODE, sentence)
     return _OPERATOR_PLAIN_CHECK(operator)
+
+
+async def _json_body_or_none(request: Request) -> object:
+    """The JSON body of *request*, or ``None`` when the body is not JSON.
+
+    An empty body, plain text and a form body name no operation. FastAPI read
+    the body before the dependencies run and the request keeps it, so this
+    read does not wait on the client.
+    """
+    raw = await request.body()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 def _raise_reader_change_refusal(

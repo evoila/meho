@@ -323,3 +323,41 @@ async def test_an_operator_call_through_the_route_is_not_looked_up_as_a_reader(
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "ok"
     assert _RUNS == [_SAFE_WRITE]
+
+
+#: Bodies that are not a JSON object: (content, content type or ``None``).
+_NOT_A_JSON_OBJECT: dict[str, tuple[bytes, str | None]] = {
+    "empty JSON": (b"", "application/json"),
+    "empty, no type": (b"", None),
+    "plain text": (b"made-up words", "text/plain"),
+    "form": (b"connector_id=made-up&op_id=made-up", "application/x-www-form-urlencoded"),
+}
+
+
+@pytest.mark.parametrize("case", list(_NOT_A_JSON_OBJECT))
+@pytest.mark.usefixtures("safe_kinds")
+async def test_the_rest_call_route_answers_a_body_that_is_not_a_json_object(
+    client: tuple[httpx.AsyncClient, Any],  # noqa: F811
+    case: str,
+) -> None:
+    from tests.test_approved_run_rights import _token
+
+    ac, key = client
+    content, content_type = _NOT_A_JSON_OBJECT[case]
+    type_header = {"Content-Type": content_type} if content_type else {}
+
+    reader = await ac.post(
+        "/api/v1/operations/call",
+        content=content,
+        headers={**_reader_tokens(key)["person"], **type_header},
+    )
+    operator = await ac.post(
+        "/api/v1/operations/call",
+        content=content,
+        headers={**_token(key, "operator-person", role=TenantRole.OPERATOR), **type_header},
+    )
+
+    assert reader.status_code == 403, reader.text
+    assert reader.json() == _PLAIN_REST
+    assert operator.status_code == 422, operator.text
+    await _assert_nothing_stored_or_run()

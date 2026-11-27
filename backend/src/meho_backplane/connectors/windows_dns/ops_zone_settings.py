@@ -283,7 +283,6 @@ ZONE_SETTINGS_OPS: tuple[WindowsDnsOp, ...] = (
         tags=("write", "zone", "settings"),
         safety_level="caution",
         requires_approval=True,
-        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_call": (

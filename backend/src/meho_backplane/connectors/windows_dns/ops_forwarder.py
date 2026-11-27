@@ -225,7 +225,6 @@ FORWARDER_OPS: tuple[WindowsDnsOp, ...] = (
         tags=("write", "forwarder", "settings"),
         safety_level="caution",
         requires_approval=True,
-        hard_to_undo="overwrites",
         llm_instructions={
             "when_to_call": (
                 "Call while building a DNS server to set where it sends names it cannot "

@@ -1725,7 +1725,6 @@ _SYSCTL_WRITE_OP = LinuxOp(
     tags=("write", "sysctl", "linux"),
     safety_level="dangerous",
     requires_approval=True,
-    hard_to_undo="overwrites",
     changes_rights=True,
     llm_instructions={
         "when_to_use": (

@@ -31,12 +31,18 @@ import requests
 import requests.adapters
 
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
-from meho_backplane.auth.principal_block_run import in_cleanup, mark_request_sent, run_login
+from meho_backplane.auth.principal_block_run import (
+    in_cleanup,
+    mark_request_sent,
+    mark_step_refused,
+    run_login,
+)
 
 __all__ = ["check_before_send", "checked_requests_adapter", "to_thread_checked"]
 
 #: Longest time, in seconds, a worker waits for the check on the event loop.
-#: A check that does not end in this time refuses the request.
+#: A check that does not end in this time refuses the request, and the run
+#: notes the refusal (``principal_block_check_unavailable``).
 _CHECK_WAIT_SECONDS: Final[float] = 60.0
 
 #: The event loop of the call that started the running worker thread.
@@ -61,7 +67,11 @@ def _check_in_worker() -> None:
         future.result(timeout=_CHECK_WAIT_SECONDS)
     except TimeoutError:
         future.cancel()
-        raise PrincipalBlockedStepError(unavailable=True) from None
+        # Noted for the run like an unreadable block list, so a caller that
+        # catches the error does not go on, and no later request is sent.
+        refusal = PrincipalBlockedStepError(unavailable=True)
+        mark_step_refused(refusal)
+        raise refusal from None
 
 
 class _CheckedAdapter(requests.adapters.HTTPAdapter):

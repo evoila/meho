@@ -123,15 +123,15 @@ reads the login that the dispatcher noted for the running call
 `checking_logins_for_steps`. It reads a copy of the list that is at most 5
 seconds old, so it reads the database at most once in 5 seconds per process.
 
-Each Vault request that MEHO sends for the caller passes this check right
-before it is sent: the requests of the Vault and secret operations, the
-Vault login, and the shared credential reader. These calls run a blocking
+The requests of the Vault and secret operations, the Vault login and the
+shared credential reader pass this check right before each is sent. These calls run a blocking
 library in a worker thread, so they go through `to_thread_checked`
 (`auth/send_check.py`). The worker runs the check on the event loop when it
 starts the call, so a call that waited for a free worker is checked when it
 can run. The Vault client then runs the check again right before each of its
-requests, so a call that reads and then writes stops before the write when
-the caller was blocked during the read. The HTTP client that reaches another
+requests. This holds only for a request sent in a worker that
+`to_thread_checked` started. So a call that reads and then writes stops
+before the write when the caller was blocked during the read. The HTTP client that reaches another
 instance's store does the same. Outside an operation the check does nothing.
 
 Clean-up calls run with no block check: the end of MEHO's own Vault login,
@@ -143,9 +143,22 @@ pins the places that use it (`tests/test_principal_block_cleanup_guard.py`).
 The clean-up takes the id of what it removes only from the target's answer to
 the create.
 
-When a call needs approval, its preview and its permission check run with
-the same check. A caller blocked while they run gets the block refusal, and
-no approval request is made.
+A run that has changed the target ends in step with the secret store. Where
+the operation has a clean-up that undoes its change, the clean-up runs. Where
+it cannot undo its change, the step that brings the target and the secret
+store in step runs to its end with no block check: the store of a token that
+the run rotated, and the setting of a password that the run stored for a
+login. Every other request of the run keeps the check. A second helper marks
+such a step (`finish_without_block_check`), and the same test names each
+place with its rule (clean-up or finish).
+
+When a call needs approval, the op's own check before the wait, its preview
+and its permission check run with the same check, and the block is checked
+once more before the request is saved. A caller who is blocked before one of
+their Vault requests gets the block refusal, and no approval request is made.
+The answer says `uncertain` when a request of the preparation was sent, and
+`not_started` when none was sent. When the list cannot be read, the audit row
+has the status `error`, as for a call that runs.
 
 Once a check of a run refused, every later check of the same run refuses
 too, also when the list can be read again. The operation answers with the

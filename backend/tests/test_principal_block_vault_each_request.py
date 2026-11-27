@@ -16,10 +16,14 @@ The next request of the call is then not sent.
   login, and the read is not sent.
 * ``vault.kv.read`` through ``dispatch``: the answer says ``not_started``
   when no Vault request was sent, and ``uncertain`` after one.
-* ``vault.kv.put`` that waits for approval, through ``dispatch``: the caller
-  is blocked during the Vault login of the permission check. The
-  capabilities request is not sent, the answer is the block refusal, and
-  no approval request is made.
+* ``vault.kv.put`` that waits for approval, through ``dispatch``: a caller
+  blocked during the Vault login of the permission check gets the block
+  refusal with ``uncertain``; the capabilities request is not sent. A caller
+  blocked before any request of the preparation gets ``not_started``. A block
+  during the capabilities request, a block during a request of the op's own
+  check, an unreadable block list and a block check that takes too long
+  refuse too. No approval request is made in any of them, and the audit row
+  has the status of the answer.
 
 The end of MEHO's own Vault login is a clean-up: it is always sent.
 """
@@ -37,11 +41,21 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
+from meho_backplane.auth import principal_block as principal_block_module
+from meho_backplane.auth import send_check as send_check_module
 from meho_backplane.auth import vault as auth_vault
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.principal_block import PrincipalBlockedStepError, reset_block_cache
-from meho_backplane.auth.principal_block_run import request_was_sent, tracking_run
-from meho_backplane.auth.send_check import to_thread_checked
+from meho_backplane.auth.principal_block import (
+    PrincipalBlockedStepError,
+    PrincipalBlockUnavailableError,
+    reset_block_cache,
+)
+from meho_backplane.auth.principal_block_run import (
+    request_was_sent,
+    step_refused_in_run,
+    tracking_run,
+)
+from meho_backplane.auth.send_check import check_before_send, to_thread_checked
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialBackend
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import OperationResult
@@ -50,8 +64,10 @@ from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoin
 from meho_backplane.connectors.vault import VaultConnector, register_vault_typed_operations
 from meho_backplane.connectors.vault import ops as vault_ops
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.db.models import ApprovalRequest, AuditLog
+from meho_backplane.operations import _park_check as park_check_module
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations import dispatcher as dispatcher_module
 from meho_backplane.settings import get_settings
 
 from ._principal_block_send_helpers import add_tenant, block_the_caller
@@ -321,21 +337,165 @@ async def test_kv_read_blocked_after_the_vault_login_says_uncertain(
     assert vault.sent("GET", _DATA) == 0
 
 
-async def test_preflight_of_a_call_that_waits_for_approval_stops_for_a_blocked_caller(
+async def _approval_requests() -> list[ApprovalRequest]:
+    async with get_sessionmaker()() as session:
+        return list((await session.execute(select(ApprovalRequest))).scalars().all())
+
+
+async def _kv_put_row() -> AuditLog:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(select(AuditLog).where(AuditLog.path == "vault.kv.put"))
+        (row,) = rows.scalars().all()
+    return row
+
+
+_PUT = {"path": _ITEM, "data": {"password": "made-up-value"}}
+
+
+async def test_block_during_the_login_of_the_approval_preparation_says_uncertain(
     vault: VaultStandIn, registered: None
 ) -> None:
     vault.on_request("POST", "/v1/auth/jwt/login", _block)
-    params = {"path": _ITEM, "data": {"password": "made-up-value"}}
 
-    result = await _dispatch("vault.kv.put", params, approved=False)
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert vault.sent("POST", "/v1/auth/jwt/login") == 1
+    assert vault.sent("POST", "/v1/sys/capabilities-self") == 0
+    assert await _approval_requests() == []
+    row = await _kv_put_row()
+    assert row.status_code == 403
+    assert row.payload["error"]["execution_outcome"] == "uncertain"
+
+
+async def test_block_before_any_request_of_the_approval_preparation_says_not_started(
+    vault: VaultStandIn, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = dispatcher_module.park_check_refusal
+
+    async def _block_then_check(**kwargs: Any) -> Any:
+        await _block()
+        return await real(**kwargs)
+
+    monkeypatch.setattr(dispatcher_module, "park_check_refusal", _block_then_check)
+
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
 
     assert _is_block_refusal(result), (result.status, result.error)
     assert result.extras["execution_outcome"] == "not_started"
-    assert vault.sent("POST", "/v1/auth/jwt/login") == 1
+    assert vault.requests == []
+    assert await _approval_requests() == []
+    assert (await _kv_put_row()).status_code == 403
+
+
+async def test_block_during_the_last_request_of_the_preparation_makes_no_approval_request(
+    vault: VaultStandIn, registered: None
+) -> None:
+    vault.on_request("POST", "/v1/sys/capabilities-self", _block)
+
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert vault.sent("POST", "/v1/sys/capabilities-self") == 1
+    assert await _approval_requests() == []
+
+
+async def test_requests_of_the_ops_own_check_before_approval_pass_the_block_check(
+    vault: VaultStandIn, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _check_that_reads_vault(ctx: Any) -> str | None:
+        async with auth_vault.vault_client_for_operator(ctx.operator) as client:
+            await to_thread_checked(
+                client.secrets.kv.v2.read_secret_version, path=_ITEM, mount_point="secret"
+            )
+        return None
+
+    monkeypatch.setitem(park_check_module._PARK_CHECKS, "vault.kv.put", _check_that_reads_vault)
+    vault.on_request("POST", "/v1/auth/jwt/login", _block)
+
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert vault.sent("GET", _DATA) == 0
     assert vault.sent("POST", "/v1/sys/capabilities-self") == 0
-    async with get_sessionmaker()() as session:
-        rows = (await session.execute(select(ApprovalRequest))).scalars().all()
-    assert rows == []
+    assert await _approval_requests() == []
+
+
+def _list_unreadable_after(
+    vault: VaultStandIn, monkeypatch: pytest.MonkeyPatch, *, slow: bool = False
+) -> None:
+    """From the Vault login on, reading the block list fails (or takes too long)."""
+    real = principal_block_module.first_blocked_step_login
+    broken: list[bool] = []
+
+    async def _read(*args: Any, **kwargs: Any) -> Any:
+        if broken:
+            if slow:
+                await asyncio.sleep(5)
+            raise PrincipalBlockUnavailableError
+        return await real(*args, **kwargs)
+
+    async def _break() -> None:
+        broken.append(True)
+
+    monkeypatch.setattr(principal_block_module, "first_blocked_step_login", _read)
+    vault.on_request("POST", "/v1/auth/jwt/login", _break)
+
+
+async def test_unreadable_block_list_during_the_preparation_is_audited_as_an_error(
+    vault: VaultStandIn, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _list_unreadable_after(vault, monkeypatch)
+
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
+
+    assert result.status == "error", (result.status, result.error)
+    assert result.extras["error_code"] == "principal_block_check_unavailable"
+    assert result.extras["execution_outcome"] == "uncertain"
+    assert vault.sent("POST", "/v1/sys/capabilities-self") == 0
+    assert await _approval_requests() == []
+    row = await _kv_put_row()
+    assert row.status_code == 500
+    assert row.payload["error"]["error_code"] == "principal_block_check_unavailable"
+
+
+async def test_block_check_that_takes_too_long_stops_the_preparation_and_later_sends(
+    vault: VaultStandIn, registered: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(send_check_module, "_CHECK_WAIT_SECONDS", 0.2)
+    _list_unreadable_after(vault, monkeypatch, slow=True)
+
+    result = await _dispatch("vault.kv.put", dict(_PUT), approved=False)
+
+    assert result.status == "error", (result.status, result.error)
+    assert result.extras["error_code"] == "principal_block_check_unavailable"
+    assert vault.sent("POST", "/v1/sys/capabilities-self") == 0
+    assert await _approval_requests() == []
+    assert (await _kv_put_row()).status_code == 500
+
+
+async def test_a_timed_out_check_refuses_every_later_send_of_the_run(
+    vault: VaultStandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(send_check_module, "_CHECK_WAIT_SECONDS", 0.2)
+
+    async def _slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(principal_block_module, "first_blocked_step_login", _slow)
+
+    with _running():
+        with pytest.raises(PrincipalBlockedStepError) as first:
+            await to_thread_checked(lambda: None)
+        assert first.value.unavailable
+        assert isinstance(step_refused_in_run(), PrincipalBlockedStepError)
+        # A caller that caught the error does not go on: the next send is refused
+        # without a new read of the list.
+        with pytest.raises(PrincipalBlockedStepError):
+            await check_before_send()
 
 
 async def test_preflight_of_a_call_that_waits_for_approval_runs_for_a_caller_not_blocked(

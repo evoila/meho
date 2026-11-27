@@ -2456,7 +2456,7 @@
           "policy"
         ],
         "summary": "Carry Over",
-        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row. The\nlist reads no switch; only the first field, ``custom_policy_on``, says\nwhether ``CUSTOM_POLICY`` is on at that moment.",
         "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
         "parameters": [
           {
@@ -33358,6 +33358,10 @@
       },
       "CarryOverDryRun": {
         "properties": {
+          "custom_policy_on": {
+            "type": "boolean",
+            "title": "Custom Policy On"
+          },
           "scope": {
             "type": "string",
             "enum": [
@@ -33385,12 +33389,13 @@
         },
         "type": "object",
         "required": [
+          "custom_policy_on",
           "scope",
           "sandbox_mode",
           "settings"
         ],
         "title": "CarryOverDryRun",
-        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed.\n\n``custom_policy_on`` says whether ``CUSTOM_POLICY`` is on at that\nmoment; the list is the same in every switch state."
       },
       "CarryOverOperation": {
         "properties": {

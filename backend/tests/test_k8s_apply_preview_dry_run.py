@@ -4,26 +4,33 @@
 """``preview_operation`` of ``k8s.apply`` shows a dry run on the cluster.
 
 Each test goes through the real ``preview_dispatch`` over a stand-in
-Kubernetes API server that records every request.
+dynamic client that records every apply. The tests with the real
+Kubernetes client over an HTTP stand-in server are in
+``test_k8s_apply_preview_dry_run_wire.py``.
 
 * With ``K8S_APPLY_PREVIEW_DRY_RUN`` on, the preview shows for each document
   whether the apply creates it, changes it or is refused, with
-  ``plan_shown: true``. Every request carries ``dryRun=All``, and the preview
-  makes no approval request and no audit row.
-* A Secret value of the manifest is not in the dry-run result of the preview.
+  ``plan_shown: true``. Every apply carries ``dryRun=All``, and the preview
+  makes no approval request and one audit row of the class read.
+* A Secret value of the manifest is not in the dry-run result of the
+  preview, also when the cluster quotes it in a warning or a refusal.
+* ``document`` is the place in the manifest, also across empty documents.
+* Each entry is made for its own document; a document the preview cannot
+  name safely is not sent and is ``not_checked``.
+* A long list of documents is stored behind a result handle, and every
+  entry is read back; a short list stays in the answer.
 * A cluster that does not answer in time gives the time-out note and the
-  rest of the preview.
-* A login with the Read-only role gets no dry run.
+  rest of the preview. A failed sign-in gives a plain note.
+* A login with the Read-only role, and an Operator whom the policy refuses
+  the apply, get no dry run.
 * With the switch off, the preview sends nothing and answers as before.
-* The text of the ``preview_operation`` tool names the dry run only while the
-  switch is on.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
+import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -31,19 +38,23 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
+from multidict import CIMultiDict, CIMultiDictProxy
 from sqlalchemy import func, select
 
+import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
+from meho_backplane.connectors.kubernetes import ops_write_apply_dry_run as dry_run_module
+from meho_backplane.connectors.kubernetes.ops_write_apply_dry_run_text import WITHHELD
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog
-from meho_backplane.mcp import registry as mcp_registry
-from meho_backplane.mcp.registry import tool_for_settings
-from meho_backplane.mcp.tools._preview_typed_writes_text import K8S_APPLY_DRY_RUN_TEXT_SWAP
-from meho_backplane.operations import _composite_preview
+from meho_backplane.operations import _composite_preview, dispatch
+from meho_backplane.operations._preview import _k8s_apply_redactor
 from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.settings import get_settings
-from tests.mcp_test_fixtures import build_operator
 from tests.test_k8s_apply_card_through_dispatch import (
     _CONNECTOR_ID,
     _TENANT,
@@ -58,14 +69,26 @@ from tests.test_ui_approvals import _bff_env, _seed_tenant
 __all__ = ["_bff_env", "_kubernetes_registry"]
 
 _SWITCH = "K8S_APPLY_PREVIEW_DRY_RUN"
+_SECRET_VALUE = "made-up-value-7Qx2Lp9Vw"
+
+
+class _WarningResponse(_Response):
+    """A stand-in answer that carries ``Warning`` headers."""
+
+    def __init__(self, status: int, body: Any, warnings: list[str]) -> None:
+        super().__init__(status, body)
+        self.headers = CIMultiDictProxy(
+            CIMultiDict(("Warning", f'299 - "{text}"') for text in warnings)
+        )
 
 
 class _StandInCluster:
     """A stand-in API server: 201 for a new object, 200 for one in *live*.
 
-    A kind of *refused_kinds* is refused with 422, as an admission check
-    refuses it. A namespace of *missing_namespaces* gives 404. With *hang*
-    each apply waits until it is cancelled.
+    A kind of *refused_kinds* is refused with 422 and *refusal*, as an
+    admission check refuses it. A namespace of *missing_namespaces* gives
+    404. Each answer carries *warnings*. With *hang* each apply waits until
+    it is cancelled.
     """
 
     def __init__(
@@ -75,11 +98,15 @@ class _StandInCluster:
         refused_kinds: frozenset[str] = frozenset(),
         missing_namespaces: frozenset[str] = frozenset(),
         hang: bool = False,
+        refusal: str = "refused by an admission check",
+        warnings: tuple[str, ...] = (),
     ) -> None:
         self.live = live
         self.refused_kinds = refused_kinds
         self.missing_namespaces = missing_namespaces
         self.hang = hang
+        self.refusal = refusal
+        self.warnings = list(warnings)
         self.requests: list[dict[str, Any]] = []
         self.resources = SimpleNamespace(get=self._discover)
 
@@ -91,11 +118,13 @@ class _StandInCluster:
         if self.hang:
             await asyncio.Event().wait()
         if kwargs.get("namespace") in self.missing_namespaces:
-            return _Response(404, {"kind": "Status", "message": "namespaces web not found"})
+            body: Any = {"kind": "Status", "message": "namespaces web not found"}
+            return _WarningResponse(404, body, self.warnings)
         if resource.kind in self.refused_kinds:
-            return _Response(422, {"kind": "Status", "message": "refused by an admission check"})
-        body = kwargs["body"]
-        return _Response(200 if kwargs["name"] in self.live else 201, body)
+            body = {"kind": "Status", "message": self.refusal}
+            return _WarningResponse(422, body, self.warnings)
+        status = 200 if kwargs["name"] in self.live else 201
+        return _WarningResponse(status, kwargs["body"], self.warnings)
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +166,17 @@ def _preview(manifest: str, operator: Operator | None = None) -> dict[str, Any]:
             params={"manifest": manifest},
         )
     )
+
+
+def _preview_rows() -> list[AuditLog]:
+    async def _do() -> list[AuditLog]:
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(AuditLog).where(AuditLog.method == "PREVIEW").order_by(AuditLog.occurred_at)
+            )
+            return list(result.scalars().all())
+
+    return asyncio.run(_do())
 
 
 def _counts() -> tuple[int, int]:
@@ -192,10 +232,14 @@ def test_the_preview_shows_a_create_a_change_and_a_refusal(
     assert "refused by an admission check" in refused["error"]
     assert refused["namespace"] == "prod"
     assert refused["name"] == "web"
-    # Every request is a dry run, and the preview stores nothing.
+    # Every request is a dry run. The preview makes no approval request,
+    # and one audit row of the class read.
     assert len(cluster.requests) == 3
     assert all(request["dry_run"] == "All" for request in cluster.requests)
-    assert _counts() == before
+    assert _counts() == (before[0], before[1] + 1)
+    row = _preview_rows()[-1]
+    assert (row.method, row.path, row.payload["op_class"]) == ("PREVIEW", "k8s.apply", "read")
+    assert row.payload["documents"] == 3
     # The approval rules do not change.
     assert answer["safety_level"] == "dangerous"
     assert answer["policy_verdict"] == "needs-approval"
@@ -309,27 +353,6 @@ def test_with_the_switch_off_the_preview_sends_nothing(
     assert "proposed_effect" not in answer
 
 
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
-def test_the_tool_text_names_the_dry_run_only_with_the_switch_on(
-    monkeypatch: pytest.MonkeyPatch, on: bool
-) -> None:
-    monkeypatch.setenv("MCP_SHORT_TOOL_TEXTS", "false")
-    if on:
-        _switch_on(monkeypatch)
-    get_settings.cache_clear()
-    importlib.import_module("meho_backplane.mcp.tools.operations")  # registers the tool
-    definition = mcp_registry._TOOLS["preview_operation"][0]
-    old, new = K8S_APPLY_DRY_RUN_TEXT_SWAP
-
-    description = tool_for_settings(definition, build_operator()).to_wire()["description"]
-
-    assert old in definition.description
-    if on:
-        assert new in description
-    else:
-        assert description == definition.description
-
-
 def test_a_failed_cluster_login_says_the_dry_run_did_not_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -348,5 +371,236 @@ def test_a_failed_cluster_login_says_the_dry_run_did_not_work(
     assert answer["plan_shown"] is False
     assert "did not work" in answer["plan_note"]
     assert "the cluster login was refused" in answer["plan_note"]
+    assert "RuntimeError" not in answer["plan_note"]
     assert "proposed_effect" not in answer
+    assert cluster.requests == []
+
+
+def _secret_manifest(extra: str = "") -> str:
+    secret = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "db", "namespace": "prod"},
+            "stringData": {"password": _SECRET_VALUE},
+        }
+    )
+    return secret + extra
+
+
+def test_a_warning_that_quotes_a_secret_value_hides_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(warnings=(f"the value {_SECRET_VALUE} is weak",))
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_secret_manifest())
+
+    assert _changes(answer) == [(1, "Secret", "create")]
+    warnings = answer["proposed_effect"]["preview"]["documents"][0]["warnings"]
+    assert warnings and "is weak" in warnings[0]
+    assert _SECRET_VALUE not in json.dumps(answer)
+
+
+def test_a_refusal_that_quotes_a_secret_value_hides_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(
+        refused_kinds=frozenset({"Secret"}),
+        refusal=f"the password {_SECRET_VALUE} breaks the rule of the admission check",
+    )
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_secret_manifest())
+
+    assert _changes(answer) == [(1, "Secret", "refused")]
+    error = answer["proposed_effect"]["preview"]["documents"][0]["error"]
+    assert "breaks the rule of the admission check" in error
+    assert _SECRET_VALUE not in json.dumps(answer)
+
+
+def test_a_text_that_quotes_a_short_secret_value_is_withheld(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(warnings=("the pin q7 is too short",))
+    _setup(monkeypatch, cluster)
+    manifest = yaml.safe_dump(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "pin", "namespace": "prod"},
+            "stringData": {"pin": "q7"},
+        }
+    )
+
+    answer = _preview(manifest)
+
+    assert answer["proposed_effect"]["preview"]["documents"][0]["warnings"] == [WITHHELD]
+
+
+def test_document_counts_the_place_across_empty_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(refused_kinds=frozenset({"Deployment"}))
+    _setup(monkeypatch, cluster)
+    manifest = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: settings, namespace: prod}\n"
+        "---\n"
+        "---\n"
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web, namespace: prod}\n"
+        "spec: {template: {spec: {containers: [{name: app, image: web:2}]}}}\n"
+    )
+
+    answer = _preview(manifest)
+
+    assert _changes(answer) == [(1, "ConfigMap", "create"), (3, "Deployment", "refused")]
+
+
+def test_a_document_the_preview_cannot_name_is_not_counted_as_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(live=frozenset({"web"}))
+    _setup(monkeypatch, cluster)
+
+    def _drops_deployments(ctx: Any) -> Any:
+        redact = _k8s_apply_redactor(ctx)
+
+        def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [doc for doc in redact(docs) if doc.get("kind") != "Deployment"]
+
+        return _redact
+
+    # The shown list is one entry shorter than the manifest.
+    monkeypatch.setattr(dry_run_module, "_k8s_apply_redactor", _drops_deployments)
+
+    answer = _preview(_THREE_OBJECTS)
+
+    assert answer["plan_shown"] is False
+    preview = answer["proposed_effect"]["preview"]
+    documents = preview["documents"]
+    assert [doc["document"] for doc in documents] == [1, 2, 3]
+    assert documents[1]["change"] == "not_checked"
+    assert "kind" not in documents[1]
+    assert preview["not_checked"] == [2]
+    # Each checked entry names the document it was checked for.
+    assert [(r["kind"], r["name"]) for r in cluster.requests] == [
+        ("ConfigMap", "settings"),
+        ("Ingress", "web"),
+    ]
+    assert (documents[0]["kind"], documents[0]["name"]) == ("ConfigMap", "settings")
+    assert (documents[2]["kind"], documents[2]["name"]) == ("Ingress", "web")
+
+
+class _Valkey:
+    """A minimal async Valkey stand-in, so the real result store keeps rows."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        del ex
+        self.values[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.values.get(name)
+
+
+def _config_maps(count: int) -> str:
+    return "---\n".join(
+        f"apiVersion: v1\nkind: ConfigMap\nmetadata: {{name: cm-{n}, namespace: prod}}\n"
+        for n in range(count)
+    )
+
+
+def test_a_long_list_of_documents_comes_back_as_a_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster()
+    _setup(monkeypatch, cluster)
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(dry_run_module, "_DOCUMENTS_REDUCER", JsonFluxReducer(store=store))
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    operator = _login("writer")
+
+    answer = _preview(_config_maps(400), operator)
+
+    assert answer["plan_shown"] is True
+    documents = answer["proposed_effect"]["preview"]["documents"]
+    assert isinstance(documents, dict)
+    handle_id = uuid.UUID(documents["handle"]["handle_id"])
+
+    async def _read_all() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        while True:
+            window = await read_result_window(operator, handle_id, offset=len(rows), limit=100)
+            rows.extend(window["rows"])
+            if not window["rows"]:
+                return rows
+
+    rows = asyncio.run(_read_all())
+    assert len(rows) == 400
+    assert [row["document"] for row in rows] == list(range(1, 401))
+    assert {row["change"] for row in rows} == {"create"}
+    assert {row["kind"] for row in rows} == {"ConfigMap"}
+    assert {row["namespace"] for row in rows} == {"prod"}
+    assert [row["name"] for row in rows] == [f"cm-{n}" for n in range(400)]
+
+
+def test_a_short_list_of_documents_stays_in_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster()
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_config_maps(3))
+
+    documents = answer["proposed_effect"]["preview"]["documents"]
+    assert isinstance(documents, list)
+    assert [doc["name"] for doc in documents] == ["cm-0", "cm-1", "cm-2"]
+
+
+def test_an_operator_whom_the_policy_refuses_gets_no_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    monkeypatch.setenv("MCP_PROFILE_CONNECTOR_LISTS", "true")
+    monkeypatch.setenv(
+        "MCP_CONNECTOR_PROFILES",
+        json.dumps({"k8s-read": {"tools": "operate", "connectors": ["k8s"]}}),
+    )
+    get_settings.cache_clear()
+    cluster = _StandInCluster()
+    _setup(monkeypatch, cluster)
+    # A read-only profile: the policy refuses every call that changes something.
+    caller = Operator(
+        sub="profile-writer",
+        name="profile-writer",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        mcp_tool_profile="k8s-read",
+    )
+
+    answer = _preview(_THREE_OBJECTS, caller)
+
+    assert cluster.requests == []
+    assert answer["plan_shown"] is False
+    assert answer["plan_note"] == _composite_preview.TARGET_READ_NOT_ALLOWED_NOTE
+    assert answer["policy_verdict"] == "deny"
+    assert _preview_rows() == []
+    # The real call of this caller is refused too.
+    result = asyncio.run(
+        dispatch(
+            operator=caller,
+            connector_id=_CONNECTOR_ID,
+            op_id="k8s.apply",
+            target=_Target(),
+            params={"manifest": _THREE_OBJECTS},
+        )
+    )
+    assert result.status == "denied", result
     assert cluster.requests == []

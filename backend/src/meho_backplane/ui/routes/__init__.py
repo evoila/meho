@@ -376,7 +376,8 @@ def build_router() -> APIRouter:
     router.include_router(build_vault_status_router())
     # The settings file page: upload, preview, apply (``/ui/settings``).
     router.include_router(build_settings_router())
-    # The policy page (``/ui/policy``), read only; 404 with CUSTOM_POLICY off.
+    # The policy page (``/ui/policy``), read only; with CUSTOM_POLICY off the route
+    # does not match, as an address that does not exist.
     router.include_router(build_policy_router())
     router.include_router(build_stubs_router())
     return router

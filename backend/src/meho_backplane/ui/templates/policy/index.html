@@ -23,16 +23,18 @@
   <header class="space-y-1">
     <h1 class="flex items-center gap-2 text-2xl font-semibold">Policy{% include "_maturity_badge.html" %}</h1>
     <p class="text-sm text-muted">
-      The rules that decide which operations run at once and which wait for
-      a person. This page only shows them.
+      This page shows two lists: the fixed rules and the risk-level edits.
+      It changes nothing.
     </p>
   </header>
 
   <section class="space-y-2" data-policy-fixed-rules>
     <h2 class="text-lg font-semibold">Fixed rules</h2>
     <p class="text-sm text-muted">
-      These rules always hold, whatever the policy says. No policy and no
-      admin can lower them.
+      A fixed rule is one of MEHO's own checks. These checks decide whether a
+      call runs or waits for a person. Nothing after them lets a call run
+      where they make it wait: no standing grant, no run approval and no
+      policy rule.
     </p>
     <ul class="space-y-2">
       {% for rule_id, sentence in fixed_rules %}

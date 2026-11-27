@@ -2358,12 +2358,16 @@ def result_connector_http_403(
     never required, so a non-GitHub 403 still yields the structured
     cause with an empty ``permission_headers``.
 
-    An error with the
-    :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark holds
-    a fixed sentence of the connector: which request was refused and which
-    right is missing. The ``error`` text then gives that sentence instead of
-    the general one. It stays in front of the vendor's text, so an
-    operation that sends a secret keeps it when the vendor's text is
+    An error class with the
+    :class:`~meho_backplane.connectors.base.ConnectorOwnMessage` mark can
+    name a fixed sentence of the connector in its class attribute
+    ``OWN_TEXT``: which request was refused and which right is missing (for
+    example
+    :class:`~meho_backplane.connectors.keycloak.managed_realm_check.ManagedRealmReadRefusedError`).
+    The ``error`` text then gives that sentence instead of the general one.
+    The text of the error itself is never used: an HTTP error's text can
+    hold the request URL. The sentence stays in front of the vendor's text,
+    so an operation that sends a secret keeps it when the vendor's text is
     hidden. The ``extras`` are the same.
     """
     response = exc.response
@@ -2386,8 +2390,9 @@ def result_connector_http_403(
         "the upstream sent it). See docs/codebase/error-message-shape.md for "
         "the dispatch error convention."
     )
-    if isinstance(exc, ConnectorOwnMessage):
-        summary = f"connector_http_403: {exc}"
+    own_text = getattr(type(exc), "OWN_TEXT", None)
+    if isinstance(exc, ConnectorOwnMessage) and isinstance(own_text, str):
+        summary = f"connector_http_403: {own_text}"
     if upstream_message is not None:
         summary = f"{summary}{UPSTREAM_SAID}{upstream_message}"
     extras: dict[str, Any] = {

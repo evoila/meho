@@ -411,6 +411,29 @@ async def test_dispatch_hides_vendor_text_of_a_returned_result_that_claims_the_m
     assert "quokka" not in str(payload)
 
 
+_REFUSED_URL = "https://appliance.example.test/api/licences/quokka-path"
+
+
+async def _raising_marked_403(operator: Operator, target: Any, params: dict[str, Any]) -> Any:
+    """A marked HTTP 403 whose own text holds the URL and the vendor's words."""
+    request = httpx.Request("POST", _REFUSED_URL)
+    response = httpx.Response(403, json={"message": _VENDOR_TEXT}, request=request)
+    raise _MarkedHttpError(f"{_REFUSED_URL}: {_VENDOR_TEXT}", request=request, response=response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_dispatch_never_shows_the_own_text_of_a_marked_403() -> None:
+    """Only a fixed sentence of the error class goes into the 403 ``error``."""
+    result, payload = await _dispatch(_raising_marked_403)
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_http_403"
+    assert (result.error or "").startswith("connector_http_403: the upstream returned HTTP 403")
+    assert "quokka" not in result.model_dump_json()
+    assert "quokka" not in str(payload)
+
+
 _RKE2_ROTATE = next(op for op in RKE2_OPS if op.op_id == "rke2.token.rotate")
 
 

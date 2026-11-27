@@ -38,7 +38,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 import httpx
 
@@ -74,9 +74,13 @@ class ManagedRealmReadRefusedError(ConnectorOwnMessage, httpx.HTTPStatusError):
     """Keycloak answered 403 to the read of the managed realm.
 
     The message is the fixed sentence :data:`_REFUSED_TEXT`; it holds no
-    vendor text and no value of the call. Request and response are the ones
-    of the refused read, so the 403 result keeps its usual fields.
+    vendor text and no value of the call. The 403 result takes the sentence
+    from :attr:`OWN_TEXT`, never from the error's text. Request and response
+    are the ones of the refused read, so the 403 result keeps its usual
+    fields.
     """
+
+    OWN_TEXT: ClassVar[str] = _REFUSED_TEXT
 
     def __init__(self, refused: httpx.HTTPStatusError) -> None:
         super().__init__(_REFUSED_TEXT, request=refused.request, response=refused.response)

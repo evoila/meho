@@ -331,6 +331,33 @@ column. A row with the scope "whole install" holds for every tenant and
 shows the install's values; a tenant's own rules can make the operation
 stricter for that tenant. The page says so.
 
+## What a call does: `hard_to_undo` and `changes_rights`
+
+These two facts come from the operation's own definition in code, not from
+a policy. A typed or multi-step operation sets them when it registers
+(`register_typed_operation` and `register_composite_operation` in
+`operations/typed_register.py`). A connector package sets them through the
+connector kit (kit 1.7 or higher).
+
+| Field | Values | Means |
+|---|---|---|
+| `hard_to_undo` | `deletes`, `stops`, `overwrites`, or none (the default) | A call can delete, stop or overwrite something, and no later call of the same connector brings it back. |
+| `changes_rights` | yes or no (the default) | A call that changes who or what may reach or use something in the target system: a login, a group or role, an access list, a firewall rule. |
+
+- Registration refuses `hard_to_undo` on a `safe` operation, and any word
+  other than the three. The error names the operation and says why.
+- Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
+  (a CHECK allows only the three words) and
+  `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
+  Each start writes the values from the code again. Operations from an
+  imported API spec leave both NULL.
+- No rule of MEHO reads the two fields. No call waits, runs or is refused
+  because of them.
+- A delivery call of the Argo CD or Kubernetes connector (it deploys or
+  runs a workload) carries no `hard_to_undo` on the whole operation. Its
+  `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`
+  names these calls and checks their stored rows.
+
 ## Known limits
 
 - The policy file import (`policy.apply`, see [policy.md](policy.md))

@@ -49,6 +49,8 @@ _Spec = tuple[
     dict[str, Any],  # guidance
     list[str],  # tags
     Literal["safe", "caution"],  # safety level
+    Literal["deletes", "stops", "overwrites"] | None,  # hard to undo
+    bool,  # changes rights
 ]
 
 _WRITE_TAGS = ["spaces", "write", "ownership"]
@@ -65,6 +67,8 @@ _SPECS: tuple[_Spec, ...] = (
         s.ASSIGN_GUIDANCE,
         _WRITE_TAGS,
         "caution",
+        None,
+        False,
     ),
     (
         "spaces.unassign",
@@ -77,6 +81,8 @@ _SPECS: tuple[_Spec, ...] = (
         s.UNASSIGN_GUIDANCE,
         _WRITE_TAGS,
         "caution",
+        None,
+        False,
     ),
     (
         "spaces.reassign",
@@ -89,6 +95,8 @@ _SPECS: tuple[_Spec, ...] = (
         s.REASSIGN_GUIDANCE,
         _WRITE_TAGS,
         "caution",
+        None,
+        False,
     ),
     (
         "spaces.member.disable",
@@ -102,6 +110,8 @@ _SPECS: tuple[_Spec, ...] = (
         s.DISABLE_GUIDANCE,
         _WRITE_TAGS,
         "caution",
+        "stops",
+        False,
     ),
     (
         import_op.IMPORT_OP_ID,
@@ -116,6 +126,8 @@ _SPECS: tuple[_Spec, ...] = (
         import_op.IMPORT_GUIDANCE,
         _WRITE_TAGS,
         "caution",
+        "overwrites",
+        False,
     ),
     (
         "spaces.overview",
@@ -129,6 +141,8 @@ _SPECS: tuple[_Spec, ...] = (
         s.OVERVIEW_GUIDANCE,
         ["spaces", "read", "ownership", "health"],
         "safe",
+        None,
+        False,
     ),
     (
         "spaces.drift",
@@ -143,11 +157,13 @@ _SPECS: tuple[_Spec, ...] = (
         ds.DRIFT_GUIDANCE,
         ["spaces", "read", "ownership", "health"],
         "safe",
+        None,
+        False,
     ),
 )
 
 for _spec in _SPECS:
-    if _spec[-1] == "caution":
+    if _spec[8] == "caution":
         register_role_floor(_spec[0], TenantRole.TENANT_ADMIN)
 
 register_preview_builder(import_op.IMPORT_OP_ID, import_op.build_import_preview)
@@ -158,7 +174,19 @@ async def register_spaces_operations(
     embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Upsert the seven ``spaces.*`` typed operations. Safe to run twice."""
-    for op_id, handler, summary, description, params, response, guidance, tags, safety in _SPECS:
+    for (
+        op_id,
+        handler,
+        summary,
+        description,
+        params,
+        response,
+        guidance,
+        tags,
+        safety,
+        hard_to_undo,
+        changes_rights,
+    ) in _SPECS:
         await register_typed_operation(
             product="spaces",
             version="1.x",
@@ -174,6 +202,8 @@ async def register_spaces_operations(
             tags=tags,
             safety_level=safety,
             requires_approval=safety != "safe",
+            hard_to_undo=hard_to_undo,
+            changes_rights=changes_rights,
             llm_instructions=guidance,
             embedding_service=embedding_service,
         )

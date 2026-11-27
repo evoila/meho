@@ -18,14 +18,23 @@ MEHO cannot read the block list, the page and both steps of an unblock
 answer ``503`` with ``principal_block_check_unavailable``. A
 change answers ``303`` back to the page. The unblock button of a row
 opens a confirm page first; only the form of that page (``confirm=yes``)
-removes blocks. The page never unblocks the admin's own login: that
-needs a reason and a fresh sign-in, so the admin runs
-``meho principal unblock <sub> --reason <text>`` in the tenant of the
-block. On the own login MEHO removes only the block of the current
-tenant, and a block in every tenant stays until another platform admin
-removes it. Each block and unblock
-writes one audit row named ``principal.block`` or ``principal.unblock``;
-the request record of the form keeps its own ``http.post:`` name.
+removes blocks. That form carries the set of blocks the page showed
+(``shown``), and the confirm removes only those blocks. When the blocks of
+the login changed in between, the confirm removes nothing and shows the
+confirm page again with the new blocks. The console never removes a block
+on the admin's own login. A platform admin removes a block on their own
+login with `meho principal unblock <sub> --reason <text>`, run in the
+tenant of that block, with a fresh sign-in. It removes only the block of
+that tenant. A block in every tenant stays until another platform admin
+removes it. A tenant admin cannot remove a block on their own login.
+Another tenant admin of that tenant removes a block of that tenant, and a
+platform admin with `tenant_admin` in the current tenant removes every
+block of another login, on the Blocked people page or with
+`meho principal unblock`. Only a platform admin removes a block in every
+tenant. Each block and unblock writes one audit row named
+``principal.block`` or ``principal.unblock``. The row names the console
+route of the form, not the REST route; the request record of the form
+keeps its own ``http.post:`` name.
 """
 
 from __future__ import annotations
@@ -42,10 +51,12 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import (
     BLOCK_SCOPE_ALL,
     BlockedPerson,
+    BlockSetChangedError,
     CannotBlockSelfError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
     block_principal,
+    block_set_digest,
     list_blocked,
     unblock_principal,
 )
@@ -57,6 +68,7 @@ from meho_backplane.ui.templating import get_templates
 __all__ = ["build_principal_blocks_router"]
 
 _PAGE = "/ui/blocked-people"
+_UNBLOCK_PAGE = f"{_PAGE}/unblock"
 _log = structlog.get_logger(__name__)
 _session = Depends(require_ui_session)
 
@@ -70,12 +82,20 @@ _admin = Depends(_human_admin)
 
 _SELF_BLOCK_MESSAGE = "You cannot block your own login."
 _OWN_LOGIN_UNBLOCK = (
-    "own_login: the console does not remove a block on your own login. "
-    "Run `meho principal unblock <sub> --reason <text>` in the tenant of the block, "
-    "with a fresh sign-in. On your own login MEHO removes only the block of the "
-    "current tenant. A block in every tenant stays until another platform admin removes it."
+    "own_login: The console never removes a block on the admin's own login. "
+    "A platform admin removes a block on their own login with "
+    "`meho principal unblock <sub> --reason <text>`, run in the tenant of that block, "
+    "with a fresh sign-in. It removes only the block of that tenant. "
+    "A block in every tenant stays until another platform admin removes it. "
+    "A tenant admin cannot remove a block on their own login. "
+    "Another tenant admin of that tenant removes a block of that tenant, "
+    "and a platform admin with `tenant_admin` in the current tenant "
+    "removes every block of another login, "
+    "on the Blocked people page or with `meho principal unblock`. "
+    "Only a platform admin removes a block in every tenant."
 )
 _CONFIRMED = "yes"
+_SET_CHANGED = "The blocks of this login changed. Check the blocks below and confirm again."
 _FIELD_MESSAGES = {
     "sub": "Enter the login id of the person.",
     "reason": "Enter a reason (at most 500 characters).",
@@ -144,7 +164,7 @@ def _back_to_page() -> RedirectResponse:
     return RedirectResponse(_PAGE, status_code=status.HTTP_303_SEE_OTHER)
 
 
-async def _index(
+async def blocked_people_page(
     request: Request,
     session: UISessionContext = _session,
     operator: Operator = _admin,
@@ -152,7 +172,7 @@ async def _index(
     return await _page(request, session, operator)
 
 
-async def _block(
+async def block_person(
     request: Request,
     sub: str = Form(default=""),
     reason: str = Form(default=""),
@@ -162,11 +182,13 @@ async def _block(
     sub, reason = sub.strip(), reason.strip()
     try:
         body = BlockCreate(sub=sub, reason=reason)
-        await block_principal(operator, body.sub, body.reason)
+        await block_principal(operator, body.sub, body.reason, route=("POST", _PAGE))
     except ValidationError as exc:
         errors = _errors_of(exc)
     except CannotBlockSelfError:
         errors = {"sub": _SELF_BLOCK_MESSAGE}
+    except PrincipalBlockUnavailableError as exc:
+        raise _unavailable() from exc
     else:
         return _back_to_page()
     return await _page(
@@ -180,6 +202,8 @@ async def _confirm_page(
     operator: Operator,
     sub: str,
     blocks: list[BlockedPerson],
+    *,
+    changed: bool = False,
 ) -> HTMLResponse:
     token = mint_csrf_token(str(session.session_id))
     context = {
@@ -187,6 +211,8 @@ async def _confirm_page(
         "active_surface": "blocked-people",
         "sub": sub,
         "blocks": blocks,
+        "shown": block_set_digest(blocks),
+        "changed_message": _SET_CHANGED if changed else "",
         "scope_all": BLOCK_SCOPE_ALL,
         "platform_admin": operator.platform_admin,
         "confirmed": _CONFIRMED,
@@ -210,27 +236,33 @@ def _unavailable() -> HTTPException:
     )
 
 
-async def _unblock(
+async def unblock_person(
     request: Request,
     sub: str = Form(min_length=1, max_length=255),
     confirm: str = Form(default=""),
+    shown: str = Form(default=""),
     session: UISessionContext = _session,
     operator: Operator = _admin,
 ) -> HTMLResponse | RedirectResponse:
     if sub == operator.sub:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_LOGIN_UNBLOCK)
-    if confirm != _CONFIRMED:
-        blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
-        if not blocks:
-            raise _not_blocked()
-        return await _confirm_page(request, session, operator, sub, blocks)
-    try:
-        await unblock_principal(operator, sub)
-    except PrincipalBlockUnavailableError as exc:
-        raise _unavailable() from exc
-    except PrincipalNotBlockedError as exc:
-        raise _not_blocked() from exc
-    return _back_to_page()
+    if confirm == _CONFIRMED:
+        try:
+            await unblock_principal(operator, sub, shown=shown, route=("POST", _UNBLOCK_PAGE))
+        except PrincipalBlockUnavailableError as exc:
+            raise _unavailable() from exc
+        except PrincipalNotBlockedError as exc:
+            raise _not_blocked() from exc
+        except BlockSetChangedError:
+            pass
+        else:
+            return _back_to_page()
+    blocks = [b for b in await _readable_blocks(operator) if b.sub == sub]
+    if not blocks:
+        raise _not_blocked()
+    return await _confirm_page(
+        request, session, operator, sub, blocks, changed=confirm == _CONFIRMED
+    )
 
 
 _HTML = {"text/html": {"schema": {"type": "string"}}}
@@ -240,21 +272,46 @@ _JSON_DETAIL = {
 _BACK_TO_PAGE: dict[int | str, dict[str, Any]] = {
     303: {"description": "Done. The answer sends the browser back to the page."}
 }
+#: JSON from the page, or plain text from the session check that runs first.
+_JSON_OR_TEXT = {**_JSON_DETAIL, "text/plain": {"schema": {"type": "string"}}}
+_UNREADABLE: dict[int | str, dict[str, Any]] = {
+    503: {
+        "description": (
+            "MEHO cannot read the block list now. The page answers with JSON; "
+            "the session check before the page answers with plain text."
+        ),
+        "content": _JSON_OR_TEXT,
+    }
+}
+_OTHER_TENANT: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": "The form comes from a page of another tenant. Reload the page.",
+        "content": _JSON_DETAIL,
+    }
+}
 
 
 def build_principal_blocks_router() -> APIRouter:
     """The ``/ui/blocked-people`` page and its two forms."""
     router = APIRouter(tags=["ui-principal-blocks"])
-    router.add_api_route(_PAGE, _index, methods=["GET"], response_class=HTMLResponse)
     router.add_api_route(
         _PAGE,
-        _block,
+        blocked_people_page,
+        methods=["GET"],
+        response_class=HTMLResponse,
+        responses=_UNREADABLE,
+    )
+    router.add_api_route(
+        _PAGE,
+        block_person,
         methods=["POST"],
         status_code=status.HTTP_303_SEE_OTHER,
         response_class=RedirectResponse,
         response_model=None,
         responses={
             **_BACK_TO_PAGE,
+            **_UNREADABLE,
+            **_OTHER_TENANT,
             422: {
                 "description": "The page again, with the error next to its field.",
                 "content": _HTML,
@@ -262,8 +319,8 @@ def build_principal_blocks_router() -> APIRouter:
         },
     )
     router.add_api_route(
-        f"{_PAGE}/unblock",
-        _unblock,
+        _UNBLOCK_PAGE,
+        unblock_person,
         methods=["POST"],
         status_code=status.HTTP_303_SEE_OTHER,
         response_class=RedirectResponse,
@@ -271,12 +328,22 @@ def build_principal_blocks_router() -> APIRouter:
         responses={
             **_BACK_TO_PAGE,
             200: {
-                "description": "The confirm page (the form has no confirm=yes).",
+                "description": (
+                    "The confirm page: the form has no confirm=yes, or the blocks "
+                    "of the login are not the blocks the confirm page showed."
+                ),
                 "content": _HTML,
             },
-            403: {"description": "The login is the admin's own login.", "content": _JSON_DETAIL},
+            403: {
+                "description": (
+                    "The login is the admin's own login (JSON), or the admin's own "
+                    "login is blocked in this tenant (plain text, from the session check)."
+                ),
+                "content": _JSON_OR_TEXT,
+            },
             404: {"description": "The login has no block you may remove.", "content": _JSON_DETAIL},
-            503: {"description": "MEHO cannot read the block list now.", "content": _JSON_DETAIL},
+            **_UNREADABLE,
+            **_OTHER_TENANT,
         },
     )
     return router

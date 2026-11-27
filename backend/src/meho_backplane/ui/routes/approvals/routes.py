@@ -1064,7 +1064,7 @@ async def _render_detail_modal(
     )
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
-        "request": project_request_to_view(approval, delegation, chain),
+        "request": project_request_to_view(approval, delegation, chain, reader=operator),
         # Redacted reviewer context (#3353), resolved from the shared
         # resolver so the modal renders the same substance ``meho approvals
         # show`` does. Always present in this context (StrictUndefined-safe)
@@ -1159,8 +1159,8 @@ async def _decide(
             error_hint=WEB_APPROVAL_HINT if approve_refused else None,
         )
 
-    # Approve starts the parked op in the background (the committed approval
-    # is the authorization) and answers within a second, however long the
+    # Approve starts the parked op in the background (the approval is not
+    # asked for again) and answers within a second, however long the
     # op runs (#5110). Reject runs nothing. The card asks again until the
     # run ends.
     run: dict[str, object] | None = None
@@ -1170,7 +1170,7 @@ async def _decide(
     context: dict[str, object] = {
         # The reason already passed validation in the service, so this
         # re-parse cannot raise; it shows the delegation on the outcome card.
-        "request": project_request_to_view(approval, parse_delegation(reason)),
+        "request": project_request_to_view(approval, parse_delegation(reason), reader=operator),
         "decision": decision,
         "run": run,
         # A self-approval says so on the outcome card (#3329), with the rule

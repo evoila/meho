@@ -174,6 +174,8 @@ from meho_backplane.operations.approval_rerun import (
     RerunNeedsNewApprovalError,
     RerunNotAllowedError,
     RerunParamsRequiredError,
+    RerunRightsRefusedError,
+    RerunRoleTooLowError,
     rerun_failed_request,
 )
 from meho_backplane.operations.approval_rights import ApproveRight, approve_right
@@ -187,6 +189,7 @@ from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.people_behind import entries_of, people_behind_line
+from meho_backplane.operations.platform_admin_card import card_for_reader
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
@@ -774,8 +777,15 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
     a person (:func:`without_person_only_effect_keys`). No caller reads the
-    internal keys (:func:`without_internal_effect_keys`).
+    internal keys (:func:`without_internal_effect_keys`). The parts of a card
+    that only a platform admin reads stay out for every other caller
+    (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
     """
+    return card_for_reader(row.op_id, _effect_for_kind(operator, row), reader=operator)
+
+
+def _effect_for_kind(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
+    """The ``proposed_effect`` of *row* for the kind of login *operator* is."""
     if _reads_whole_card(operator):
         return without_internal_effect_keys(row.proposed_effect)
     if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:
@@ -1428,7 +1438,7 @@ async def approve_approval_request(
     on a background task and the route returns HTTP 202 + a durable run
     handle (``{"run_id", "status": "pending", "async": true}``) instead of
     blocking for the resumed op's full duration. The resume runs through the
-    same exactly-one-resumer claim + policy bypass + audit path the inline
+    same exactly-one-resumer claim + approved-run checks + audit path the inline
     resume uses. Default (``async`` absent / false) is byte-identical to the
     pre-#3079 inline resume below.
 
@@ -1755,13 +1765,20 @@ async def rerun_approval_request(
     changed: same params, same target, same preview, same work reference
     (the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not
     passed, and MEHO was not updated since the request was made. Otherwise
-    the re-run is refused and the requester asks again. Each re-run, and each
-    refused re-run, writes an ``approval.rerun`` audit row.
+    the re-run is refused and the requester asks again. The re-run checks
+    what the first run checks (the grants of an agent that asked, a revoked
+    agent login, a blocked login and the risk level), and also the caller's
+    role and grants from the caller's token now, as for a new call: it
+    needs the ``operator`` role. A refused request stays approved and can
+    run again later. Each re-run, and each refused re-run, writes an
+    ``approval.rerun`` audit row.
 
     HTTP status codes:
 
     * 200 — the request ran again. ``dispatch_status`` is the run's status.
-    * 403 — the caller did not make the request.
+    * 403 — the caller did not make the request, the caller's role is too
+      low (``insufficient_role``), or a new call of the caller made now
+      would be refused (``approval_rerun_refused``).
     * 404 — request not found (or belongs to another tenant).
     * 409 — the last run did not fail, another re-run is running, or
       something changed and a new approval is needed.
@@ -1795,6 +1812,16 @@ async def rerun_approval_request(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_rerun_needs_new_approval: {exc}",
+        ) from exc
+    except RerunRoleTooLowError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_role",
+        ) from exc
+    except RerunRightsRefusedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=f"approval_rerun_refused: {exc}",
         ) from exc
     except RerunParamsRequiredError as exc:
         raise HTTPException(
@@ -2024,8 +2051,9 @@ async def decide_approval_request(
     )
 
     # Every approval drives the execute (#1503, #2293): stored params
-    # re-hydrate the dispatch; the committed approval is the authorization
-    # (``_approved=True``). The exactly-one-resumer claim inside
+    # re-hydrate the dispatch; the approval is not asked for again
+    # (``_approved=True``), and the run checks again what can change. The
+    # exactly-one-resumer claim inside
     # resume_dispatch_after_approval arbitrates against the in-process
     # agent waiter for a run-bound request — this path executes only when
     # the claim is free (waiter gone), else it no-ops already_resumed —

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 """A fake kubectl that keeps the state of a small cluster, for the tests of
-meho-host certificate, keyholder and unseal.
+meho-host certificate, keyholder, unseal and target-networks.
 
 cluster_harness.py puts a shell stub at the path of RKE2's kubectl. The stub
 logs its arguments to calls.log, like every stub, and runs this script. The
@@ -10,7 +10,8 @@ state is one JSON file, $MEHO_FAKE/cluster.json:
 - "objects": the Secrets of namespace meho by name, each with its "type",
   its "labels" and its "data", decoded;
 - "configmaps": the ConfigMaps of namespace meho by name, each the decoded
-  values of its "binaryData" and "data", as "kubectl apply" leaves them;
+  values of its "binaryData" and "data", as "kubectl apply" leaves them. A
+  merge patch of a ConfigMap changes only the keys of its "data";
 - "deployment_restarts": how many times "rollout restart
   deployment/meho" ran;
 - "openbao": the one OpenBao pod: its "uid", whether it is "sealed", the
@@ -21,8 +22,9 @@ state is one JSON file, $MEHO_FAKE/cluster.json:
   pod that is shutting down does. "boot_unsealed": the new pod is unsealed
   at once, as when someone else unseals it. "stops_after_unseal": the server
   stops answering after an unseal call;
-- "fail": the calls that fail: "patch", "delete", "create", "apply" and
-  "restart" (of OpenBao's StatefulSet and of the meho Deployment);
+- "fail": the calls that fail: "patch" (of a Secret or a ConfigMap),
+  "delete", "create", "apply" and "restart" (of OpenBao's StatefulSet and
+  of the meho Deployment);
 - "down": true when RKE2 does not answer at all;
 - "key_inputs": every call that got the unseal key on standard input.
 
@@ -112,12 +114,21 @@ def _get(state: State, words: list[str]) -> int:
 
 
 def _patch(state: State, words: list[str], stdin: str) -> int:
-    name = words[2]
+    kind, name = words[1], words[2]
     merge_from_stdin = "--type=merge" in words and "--patch-file=/dev/stdin" in words
-    if words[1] != "secret" or not merge_from_stdin:
-        return _error("the fake kubectl takes only a merge patch of a Secret on standard input")
+    if kind not in ("secret", "configmap") or not merge_from_stdin:
+        return _error(
+            "the fake kubectl takes only a merge patch of a Secret or a ConfigMap on standard input"
+        )
     if "patch" in state["fail"]:
         return _error(f"Internal error occurred: the patch {stdin.strip()} was not saved")
+    if kind == "configmap":
+        values = state["configmaps"].get(name)
+        if values is None:
+            return _error(f'configmaps "{name}" not found')
+        values.update(json.loads(stdin)["data"])
+        print(f"configmap/{name} patched")
+        return 0
     entry = state["objects"].get(name)
     if entry is None:
         return _error(f'secrets "{name}" not found')

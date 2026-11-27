@@ -244,6 +244,7 @@ class CoreInstallTests(InstallTestCase):
                     "cluster_cidr": "10.42.0.0/16",
                     "service_cidr": "10.43.0.0/16",
                     "join_address": "",
+                    "target_networks": "",
                     "from_disk": False,
                 },
             },

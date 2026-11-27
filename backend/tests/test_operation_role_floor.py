@@ -20,10 +20,10 @@ checks it (:mod:`meho_backplane.operations.role_floors`).
   ``tenant_admin`` approves it, and the agent's own resume then runs.
 * **After approval** -- the approver's role counts again when a person
   runs the approved call: an ``operator`` approver is refused, a
-  ``tenant_admin`` approver runs the call. The requester's own run is
-  not checked again, the person's approval is the authorization: an
-  agent's own resume runs, and a service login with the ``operator``
-  role runs its approved call again after a failed run.
+  ``tenant_admin`` approver runs the call. The requester's own run gets
+  the checks of its own login: an agent's own resume runs, and a service
+  login with the ``operator`` role runs its approved call again after a
+  failed run (the floor applies to people).
 * **The topology writes** -- the same rule on all five.
 """
 
@@ -328,7 +328,7 @@ async def test_a_service_login_still_waits_for_approval(
 async def test_a_person_below_the_floor_cannot_approve_the_parked_call(
     _registered_ops: None, role: TenantRole
 ) -> None:
-    """The approval is the authorization for every resume, so the approver needs the role."""
+    """The approver is read as recorded at the decision on every resume, so they need the role."""
     agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
     request_id = await _park_for_approval(agent)
     # ``approver=True`` lets a ``read_only`` person decide requests at all.

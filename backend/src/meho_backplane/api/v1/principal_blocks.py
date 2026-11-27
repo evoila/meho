@@ -27,7 +27,9 @@ Routes (REST and CLI only; there is no MCP tool):
   The route then removes only the block of this tenant, and it reads the
   table first. A block that a platform admin made (every tenant) stays
   until another platform admin removes it. A tenant admin who is blocked
-  cannot remove a block.
+  cannot remove a block. When a block of the login is changed while the
+  route removes it, the route removes nothing and answers 409
+  ``principal_block_changed``.
 
 Block and list need ``tenant_admin``. Unblock needs ``tenant_admin``, or a
 platform admin who removes their own block. Every route needs a person's
@@ -57,10 +59,12 @@ from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     REASON_MAX_LENGTH,
     BlockedPerson,
+    BlockSetChangedError,
     CannotBlockSelfError,
     OwnBlockStaysError,
     PrincipalBlockUnavailableError,
     PrincipalNotBlockedError,
+    SignInAlreadyUsedError,
     block_principal,
     is_principal_blocked,
     list_blocked,
@@ -228,6 +232,11 @@ async def block_principal_route(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="cannot_block_self: you cannot block your own login.",
         ) from exc
+    except PrincipalBlockUnavailableError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="principal_block_check_unavailable",
+        ) from exc
 
 
 @router.delete("/{sub}", response_model=UnblockResponse)
@@ -260,10 +269,21 @@ async def unblock_principal_route(
         ) from exc
     except OwnBlockStaysError as exc:
         raise _blocked() from exc
+    except SignInAlreadyUsedError as exc:
+        raise fresh_sign_in_required(
+            reason="fresh_sign_in_already_used",
+            max_age_seconds=get_settings().fresh_sign_in_max_age_seconds,
+            remediation=_UNBLOCK_FRESH_SIGN_IN,
+        ) from exc
     except PrincipalNotBlockedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="principal_not_blocked",
+        ) from exc
+    except BlockSetChangedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="principal_block_changed: a block of this login changed. Read the list again.",
         ) from exc
     return UnblockResponse(sub=sub, removed=removed)
 

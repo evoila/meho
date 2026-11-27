@@ -13,6 +13,10 @@ in two clear pairs:
 
 A decision row also has ``reviewed_by`` / ``reviewed_by_name``.
 
+The ``approval.rerun`` row of a re-run refused to a caller who did not
+make the request has ``requester_sub`` set to ``None``: the row does
+not name the requester, and the caller is only ``principal_sub``.
+
 Rows in the older form have no ``requester_sub``. Their
 ``payload['principal_sub']`` names the requester, while
 ``payload['principal_name']`` names the person who acted. The audit log
@@ -40,7 +44,8 @@ def approval_payload_view(
 
     A copy of *payload*. Only an approval row in the older form changes:
     it has an ``approval_request_id``, a string ``principal_sub`` and no
-    ``requester_sub``. Every other row comes back unchanged.
+    ``requester_sub`` key. A row with the key, also with the value
+    ``None``, and every other row come back unchanged.
     """
     view = dict(payload)
     if method != "APPROVAL" or "requester_sub" in view or "approval_request_id" not in view:

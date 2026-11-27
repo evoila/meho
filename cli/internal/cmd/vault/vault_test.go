@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -768,5 +769,43 @@ func TestKVPutHelpNamesClassAndTenantPaths(t *testing.T) {
 		if !strings.Contains(line, "--data @") {
 			t.Errorf("put example does not read --data from a file: %q", line)
 		}
+	}
+}
+
+// ---------- the backend's restage hint ----------
+
+// restageDataArgRe finds the one-line constant RESTAGE_KV_PUT_DATA_ARG in
+// the backend file that builds the connector_auth_failed hint.
+var restageDataArgRe = regexp.MustCompile(`(?m)^RESTAGE_KV_PUT_DATA_ARG: Final = "([^"]*)"$`)
+
+// TestRestageHintDataArgIsReadByLoadJSONFlag holds the backend's
+// connector_auth_failed hint equal to this CLI: the --data form the hint
+// names must be a file that loadJSONFlag reads. A backend test checks that
+// the hint uses this constant and no other --data form.
+func TestRestageHintDataArgIsReadByLoadJSONFlag(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "backend", "src",
+		"meho_backplane", "operations", "_errors.py"))
+	if err != nil {
+		t.Fatalf("read backend hint source: %v", err)
+	}
+	m := restageDataArgRe.FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("RESTAGE_KV_PUT_DATA_ARG not found in the backend hint source")
+	}
+	form := string(m[1])
+	if !strings.HasPrefix(form, "@") || !strings.Contains(form, "<file>") {
+		t.Fatalf("hint --data form %q is not a file reference (@<file>)", form)
+	}
+
+	path := filepath.Join(t.TempDir(), "creds.json")
+	if err := os.WriteFile(path, []byte(`{"username":"u","password":"p"}`), 0o600); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	got, err := loadJSONFlag(strings.ReplaceAll(form, "<file>", path))
+	if err != nil {
+		t.Fatalf("loadJSONFlag does not read the hint's form %q: %v", form, err)
+	}
+	if got["username"] != "u" || got["password"] != "p" {
+		t.Fatalf("file JSON not parsed; got %v", got)
 	}
 }

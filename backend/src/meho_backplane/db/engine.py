@@ -99,6 +99,9 @@ def create_engine_for_url(url: str, *, pool_size: int, pool_timeout: float) -> A
         pool_kwargs["pool_timeout"] = pool_timeout
     engine = create_async_engine(url, future=True, **pool_kwargs)
 
+    if url.startswith("sqlite"):
+        _begin_real_sqlite_transactions(engine)
+
     if url.startswith("sqlite") and os.environ.get("MEHO_SQLITE_FOREIGN_KEYS") == "1":
         # SQLite enforces foreign-key constraints only when ``PRAGMA
         # foreign_keys = ON`` is issued on every connection (the default
@@ -138,6 +141,28 @@ def create_engine_for_url(url: str, *, pool_size: int, pool_timeout: float) -> A
                 cursor.close()
 
     return engine
+
+
+def _begin_real_sqlite_transactions(engine: AsyncEngine) -> None:
+    """Start a real SQLite transaction before the first savepoint.
+
+    The ``sqlite3`` driver sends ``BEGIN`` only before the first INSERT /
+    UPDATE / DELETE. A ``SAVEPOINT`` (from ``session.begin_nested()``)
+    outside a transaction opens a transaction of its own, which its
+    ``RELEASE`` commits (SQLAlchemy SQLite dialect docs, "Transactions with
+    SQLite and the sqlite3 driver"). So when no transaction is open yet,
+    MEHO sends ``BEGIN`` before the ``SAVEPOINT``. The savepoint then sits
+    inside the outer transaction, and a rollback of that transaction undoes
+    every write of it, as on PostgreSQL.
+
+    Reads and ``PRAGMA`` statements before the first write or savepoint
+    still run outside a transaction, as the driver does by default.
+    """
+
+    @event.listens_for(engine.sync_engine, "savepoint")
+    def _sqlite_begin_before_savepoint(conn: Any, _name: str | None) -> None:
+        if not conn.connection.driver_connection.in_transaction:
+            conn.exec_driver_sql("BEGIN")
 
 
 def get_engine() -> AsyncEngine:

@@ -8,11 +8,13 @@
   Vault login and its write), and the answer and the audit row are the
   operation's own. A caller blocked before the rotate gets the block
   refusal: no rotate command and no store.
-* ``vault.auth.userpass.write`` with ``generate_password`` (also with
-  ``rotate``): the caller is blocked while the new password is written to
-  KV. Setting it on the login runs to its end, and the answer says
-  ``written``. A caller blocked before the store gets the block refusal: no
-  store and no set.
+* ``vault.auth.userpass.write`` with ``generate_password`` and ``rotate``:
+  the caller is blocked while the new password is written to KV. Setting
+  only that password on the login runs to its end, and the answer says
+  ``written``. A change of the policies keeps the check: it is not sent, the
+  login keeps its policies, and the answer is the block refusal. A login
+  that does not exist is not made. A caller blocked before the store gets
+  the block refusal: no store and no set.
 
 The node is a scripted SSH connection under the real ``_run_command`` and
 ``run_capped``. Vault is the stand-in HTTP server with the real ``hvac``
@@ -293,11 +295,10 @@ async def _block() -> None:
     await block_the_caller(_caller())
 
 
-@pytest.mark.parametrize("rotate", _CASES)
 async def test_password_set_finishes_when_the_caller_is_blocked_during_the_store(
-    vault_ops: VaultStandIn, rotate: bool
+    vault_ops: VaultStandIn,
 ) -> None:
-    params = _prepare(vault_ops, rotate)
+    params = _prepare(vault_ops, rotate=True)
     vault_ops.on_request("POST", _PASSWORD_DATA, _block)
 
     result = await _write_login(params)
@@ -309,11 +310,62 @@ async def test_password_set_finishes_when_the_caller_is_blocked_during_the_store
     assert payload["credential_generated"] is True
     stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
     assert stored != "made-up-old"
-    assert vault_ops.sent("POST", _USER_PATH) == 1
+    assert vault_ops.user_writes == [(f"{_USER_PATH}/password", {"password": stored})]
     assert vault_ops.users["svc-a"]["password"] == stored
+    assert vault_ops.users["svc-a"]["token_policies"] == ["app"]
     (row,) = await _dispatch_rows(_USERPASS)
     assert row.payload["result_status"] == "ok"
     assert stored not in json.dumps(row.payload) + json.dumps(row.raw_payload)
+
+
+async def test_a_blocked_rotation_sets_only_the_stored_password_and_keeps_the_policies(
+    vault_ops: VaultStandIn,
+) -> None:
+    params = {**_prepare(vault_ops, rotate=True), "token_policies": ["new-rights"]}
+    vault_ops.on_request("POST", _PASSWORD_DATA, _block)
+
+    result = await _write_login(params)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
+    assert stored != "made-up-old"
+    # Only the password set reaches Vault; the policy request is not sent.
+    assert vault_ops.user_writes == [(f"{_USER_PATH}/password", {"password": stored})]
+    assert vault_ops.users["svc-a"]["password"] == stored
+    assert vault_ops.users["svc-a"]["token_policies"] == ["app"]
+    (row,) = await _dispatch_rows(_USERPASS)
+    assert row.payload["result_status"] == "denied"
+    assert stored not in json.dumps(row.payload) + json.dumps(row.raw_payload)
+    assert stored not in json.dumps(result.model_dump(mode="json"))
+
+
+async def test_a_blocked_run_makes_no_new_login(vault_ops: VaultStandIn) -> None:
+    params = {**_prepare(vault_ops, rotate=False), "token_policies": ["new-rights"]}
+    vault_ops.on_request("POST", _PASSWORD_DATA, _block)
+
+    result = await _write_login(params)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert vault_ops.sent("POST", _PASSWORD_DATA) == 1
+    assert "svc-a" not in vault_ops.users
+    assert vault_ops.user_writes == []
+
+
+async def test_an_unblocked_rotation_sets_the_password_and_the_policies(
+    vault_ops: VaultStandIn,
+) -> None:
+    params = {**_prepare(vault_ops, rotate=True), "token_policies": ["new-rights"]}
+
+    result = await _write_login(params)
+
+    assert result.status == "ok", (result.status, result.error)
+    stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
+    assert vault_ops.user_writes == [
+        (f"{_USER_PATH}/password", {"password": stored}),
+        (_USER_PATH, {"token_policies": ["new-rights"]}),
+    ]
+    assert vault_ops.users["svc-a"]["password"] == stored
+    assert vault_ops.users["svc-a"]["token_policies"] == ["new-rights"]
 
 
 @pytest.mark.parametrize("rotate", _CASES)

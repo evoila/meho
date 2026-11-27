@@ -5,8 +5,9 @@
 
 It answers the few Vault requests the block tests send: the JWT login, the
 end of a login, a KV v2 item (read, write, patch), the capabilities request,
-the mount read and a userpass login (read, write). It keeps the KV items and
-the userpass logins, and counts each request.
+the mount read and a userpass login (read, write, password set). It keeps the
+KV items and the userpass logins, records the body of each login write, and
+counts each request.
 
 :meth:`VaultStandIn.on_request` runs a step while one request is on the
 wire, before Vault answers it: a test blocks the caller there. The step runs
@@ -45,6 +46,7 @@ class VaultStandIn:
     requests: list[tuple[str, str]] = field(default_factory=list)
     items: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
+    user_writes: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     hooks: list[_Hook] = field(default_factory=list)
     loop: asyncio.AbstractEventLoop | None = None
 
@@ -73,6 +75,11 @@ def _kv_key(path: str) -> str | None:
     if len(parts) == 5 and parts[3] == "data":
         return f"{parts[2]}/{parts[4]}"
     return None
+
+
+def path_of_user(name: str) -> str:
+    """The stand-in's path of the userpass login *name*."""
+    return f"/v1/auth/userpass/users/{name}"
 
 
 def _handler(state: VaultStandIn) -> type[BaseHTTPRequestHandler]:
@@ -108,10 +115,12 @@ def _handler(state: VaultStandIn) -> type[BaseHTTPRequestHandler]:
                 self._reply(204)
             elif path == "/v1/sys/capabilities-self":
                 paths = body.get("paths") or []
-                grant = ["create", "read", "update"]
+                grant = ["create", "read", "update", "delete"]
                 self._reply(200, {"capabilities": grant, **dict.fromkeys(paths, grant)})
             elif path.startswith("/v1/sys/internal/ui/mounts/"):
                 self._reply(200, {"data": {"type": "kv", "options": {"version": "2"}}})
+            elif path.startswith("/v1/auth/userpass/users/") and path.endswith("/password"):
+                self._user_password(path.split("/")[-2], body)
             elif path.startswith("/v1/auth/userpass/users/"):
                 self._user(method, path.rsplit("/", 1)[1], body)
             elif (key := _kv_key(path)) is not None:
@@ -128,7 +137,16 @@ def _handler(state: VaultStandIn) -> type[BaseHTTPRequestHandler]:
                 policies = user.get("token_policies", [])
                 self._reply(200, {"data": {"token_policies": policies}})
                 return
+            state.user_writes.append((path_of_user(name), dict(body)))
             state.users[name] = {**state.users.get(name, {}), **body}
+            self._reply(204)
+
+        def _user_password(self, name: str, body: dict[str, Any]) -> None:
+            state.user_writes.append((f"{path_of_user(name)}/password", dict(body)))
+            if name not in state.users:
+                self._reply(400, {"errors": ["username does not exist"]})
+                return
+            state.users[name] = {**state.users[name], "password": body.get("password")}
             self._reply(204)
 
         def _kv(self, method: str, key: str, body: dict[str, Any]) -> None:

@@ -405,7 +405,9 @@ target registration) is documented in
     It is safe to run twice: when the login exists and the path holds a
     password, nothing changes (`written: false`), except a changed
     `token_policies`. `rotate: true` makes a new password. If a run stops
-    after the KV write, run it again with `rotate: true`.
+    after the KV write, run it again with `rotate: true`. For a login that
+    exists, MEHO sets the new password in its own request and changes the
+    policies in a second request.
 
   The result never holds the password. It says `credential_source`
   (`request`, `kv_path` or `generated`), `credential_generated` and

@@ -97,6 +97,14 @@ class _Fake:
         if "token_policies" in kw:
             user["token_policies"] = kw["token_policies"]
 
+    def update_password_on_user(
+        self, username: str, password: str, mount_point: str = "userpass"
+    ) -> None:
+        if username.lower() not in self.users:
+            raise hvac.exceptions.InternalServerError("username does not exist")
+        self.user_writes.append({"username": username, "has_password": True, "only_password": True})
+        self.users[username.lower()]["_password"] = password
+
     # --- kv v2
     def read_secret_version(
         self, path: str, mount_point: str = "secret", **_kw: Any

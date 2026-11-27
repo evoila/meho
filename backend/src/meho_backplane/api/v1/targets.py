@@ -161,6 +161,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import object_session
+from sqlalchemy.orm.attributes import flag_modified
 
 from meho_backplane.api.v1._wait_for_approval import (
     AWAITING_APPROVAL_RESPONSES,
@@ -1961,7 +1962,13 @@ async def update_target(
     id (:func:`resolve_route_target`). The change itself is
     :func:`apply_target_update`.
     """
-    t = await resolve_route_target(session, operator.tenant_id, name)
+    found = await resolve_route_target(session, operator.tenant_id, name)
+    # Lock the row and read it again, so a change of the same target that
+    # commits meanwhile is not overwritten: extras_changes merges into the
+    # extras stored when the lock is taken.
+    t = await resolve_target_by_id(session, operator.tenant_id, found.id, for_update=True)
+    if t is None:
+        raise TargetNotFoundError(name, [])
     return _with_warnings(await apply_target_update(t, body, operator, session))
 
 
@@ -2008,6 +2015,10 @@ async def apply_target_update(
         _bind_extras_changes_audit(extras_changes)
     for k, v in updates.items():
         setattr(t, k, v)
+    if "extras" in updates:
+        # Python counts 1 == True == 1.0, so without this a change of only
+        # the JSON type of a value (1 to true) would not be written.
+        flag_modified(t, "extras")
     # #2872: PATCH no longer re-homes an unset ``secret_ref``. The #1723
     # auto-home branch that used to derive ``tenants/<tenant_id>/<name>``
     # here — on any PATCH omitting ``secret_ref`` over a NULL row — was

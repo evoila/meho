@@ -22,7 +22,8 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects import postgresql
 
 from meho_backplane.api.v1.targets import router as targets_router
 from meho_backplane.audit import AuditMiddleware
@@ -42,7 +43,9 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation
+from meho_backplane.api.v1 import targets as targets_api
 from meho_backplane.targets.extras_changes import merge_extras_changes
+from meho_backplane.targets.resolver import resolve_target_by_id, target_by_id_stmt
 from meho_backplane.targets.schemas import TargetUpdate
 from tests._people_behind_helpers import give_known_person
 
@@ -212,13 +215,69 @@ async def test_rest_change_with_extras_and_extras_changes_changes_nothing(
     assert await _extras(row.id) == _THREE
 
 
-async def test_the_whole_map_form_still_replaces(console: TestClient) -> None:
+async def test_the_whole_map_form_replaces(console: TestClient) -> None:
     row = await _insert_target(name=_NAME, extras=dict(_THREE))
 
     response = _patch(console, {"extras": {"only": "this"}})
 
     assert response.status_code == 200, response.text
     assert await _extras(row.id) == {"only": "this"}
+
+
+@pytest.mark.parametrize("field", ["extras_changes", "extras"])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(1, True), (0, False), (True, 1), (1, 1.0)],
+    ids=["1-to-true", "0-to-false", "true-to-1", "1-to-1.0"],
+)
+async def test_a_change_of_only_the_json_type_is_stored(
+    console: TestClient, field: str, before: Any, after: Any
+) -> None:
+    row = await _insert_target(name=_NAME, extras={"flag": before, "keep": "k"})
+    sent = {"flag": after} if field == "extras_changes" else {"flag": after, "keep": "k"}
+
+    response = _patch(console, {field: sent})
+
+    assert response.status_code == 200, response.text
+    stored = await _extras(row.id)  # a new database session
+    assert stored == {"flag": after, "keep": "k"}
+    assert type(stored["flag"]) is type(after)
+
+
+def test_the_locked_read_holds_for_update_on_postgresql() -> None:
+    stmt = target_by_id_stmt(_TENANT_ID, uuid.uuid4(), for_update=True)
+
+    assert "FOR UPDATE" in str(stmt.compile(dialect=postgresql.dialect()))
+    assert stmt.get_execution_options().get("populate_existing") is True
+
+
+async def test_the_console_change_merges_into_the_extras_of_the_locked_read(
+    console: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = await _insert_target(name=_NAME, extras={"a": 1})
+    locked: list[bool] = []
+
+    async def other_change_then_lock(session: Any, tenant_id: Any, target_id: Any, **kw: Any) -> Any:
+        if kw.get("for_update"):
+            locked.append(True)
+            # Another change of a different key commits after the first read
+            # of this request and before its lock. The row the request holds
+            # in memory does not see it.
+            await session.execute(
+                update(TargetORM)
+                .where(TargetORM.id == target_id)
+                .values(extras={"a": 1, "other": "kept"})
+                .execution_options(synchronize_session=False)
+            )
+        return await resolve_target_by_id(session, tenant_id, target_id, **kw)
+
+    monkeypatch.setattr(targets_api, "resolve_target_by_id", other_change_then_lock)
+
+    response = _patch(console, {"extras_changes": {"mine": True}})
+
+    assert response.status_code == 200, response.text
+    assert locked == [True]
+    assert await _extras(row.id) == {"a": 1, "other": "kept", "mine": True}
 
 
 # ---------------------------------------------------------------------------

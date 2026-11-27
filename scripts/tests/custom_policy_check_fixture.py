@@ -37,7 +37,7 @@ OPS = {
     "CPC_OP_CREDENTIAL_READ": "vault vault.kv.read vault-a",
     "CPC_OP_CREDENTIAL_WRITE": "vault vault.kv.write",
     "CPC_OP_RIGHTS_CHANGE": "kc kc.role.assign",
-    "CPC_OP_POLICY_CHANGE": "policy policy.apply",
+    "CPC_OP_POLICY_CHANGE": "policy-registry-1.x policy.apply",
     "CPC_OP_DESTRUCTIVE": "k8s k8s.namespace.delete web-a",
     "CPC_OP_ROOT_SHELL": "linux linux.service.control host-a",
     "CPC_OP_DELETE": "k8s k8s.pod.delete web-a",
@@ -101,9 +101,27 @@ ALWAYS_SKIPPED = [
     + "line): not run: waits for #7132",
 ]
 
-#: CPC_PARAMS_* of the tests: the credential write has params, so its check 7
-#: probe also previews the call with them.
-PARAMS = {"CPC_PARAMS_CREDENTIAL_WRITE": json.dumps({"path": "app/db", "value": "x"})}
+#: The params of the policy import (policy.apply): the scope, the whole file,
+#: and the two SHA-256 values that a preview of the same file gives.
+POLICY_FILE = "policy: v1\n"
+POLICY_PARAMS = {
+    "scope": "tenant",
+    "file": POLICY_FILE,
+    "file_sha256": hashlib.sha256(POLICY_FILE.encode()).hexdigest(),
+    "based_on": hashlib.sha256(b"policy: v1\nclassifications: []\n").hexdigest(),
+}
+
+#: CPC_PARAMS_* of the tests: the credential write and the policy import have
+#: params, so their check 7 probes also preview the call with them.
+PARAMS = {
+    "CPC_PARAMS_CREDENTIAL_WRITE": json.dumps({"path": "app/db", "value": "x"}),
+    "CPC_PARAMS_POLICY_CHANGE": json.dumps(POLICY_PARAMS),
+}
+
+#: The probes of check 7 whose operation has params: each also previews the call.
+PROBES_WITH_PARAMS = [
+    key for key in PROBE_KEYS if key.split()[2] in ("CREDENTIAL_WRITE", "POLICY_CHANGE")
+]
 
 #: The login of each token.
 SUBS = {
@@ -187,13 +205,14 @@ def edit_row(
     *,
     removed: bool = False,
     level: str | None = None,
+    old: str = "caution",
     ts: str = C1_EDIT_AT,
     connector: str = "k8s",
 ) -> dict[str, Any]:
     """The audit row of an Admin's edit of one operation's risk level, or of its removal."""
     payload: dict[str, Any] = {"connector_id": connector, "op_id": op, "changes": {}}
     if level is not None:
-        payload["changes"]["safety_level"] = {"old": "caution", "new": level}
+        payload["changes"]["safety_level"] = {"old": old, "new": level}
     if removed:
         payload["override_removed"] = True
     return {
@@ -327,7 +346,7 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     a["c1-start-row"] = rows(
         {"id": audit_id("c1-start"), "request_id": "@request-id:c1-start", "ts": C1_START}
     )
-    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale", level="caution"))
+    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous"))
     a["c1-overrides"] = {
         "code": 200,
         "body": {
@@ -440,13 +459,13 @@ def _end(a: dict[str, dict[str, Any]]) -> None:
     a["before-overrides"] = {"code": 200, "body": {"overrides": []}}
     a["takeback-overrides"] = {"code": 200, "body": {"overrides": []}}
     a["c7-ready"] = ready(False)
-    with_params = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
+    with_params = {PROBE_KEYS.index(key) + 1 for key in PROBES_WITH_PARAMS}
     for i in range(1, len(PROBE_KEYS) + 1):
         for prefix in ("c7", "baseline"):
             step = f"{prefix}-{i}"
             a[step] = explained()
             probe_rows = [{"id": audit_id(step), "request_id": f"@request-id:{step}"}]
-            if i == with_params:
+            if i in with_params:
                 a[f"{step}-preview"] = {
                     "code": 200,
                     "body": {"status": "ok", "policy_verdict": "needs-approval"},
@@ -483,7 +502,7 @@ def baseline_text(answer: str = "wait") -> str:
     approvers = json.dumps(APPROVERS, sort_keys=True, separators=(",", ":"))
     lines = []
     for key in PROBE_KEYS:
-        verdict = "needs-approval" if key == "6 PERSON_TOKEN CREDENTIAL_WRITE token" else "-"
+        verdict = "needs-approval" if key in PROBES_WITH_PARAMS else "-"
         lines.append(f"{key}\t{answer}\t{approvers}\t{verdict}\n")
     return "".join(lines)
 
@@ -647,6 +666,7 @@ class LiveRun:
             CPC_CUSTOM_ROLE="Approvers-VMW",
             CPC_SENSOR_ID=SENSOR_ID,
             CPC_PARAMS_CREDENTIAL_WRITE=json.dumps({"path": "app/db", "password": self.secret}),
+            CPC_PARAMS_POLICY_CHANGE=PARAMS["CPC_PARAMS_POLICY_CHANGE"],
             CPC_STUB_DIR=str(self.answers_dir),
             CPC_STUB_LOG=str(self.log),
         )

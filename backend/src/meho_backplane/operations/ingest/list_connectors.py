@@ -104,6 +104,7 @@ from meho_backplane.operations._code_presence import code_missing_connectors
 from meho_backplane.operations._lookup import (
     connector_exists,
     installed_owner_clause,
+    package_missing_clause,
     package_visible_group_clause,
     parse_connector_id,
 )
@@ -475,7 +476,7 @@ async def _missing_package_by_connector(
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
             | (EndpointDescriptor.tenant_id == operator_tenant_id),
-            ~installed_owner_clause(),
+            package_missing_clause(),
         )
         .group_by(
             EndpointDescriptor.tenant_id,

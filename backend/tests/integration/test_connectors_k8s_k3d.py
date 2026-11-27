@@ -853,7 +853,7 @@ async def busybox_pod(
             "containers": [
                 {
                     "name": "busybox",
-                    "image": os.environ.get("MEHO_TEST_BUSYBOX_IMAGE", "busybox:1.36"),
+                    "image": _busybox_image(),
                     "command": ["sleep", "600"],
                 }
             ],
@@ -1137,7 +1137,7 @@ async def test_job_create_then_delete_redacts_env_secret_against_k3s(
                     "containers": [
                         {
                             "name": "echo",
-                            "image": "busybox:1.36",
+                            "image": _busybox_image(),
                             "command": ["sh", "-c", "echo done"],
                             "env": [{"name": "TOKEN", "value": "job-topsecret"}],
                         }
@@ -1216,6 +1216,9 @@ async def test_cordon_uncordon_node_against_k3s(
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_BUSYBOX_IMAGE = "busybox:1.36"
+
+
 def _busybox_image() -> str:
     """Return a busybox image the k3s node can pull.
 
@@ -1223,7 +1226,7 @@ def _busybox_image() -> str:
     points at a registry mirror (``<mirror>/rancher/k3s:<tag>``), the
     busybox image k3s itself ships is taken from the same mirror: a
     cluster that cannot reach Docker Hub can usually reach that mirror.
-    Without either, Docker Hub's ``busybox:1.36`` is used.
+    Without either, Docker Hub's ``busybox:1.36`` is used (outside CI).
     """
     explicit = os.environ.get("MEHO_TEST_BUSYBOX_IMAGE")
     if explicit:
@@ -1231,7 +1234,7 @@ def _busybox_image() -> str:
     mirror, found, _ = os.environ.get("MEHO_TEST_K3S_IMAGE", "").partition("/rancher/k3s")
     if found and mirror:
         return f"{mirror}/rancher/mirrored-library-busybox:1.36.1"
-    return "busybox:1.36"
+    return _DEFAULT_BUSYBOX_IMAGE
 
 
 async def _newest_pod_reasons(

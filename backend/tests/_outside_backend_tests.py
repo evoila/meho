@@ -109,6 +109,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_repo_secrets.py",
     "tests/test_ci_security_weekly_issue.py",
     "tests/test_ci_spec_shelf_lists.py",
+    "tests/test_ci_test_images.py",
     "tests/test_ci_upgrade_release_lookup.py",
     "tests/test_connector_kit.py",
     "tests/test_connector_overlay_build.py",

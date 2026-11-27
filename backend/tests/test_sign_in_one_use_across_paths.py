@@ -363,6 +363,9 @@ async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_i
     _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch, step: str
 ) -> None:
     ac, key = _client
+    # With the level check off, no other line of the call names the login.
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "off")
+    get_settings.cache_clear()
     login = f"login-{uuid.uuid4().hex}"
     sign_in_key = f"key-{uuid.uuid4().hex}"
     await _seed_block(login)
@@ -389,16 +392,18 @@ async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_i
             "error_type": "OperationalError",
         }
     ]
-    assert login not in repr(failed)
-    assert sign_in_key not in repr(failed)
+    assert login not in repr(logs)
+    assert sign_in_key not in repr(logs)
     assert await _blocked(login)
 
 
 @pytest.mark.asyncio
 async def test_a_reused_sign_in_logs_no_login(
-    _client: tuple[httpx.AsyncClient, Any],
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ac, key = _client
+    monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "off")
+    get_settings.cache_clear()
     plain = await _park(destructive=False)
     assert (await _approve(ac, plain, _sign_in(key, "s-log-reused"))).status_code == 200
     await _seed_block()
@@ -408,4 +413,4 @@ async def test_a_reused_sign_in_logs_no_login(
 
     reused = [e for e in logs if e["event"] == "principal_unblock_sign_in_reused"]
     assert reused == [{"event": "principal_unblock_sign_in_reused", "log_level": "warning"}]
-    assert _PERSON not in repr(reused)
+    assert _PERSON not in repr(logs)

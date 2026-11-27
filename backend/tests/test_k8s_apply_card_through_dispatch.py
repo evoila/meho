@@ -17,6 +17,9 @@ and the MCP approvals tool.
 * When the dry run fails, the card still shows the manifest and the subject
   line, says which document the dry run stopped at, and says that the summary
   of the objects could not be made.
+* A manifest that is not valid YAML or JSON is refused before the wait: no
+  approval request and no card are made, and no value of it is in the answer
+  or the logs.
 """
 
 from __future__ import annotations
@@ -220,6 +223,27 @@ def _park(operator: Operator, manifest: str) -> ApprovalRequest:
             assert row is not None
             session.expunge(row)
             return row
+
+    return asyncio.run(_do())
+
+
+def _refuse(operator: Operator, manifest: str) -> Any:
+    """Dispatch one apply that is refused before the wait; return its answer."""
+
+    async def _do() -> Any:
+        result = await dispatch(
+            operator=operator,
+            connector_id=_CONNECTOR_ID,
+            op_id="k8s.apply",
+            target=_Target(),
+            params={"manifest": manifest},
+        )
+        assert result.status == "denied", result
+        assert result.extras["error_code"] == "refused_before_approval"
+        async with get_sessionmaker()() as session:
+            stored = (await session.execute(select(func.count(ApprovalRequest.id)))).scalar_one()
+        assert stored == 0
+        return result
 
     return asyncio.run(_do())
 
@@ -453,19 +477,19 @@ def test_a_refused_object_in_an_existing_namespace_keeps_the_manifest(
     _assert_failed_card(row, "The dry run stopped at document 3 of 3 (Service/web/api).")
 
 
-def test_an_unreadable_manifest_card_says_the_summary_could_not_be_made(
+def test_an_unreadable_manifest_is_refused_before_a_card_is_made(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
 
-    row = _park(_login("person-token"), "a: [b")
+    result = _refuse(_login("person-token"), "a: [b")
 
-    assert row.proposed_effect["preview_unavailable"] is True
+    assert result.extras["reason"].startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(a structure YAML refuses, line 1, column 6). "
+    )
     assert server.requests == []
-    card = _console_card(row)
-    assert "Blast radius unknown" in card
-    assert _SUMMARY_FAILED in card
 
 
 def _b64(raw: bytes) -> str:
@@ -518,7 +542,7 @@ def test_a_date_in_a_config_map_still_waits_for_approval(
     assert "2024-01-31" in _console_card(row)
 
 
-def test_a_malformed_secret_puts_no_value_in_the_error_or_the_log(
+def test_a_malformed_secret_is_refused_with_no_value_in_the_answer_or_the_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = _StandInServer()
@@ -530,13 +554,12 @@ def test_a_malformed_secret_puts_no_value_in_the_error_or_the_log(
     )
 
     with structlog.testing.capture_logs() as logs:
-        row = _park(_login("person-token"), manifest)
+        result = _refuse(_login("person-token"), manifest)
 
-    effect = row.proposed_effect
-    assert effect["preview_unavailable"] is True
-    assert "line 5, column" in effect["preview_error"]
-    assert row.params is None
-    assert value not in json.dumps(effect)
+    assert result.extras["reason"].startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        f"(a token YAML refuses, line 5, column {9 + len(value)}). "
+    )
+    assert value not in json.dumps(result.model_dump(mode="json"), default=str)
     assert value not in json.dumps(logs, default=str)
-    assert any(entry.get("event") == "proposed_effect_preview_failed" for entry in logs)
-    assert value not in _console_card(row)
+    assert server.requests == []

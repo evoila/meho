@@ -212,7 +212,6 @@ OPS: tuple[AzureTypedOp, ...] = (
         tags=("write", *_COMMON, "record-set"),
         safety_level="dangerous",
         requires_approval=True,
-        hard_to_undo="overwrites",
         llm_instructions=_UPSERT,
     ),
     AzureTypedOp(

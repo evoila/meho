@@ -267,7 +267,6 @@ async def register_harbor_artifact_copy_operation(
         tags=["write", "harbor", "artifact"],
         safety_level="caution",
         requires_approval=True,
-        hard_to_undo="overwrites",
         llm_instructions=_ARTIFACT_COPY_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

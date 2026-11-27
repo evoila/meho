@@ -498,6 +498,15 @@ Where MEHO checks it:
     reads (the preview, the knowledge search and the editor preview, the
     retrieval pages, the docs search and a docs text read) uses
     `require_ui_operator_read` and keeps `403 operator_required`.
+  - The console call form `POST /ui/operations/call`
+    (`require_ui_operator_for_call`) looks the operation up first, the same
+    way the REST call route does. An operation that asks for a change gets
+    the code and the sentence. A `safe` read that needs no approval, an
+    operation that cannot be found and a form that names no operation get
+    `403 operator_required`.
+  - The REST call route reads a body that is not a JSON object (an empty
+    body, plain text, a form body) as a call that names no operation: a
+    Reader gets the plain `403 {"detail": "insufficient_role"}`.
 
 A walk test (`tests/test_reader_change_refused.py`,
 `tests/test_reader_change_refused_console.py`) calls every REST route and

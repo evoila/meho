@@ -34,7 +34,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.role_floors import READER_CHANGE_CODE, READER_CHANGE_SENTENCE
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME
-from meho_backplane.ui.auth.middleware import require_ui_operator
+from meho_backplane.ui.auth.middleware import require_ui_operator, require_ui_operator_for_call
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from tests._route_tree_helpers import iter_routes
 from tests.test_ui_operations import (
@@ -46,6 +46,7 @@ from tests.test_ui_operations import (
     _mint_token,
     _mock_discovery_and_jwks,
     _patch_call_operation,
+    _seed_group_and_op,
     _seed_session_sync,
     _seed_tenant,
     _wait_for_the_answer,
@@ -55,15 +56,11 @@ __all__ = ["_bff_env", "_wait_for_the_answer"]
 
 _BODY = {"detail": READER_CHANGE_CODE, "message": READER_CHANGE_SENTENCE}
 
-#: One op id per kind of change; the console door refuses before it reads them.
-_KIND_OPS = (
-    "vault.reader.write_caution",
-    "vault.reader.write_dangerous",
-    "vault.reader.delete",
-    "vault.reader.rights_change",
-    "vault.reader.credential_write",
-    "vault.reader.multi_step",
-)
+#: Stand-in operations for the console call form; the door looks them up.
+_SAFE_READ = "vault.reader.console_read"
+_CAUTION_WRITE = "vault.reader.console_write"
+_UNKNOWN_OP = "vault.reader.no_such_operation"
+_PLAIN = {"detail": "operator_required"}
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _PATH_PARAM = re.compile(r"\{[^}]+\}")
@@ -99,20 +96,42 @@ def _approval_requests() -> int:
     return asyncio.run(_count())
 
 
+def _seed_stand_ins() -> None:
+    for op_id, level in ((_SAFE_READ, "safe"), (_CAUTION_WRITE, "caution")):
+        _seed_group_and_op(
+            tenant_id=None,
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            group_key=f"group-{op_id}",
+            group_name=f"Group {op_id}",
+            op_id=op_id,
+            safety_level=level,
+        )
+
+
+def _call_form(op_id: str) -> dict[str, str]:
+    return {"connector_id": "vault-1.x", "op_id": op_id, "target": "", "params": "{}"}
+
+
 def test_a_reader_console_run_of_each_kind_gets_the_code_and_the_sentence(
     monkeypatch: pytest.MonkeyPatch, reader: tuple[TestClient, str]
 ) -> None:
+    """The call form looks the operation up before it answers a Reader."""
     client, csrf = reader
     received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
+    _seed_stand_ins()
+    cases: list[tuple[dict[str, str], dict[str, str]]] = [
+        (_call_form(_CAUTION_WRITE), _BODY),
+        (_call_form(_SAFE_READ), _PLAIN),
+        (_call_form(_UNKNOWN_OP), _PLAIN),
+        ({}, _PLAIN),
+    ]
 
-    for op_id in _KIND_OPS:
-        response = client.post(
-            "/ui/operations/call",
-            headers=_csrf_headers(csrf),
-            data={"connector_id": "vault-1.x", "op_id": op_id, "target": "", "params": "{}"},
-        )
-        assert response.status_code == 403, (op_id, response.text)
-        assert response.json() == _BODY
+    for form, body in cases:
+        response = client.post("/ui/operations/call", headers=_csrf_headers(csrf), data=form)
+        assert response.status_code == 403, (form, response.text)
+        assert response.json() == body, form
 
     assert received == []
     assert _approval_requests() == 0
@@ -127,7 +146,7 @@ def test_a_reader_console_preview_keeps_its_answer(
     response = client.post(
         "/ui/operations/preview",
         headers=_csrf_headers(csrf),
-        data={"connector_id": "vault-1.x", "op_id": _KIND_OPS[0], "target": "", "params": "{}"},
+        data=_call_form(_CAUTION_WRITE),
     )
 
     assert response.status_code == 403, response.text
@@ -160,8 +179,12 @@ def _walk(client: TestClient, csrf: str) -> list[str]:
         response = client.request(method, path, headers=_csrf_headers(csrf), data={})
         if _approval_requests() != before:
             problems.append(f"{method} {route.path}: a Reader stored an approval request")
-        behind_operator_door = require_ui_operator in set(_calls(route.dependant))
-        if behind_operator_door and (response.status_code, response.json()) != (403, _BODY):
+        doors = set(_calls(route.dependant))
+        # The walk sends an empty form: the call form names no operation.
+        expected = _BODY if require_ui_operator in doors else None
+        if require_ui_operator_for_call in doors:
+            expected = _PLAIN
+        if expected and (response.status_code, response.json()) != (403, expected):
             problems.append(f"{method} {route.path}: {response.status_code} {response.text[:120]}")
     return problems
 
@@ -182,7 +205,13 @@ def test_the_console_walk_reads_the_operator_door_of_each_route() -> None:
     behind = [
         r for _m, _p, r in _change_routes() if require_ui_operator in set(_calls(r.dependant))
     ]
-    assert any(route.path == "/ui/operations/call" for route in behind)
+    call_door = [
+        r.path
+        for _m, _p, r in _change_routes()
+        if require_ui_operator_for_call in set(_calls(r.dependant))
+    ]
+    assert len(behind) > 10
+    assert call_door == ["/ui/operations/call"]
     assert all(route.path != "/ui/operations/preview" for route in behind)
 
 

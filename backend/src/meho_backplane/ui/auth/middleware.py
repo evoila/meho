@@ -134,7 +134,7 @@ from meho_backplane.ui.auth.tenant import (
 )
 
 if TYPE_CHECKING:
-    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.auth.operator import Operator, TenantRole
 
 __all__ = [
     "AUTH_PREFIX",
@@ -143,6 +143,7 @@ __all__ = [
     "UISessionMiddleware",
     "require_ui_admin",
     "require_ui_operator",
+    "require_ui_operator_for_call",
     "require_ui_operator_read",
     "require_ui_session",
 ]
@@ -825,6 +826,55 @@ async def require_ui_operator_read(
     )
 
 
+async def require_ui_operator_for_call(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """:func:`require_ui_operator` for the console call form ``POST /ui/operations/call``.
+
+    A Reader's answer depends on the operation, so this check looks it up
+    from the form first, the same way the REST call route does
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    An operation that asks for a change gets ``403 insufficient_role`` with
+    the sentence in ``message``. A plain read, an operation that cannot be
+    found and a form that names no operation get ``403 operator_required``.
+    MEHO stores nothing and runs nothing.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.OPERATOR,
+        detail="operator_required",
+        log_prefix="ui_operator_gate",
+        call_request=request,
+    )
+
+
+async def _reader_call_sentence(operator: Operator, request: Request) -> str | None:
+    """The Reader sentence when the call form of *request* asks for a change.
+
+    FastAPI read the form before the dependencies run and the request keeps
+    it. ``params`` is the JSON text of the form; text that is not a JSON
+    object counts as no params.
+    """
+    import json
+
+    from meho_backplane.operations.reader_call import reader_call_refusal
+
+    form = await request.form()
+    try:
+        params = json.loads(str(form.get("params") or "{}"))
+    except ValueError:
+        params = {}
+    arguments = {
+        "connector_id": form.get("connector_id"),
+        "op_id": form.get("op_id"),
+        "params": params,
+    }
+    return await reader_call_refusal(operator, arguments)
+
+
 async def _require_ui_role(
     session: UISessionContext,
     *,
@@ -832,6 +882,7 @@ async def _require_ui_role(
     detail: str,
     log_prefix: str,
     is_change: bool = False,
+    call_request: Request | None = None,
 ) -> UISessionContext:
     """Shared body of the role-gated console dependencies.
 
@@ -881,6 +932,14 @@ async def _require_ui_role(
             status_code=exc.status_code,
         )
         raise
+
+    if call_request is not None:
+        sentence = await _reader_call_sentence(operator, call_request)
+        if sentence is not None:
+            from meho_backplane.auth.role_refusal import RoleRefusedError
+            from meho_backplane.operations.role_floors import READER_CHANGE_CODE
+
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence)
 
     _assert_min_role(
         operator.tenant_role,

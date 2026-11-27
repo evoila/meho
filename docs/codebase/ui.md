@@ -1451,7 +1451,12 @@ body (`_require_ui_role`):
   A `POST` form that only reads (the operation preview, the knowledge
   search and the editor preview, the corpus search, a docs text read, the
   retrieval pages) uses `require_ui_operator_read` and keeps
-  `operator_required`. It is the console twin of
+  `operator_required`. The call form `POST /ui/operations/call` uses
+  `require_ui_operator_for_call`: it looks the operation up first, so a
+  `read_only` session gets the code and the sentence only for an
+  operation that asks for a change, and `operator_required` for a `safe`
+  read, an unknown operation or a form that names no operation. It is the
+  console twin of
   the REST `require_role(TenantRole.OPERATOR)` floor and the MCP
   `required_role=OPERATOR` on `call_operation`. Every console route that
   runs or queues an operation, or starts, advances or aborts a runbook

@@ -2609,15 +2609,19 @@ run, not a broken `main`.
   `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
   `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
   A failed upload gives `full suite: could not store the picked tests`.
-  When the unit tests run without the map, or do not run, the line is a
-  warning, so a missing or old map is seen (#7103). This is also so for a
-  pull request from a fork (the unit test jobs need this repo's runners)
-  and one with no backend change (only `python-outside-backend` runs). A
-  run with the map, one connector's tests, or a docs-only change shows a
-  notice. An old map gives one more warning, `Old unit test map`.
+  The line is a notice only when the unit tests run the tests the map
+  picked. Every pull request that skips the map gets a warning, so a
+  missing or old map is seen (#7103), with the reason: the full suite, one
+  connector's tests, a docs-only change, a pull request from a fork (the
+  unit test jobs need this repo's runners), one with no backend change
+  (only `python-outside-backend` runs), or an earlier failed step of the
+  `changes` job (then every unit test job skips). An old map gives one
+  more warning, `Old unit test map`.
 - **The alarm.** `.github/workflows/unit-test-map-check.yml` runs after
   each nightly CI run. It is red when that run uploaded no `unit-test-map`
-  artifact, and its summary lists the coverage jobs that did not pass. It
+  artifact, and its summary lists the coverage jobs that did not pass.
+  When it cannot read the artifacts of that run, it is red too, with the
+  title `Could not check the unit test map`. It
   says only what it found in that run: pull requests may still use an
   older map for 2 days. It
   is a separate workflow, not a job in `ci.yml`: a red job would turn the

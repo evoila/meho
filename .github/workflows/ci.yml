@@ -540,15 +540,18 @@ jobs:
       - name: Say how the unit tests run
         # #7103. One line on every pull request, in the step summary and as
         # an annotation, after the upload above: the same choice as the job
-        # output `test_map`. When the unit tests run without the map, or do
-        # not run, the line is a warning. It is a notice when they run the
-        # picked tests or one connector's tests, or when only docs changed.
-        # A pull request with no backend change runs the job
-        # python-outside-backend instead of the unit shards. A pull request
-        # from a fork runs neither: those jobs need this repo's runners.
+        # output `test_map`. The line is a notice only when the unit tests
+        # run the tests the map picked. Every other case is a warning: the
+        # full suite, one connector's tests, only docs changed, or no unit
+        # tests at all. A failed earlier step of this job fails the job, so
+        # every job that needs it skips, the unit tests too. A pull request
+        # with no backend change runs the job python-outside-backend instead
+        # of the unit shards. A pull request from a fork runs neither: those
+        # jobs need this repo's runners.
         id: report
         if: always() && github.event_name == 'pull_request'
         env:
+          JOB_STATUS: ${{ job.status }}
           SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
           DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
           BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
@@ -559,15 +562,15 @@ jobs:
           UPLOAD: ${{ steps.upload-selection.outcome }}
         run: |
           level=warning
-          if [ "${DOCS_ONLY}" = "true" ]; then
-            level=notice
+          if [ "${JOB_STATUS}" != "success" ]; then
+            line="no unit tests: an earlier step of this job did not pass (job: ${JOB_STATUS:-unknown}), so the unit test jobs are skipped"
+          elif [ "${DOCS_ONLY}" = "true" ]; then
             line="no unit tests: only docs changed"
           elif [ "${SAME_REPO}" != "true" ]; then
             line="no unit tests: the pull request comes from a fork, and the unit test jobs run only for branches of this repo"
           elif [ "${BACKEND_PYTHON}" = "false" ]; then
             line="no unit shards: no backend change, so only the job \"Python tests that read files outside backend\" runs"
           elif [ -n "${SINGLE_CONNECTOR}" ]; then
-            level=notice
             line="no test map needed: the tests of connector ${SINGLE_CONNECTOR} run"
           elif [ "${TEST_MAP}" != "true" ]; then
             line="${MAP_LINE:-full suite: the test map step gave no result}"

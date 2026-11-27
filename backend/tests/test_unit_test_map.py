@@ -1093,6 +1093,7 @@ def _run_report_step(tmp_path: Path, **env: str) -> tuple[str, str]:
     summary = tmp_path / "report_summary"
     summary.write_text("", encoding="utf-8")
     inputs = {
+        "JOB_STATUS": "success",
         "SAME_REPO": "true",
         "DOCS_ONLY": "false",
         "BACKEND_PYTHON": "true",
@@ -1274,10 +1275,10 @@ def test_ci_old_map_and_a_full_run_give_two_warnings(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("inputs", "level", "line"),
     [
-        ({"DOCS_ONLY": "true"}, "notice", "no unit tests: only docs changed"),
+        ({"DOCS_ONLY": "true"}, "warning", "no unit tests: only docs changed"),
         (
             {"DOCS_ONLY": "true", "SAME_REPO": "false"},
-            "notice",
+            "warning",
             "no unit tests: only docs changed",
         ),
         (
@@ -1300,12 +1301,42 @@ def test_ci_old_map_and_a_full_run_give_two_warnings(tmp_path: Path) -> None:
         ),
         (
             {"SINGLE_CONNECTOR": "acme"},
-            "notice",
+            "warning",
             "no test map needed: the tests of connector acme run",
         ),
         ({}, "warning", "full suite: the test map step gave no result"),
+        (
+            # The checkout failed: the step detect gave no outputs.
+            {"JOB_STATUS": "failure", "DOCS_ONLY": "", "BACKEND_PYTHON": ""},
+            "warning",
+            "no unit tests: an earlier step of this job did not pass (job: failure),"
+            " so the unit test jobs are skipped",
+        ),
+        (
+            {"JOB_STATUS": "failure", "TEST_MAP": "true", "UPLOAD": "success"},
+            "warning",
+            "no unit tests: an earlier step of this job did not pass (job: failure),"
+            " so the unit test jobs are skipped",
+        ),
+        (
+            {"JOB_STATUS": "cancelled", "DOCS_ONLY": "true"},
+            "warning",
+            "no unit tests: an earlier step of this job did not pass (job: cancelled),"
+            " so the unit test jobs are skipped",
+        ),
     ],
-    ids=["docs", "fork-docs", "fork", "fork-no-backend", "no-backend", "connector", "no-map-step"],
+    ids=[
+        "docs",
+        "fork-docs",
+        "fork",
+        "fork-no-backend",
+        "no-backend",
+        "connector",
+        "no-map-step",
+        "failed-step",
+        "failed-step-after-map",
+        "cancelled",
+    ],
 )
 def test_ci_report_names_the_job_that_runs_or_why_none_runs(
     tmp_path: Path, inputs: dict[str, str], level: str, line: str
@@ -1326,6 +1357,7 @@ def test_ci_report_step_matches_the_jobs_that_run() -> None:
 
     report = _step("changes", step_id="report")
     assert report["if"] == "always() && github.event_name == 'pull_request'"
+    assert report["env"]["JOB_STATUS"] == "${{ job.status }}"
     assert report["env"]["SAME_REPO"] == f"${{{{ {same_repo} }}}}"
     assert report["env"]["UPLOAD"] == "${{ steps.upload-selection.outcome }}"
     assert report["env"]["DOCS_ONLY"] == "${{ steps.detect.outputs.docs_only }}"

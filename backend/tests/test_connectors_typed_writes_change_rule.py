@@ -131,8 +131,9 @@ async def test_a_302_or_303_to_another_path_is_not_followed(
             status, headers={"Location": "/elsewhere/42"}
         )
         elsewhere = mock.route(path="/elsewhere/42").respond(200, json={"ok": True})
-        assert await _status_of(write(conn, method, path)) == status
+        answered = await _status_of(write(conn, method, path))
     await conn.aclose()
+    assert answered == status
     assert (sent.call_count, elsewhere.call_count) == (1, 0), name
 
 
@@ -148,8 +149,9 @@ async def test_a_307_to_another_path_sends_nothing_more(
             307, headers={"Location": "/api/v2.0/robots/8"}
         )
         other = mock.route(path="/api/v2.0/robots/8").respond(200, json={"ok": True})
-        assert await _status_of(write(conn, method, path)) == 307
+        answered = await _status_of(write(conn, method, path))
     await conn.aclose()
+    assert answered == 307
     assert (sent.call_count, other.call_count) == (1, 0), name
 
 
@@ -167,8 +169,9 @@ async def test_a_307_or_308_to_the_same_path_with_a_slash_sends_the_write_once_m
                 status, headers={"Location": f"{path}/"}
             )
             again = mock.route(method=method, path=f"{path}/").respond(200, json={})
-            assert await _status_of(write(conn, method, path)) == 200
+            answered = await _status_of(write(conn, method, path))
     await conn.aclose()
+    assert answered == 200
     assert (first.call_count, again.call_count) == (1, 1), name
     # One trace entry for each request that was sent: the write and its repeat
     # (the Harbor robot read before the delete has its own entry).

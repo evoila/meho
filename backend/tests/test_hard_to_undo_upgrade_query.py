@@ -7,8 +7,12 @@ The query in ``docs/upgrade-rows/v0.49.0/hard-to-undo-no-standing-grant.md``
 lists a standing grant when it is live (not revoked, not expired), its
 connector id names the stored row the way a call reads it, and the row a
 call of the grant's tenant uses has ``hard_to_undo``. Each case also makes
-the call of the grant over REST, with ``CUSTOM_POLICY`` off and on: a listed
-grant covers the call with the switch off and not with it on.
+the direct call of the grant over REST, with ``CUSTOM_POLICY`` off and on.
+Both directions hold: every grant whose call runs with the switch off and
+waits with it on is listed; a listed grant never lets the call run with the
+switch on; a grant that is not listed gives the same answer with the switch
+off and on. A listed grant can also let no call run with the switch off,
+when its operation is turned off for the tenant or is ``destructive``.
 
 The connectors, the operations and the target are made up.
 """
@@ -27,7 +31,11 @@ import pytest
 from sqlalchemy import inspect, select, text
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, ServicePrincipalGrant
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    ServicePrincipalGrant,
+    TenantOperationSetting,
+)
 from tests._hard_to_undo_helpers import (
     RUNS,
     SERVICE,
@@ -57,6 +65,12 @@ _LITE_TARGET = "cow-lite-01"
 _HALT = "cowapi.box.halt"
 _RESET = "cowapi.box.reset"
 _LITE_HALT = "cowlite.box.halt"
+_COWOFF = "cowoff-1.x"
+_OFF_HALT = "cowoff.box.halt"
+_OFF_TARGET = "cow-off-01"
+_COWTOP = "cowtop-1.x"
+_TOP_HALT = "cowtop.box.halt"
+_TOP_TARGET = "cow-top-01"
 
 
 @pytest.fixture(autouse=True)
@@ -64,6 +78,8 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     start(monkeypatch)
     add_connector("cowapi", "1.x", "cowapi")
     add_connector("cowlite", "", "")
+    add_connector("cowoff", "1.x", "cowoff")
+    add_connector("cowtop", "1.x", "cowtop")
     yield
     finish()
 
@@ -125,6 +141,24 @@ async def _tenant_copy(op_id: str, hard_to_undo: str | None) -> None:
         await session.commit()
 
 
+async def _turn_off_for_tenant(op_id: str, *, product: str, version: str, impl_id: str) -> None:
+    """The tenant turns the built-in operation off for itself."""
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantOperationSetting(
+                tenant_id=TENANT,
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id=op_id,
+                enabled=False,
+                set_by_sub="tenant-admin",
+                set_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+
 async def _calls(
     monkeypatch: pytest.MonkeyPatch,
     client: tuple[httpx.AsyncClient, Any],
@@ -134,7 +168,7 @@ async def _calls(
     op_id: str,
     target: str,
 ) -> tuple[str, str]:
-    """Call the operation with the switch off, then on; say for each if it ran or waited."""
+    """Call the operation with the switch off, then on: did it run, wait or get refused?"""
     answers: list[str] = []
     for on in (False, True):
         custom_policy(monkeypatch, on=on)
@@ -146,10 +180,13 @@ async def _calls(
             assert len(await grant_use_rows(grant_id)) == uses_before + 1
             answers.append("runs")
         else:
-            assert result["status"] == "awaiting_approval", result
-            assert len(RUNS) == runs_before
+            assert len(RUNS) == runs_before, result
             assert len(await grant_use_rows(grant_id)) == uses_before
-            answers.append("waits")
+            if result["status"] == "awaiting_approval":
+                answers.append("waits")
+            else:
+                code = (result.get("extras") or {}).get("error_code")
+                answers.append(f"{result['status']}:{code}")
     return answers[0], answers[1]
 
 
@@ -242,3 +279,50 @@ async def test_case_12_a_tenant_copy_with_the_field_is_listed(
         monkeypatch, client, grant_id=grant_id, connector_id=_COWAPI, op_id=_RESET, target=_TARGET
     )
     assert (off, on) == ("runs", "waits")
+
+
+async def test_case_18_a_grant_of_an_op_turned_off_for_the_tenant_is_listed(
+    monkeypatch: pytest.MonkeyPatch, client: tuple[httpx.AsyncClient, Any]
+) -> None:
+    await register_op(_OFF_HALT, "stops", product="cowoff", version="1.x", impl_id="cowoff")
+    await _turn_off_for_tenant(_OFF_HALT, product="cowoff", version="1.x", impl_id="cowoff")
+    await seed_target(_OFF_TARGET, product="cowoff", version="1.x")
+    grant_id = await _grant(_COWOFF, _OFF_HALT)
+
+    assert await _listed() == [(_COWOFF, _OFF_HALT)]
+    off, on = await _calls(
+        monkeypatch,
+        client,
+        grant_id=grant_id,
+        connector_id=_COWOFF,
+        op_id=_OFF_HALT,
+        target=_OFF_TARGET,
+    )
+    assert (off, on) == ("error:unknown_op", "error:unknown_op")
+
+
+async def test_case_19_a_grant_of_a_destructive_op_is_listed(
+    monkeypatch: pytest.MonkeyPatch, client: tuple[httpx.AsyncClient, Any]
+) -> None:
+    await register_op(
+        _TOP_HALT,
+        "stops",
+        product="cowtop",
+        version="1.x",
+        impl_id="cowtop",
+        safety_level="destructive",
+    )
+    await seed_target(_TOP_TARGET, product="cowtop", version="1.x")
+    grant_id = await _grant(_COWTOP, _TOP_HALT)
+
+    assert await _listed() == [(_COWTOP, _TOP_HALT)]
+    off, on = await _calls(
+        monkeypatch,
+        client,
+        grant_id=grant_id,
+        connector_id=_COWTOP,
+        op_id=_TOP_HALT,
+        target=_TOP_TARGET,
+    )
+    # No grant covers a destructive call, so it never runs: without a preview first it is refused.
+    assert (off, on) == ("denied:preview_binding_required", "denied:preview_binding_required")

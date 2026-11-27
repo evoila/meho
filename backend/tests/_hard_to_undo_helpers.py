@@ -104,8 +104,9 @@ async def register_op(
     product: str = "undo",
     version: str = "1.0",
     impl_id: str = "undo-api",
+    safety_level: str = "caution",
 ) -> None:
-    """A ``caution`` operation that waits for approval, with no delete name, verb or tag."""
+    """An operation that waits for approval, with no delete name, verb or tag."""
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.1] * 384
     embedding.encode.return_value = [[0.1] * 384]
@@ -120,7 +121,7 @@ async def register_op(
         description="Changes one widget of a made-up product.",
         parameter_schema={"type": "object"},
         when_to_use=None,
-        safety_level="caution",
+        safety_level=safety_level,  # type: ignore[arg-type]
         requires_approval=True,
         hard_to_undo=hard_to_undo,  # type: ignore[arg-type]
         embedding_service=embedding,

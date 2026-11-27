@@ -53,7 +53,11 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import redirect_status_text
+from meho_backplane.connectors._shared.log_host import (
+    UNPARSEABLE_ADDRESS,
+    host_for_log,
+    redirect_status_text,
+)
 from meho_backplane.connectors._shared.login_mark import is_login
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
@@ -1793,35 +1797,26 @@ def redirect_change_may_have_run(exc: httpx.HTTPStatusError) -> bool:
     return exc.response.status_code in (301, 302, 303)
 
 
-def _safe_address(url: httpx.URL) -> str:
-    """*url* as scheme, host and path only: no query, fragment or login part."""
-    return str(url.copy_with(query=None, fragment=None, username=None, password=None))
-
-
-def _origin(url: httpx.URL) -> str:
-    """*url* as scheme, host and port only."""
-    return f"{url.scheme}://{url.netloc.decode('ascii')}"
-
-
 def _redirect_url(location: str, exc: httpx.HTTPStatusError) -> httpx.URL | None:
     """The absolute address *location* names, or ``None`` when MEHO cannot read it."""
     try:
         return exc.request.url.join(location)
-    except httpx.InvalidURL:
+    except (httpx.InvalidURL, UnicodeError):
         return None
 
 
 def _redirect_address(exc: httpx.HTTPStatusError) -> str:
-    """The address a redirect names: scheme, host and path only.
+    """The host name of the address a redirect names, or fixed words.
 
-    The query and any login part of the address are dropped, so a one-time
-    ticket in the address never reaches an error text.
+    Only the host name is kept, so no path, query, fragment, user part or
+    port of the address (a one-time ticket, say) reaches an error text.
     """
     location = exc.response.headers.get("Location")
     if not location:
         return "an address it did not name"
     url = _redirect_url(location, exc)
-    return "an address MEHO could not read" if url is None else _safe_address(url)
+    host = UNPARSEABLE_ADDRESS if url is None else host_for_log(url)
+    return "an address MEHO could not read" if host == UNPARSEABLE_ADDRESS else host
 
 
 #: Put in place of the redirect address for an operation that sends a secret.
@@ -1844,16 +1839,19 @@ def result_connector_redirect_on_change(
     change ran. The result keeps the shape of a
     ``connector_error`` and adds no field.
 
-    Every text is built here from the status, the method and the safe parts
+    Every text is built here from the status, the method and the host names
     of the two addresses. ``str(exc)`` is not used: httpx puts the full
     ``Location`` there, and a one-time ticket in its query would reach the
     caller and the audit row. The redirect body is not used either. With
     *withhold_address* (the operation sends a secret) the redirect address is
-    left out, and the sent address keeps only its scheme, host and port: a
-    path parameter of the call, or the path the vendor chose, can carry the
-    secret.
+    left out with a fixed sentence. A 307 or 308 with no ``Location`` names
+    no address to approve, so it gets the plain answer of
+    :func:`result_connector_error`.
     """
     status_code = exc.response.status_code
+    if status_code in (307, 308) and not exc.response.headers.get("Location"):
+        # No address to go to, so nothing to approve: the plain refusal.
+        return result_connector_error(op_id, exc, duration_ms)
     address = _ADDRESS_WITHHELD if withhold_address else _redirect_address(exc)
     if status_code in (307, 308):
         message = (
@@ -1870,11 +1868,7 @@ def result_connector_redirect_on_change(
             f"The target answered with a redirect to {address}. MEHO did not follow it "
             "and could not find out if the change ran. Check the target."
         )
-    # For an operation that sends a secret, the sent path is left out too: a
-    # path parameter can carry the secret.
-    sent_url = exc.request.url
-    sent_address = _origin(sent_url) if withhold_address else _safe_address(sent_url)
-    sent = f"{exc.request.method} {sent_address}"
+    sent = f"{exc.request.method} {host_for_log(exc.request.url)}"
     return OperationResult(
         status="error",
         op_id=op_id,

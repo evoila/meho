@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
@@ -38,6 +39,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient, login_request
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_queue import _dump_result_envelope
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
 from meho_backplane.settings import get_settings
@@ -290,24 +292,96 @@ class _TicketRedirectConnector(_RedirectingConnector):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 async def test_ticket_in_the_redirect_address_stays_out_of_result_and_audit_row(
-    stub_embedding_service: AsyncMock, session: AsyncSession
+    stub_embedding_service: AsyncMock, session: AsyncSession, on: bool, answer_switch: Any
 ) -> None:
-    result, _ = await _run(
-        _TicketRedirectConnector,
+    answer_switch(on)
+
+    class _Conn(_TicketRedirectConnector):
+        impl_id = f"vcfops-rest-redirect-ticket-{'on' if on else 'off'}"
+
+    with capture_logs() as captured:
+        result, _ = await _run(
+            _Conn,
+            stub_embedding_service,
+            session,
+            _web_operator(),
+            method="POST",
+            safety_level="caution",
+        )
+
+    assert result.status == "error"
+    assert result.error is not None
+    message = result.extras["exception_message"]
+    if on:
+        assert message == "HTTP 303 redirect after POST vcfops.example.test"
+        assert "vcfops.example.test" in result.error
+    else:
+        assert result.error == "connector_error: HTTPStatusError"
+        assert message == (
+            "Redirect response 303 from vcfops.example.test to <unparseable-location>, "
+            "not followed."
+        )
+    for text in (result.error, message):
+        assert "one-time-ticket-123" not in text
+        assert "/jobs/42" not in text
+    assert "one-time-ticket-123" not in json.dumps(result.model_dump(mode="json"))
+    assert "one-time-ticket-123" not in json.dumps(_dump_result_envelope(result))
+    assert "one-time-ticket-123" not in json.dumps(captured, default=str)
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].payload["error"]["exception_message"] == message
+    assert "one-time-ticket-123" not in json.dumps(rows[0].payload)
+
+
+class _NoLocationRedirectConnector(_RedirectingConnector):
+    location = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("status", [307, 308])
+async def test_307_or_308_without_location_gives_the_plain_refusal(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    on: bool,
+    answer_switch: Any,
+) -> None:
+    # There is no address to approve, so the answer asks for no approval.
+    answer_switch(on)
+
+    class _Conn(_NoLocationRedirectConnector):
+        impl_id = f"vcfops-rest-redirect-noloc-{status}-{'on' if on else 'off'}"
+
+    _Conn.status = status
+    async with get_sessionmaker()() as fresh:
+        approvals_before = await fresh.scalar(select(func.count()).select_from(ApprovalRequest))
+    result, connector = await _run(
+        _Conn,
         stub_embedding_service,
         session,
         _web_operator(),
-        method="POST",
+        method="PUT",
         safety_level="caution",
     )
 
+    assert connector.sent == ["PUT"]
     assert result.status == "error"
-    assert "one-time-ticket-123" not in json.dumps(result.model_dump(mode="json"))
-    assert "one-time-ticket-123" not in json.dumps(_dump_result_envelope(result))
+    assert result.error == "connector_error: HTTPStatusError"
+    assert result.extras["exception_message"] == (
+        f"Redirect response {status} from vcfops.example.test, with no Location header."
+    )
+    assert "approval" not in json.dumps(result.model_dump(mode="json")).lower()
+    for key in ("execution_outcome", "retry", "remediation", "message_source"):
+        assert key not in result.extras
+    async with get_sessionmaker()() as fresh:
+        approvals_after = await fresh.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert approvals_after == approvals_before
     rows = await _audit_rows()
     assert len(rows) == 1
-    assert "one-time-ticket-123" not in json.dumps(rows[0].payload)
+    assert "execution_outcome" not in rows[0].payload["error"]
 
 
 class _SecretPathRedirectConnector(_RedirectingConnector):
@@ -437,9 +511,7 @@ async def test_operation_that_sends_a_secret_keeps_the_sent_path_out(
         )
 
     assert result.status == "error"
-    assert result.extras["exception_message"] == (
-        "HTTP 307 redirect after PUT https://vcfops.example.test"
-    )
+    assert result.extras["exception_message"] == "HTTP 307 redirect after PUT vcfops.example.test"
     assert "sent-secret-value" not in json.dumps(result.model_dump(mode="json"))
     assert "sent-secret-value" not in json.dumps(_dump_result_envelope(result))
     assert "sent-secret-value" not in json.dumps(captured, default=str)

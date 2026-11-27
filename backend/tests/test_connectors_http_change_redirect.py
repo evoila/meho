@@ -940,21 +940,33 @@ def _real_status_error(status: int, location: str) -> httpx.HTTPStatusError:
     return caught.value
 
 
-@pytest.mark.usefixtures("answer_switch_on")
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_result_keeps_a_ticket_in_the_address_out_of_every_field(status: int) -> None:
+def test_result_keeps_a_ticket_in_the_address_out_of_every_field(
+    status: int, on: bool, answer_switch: Any
+) -> None:
+    answer_switch(on)
     exc = _real_status_error(status, "/jobs/42?ticket=one-time-ticket-123")
     # httpx puts the full address into its own message.
     assert "one-time-ticket-123" in str(exc)
 
     result = _classify(exc)
 
-    dumped = json.dumps(result.model_dump(mode="json"))
-    assert "one-time-ticket-123" not in dumped
-    assert "https://svc.example.com/jobs/42" in result.error
-    assert result.extras["exception_message"] == (
-        f"HTTP {status} redirect after POST https://svc.example.com/jobs"
-    )
+    for text in (result.error, result.extras["exception_message"]):
+        assert "one-time-ticket-123" not in text
+        assert "/jobs" not in text
+    if on:
+        assert "svc.example.com" in result.error
+        assert result.extras["exception_message"] == (
+            f"HTTP {status} redirect after POST svc.example.com"
+        )
+        assert "one-time-ticket-123" not in json.dumps(result.model_dump(mode="json"))
+    else:
+        assert result == result_connector_error("svc.item.update", exc, 1.0)
+        assert result.extras["exception_message"] == (
+            f"Redirect response {status} from svc.example.com to <unparseable-location>, "
+            "not followed."
+        )
 
 
 @pytest.mark.usefixtures("answer_switch_on")
@@ -982,7 +994,7 @@ def test_result_leaves_out_the_sent_path_for_an_operation_that_sends_a_secret(
     result = _classify(caught.value, op_sends_secret=True)
 
     assert "sent-secret-value" not in json.dumps(result.model_dump(mode="json"))
-    assert result.extras["exception_message"] == f"HTTP {status} redirect after PUT {_BASE}"
+    assert result.extras["exception_message"] == f"HTTP {status} redirect after PUT svc.example.com"
 
 
 @pytest.mark.usefixtures("answer_switch_on")
@@ -997,7 +1009,8 @@ def test_result_for_307_308_asks_for_a_new_approval(status: int) -> None:
     assert result.extras["http_status"] == status
     assert "did not run" not in result.error
     assert "change happened" not in result.error
-    assert "https://svc.example.com/items/8" in result.error
+    assert "to go to svc.example.com." in result.error
+    assert "/items" not in result.error
     assert "ticket" not in result.error
     assert "not the approved call" in result.error
     assert "execution_outcome" not in result.extras
@@ -1008,7 +1021,8 @@ def test_result_for_307_308_asks_for_a_new_approval(status: int) -> None:
 def test_result_for_303_names_another_resource_and_claims_no_success() -> None:
     result = _classify(_status_error("POST", 303, "/jobs/42"))
     assert "directed MEHO to another resource" in result.error
-    assert "https://svc.example.com/jobs/42" in result.error
+    assert "another resource at svc.example.com." in result.error
+    assert "/jobs" not in result.error
     assert "Check on the target whether the change ran" in result.error
     assert "says the change ran" not in result.error
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
@@ -1031,15 +1045,39 @@ def test_redirect_on_a_read_keeps_the_generic_result() -> None:
 
 
 @pytest.mark.usefixtures("answer_switch_on")
-@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("status", [301, 302, 303])
 def test_redirect_without_location_after_a_change_is_worded_by_its_code(status: int) -> None:
     # The target got the change, also when its answer names no address.
     exc = _status_error("PUT", status, None)
     assert is_redirect_on_change(exc)
     result = _classify(exc)
     assert "an address it did not name" in result.error
-    may_have_run = status in (301, 302, 303)
-    assert (result.extras.get("execution_outcome") == UNCERTAIN_OUTCOME) is may_have_run
+    assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
+
+
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
+@pytest.mark.parametrize("status", [307, 308])
+def test_307_or_308_without_location_gives_the_plain_refusal(
+    status: int, on: bool, answer_switch: Any
+) -> None:
+    # No address to go to, so nothing to approve.
+    answer_switch(on)
+    exc = _status_error("PUT", status, None)
+
+    result = _classify(exc)
+
+    assert result == result_connector_error("svc.item.update", exc, 1.0)
+    assert result.extras["exception_message"] == (
+        f"Redirect response {status} from svc.example.com, with no Location header."
+    )
+    assert "approval" not in (result.error or "")
+    assert "execution_outcome" not in result.extras
+
+
+@pytest.mark.usefixtures("answer_switch_on")
+def test_unreadable_location_keeps_its_fixed_words() -> None:
+    result = _classify(_status_error("PUT", 303, "https://bad host/x"))
+    assert "an address MEHO could not read" in result.error
 
 
 def test_redirect_on_a_login_is_not_a_redirect_on_change() -> None:
@@ -1089,11 +1127,15 @@ _MARKERS = (
     "marker-sent-fragment",
     "marker-sent-user",
     "marker-sent-pass",
+    "marker-redirect-path",
     "marker-redirect-query",
     "marker-redirect-fragment",
     "marker-redirect-user",
     "marker-body",
 )
+
+#: The port of the ``Location``: a made-up value that MEHO's text leaves out.
+_MARKER_PORT = "48613"
 
 
 def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
@@ -1106,8 +1148,8 @@ def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
         status,
         headers={
             "Location": (
-                "https://marker-redirect-user@svc.example.com/jobs/42"
-                "?t=marker-redirect-query#marker-redirect-fragment"
+                f"https://marker-redirect-user@svc.example.com:{_MARKER_PORT}"
+                "/marker-redirect-path?t=marker-redirect-query#marker-redirect-fragment"
             )
         },
         json={"message": "marker-body"},
@@ -1118,16 +1160,22 @@ def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
     return caught.value
 
 
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_the_switch_on_answer_hides_the_marked_values(status: int, answer_switch: Any) -> None:
-    answer_switch(True)
+def test_the_answer_names_host_names_only(status: int, on: bool, answer_switch: Any) -> None:
+    answer_switch(on)
 
-    result = _classify(_marked_status_error(status, "/items/7"))
+    result = _classify(_marked_status_error(status, "/items/marker-sent-path"))
 
-    dumped = json.dumps(result.model_dump(mode="json"))
-    for marker in _MARKERS:
-        assert marker not in dumped, marker
-    assert f"{_BASE}/items/7" in dumped
+    message = result.extras["exception_message"]
+    for text in (result.error, message):
+        for marker in (*_MARKERS, "marker-sent-path", _MARKER_PORT, "https://"):
+            assert marker not in text, (marker, text)
+    assert "svc.example.com" in message
+    if on:
+        dumped = json.dumps(result.model_dump(mode="json"))
+        for marker in (*_MARKERS, "marker-sent-path", _MARKER_PORT):
+            assert marker not in dumped, marker
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
@@ -1141,6 +1189,6 @@ def test_the_switch_on_answer_hides_the_path_of_an_operation_that_sends_a_secret
     )
 
     dumped = json.dumps(result.model_dump(mode="json"))
-    for marker in (*_MARKERS, "marker-secret-path", "/jobs/42"):
+    for marker in (*_MARKERS, "marker-secret-path", _MARKER_PORT, "svc.example.com:"):
         assert marker not in dumped, marker
-    assert _BASE in dumped
+    assert result.extras["exception_message"] == f"HTTP {status} redirect after PUT svc.example.com"

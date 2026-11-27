@@ -92,6 +92,12 @@ def _op(
     "value", ["{example-name: example-value-7}", "[example-value-7]", "example-value-7", "null"]
 )
 def test_with_the_switch_off_agents_is_one_sentence_whatever_its_value(value: str) -> None:
+    content = f"policy: v1\nagents: {value}\n".encode()
+    assert parse_policy_file(content, custom_policy=False).mistakes == [AGENTS_NEED_CUSTOM_POLICY]
+
+
+@pytest.mark.parametrize("value", ["[example-value-7]", "null"])
+def test_the_rule_check_refuses_agents_with_the_switch_off(value: str) -> None:
     parsed = parse_policy_file(f"policy: v1\nagents: {value}\n".encode())
     assert parsed.model is not None
     document = document_of(parsed.model)
@@ -178,9 +184,9 @@ def test_a_wrong_rule_is_one_sentence_with_its_place(rule: str, mistake: str) ->
 
 def test_a_part_that_is_not_a_list_and_a_repeated_name_are_mistakes() -> None:
     parsed = parse_policy_file(b"policy: v1\nagents: {name: r}\n")
-    assert parsed.model is not None
-    document = document_of(parsed.model)
-    assert agent_rules_mistakes(document, scope="tenant", custom_policy=True, limit="safe") == [
+    assert parsed.mistakes == ["`agents` must be a list."]
+    stored = {"agents": {"name": "r"}}
+    assert agent_rules_mistakes(stored, scope="tenant", custom_policy=True, limit="safe") == [
         "`agents` must be a list of rules."
     ]
     assert _mistakes(_RULE + _RULE) == [

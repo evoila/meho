@@ -6,9 +6,9 @@
 :func:`agents_plan` adds to the diff of :func:`~meho_backplane.policy.service.build_plan`:
 
 * for a tenant's file: ``agents`` (the rules added, changed and removed)
-  and ``runs_at_once`` (for each role, the operations that start to run at
-  once for a personal agent under the file's rules). Both only when one
-  side has a rule.
+  and ``runs_at_once`` (for each role, the operations that run at once for
+  a personal agent under the file's rules and do not under the stored
+  rules). Both only when one side has a rule.
 * for the install's file: ``agents_above_limit``, each tenant with a stored
   rule above the file's outer limit, with one warning each. Only when
   there is such a tenant.
@@ -22,15 +22,27 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantPolicy
 from meho_backplane.op_classes import is_root_shell
+from meho_backplane.operations._code_presence import row_code_missing
+from meho_backplane.operations._lookup import (
+    enabled_for_tenant_clause,
+    installed_owner_clause,
+    visible_scope_clause,
+)
 from meho_backplane.operations.grant_approval import is_rights_change_op
-from meho_backplane.operations.op_policy import has_plain_mark
+from meho_backplane.operations.op_policy import (
+    EffectivePolicy,
+    OpKey,
+    has_plain_mark,
+    load_overrides,
+    policy_in_force,
+)
 from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.service_grants import never_covered_reason
 from meho_backplane.policy.agent_rules import (
@@ -63,27 +75,32 @@ _RULE_ROLE: dict[TenantRole, str] = {
 }
 
 
-def _keeps_waiting(row: EndpointDescriptor, classified: Classification) -> bool:
-    """True when a check that no rule lowers makes every call of *row* wait."""
+def _keeps_waiting(
+    row: EndpointDescriptor, classified: Classification, policy: EffectivePolicy
+) -> bool:
+    """True when a check that no rule lowers makes every call of *row* wait.
+
+    *policy* is the policy in force for the tenant: the code, the admin's
+    per-operation edits, the classification and the floors.
+    """
     return (
-        "destructive" in (row.safety_level, classified.risk)
-        or classified.always_wait
+        policy.safety_level == "destructive"
+        or policy.always_wait
         or classified.conflict is not None
         or never_covered_reason(row) is not None
         or is_rights_change_op(row.op_id)
         or is_root_shell(row.op_id)
         or row.hard_to_undo is not None
         or row.source_kind == "composite"
-        or (bool(row.requires_approval) and not has_plain_mark(row))
+        or (policy.requires_approval and not has_plain_mark(row))
     )
 
 
-def _level(row: EndpointDescriptor, classified: Classification) -> str:
-    """The level the rule compares: the highest of the code, the policy and the plain mark."""
-    levels = [row.safety_level, classified.risk]
-    if row.requires_approval and has_plain_mark(row):
-        levels.append("dangerous")
-    return max((lvl for lvl in levels if lvl in RISK_LEVELS), key=RISK_LEVELS.index, default="safe")
+def _level(row: EndpointDescriptor, policy: EffectivePolicy) -> str:
+    """The level the rule compares: the level in force, ``dangerous`` with the plain mark."""
+    if policy.requires_approval and has_plain_mark(row):
+        return "dangerous"
+    return policy.safety_level if policy.safety_level in RISK_LEVELS else "destructive"
 
 
 def _lowest_role(op_id: str) -> str:
@@ -98,27 +115,53 @@ async def _rule_ops(
     entries: list[ClassificationEntry],
     taxonomy: Taxonomy,
 ) -> list[RuleOp]:
-    """Each enabled operation the tenant can call, as the rule check sees it."""
+    """Each operation a call by a login of the tenant finds, as the rule check sees it.
+
+    The same rows and values as dispatch
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`): the
+    tenant's own copy of a connector in place of the built-in rows, the
+    tenant's on/off choice of a built-in operation, the installed packages,
+    and the policy in force
+    (:func:`~meho_backplane.operations.op_policy.policy_in_force`) with the
+    admin's per-operation edits. The classification is the one of the
+    planned file (*entries*, *taxonomy*).
+    """
+    if tenant_id is None:
+        return []
     group = aliased(OperationGroup)
-    visible: ColumnElement[bool] = EndpointDescriptor.tenant_id.is_(None)
-    if tenant_id is not None:
-        visible = or_(visible, EndpointDescriptor.tenant_id == tenant_id)
     stmt = (
         select(EndpointDescriptor, group.group_key)
         .outerjoin(group, EndpointDescriptor.group_id == group.id)
-        .where(visible, EndpointDescriptor.is_enabled.is_(True))
+        .where(
+            visible_scope_clause(
+                EndpointDescriptor,
+                tenant_id=tenant_id,
+                product=EndpointDescriptor.product,
+                version=EndpointDescriptor.version,
+                impl_id=EndpointDescriptor.impl_id,
+            ),
+            enabled_for_tenant_clause(tenant_id=tenant_id),
+            installed_owner_clause(),
+        )
+    )
+    found = list((await session.execute(stmt)).tuples())
+    overrides = await load_overrides(
+        session, tenant_id=tenant_id, keys=(OpKey.of(row) for row, _ in found)
     )
     ops: list[RuleOp] = []
-    for row, group_key in (await session.execute(stmt)).tuples():
+    for row, group_key in found:
+        if await row_code_missing(session, tenant_id=tenant_id, row=row):
+            continue
         connector_id = connector_id_of(row)
         classified = classify(OpCoordinates(connector_id, group_key, row.op_id), entries, taxonomy)
+        policy = policy_in_force(row, overrides.get(OpKey.of(row), []), classified)
         ops.append(
             RuleOp(
                 connector_id=connector_id,
                 op_id=row.op_id,
-                level=_level(row, classified),
+                level=_level(row, policy),
                 changes_rights=bool(row.changes_rights),
-                keeps_waiting=_keeps_waiting(row, classified),
+                keeps_waiting=_keeps_waiting(row, classified, policy),
                 lowest_role=_lowest_role(row.op_id),
             )
         )
@@ -169,5 +212,10 @@ async def agents_plan(
         return {}, []
     limit = personal_agent_limit(install_document, custom_policy=True)
     ops = await _rule_ops(session, tenant_id, *side)
-    diff["runs_at_once"] = runs_at_once_by_role(rules_from_document(document), limit=limit, ops=ops)
+    diff["runs_at_once"] = runs_at_once_by_role(
+        rules_from_document(document),
+        limit=limit,
+        ops=ops,
+        before=rules_from_document(before),
+    )
     return diff, []

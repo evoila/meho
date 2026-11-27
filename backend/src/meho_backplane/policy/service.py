@@ -414,7 +414,7 @@ async def build_plan(
         file_sha256=file_sha256(content),
         based_on=canonical_sha256(before),
     )
-    parsed = parse_policy_file(content)
+    parsed = parse_policy_file(content, custom_policy=custom_policy)
     if parsed.model is None:
         plan.mistakes = parsed.mistakes
         return plan

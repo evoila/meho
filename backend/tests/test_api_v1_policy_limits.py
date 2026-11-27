@@ -375,7 +375,7 @@ async def test_a_limits_part_of_the_wrong_type_is_refused(
 
 _SEVEN_FILES = {
     "limits": "limits: {personal_agent_up_to: caution}",
-    "agents": "agents: {example-name: example-value-7}",
+    "agents": "agents: [example-value-7]",
     **{name: f"{name}: {{example-name: example-value-7}}" for name in _FIVE},
 }
 

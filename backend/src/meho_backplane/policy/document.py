@@ -27,8 +27,10 @@ It holds:
   refused.
 * ``agents``: in a tenant's file only, the rules for personal agents
   (:mod:`meho_backplane.policy.agent_rules`). A file may hold it only while
-  the ``CUSTOM_POLICY`` switch is on. The parser keeps its value as
-  written; :func:`~meho_backplane.policy.validate.check_document` checks it.
+  the ``CUSTOM_POLICY`` switch is on: with it off, the parser refuses the
+  key like the five refused keys. With it on, the part holds at most 200
+  rules, the parser keeps each rule as written, and
+  :func:`~meho_backplane.policy.validate.check_document` checks them.
 
 The file reserves seven top-level keys: ``limits``, ``agents`` and five
 refused keys, ``approvers``, ``role_bindings``, ``risk_levels``,
@@ -70,7 +72,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     render_path,
 )
-from meho_backplane.policy.agent_rules import stored_agents
+from meho_backplane.policy.agent_rules import AGENTS_NEED_CUSTOM_POLICY, stored_agents
 from meho_backplane.policy.limits import PolicyLimits, not_read_mistake
 from meho_backplane.policy.store import _check_labels
 
@@ -326,7 +328,7 @@ class PolicyFile(_Strict):
     bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
     limits: PolicyLimits | None = None
     # Checked with the switch and the outer limit: policy/agent_rules.py.
-    agents: Any = None
+    agents: list[Any] | None = Field(default=None, max_length=200)
 
 
 @dataclass
@@ -373,8 +375,14 @@ def _repeated_match_mistakes(model: PolicyFile) -> list[str]:
     return mistakes
 
 
-def parse_policy_file(content: bytes) -> ParsedPolicy:
-    """Parse and check *content*; collect every mistake as one sentence each."""
+def parse_policy_file(content: bytes, *, custom_policy: bool = True) -> ParsedPolicy:
+    """Parse and check *content*; collect every mistake as one sentence each.
+
+    With *custom_policy* false (the ``CUSTOM_POLICY`` switch is off), the
+    key ``agents`` is refused here like the five refused keys, so its
+    sentence comes back also when the file has other mistakes. True keeps
+    the part for :func:`~meho_backplane.policy.validate.check_document`.
+    """
     if len(content) > MAX_POLICY_BYTES:
         return ParsedPolicy(None, [f"The file is larger than {MAX_POLICY_BYTES // 1024} KiB."])
     loaded = _load_yaml(content)
@@ -401,10 +409,13 @@ def parse_policy_file(content: bytes) -> ParsedPolicy:
         return ParsedPolicy(None, mistakes)
     if "policy" in raw and raw["policy"] != POLICY_VERSION:
         mistakes.append(f"`policy` is not a file format this MEHO reads; use `{POLICY_VERSION}`.")
+    refused = _REFUSED_KEYS if custom_policy else ("agents", *_REFUSED_KEYS)
+    if not custom_policy and "agents" in raw:
+        mistakes.append(AGENTS_NEED_CUSTOM_POLICY)
     mistakes.extend(not_read_mistake(key) for key in _REFUSED_KEYS if key in raw)
     model: PolicyFile | None = None
     try:
-        model = PolicyFile.model_validate({k: v for k, v in raw.items() if k not in _REFUSED_KEYS})
+        model = PolicyFile.model_validate({k: v for k, v in raw.items() if k not in refused})
     except ValidationError as exc:
         mistakes.extend(format_validation_errors(exc))
     if model is not None:

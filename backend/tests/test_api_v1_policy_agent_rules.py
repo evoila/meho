@@ -187,8 +187,8 @@ async def test_a_stored_file_above_a_lowered_limit_names_a_mistake_and_the_insta
         await a.set_limit("caution")
         again = h.post(client, "import", a.tenant_admin(key), a.FILE_A)
     sentence = (
-        "`agents[0]` (`helper`) allows dangerous, above the new limit caution. Above the "
-        "limit the rule does not count."
+        "`agents[0]` (`helper`) allows dangerous, above the new limit caution. The rule "
+        "counts only up to the new limit."
     )
     assert install.json()["diff"]["agents_above_limit"] == [
         {"tenant_id": str(h.TENANT), "entries": [sentence]}

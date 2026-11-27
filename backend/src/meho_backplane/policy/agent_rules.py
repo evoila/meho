@@ -367,21 +367,33 @@ def rule_lets_run(rule: AgentRule, role: str, limit: str, op: RuleOp) -> bool:
 
 
 def runs_at_once_by_role(
-    rules: Sequence[AgentRule], *, limit: str, ops: Iterable[RuleOp]
+    rules: Sequence[AgentRule],
+    *,
+    limit: str,
+    ops: Iterable[RuleOp],
+    before: Sequence[AgentRule] = (),
 ) -> dict[str, list[dict[str, str]]]:
     """For each role, the operations that start to run at once under *rules*.
 
-    Without a rule, a personal agent runs only ``safe`` operations at once,
-    so a ``safe`` operation is never in the list. Each item names the
-    connector, the operation, its level and the rule (:func:`rule_ref`).
+    An operation that already runs at once under the stored rules
+    (*before*) is not listed, so an edit that leaves the rules the same
+    lists none. Without a rule, a personal agent runs only ``safe``
+    operations at once, so a ``safe`` operation is never in the list. Each
+    item names the connector, the operation, its level and the rule
+    (:func:`rule_ref`).
     """
+
+    def _runs(of: Sequence[AgentRule], role: str, op: RuleOp) -> AgentRule | None:
+        rule = rule_for(of, role, op.connector_id)
+        return rule if rule is not None and rule_lets_run(rule, role, limit, op) else None
+
     out: dict[str, list[dict[str, str]]] = {role: [] for role in RULE_ROLES}
     for op in ops:
         if op.level == RISK_LEVELS[0]:
             continue
         for role in RULE_ROLES:
-            rule = rule_for(rules, role, op.connector_id)
-            if rule is not None and rule_lets_run(rule, role, limit, op):
+            rule = _runs(rules, role, op)
+            if rule is not None and _runs(before, role, op) is None:
                 out[role].append(
                     {
                         "connector_id": op.connector_id,
@@ -406,19 +418,23 @@ def rules_above_limit(document: Any, limit: str, *, place: str) -> list[str]:
         return [f"The stored rules at {place} are not valid, so no rule counts."]
     return [
         f"`agents[{index}]` (`{rule.name}`) allows {rule.up_to}, above the new limit "
-        f"{limit}. Above the limit the rule does not count."
+        f"{limit}. The rule counts only up to the new limit."
         for index, rule in enumerate(rules)
         if LIMIT_LEVELS.index(rule.up_to) > LIMIT_LEVELS.index(limit)
     ]
 
 
+def _rule_key(item: Any) -> str:
+    """The name of a stored rule; its whole text when the name is not text."""
+    name = item.get("name") if isinstance(item, Mapping) else None
+    if isinstance(name, str) and name:
+        return name
+    return json.dumps(["not-valid", item], sort_keys=True, default=str)
+
+
 def _rules_by_name(raw: Any) -> dict[str, Any]:
     items = raw if isinstance(raw, list) else []
-    return {
-        (item.get("name") if isinstance(item, Mapping) else None)
-        or json.dumps(["not-valid", item], sort_keys=True, default=str): item
-        for item in items
-    }
+    return {_rule_key(item): item for item in items}
 
 
 def agents_diff(before: Any, after: Any) -> dict[str, Any]:
@@ -426,7 +442,8 @@ def agents_diff(before: Any, after: Any) -> dict[str, Any]:
 
     It is ``{}`` when neither side has a rule, so the diff of a policy
     without rules has no ``agents`` section. A stored rule that is not a
-    mapping keys on its whole text: the import shows it as removed.
+    mapping, or whose ``name`` is not text, keys on its whole text: the
+    import shows it as removed.
     """
     old = _rules_by_name(before.get("agents") if isinstance(before, Mapping) else None)
     new = _rules_by_name(after.get("agents") if isinstance(after, Mapping) else None)

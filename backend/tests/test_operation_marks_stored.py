@@ -20,9 +20,11 @@ definitions in the modules of that package, in three forms:
   field, or a dict with ``op_id`` and ``handler`` (a spec dict), held in a
   module variable, also inside nested tuples, lists and dicts. A record
   without a mark field has no mark;
-* a call with an ``op_id=`` keyword: a register call with a plain op id
-  (its marks are the plain values it writes, or none), or any other call
-  that writes a mark as a plain value (a call that makes a record);
+* a call with an ``op_id=`` keyword, or with the op id in the place of the
+  ``op_id`` parameter of the function it names: a register call with a
+  plain op id (its marks are the plain values it writes, or none), or any
+  other call that writes a mark as a plain value (a call that makes a
+  record);
 * a ``for`` loop that unpacks spec tuples of a module variable into names
   such as ``op_id`` and ``hard_to_undo``.
 
@@ -297,8 +299,43 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
+def _positional_op_id(node: ast.Call, module: ModuleType) -> ast.expr | None:
+    """The argument that a call passes as ``op_id`` by position, or ``None``.
+
+    The test reads the signature of the function that the call names in its
+    module, so a helper such as ``_make_op("x.delete", ..., hard_to_undo=...)``
+    counts as a call with ``op_id=``.
+    """
+    if not node.args or not isinstance(node.func, ast.Name):
+        return None
+    function = getattr(module, node.func.id, None)
+    if not callable(function):
+        return None
+    try:
+        parameters = list(inspect.signature(function).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    positional = [
+        parameter.name
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if "op_id" not in positional:
+        return None
+    index = positional.index("op_id")
+    if index >= len(node.args) or isinstance(node.args[index], ast.Starred):
+        return None
+    if any(isinstance(arg, ast.Starred) for arg in node.args[:index]):
+        return None
+    return node.args[index]
+
+
 def _call_definition(node: ast.Call, module: ModuleType) -> tuple[dict[str, Any], Mark] | None:
-    """The definition in a call with ``op_id=``, or ``None`` when the call defines nothing.
+    """The definition in a call with ``op_id``, or ``None`` when the call defines nothing.
+
+    The op id is the ``op_id=`` keyword, or the argument in the place of the
+    ``op_id`` parameter of the function the call names.
 
     A register call with a plain op id defines the op: its marks are the
     plain values it writes, or none. A register call that takes a mark from
@@ -307,7 +344,8 @@ def _call_definition(node: ast.Call, module: ModuleType) -> tuple[dict[str, Any]
     mark as a plain value.
     """
     keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
-    op_id = _resolve(keywords["op_id"], module) if "op_id" in keywords else None
+    op_id_node = keywords.get("op_id") or _positional_op_id(node, module)
+    op_id = _resolve(op_id_node, module) if op_id_node is not None else None
     if not isinstance(op_id, str):
         return None
     marks = [keywords[name] for name in _MARK_FIELDS if name in keywords]

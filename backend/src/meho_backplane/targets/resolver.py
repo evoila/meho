@@ -301,7 +301,9 @@ async def resolve_target_by_id(
     return result.scalar_one_or_none()
 
 
-def target_by_id_stmt(tenant_id: UUID, target_id: UUID, *, for_update: bool = False) -> Select[tuple[TargetORM]]:
+def target_by_id_stmt(
+    tenant_id: UUID, target_id: UUID, *, for_update: bool = False
+) -> Select[tuple[TargetORM]]:
     """The ``SELECT`` of :func:`resolve_target_by_id`.
 
     With *for_update* it locks the row (``FOR UPDATE``) and loads it again

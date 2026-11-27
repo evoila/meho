@@ -21,7 +21,15 @@ from meho_backplane.targets.extras_limits import check_extras_size
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["merge_extras_changes"]
+__all__ = ["extras_change_keys", "merge_extras_changes"]
+
+
+def extras_change_keys(changes: Mapping[str, Any]) -> dict[str, list[str]]:
+    """The key names *changes* sets and removes, sorted. Never a value."""
+    return {
+        "extras_keys_set": sorted(k for k, v in changes.items() if v is not None),
+        "extras_keys_removed": sorted(k for k, v in changes.items() if v is None),
+    }
 
 
 def merge_extras_changes(

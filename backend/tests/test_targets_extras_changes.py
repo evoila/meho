@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.dialects import postgresql
 
+from meho_backplane.api.v1 import targets as targets_api
 from meho_backplane.api.v1.targets import router as targets_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -43,7 +44,6 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation
-from meho_backplane.api.v1 import targets as targets_api
 from meho_backplane.targets.extras_changes import merge_extras_changes
 from meho_backplane.targets.resolver import resolve_target_by_id, target_by_id_stmt
 from meho_backplane.targets.schemas import TargetUpdate
@@ -257,7 +257,9 @@ async def test_the_console_change_merges_into_the_extras_of_the_locked_read(
     row = await _insert_target(name=_NAME, extras={"a": 1})
     locked: list[bool] = []
 
-    async def other_change_then_lock(session: Any, tenant_id: Any, target_id: Any, **kw: Any) -> Any:
+    async def other_change_then_lock(
+        session: Any, tenant_id: Any, target_id: Any, **kw: Any
+    ) -> Any:
         if kw.get("for_update"):
             locked.append(True)
             # Another change of a different key commits after the first read
@@ -358,14 +360,17 @@ async def test_the_card_names_the_changed_keys_and_hides_a_secret_value() -> Non
 # ---------------------------------------------------------------------------
 
 
-async def test_the_operation_answer_shows_the_extras_after_the_change() -> None:
+async def test_the_operation_answer_names_the_changed_keys() -> None:
     row = await _insert_target(name=_NAME, extras=dict(_THREE))
 
-    result = await _run(_operator(), row.id, extras_changes={"retries": 4})
+    result = await _run(_operator(), row.id, extras_changes={"retries": 4, "tags": None})
 
     assert result.status == "ok", result
-    assert result.result["extras"] == {**_THREE, "retries": 4}
+    assert result.result["extras_keys_set"] == ["retries"]
+    assert result.result["extras_keys_removed"] == ["tags"]
+    assert "extras" not in result.result
     assert result.result["updated_fields"] == ["extras_changes"]
+    assert await _extras(row.id) == {"limits": {"cpu": 2}, "strict": True, "retries": 4}
 
 
 async def test_the_operation_refuses_extras_with_extras_changes() -> None:

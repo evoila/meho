@@ -206,7 +206,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.targets.extras_changes import merge_extras_changes
+from meho_backplane.targets.extras_changes import extras_change_keys, merge_extras_changes
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.required_extras import check_keycloak_managed_realm
 from meho_backplane.targets.resolver import (
@@ -598,8 +598,7 @@ def _bind_extras_changes_audit(changes: dict[str, Any]) -> None:
     in :func:`_bind_tls_audit`.
     """
     structlog.contextvars.bind_contextvars(
-        audit_extras_keys_set=sorted(k for k, v in changes.items() if v is not None),
-        audit_extras_keys_removed=sorted(k for k, v in changes.items() if v is None),
+        **{f"audit_{key}": names for key, names in extras_change_keys(changes).items()}
     )
 
 

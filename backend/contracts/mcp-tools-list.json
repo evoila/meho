@@ -3402,8 +3402,17 @@
         "oneOf": [
           {
             "properties": {
-              "extras": {
-                "type": "object"
+              "extras_keys_removed": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "extras_keys_set": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "host": {
                 "type": "string"

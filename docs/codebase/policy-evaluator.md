@@ -339,8 +339,8 @@ approve:
 
 | Field | Meaning |
 |---|---|
-| `web`, `web_reason` | yes or no for a click in the web console, and why |
-| `token`, `token_reason` | yes or no for an approve on the command line or REST, and why |
+| `web`, `web_reason` | yes, no or `null` for a click in the web console, and why |
+| `token`, `token_reason` | yes, no or `null` for an approve on the command line or REST, and why |
 
 How it gets the answer: it builds the request in memory, with the fields
 the park would store (who asked, the risk level, "waits only because it
@@ -348,30 +348,58 @@ came with a token" from `waits_only_for_token_call`, the change-of-rights
 mark, and the approver groups of the routing). Nothing is stored. Then it
 asks `approve_right_any_status` (`operations/approval_rights.py`) about
 that request: the same check the approve sign and the approve itself
-run. So the part says what the approve does: a machine login never
-approves, a change of rights only an admin in the web console, the own
-approval rule (`_check_self_approval`: a MEHO-Admin, a click on a
-`caution` change that waited only for its token, or
-`APPROVAL_ALLOW_SELF_APPROVAL` for a `safe` or `caution` change), and the
-routing. Each reason is the text the approve shows.
+run. A machine login never approves, a change of rights only an admin in
+the web console, the own approval rule (`_check_self_approval`: a
+MEHO-Admin, a click on a `caution` change that waited only for its
+token, or `APPROVAL_ALLOW_SELF_APPROVAL` for a `safe` or `caution`
+change), and the routing.
+
+The rule of the part:
+
+- Where the approve step reads a fact that only the call has, `web` and
+  `token` are `null`, and `web_reason` and `token_reason` are both "This
+  depends on the values of the call. Explain asks without them." Such
+  facts are the values of the call, and the facts of the approval card
+  that MEHO reads from the values or from the target (the login, the
+  group, the login-realm fact, the platform admin mark and its reason).
+  These are the operations registered with one of three functions:
+  `register_rights_change_check` (a change of rights only for some
+  values), `register_grant_op` (the approval card holds facts that MEHO
+  reads from the values or from the target), and
+  `register_requester_check` (the check of who may ask reads the
+  values). One function decides it: `approve_reads_call_facts` in
+  `operations/grant_approval.py`.
+- For every other operation, `web` and `token` are `true` or `false`,
+  exactly as the approve step decides for that caller, and a refusal has
+  the approve step's reason.
+
+The part answers for the person and the request. The approve still
+checks at the click what can change until then: the sign-in, the
+deadline and the preview binding.
 
 Who sees what: every caller of their own explain answer sees the part, as
 on the approve sign of their own request. A reason can name the
-MEHO-Admins group, the groups that may approve, the setting
-`APPROVAL_ALLOW_SELF_APPROVAL`, and a routing entry (such as
-`install:routing[0]`) when the routing refuses. The approve sign of that
-request shows the same text to the same person. The answer for a
-what-if login with groups asks for that made-up login.
+MEHO-Admins group, the groups that may approve and the setting
+`APPROVAL_ALLOW_SELF_APPROVAL`. Only a tenant admin or a platform admin
+also sees the place of a routing entry (such as `install:routing[0]`)
+when the routing refuses. For anyone else `without_policy` gives the
+same sentence without the place; the routing refusal code makes that
+text. The answer for a what-if login with groups asks for that made-up
+login.
 
 With `CUSTOM_POLICY` off, or when the answer is not `wait`, the key is
 left out of the answer. The CLI prints the part after the approver
-groups ("May you approve your own request:").
+groups ("May you approve your own request:"); for a `null` value it
+prints "depends on the values of the call" and the reason.
 
-`tests/test_policy_explain_own_approval.py` asks explain through the
-route, then makes the real call and the real approve by the same login,
-with a click and with a token, for each kind of caller, each risk level
-and both settings of `APPROVAL_ALLOW_SELF_APPROVAL`. It fails when the
-part and the approve differ.
+Tests: `tests/test_policy_explain_own_approval.py` asks explain through
+the route, then makes the real call and the real approve by the same
+login, with a click and with a token, for each kind of caller, each risk
+level and both settings of `APPROVAL_ALLOW_SELF_APPROVAL`. It fails when
+the part and the approve differ. `..._values.py` and `..._card.py` cover
+the operations where the part is `null`, `..._routing.py` the routing,
+and `test_policy_explain_switch_off.py` compares the whole answer with
+the switch off with answers recorded from main.
 
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).
@@ -588,8 +616,9 @@ switch off and on.
   both routing states, and a stored routing that is not valid.
   `backend/tests/test_operations_request_preview.py`: the preview's
   `policy_rule` and `approvers`. `cli/internal/cmd/policy/explain_test.go`.
-  `backend/tests/test_policy_explain_own_approval.py`: `own_approval` and
-  the real approve agree.
+  `backend/tests/test_policy_explain_own_approval*.py`: `own_approval` and
+  the real approve agree. `backend/tests/test_policy_explain_switch_off.py`:
+  with `CUSTOM_POLICY` off the answer is the one of main.
 
 ## References
 

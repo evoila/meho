@@ -370,12 +370,15 @@ async def _dispatch(
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
+    # A credential operation waits for a person: this is the run after the
+    # approval (the approval-queue resume sets ``_approved``).
     result = await dispatch(
         operator=operator,
         connector_id="demo-1.x",
         op_id=op_id,
         target=_Target(),
         params={},
+        _approved=True,
     )
     async with get_sessionmaker()() as session:
         rows = (

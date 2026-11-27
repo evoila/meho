@@ -28,8 +28,8 @@ counts the requests that reached the target
 * two credential writes, each one waits: each write is sent once;
 * a credential write whose answer was lost, then a wait: MEHO asks for no
   approval and stops at once;
-* a credential write through ``dispatch_child``, wait, change: the write is
-  sent once and gives back no result after the approval;
+* a credential write through ``dispatch_child``: it waits for its own
+  approval, and the approval runs only the write;
 * a credential read checked by ``enforce_subop_policy``, wait, change: when
   the login is blocked while the read waits in its policy check before it
   is sent again, the read is not sent and the answer is the block refusal;
@@ -224,10 +224,10 @@ async def test_credential_write_wait_change_finishes_and_sends_the_write_once(
     assert c.sent == [c.CREDENTIAL_WRITE_STEP, c.WAIT_STEP, c.CHANGE_STEP]
 
 
-async def test_credential_write_through_dispatch_child_is_sent_once(
+async def test_credential_write_through_dispatch_child_waits_for_its_own_approval(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
-    """A ``dispatch_child`` credential write gives back ``ok`` with no result after the approval."""
+    """A ``dispatch_child`` credential write waits for a person; its approval runs only it."""
     await _setup(
         stub_embedding_service,
         session,
@@ -237,19 +237,16 @@ async def test_credential_write_through_dispatch_child_is_sent_once(
 
     first = await h.run(c.CHILD_CREDENTIAL_WRITE_OP_ID)
     assert first.status == "awaiting_approval", first.error
-    assert c.sent == [c.CREDENTIAL_WRITE_CHILD]
+    assert c.sent == []
     (waiting,) = await _requests()
-    assert [(step["op_id"], step["status"]) for step in _steps(waiting)] == [
-        (c.CREDENTIAL_WRITE_CHILD, STEP_DONE_NO_RESULT)
-    ]
-    assert c.SECRET_VALUE not in json.dumps(waiting.resume_parent)
-    assert "result" not in _steps(waiting)[0]
+    assert waiting.op_id == c.CREDENTIAL_WRITE_CHILD
+    assert waiting.resume_parent is None
 
     second = await _approve_and_resume(first)
 
     assert second.status == "ok", second.error
-    assert second.result == {"done": True, "child_result": None}
-    assert c.sent == [c.CREDENTIAL_WRITE_CHILD, c.WAIT_STEP, c.CHANGE_STEP]
+    assert c.sent == [c.CREDENTIAL_WRITE_CHILD]
+    assert len(await _requests()) == 1
 
 
 async def test_credential_write_with_a_lost_answer_stops_before_the_wait(

@@ -544,6 +544,7 @@ import is human-only.
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
 | `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+| `GET /api/v1/policy/carry-over/dry-run` | `meho policy carry-over --dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row; an agent login gets 403 (`policy/carry_over.py`) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
 `cli/internal/cmd/policy/`.
@@ -568,8 +569,14 @@ keys: parser, checks, import, export, the reader),
 `backend/tests/test_api_v1_policy_limits.py` (the same through the routes
 and `policy.apply`: a stored limit with the switch off, the approved run,
 the refusal sentences),
+`backend/tests/test_policy_carry_over_dry_run.py` (the dry run of the
+"always wait" carry-over: the list, steps at every level, the operations
+of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
+(who may run it, every table the same, an override keeps waiting),
+`backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
+warning exactly when the step check makes the step wait, in both scopes),
 `backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
 `CUSTOM_POLICY` on: import, export and import again, who may ask and
 approve, the audit rows, a wrong part, a stored value MEHO cannot read,
 the approval table with no part, the switch turned off again),
-`cli/internal/cmd/policy/file_test.go`.
+`cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

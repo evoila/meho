@@ -517,6 +517,50 @@ Not checked: idempotency_key, connector_resolution
     Today's checks still decide. With the setting off, explain shows
     today's answer only.
 
+## Before "always wait" becomes `destructive`: `meho policy carry-over --dry-run`
+
+"Always wait" makes an operation wait for approval on every call. It is
+saved in two places: an admin's override with approval on, or a policy
+file entry with `always_wait: true`.
+
+The dry run lists every saved "always wait" and what changes for each
+setting if MEHO reads it as `destructive`. It only reads: it changes no
+setting and no answer, and it reads no setting switch. It writes only its
+audit row.
+
+```bash
+meho policy carry-over --dry-run                   # your tenant's settings
+meho policy carry-over --dry-run --scope install   # the install's (platform admin)
+```
+
+For each setting it shows:
+
+- where it comes from: `override` or `policy_file`, the scope, and the
+  place (for example `tenant:classifications[2]`);
+- the operations it matches. A policy file entry is matched against the
+  operations a call of the tenant can use, and against every step of a
+  multi-step operation, with the group the step check finds for it, also
+  a step with no row a call can use. A policy file entry makes an
+  operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
+  the dry run lists its matches with every switch;
+- a warning when the setting makes a step of a multi-step operation
+  wait, with every multi-step operation that runs it, at every level. A
+  setting of the install counts when it makes the step wait for at least
+  one run, also the run of a tenant whose own row of the step is in
+  another group. A
+  policy file entry that makes only the direct call wait gives no such
+  warning. As
+  `destructive`, a step is refused, not held for approval, so such a run
+  stops at that step;
+- a warning when the install is in sandbox mode. There a delete grant of
+  a service login can cover some `destructive` operations, but not every
+  one;
+- that, as `destructive`, a call needs a matching preview first. A call
+  without one is refused.
+
+Who may run it: the same callers who may export the policy, except an
+agent login, which gets 403. There is no MCP tool for it.
+
 ## What an import does
 
 1. MEHO checks the file and works out the diff.
@@ -553,6 +597,7 @@ Not checked: idempotency_key, connector_resolution
 | `GET /api/v1/policy/export` | the stored policy as a file |
 | `GET /api/v1/policy/history` | the imported files |
 | `POST /api/v1/policy/explain` | why a call runs, waits or is denied; runs nothing |
+| `GET /api/v1/policy/carry-over/dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row |
 
 Send the file as the request body with `Content-Type: application/yaml`.
 Every file route takes `?scope=tenant` (the default) or `?scope=install`.

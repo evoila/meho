@@ -31,6 +31,11 @@ readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
 # the appliance's cleaning step removes it with the rest of /var/lib/meho.
 readonly MEHO_CONSOLE_CA_FILE=/var/lib/meho/console-ca.crt
 readonly MEHO_CLI_PATH=/usr/local/bin/meho
+# The lock that install.sh and meho-host target-networks share, so that the
+# two never change the machine at the same time (take_host_lock below). The
+# lock is this folder itself. /run is emptied at each boot, and the lock is
+# never held across one.
+readonly MEHO_HOST_LOCK=/run/meho
 readonly RKE2_CONFIG_FILE=/etc/rancher/rke2/config.yaml
 readonly RKE2_KUBECONFIG=/etc/rancher/rke2/rke2.yaml
 readonly RKE2_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
@@ -46,7 +51,7 @@ readonly TRAEFIK_CONFIG_MANIFEST=rke2-traefik-config.yaml
 readonly MEHO_IMAGES_ARCHIVE=images/meho-images.linux-amd64.tar.zst
 readonly STORAGE_MANIFEST=storage/local-path-storage.yaml
 readonly MEHO_HOST_FILE=meho-host
-readonly MEHO_HOST_LIB_FILES=(lib/firewall.sh lib/cis.sh)
+readonly MEHO_HOST_LIB_FILES=(lib/firewall.sh lib/cis.sh lib/targets.sh)
 readonly VERSION_FILE=VERSION
 readonly SINGLE_NODE_VALUES=chart/values-single-node.yaml
 readonly HELM_FILE=bin/helm
@@ -81,6 +86,40 @@ step() { printf '\n== %s\n' "$*"; }
 fail() {
     printf '[FAIL] %s Fix: %s\n' "$1" "$2" >&2
     exit 1
+}
+
+# take_host_lock: hold MEHO_HOST_LOCK until install.sh ends. meho-host
+# target-networks takes the same lock with its own copy of this function.
+# Without the lock, an update that read the install record could write an
+# old list of target networks back after meho-host changed it. A second run
+# does not wait: it stops at once, before it reads or changes anything.
+# flock holds the lock on the open folder, so it ends with the process,
+# also after a crash. The processes that install.sh starts end before it
+# does, so none of them keeps the lock.
+take_host_lock() {
+    local lock="${HOST_ROOT}${MEHO_HOST_LOCK}"
+    command -v flock >/dev/null ||
+        fail "the command flock is missing, so install.sh cannot make sure that no meho-host command changes the machine at the same time. Nothing was changed." \
+            "install the package util-linux, then run install.sh again."
+    # The lock is the folder itself, not a file in it: there is no file
+    # that a link or a second name could lead to, and nothing to clean up.
+    # flock takes a lock on a folder that is open only for reading, so only
+    # root may open it: root's, mode 0700, and no link. mkdir makes a new
+    # folder with mode 0700 at once. -m sets the mode of the last folder
+    # only, which is the one that counts: /run is root's and always there.
+    # A folder in another state is not repaired: the run stops.
+    if [[ ! -e $lock && ! -L $lock ]]; then
+        # shellcheck disable=SC2174
+        mkdir -p -m 0700 "$lock"
+    fi
+    if [[ -L $lock || ! -d $lock || ! -O $lock || $(stat -c %a "$lock") != 700 ]]; then
+        fail "the lock folder $MEHO_HOST_LOCK is not a folder that only root may open, so another account could hold the lock. Nothing was changed." \
+            "remove it with 'sudo rm -r $MEHO_HOST_LOCK' (it holds only the lock), then run install.sh again."
+    fi
+    exec {MEHO_HOST_LOCK_FD}<"$lock"
+    flock -n "$MEHO_HOST_LOCK_FD" ||
+        fail "another install.sh or meho-host command changes this machine now (lock $MEHO_HOST_LOCK). Nothing was changed." \
+            "run install.sh again after the other command ends."
 }
 
 # usage_error <message>: wrong options; stop with exit code 2.

@@ -228,8 +228,8 @@ class ClassificationTaxonomyOut(BaseModel):
 class ClassificationListResponse(BaseModel):
     """The taxonomy and the stored entries of the caller's tenant and of the install.
 
-    ``enabled`` is ``false`` while the ``POLICY_CLASSIFICATION`` switch is
-    off; then nothing is read and ``entries`` is empty.
+    ``enabled`` is ``false`` while the ``CUSTOM_POLICY`` and
+    ``POLICY_CLASSIFICATION`` switches are off; then nothing is read and ``entries`` is empty.
     """
 
     enabled: bool

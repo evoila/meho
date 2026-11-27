@@ -26,8 +26,8 @@ console (:func:`~meho_backplane.api.v1._wait_for_approval.runs_at_once`), the
 same rule as the target routes; any other caller gets 403 and nothing is
 written. The same rule holds for a file that turns on
 ``run_approval_target_kinds`` or turns off ``announce_gate_enabled``
-(:mod:`~meho_backplane.instance_settings.console_only`). The preview has no
-such limit.
+(:mod:`~meho_backplane.instance_settings.console_only`); the person also gives
+a reason for these two changes. The preview has no such limit.
 """
 
 from __future__ import annotations
@@ -74,8 +74,8 @@ from meho_backplane.db.models import (
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.instance_settings.console_only import (
     console_only_changes,
-    console_only_refusal,
     console_only_warnings,
+    loosening_refusal,
 )
 from meho_backplane.instance_settings.diff import DEFAULT_POLICIES, diff_specs, is_empty, summarise
 from meho_backplane.instance_settings.schema import (
@@ -112,6 +112,7 @@ __all__ = [
     "SettingsExportRefusedError",
     "SettingsForbiddenError",
     "apply_import",
+    "attempted_tenant_ids",
     "build_plan",
     "dump_settings_yaml",
     "export_settings",
@@ -452,6 +453,18 @@ def _operator_for(operator: Operator, tenant_id: uuid.UUID) -> Operator:
     return operator.model_copy(update={"tenant_id": tenant_id})
 
 
+def _file_tenant_ids(model: SettingsFile, operator: Operator) -> list[uuid.UUID]:
+    return [t.id or operator.tenant_id for t in model.spec.tenants]
+
+
+async def attempted_tenant_ids(operator: Operator, content: bytes) -> list[str]:
+    """The ids of the tenants the file names; empty when the file does not parse."""
+    parsed = await asyncio.to_thread(parse_settings_file, content)
+    if parsed.model is None:
+        return []
+    return [str(tid) for tid in _file_tenant_ids(parsed.model, operator)]
+
+
 def _authorize(operator: Operator, tenant_ids: list[uuid.UUID]) -> None:
     """A tenant_admin may import only their own tenant; more needs platform_admin."""
     if operator.platform_admin:
@@ -719,7 +732,7 @@ async def build_plan(
     if model.metadata and model.metadata.exportedFrom:
         plan.exported_from = model.metadata.exportedFrom.model_dump()
 
-    tenant_ids = [t.id or operator.tenant_id for t in model.spec.tenants]
+    tenant_ids = _file_tenant_ids(model, operator)
     _authorize(operator, tenant_ids)
 
     warning = _newer_export_warning(model, await _migration_head(session))
@@ -814,6 +827,8 @@ class ImportResult:
     revision_id: uuid.UUID | None = None
     diff: dict[str, Any] | None = None
     failed: list[str] = field(default_factory=list)
+    #: The id of the import's audit row; set once the import starts to write.
+    audit_id: uuid.UUID | None = None
 
 
 async def _apply_tenant_rows(
@@ -958,6 +973,8 @@ async def apply_import(
     session: AsyncSession,
     operator: Operator,
     content: bytes,
+    *,
+    reason: str | None = None,
 ) -> ImportResult:
     """Apply *content*: add or update, never delete. See the module docstring.
 
@@ -966,11 +983,12 @@ async def apply_import(
     :class:`SettingsForbiddenError` and writes nothing when the file adds or
     changes a target, turns on ``run_approval_target_kinds`` or turns off
     ``announce_gate_enabled``, and the caller is not a person in the web
-    console (:func:`runs_at_once`). The caller's session dependency
-    commits the one transaction after the route returns.
+    console (:func:`runs_at_once`). Raises it too when such a person makes one
+    of the two policy changes without a *reason*. The caller's session
+    dependency commits the one transaction after the route returns.
     """
     plan = await build_plan(session, operator, content, lock=True)
-    refusal = None if plan.mistakes else console_only_refusal(operator, plan.console_only)
+    refusal = None if plan.mistakes else loosening_refusal(operator, plan.console_only, reason)
     if refusal is not None:
         raise SettingsForbiddenError(refusal)
     result = ImportResult(plan=plan)
@@ -981,13 +999,21 @@ async def apply_import(
         raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     tenant_ids = [tp.tenant_id for tp in plan.tenants]
+    # Bound before the first write, so the row of an apply that stops names it.
+    structlog.contextvars.bind_contextvars(
+        audit_settings_import=True,
+        audit_settings_file_sha256=plan.file_sha256,
+        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
+    )
     broken = await _apply_tenant_rows(session, plan, result.failed)
     live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
-    refusal = console_only_refusal(operator, await _replan_new_tenants(session, plan, live))
+    replanned = await _replan_new_tenants(session, plan, live)
+    refusal = loosening_refusal(operator, replanned, reason)
     if refusal is not None:
         raise SettingsForbiddenError(refusal)
 
     audit_id = uuid.uuid4()
+    result.audit_id = audit_id
     bind_preallocated_audit_id(audit_id)
     structlog.contextvars.bind_contextvars(audit_op_class="write")
     for tenant_plan in live:
@@ -1028,10 +1054,7 @@ async def apply_import(
         result.revision_id = revision.id
 
     structlog.contextvars.bind_contextvars(
-        audit_settings_import=True,
-        audit_settings_file_sha256=plan.file_sha256,
         audit_settings_revision_id=str(result.revision_id) if result.revision_id else "",
-        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
         audit_settings_summary=summary,
         audit_settings_failed=len(result.failed),
     )

@@ -50,7 +50,7 @@
 # module `meho_connector_kit` that connector packages import), so every image
 # carries the kit next to MEHO. The builder stage installs every wheel in
 # /wheels/. See docs/codebase/connector-packages.md, "The connector kit".
-FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
+FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b AS wheelbuilder
 COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_LINK_MODE=copy
@@ -87,7 +87,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # never rebuilt under emulation. `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
-FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS builder
+FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -306,16 +306,15 @@ done
 EOF
 
 # ---------- Runtime ----------------------------------------------------------
-FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
+FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b AS runtime
 
 # ---------- Base-OS security patch: base packages Trivy flags fixable --------
-# The pinned base carries several Debian trixie packages that Trivy flags as
-# fixable CRITICAL/HIGH, each with the fix already served by the trixie apt
-# repo but NOT yet in a rebuilt upstream python:3.14-slim manifest — so the
-# base-digest bump the Dependabot docker block would normally carry cannot
-# clear them. (As of this layer's last touch the freshly-rebuilt upstream tag,
-# built 2026-10-01, carries openssl 3.5.7-1~deb13u3 but still ships
-# libpcre2-8-0 10.46-1~deb13u2, so a digest bump alone leaves the gate red.)
+# The pinned base can carry a Debian trixie package that Trivy flags as
+# fixable CRITICAL/HIGH, with the fix already served by the trixie security
+# apt repo but NOT yet in a rebuilt upstream python:3.14-slim manifest. Then
+# a base-digest bump alone cannot clear it. (As of this layer's last touch the
+# pinned base, built 2026-11-24, is the newest python:3.14-slim and still
+# ships libzstd1 1.5.7+dfsg-1, below the trixie security fix.)
 # Rather than publish a release image with a known fixable CRITICAL/HIGH, we
 # upgrade just those already-present binaries to the trixie security version in
 # one apt layer (indexes dropped in the same RUN, so no apt metadata persists
@@ -328,43 +327,21 @@ FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f713
 # with the GitHub Actions layer cache (image.yml `cache-from: type=gha`), which
 # serves this layer for as long as the RUN text is unchanged: apt is not
 # re-run, so a fix trixie publishes later never reaches the image on its own,
-# and a comment-only edit changes nothing. That is how the openssl and pcre2
-# fixes below were first missed: both packages were already in the list, so
-# the cached layer kept their older versions. Raising a floor in the `case`
+# and a comment-only edit changes nothing. Raising a floor in the `case`
 # below (or adding a package and its floor) is therefore the edit that both
 # invalidates the cached layer and fails the build when apt did not deliver at
 # least that version, and a cached layer always satisfies the floors written
 # in its own RUN text. A floor is per Debian SOURCE package, checked against
 # `${source:Version}`: Debian's advisories (and Trivy's matching) are per
-# source package, one floor covers a family, and the epochs on bsdutils
-# (1:2.41…) and login (1:4.16.0-2+really2.41…) cannot make a floor vacuous.
+# source package, and one floor covers a family.
 #
-# Source package (binaries in `pkgs`), floor, and the CVEs each floor clears:
-#   util-linux (util-linux libuuid1 libmount1 libblkid1 libsmartcols1
-#     liblastlog2-2 mount bsdutils login)
-#                             >= 2.41.5-0+deb13u1   CVE-2026-53615
-#   openssl (openssl libssl3t64 openssl-provider-legacy)
-#                             >= 3.5.7-1~deb13u3    CVE-2026-14456,
-#                                                   CVE-2026-75804, CVE-2026-84782
-#   perl (perl-base)          >= 5.40.1-6+deb13u1   CVE-2026-8376 (CRITICAL),
-#                                                   CVE-2026-57433, CVE-2026-57432,
-#                                                   CVE-2026-48962, CVE-2026-42497
-#   gzip (gzip)               >= 1.13-1+deb13u1     CVE-2026-41992
-#   pcre2 (libpcre2-8-0)      >= 10.46-1~deb13u3    CVE-2026-86145, CVE-2026-89161,
-#                                                   CVE-2026-103111
-#   sqlite3 (libsqlite3-0)    >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
-#   apt (apt libapt-pkg7.0)   >= 3.0.4              CVE-2026-109518
-#   zlib (zlib1g)             >= 1:1.3.dfsg+really1.3.1-1+deb13u1
-#                                                   CVE-2026-85091, CVE-2026-76844
+# Source package (binaries in `pkgs`) and floor:
+#   libzstd (libzstd1)        >= 1.5.7+dfsg-1+deb13u1
 # Drop a package from `pkgs` once a base-digest bump lands a rebuilt base
 # already carrying it at (or above) its floor, and drop a floor once no
-# package of its source is left.
+# package of its source is left. When `pkgs` is empty, drop this layer.
 RUN set -eu; \
-    pkgs='util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
-          mount bsdutils login \
-          openssl libssl3t64 openssl-provider-legacy \
-          perl-base gzip libpcre2-8-0 libsqlite3-0 \
-          apt libapt-pkg7.0 zlib1g'; \
+    pkgs='libzstd1'; \
     apt-get update; \
     apt-get install -y --no-install-recommends --only-upgrade $pkgs; \
     rm -rf /var/lib/apt/lists/*; \
@@ -372,14 +349,7 @@ RUN set -eu; \
     for row in $rows; do \
       pkg="${row%%|*}"; rest="${row#*|}"; src="${rest%%|*}"; have="${rest#*|}"; \
       case "${src}" in \
-        util-linux) floor='2.41.5-0+deb13u1' ;; \
-        openssl)    floor='3.5.7-1~deb13u3' ;; \
-        perl)       floor='5.40.1-6+deb13u1' ;; \
-        gzip)       floor='1.13-1+deb13u1' ;; \
-        pcre2)      floor='10.46-1~deb13u3' ;; \
-        sqlite3)    floor='3.46.1-7+deb13u2' ;; \
-        apt)        floor='3.0.4' ;; \
-        zlib)       floor='1:1.3.dfsg+really1.3.1-1+deb13u1' ;; \
+        libzstd)    floor='1.5.7+dfsg-1+deb13u1' ;; \
         *) echo "ERROR: ${pkg} (source ${src}) has no security floor in this layer -- add one to the case list" >&2; exit 1 ;; \
       esac; \
       if ! dpkg --compare-versions "${have}" ge "${floor}"; then \
@@ -392,7 +362,7 @@ RUN set -eu; \
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho
 
-# Remove the base image's own pip (site-packages pip 25.0.1) while still
+# Remove the base image's own pip (from site-packages) while still
 # root. Nothing in this stage runs pip — dependencies are installed into
 # /app/.venv by the builder via uv, and the runtime is a uvicorn CMD — so
 # the base pip is dead weight whose CVEs (e.g. CVE-2026-8643) accrue on

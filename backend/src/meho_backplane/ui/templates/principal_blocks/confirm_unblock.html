@@ -9,12 +9,15 @@
     <h1 class="text-2xl font-semibold">Unblock the login <span class="font-mono break-all">{{ sub }}</span>?</h1>
     <p class="text-sm text-muted" data-unblock-scope>
       {% if platform_admin %}
-        This removes every block of this login in all tenants, also the blocks that tenant admins set.
+        This removes the blocks of this login below, in all tenants, also the blocks that tenant admins set.
       {% else %}
         This removes the block of this login in this tenant.
       {% endif %}
     </p>
   </header>
+  {% if changed_message %}
+    <div role="alert" class="alert alert-warning text-sm" data-unblock-changed>{{ changed_message }}</div>
+  {% endif %}
   <div class="overflow-x-auto rounded-box border border-base-300">
     <table class="table table-sm">
       <thead><tr><th>Tenant</th><th>Reason</th><th>Blocked by</th><th>Blocked at</th></tr></thead>
@@ -34,6 +37,7 @@
     {% include "principal_blocks/_hidden.html" %}
     <input type="hidden" name="sub" value="{{ sub }}" />
     <input type="hidden" name="confirm" value="{{ confirmed }}" />
+    <input type="hidden" name="shown" value="{{ shown }}" />
     {{ button("Yes, unblock", variant="danger", size="md", type="submit") }}
     <a href="/ui/blocked-people" class="link">Cancel</a>
   </form>

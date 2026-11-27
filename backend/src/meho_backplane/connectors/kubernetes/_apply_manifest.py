@@ -117,18 +117,6 @@ class ApplyManifestError(ValueError):
         return text
 
 
-def _is_kubernetes_group(api_version: str) -> bool:
-    """True for ``v1``, a group with no dot, or a group ending in ``.k8s.io``."""
-    group, _slash, _version = api_version.rpartition("/")
-    return "." not in group or group.endswith(".k8s.io")
-
-
-def _is_list_object(doc: dict[str, Any], api_version: str, kind: str) -> bool:
-    if kind == "List":
-        return True
-    return kind.endswith("List") and "items" in doc and _is_kubernetes_group(api_version)
-
-
 def _given(value: object) -> object:
     """*value*, or ``None`` for an empty text: an empty text counts as missing."""
     return None if value == "" else value
@@ -149,11 +137,7 @@ def _check_document(number: int, doc: object) -> None:
             raise fail(f"is missing {field}")
         if not isinstance(value, str):
             raise fail(f"has {_ARTICLE[field]} {field} that is not a text")
-    if (
-        isinstance(api_version, str)
-        and isinstance(kind, str)
-        and _is_list_object(doc, api_version, kind)
-    ):
+    if kind == "List" or "items" in doc:
         raise fail("is a list object")
     metadata = doc.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
@@ -175,11 +159,9 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     surviving doc must be a mapping with a ``metadata`` mapping, and
     ``apiVersion``, ``kind`` and ``metadata.name`` must be nonempty texts
     -- SSA cannot address an object without them. A list object is
-    refused: a ``kind`` of ``List``, or a ``kind`` ending in ``List`` with
-    a top-level ``items`` field when the ``apiVersion`` is ``v1``, or its
-    group has no dot, or its group ends in ``.k8s.io``. A custom resource
-    of another group (for example ``example.com/v1``, ``kind:
-    ShoppingList`` with ``items``) is a normal object and passes.
+    refused too: a document whose ``kind`` is ``List``, or that has a
+    top-level ``items`` field, in any group. A Kubernetes API server
+    refuses the server-side apply of such a document.
     Raises :class:`ApplyManifestError` on any structural problem.
     """
     docs = iter(yaml.safe_load_all(manifest))

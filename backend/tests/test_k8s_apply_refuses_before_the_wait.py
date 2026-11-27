@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
+import yaml
 from sqlalchemy import func, select
 from structlog.testing import capture_logs
 
@@ -154,6 +155,23 @@ _REFUSED: dict[str, tuple[str, str]] = {
     "deployment-list-with-items": (
         "apiVersion: apps/v1\nkind: DeploymentList\nmetadata: {name: web}\nitems: []\n",
         "document 1 (apiVersion apps/v1, kind DeploymentList) is a list object",
+    ),
+    "custom-resource-ending-in-list-with-items": (
+        "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\nitems: [milk]\n",
+        "document 1 (apiVersion example.com/v1, kind ShoppingList) is a list object",
+    ),
+    "custom-resource-with-items": (
+        "apiVersion: example.com/v1\nkind: Cart\nmetadata: {name: web}\nitems: [milk]\n",
+        "document 1 (apiVersion example.com/v1, kind Cart) is a list object",
+    ),
+    "custom-resource-in-a-k8s-io-group-with-items": (
+        "apiVersion: shop.example.k8s.io/v1\nkind: ShoppingList\nmetadata: {name: web}\n"
+        "items: [milk]\n",
+        "document 1 (apiVersion shop.example.k8s.io/v1, kind ShoppingList) is a list object",
+    ),
+    "config-map-with-items": (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\ndata: {a: b}\nitems: [milk]\n",
+        "document 1 (apiVersion v1, kind ConfigMap) is a list object",
     ),
 }
 
@@ -446,12 +464,11 @@ async def test_a_kind_ending_in_list_without_items_waits_once(cluster: AsyncMock
     assert await _count(ApprovalRequest) == 1
 
 
-async def test_a_custom_resource_ending_in_list_with_items_waits_once(
-    cluster: AsyncMock,
-) -> None:
+async def test_a_custom_resource_with_items_under_spec_waits_once(cluster: AsyncMock) -> None:
     params = {
         "manifest": (
-            "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\nitems: [milk]\n"
+            "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\n"
+            "spec:\n  items: [milk]\n"
         )
     }
     result = await _call(params)
@@ -465,6 +482,49 @@ async def test_a_custom_resource_ending_in_list_with_items_waits_once(
     assert result.status == "awaiting_approval", result
     assert await _count(ApprovalRequest) == 1
     assert preview["status"] == "ok", preview
+
+
+def _recorded(api_version: str, kind: str, rest: str) -> str:
+    head = f"apiVersion: {api_version}\nkind: {kind}\n"
+    return f"{head}metadata: {{name: one, namespace: prod}}\n{rest}"
+
+
+#: (manifest, the API server refused it) for the 14 recorded cases, in their order.
+_RECORDED_ANSWERS: list[tuple[str, bool]] = [
+    (_recorded("example.com/v1", "ShoppingList", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "Cart", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "Bag", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "Bag", "items:\n  - name: milk\n"), True),
+    (_recorded("example.com/v1", "Crate", "items:\n  - name: milk\n"), True),
+    (_recorded("example.com/v1", "Box", "items: [milk]\n"), True),
+    (_recorded("example.com/v1", "ShoppingList", "items: []\n"), True),
+    (_recorded("example.com/v1", "ShoppingList", "items: [milk]\n"), True),
+    (_recorded("shop.example.k8s.io/v1", "ShoppingList", "items: [milk]\n"), True),
+    (_recorded("v1", "ConfigMap", "data: {a: b}\nitems: [milk]\n"), True),
+    (_recorded("apps/v1", "Deployment", "items: [milk]\n"), True),
+    (_recorded("v1", "NamespaceList", "items: []\n"), True),
+    (_recorded("example.com/v1", "ShoppingList", "spec:\n  items: [milk]\n"), False),
+    (_recorded("v1", "ConfigMap", "data: {a: b}\n"), False),
+]
+
+
+@pytest.mark.parametrize(
+    ("manifest", "refused"), _RECORDED_ANSWERS, ids=[str(n) for n in range(1, 15)]
+)
+def test_the_list_object_check_matches_a_real_api_server(manifest: str, refused: bool) -> None:
+    """Expected answers recorded from a real API server: Kubernetes 1.37.0 (a kind cluster),
+    27 November 2026, server-side apply with and without a dry run.
+    """
+    if not refused:
+        assert _parse_manifest(manifest)
+        return
+    with pytest.raises(ApplyManifestError) as raised:
+        _parse_manifest(manifest)
+    doc = yaml.safe_load(manifest)
+    assert str(raised.value) == (
+        "The manifest cannot be applied: document 1 "
+        f"(apiVersion {doc['apiVersion']}, kind {doc['kind']}) is a list object"
+    )
 
 
 async def test_three_documents_wait_once_and_apply_in_order(

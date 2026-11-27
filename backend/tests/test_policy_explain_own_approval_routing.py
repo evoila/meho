@@ -31,6 +31,7 @@ import structlog
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY
+from meho_backplane.auth.operator import PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import TenantPolicy
 from meho_backplane.main import app
@@ -45,6 +46,7 @@ from ._own_approval_cases import (
     OPERATOR_TOKEN,
     PLATFORM_TOKEN,
     TENANT,
+    Caller,
     agrees,
     embedding_service,
     isolate_registries,
@@ -137,10 +139,23 @@ async def test_case_e_the_whole_answer_names_a_place_only_for_an_admin(
     assert approve_text.replace(" (`install:routing[0]`)", "") == operator
 
 
+#: A platform admin whose role in the tenant is ``operator``: an admin for a
+#: change of rights, but in MEHO-Operators for the routing.
+_PLATFORM_OPERATOR = Caller(
+    "Platform admin, operator role, token",
+    "pa-op-token",
+    PrincipalKind.USER,
+    TenantRole.OPERATOR,
+    platform_admin=True,
+)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("caller", [ADMIN_TOKEN, _PLATFORM_OPERATOR], ids=["admin", "platform"])
 async def test_case_f_a_change_of_rights_for_every_call_is_not_routed(
-    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch, caller: Caller
 ) -> None:
+    """Only an admin in the web console approves it; the routing entry plays no part."""
     switches(monkeypatch, CUSTOM_POLICY="true", APPROVAL_ALLOW_SELF_APPROVAL="false")
     isolate_registries(monkeypatch)
     register_rights_change_op("demo.rights.write")
@@ -149,7 +164,7 @@ async def test_case_f_a_change_of_rights_for_every_call_is_not_routed(
     key = make_rsa_keypair("kid-ownappr-case-f")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
-        row = await row_of(client, key, ADMIN_TOKEN, "demo.rights.write")
+        row = await row_of(client, key, caller, "demo.rights.write")
     assert agrees(row) == []
     assert row.own is not None and (row.own["web"], row.own["token"]) == (True, False)
     assert (row.done["web"].accepted, row.done["token"].accepted) == (True, False)

@@ -188,6 +188,7 @@ from meho_backplane.agent.toolset_operations import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import capability_satisfied, role_at_least
+from meho_backplane.mcp.tools._preview_typed_writes_text import k8s_apply_dry_run_description
 from meho_backplane.mcp.tools.connector_admin import reduce_connector_list
 from meho_backplane.operation_picks.recorder import recorded_meta_tool
 from meho_backplane.operations._target_connector_limit import connector_limit
@@ -423,8 +424,16 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
 )
 
 
+#: The hosted tool whose text follows ``K8S_APPLY_PREVIEW_DRY_RUN``.
+_PREVIEW_OPERATION = "preview_operation"
+
+
 def _active_catalog() -> tuple[MetaToolSpec, ...]:
     """Return the catalog for a run, with the operation tools the setting picks.
+
+    With ``K8S_APPLY_PREVIEW_DRY_RUN`` on, ``preview_operation`` gets the
+    text that names the dry run of ``k8s.apply``
+    (:func:`_preview_with_k8s_apply_dry_run`).
 
     Off (the default): :data:`_META_TOOL_CATALOG` as it is. On: the same
     catalog, with the three operation tools built from the MCP tools in the
@@ -436,13 +445,35 @@ def _active_catalog() -> tuple[MetaToolSpec, ...]:
     hand-written copies with the input take the place of the plain ones.
     """
     settings = get_settings()
+    swap: dict[str, MetaToolSpec]
     if settings.agent_operation_tools_from_mcp:
         swap = {spec.name: spec for spec in build_operation_meta_tools()}
     elif settings.search_typed_first:
-        swap = _OPERATIONS_META_TOOLS_WITH_RAW
+        swap = dict(_OPERATIONS_META_TOOLS_WITH_RAW)
     else:
+        swap = {}
+    if settings.k8s_apply_preview_dry_run:
+        swap[_PREVIEW_OPERATION] = _preview_with_k8s_apply_dry_run()
+    if not swap:
         return _META_TOOL_CATALOG
     return tuple(swap.get(m.name, m) for m in _META_TOOL_CATALOG)
+
+
+def _preview_with_k8s_apply_dry_run() -> MetaToolSpec:
+    """The hosted ``preview_operation`` whose text names the dry run of ``k8s.apply``.
+
+    Only while ``K8S_APPLY_PREVIEW_DRY_RUN`` is on: the preview then sends a
+    dry run to the cluster, and the registered text says it sends nothing.
+    """
+    spec = next(m for m in _META_TOOL_CATALOG if m.name == _PREVIEW_OPERATION)
+    return MetaToolSpec(
+        name=spec.name,
+        handler=spec.handler,
+        description=k8s_apply_dry_run_description(spec.description),
+        parameter_schema=spec.parameter_schema,
+        required_role=spec.required_role,
+        required_capability=spec.required_capability,
+    )
 
 
 #: Catalog tools a spec must name in ``meta_tools`` to get (#3759, #5852).

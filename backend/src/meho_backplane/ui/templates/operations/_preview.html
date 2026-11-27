@@ -98,6 +98,10 @@
       <div>
         <div class="meho-overline mb-1">What it will do</div>
         <pre class="max-h-64 overflow-auto rounded bg-base-300/40 px-2 py-1 text-xs" data-preview-effect><code>{{ envelope.proposed_effect | tojson(indent=2) }}</code></pre>
+        {#- A dry run that did not check every part gives a plan and a note. -#}
+        {% if envelope.get("plan_shown") == false and envelope.get("plan_note") %}
+          <p class="mt-1 text-xs text-subtle" data-preview-plan-note>{{ envelope.plan_note }}</p>
+        {% endif %}
       </div>
     {% elif envelope.get("plan_note") %}
       <p class="text-xs text-subtle" data-preview-plan-note>{{ envelope.plan_note }}</p>

@@ -329,6 +329,13 @@ func printPreviewResult(w io.Writer, connectorID, opID string, r *PreviewResult)
 	if len(r.ProposedEffect) > 0 && string(r.ProposedEffect) != "null" {
 		fmt.Fprintln(w, "  plan (proposed_effect):")
 		printPrettyOrRaw(w, r.ProposedEffect)
+		// A dry run that did not check every part gives a plan and a note.
+		if r.PlanShown != nil && !*r.PlanShown {
+			fmt.Fprintln(w, "  plan: not complete in this preview")
+			if r.PlanNote != "" {
+				fmt.Fprintf(w, "    %s\n", output.SafeText(r.PlanNote))
+			}
+		}
 	} else if r.PlanShown != nil && !*r.PlanShown {
 		fmt.Fprintln(w, "  plan: not shown in this preview")
 		if r.PlanNote != "" {

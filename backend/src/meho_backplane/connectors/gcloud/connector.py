@@ -742,6 +742,7 @@ class GcloudConnector(
             raw_jwt="",
             tenant_id=UUID(int=0),
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
         connector_id = f"{self.impl_id}-{self.version}"
         return await dispatch(
@@ -866,6 +867,8 @@ class GcloudConnector(
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
         _log.info(

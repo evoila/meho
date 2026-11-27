@@ -403,6 +403,10 @@ A platform admin **may**:
   They count as an admin there, so they may approve their own changes
   like members of `MEHO-Admins`. A change of rights they approve only
   with a click in the web console.
+- set the outer limit for personal agents in the install's policy file,
+  while the setting `CUSTOM_POLICY` is on. Only a platform admin imports
+  the install's file, and a tenant's file cannot hold the limit. See
+  [The outer limit for personal agents](policy-file.md#the-outer-limit-for-personal-agents).
 - use the cross-tenant options, for example `--tenant` on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers `403 tenant_select_with_header`: pick that tenant with

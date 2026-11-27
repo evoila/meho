@@ -342,6 +342,8 @@ _POOL_DELETE_OP = GcloudOp(
     tags=(*_TAGS, "write", "delete", "workload-identity"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="deletes",
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call to remove an old workload identity pool, so that no outside system "
@@ -484,6 +486,7 @@ _SA_BINDING_REMOVE_OP = GcloudOp(
     tags=(*_TAGS, "write", "service-accounts", "policy"),
     safety_level="dangerous",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call to take away one member's role on one service account, for example "

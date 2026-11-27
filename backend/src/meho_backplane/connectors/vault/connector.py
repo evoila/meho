@@ -365,6 +365,7 @@ class VaultConnector(Connector):
             raw_jwt="",
             tenant_id=_SYSTEM_TENANT_ID,
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
 
 

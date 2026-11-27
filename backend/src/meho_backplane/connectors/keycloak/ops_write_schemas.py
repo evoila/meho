@@ -266,6 +266,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "realm", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_REALM_WRITE,
             "parameter_hints": {
@@ -311,6 +312,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "realm", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_REALM_WRITE,
             "parameter_hints": {
@@ -361,6 +364,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "client", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
             "parameter_hints": {
@@ -406,6 +410,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "client", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_WRITE,
             "parameter_hints": {
@@ -448,6 +454,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "client-scope", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_CLIENT_SCOPE_WRITE,
             "parameter_hints": {
@@ -489,6 +496,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "protocol-mapper", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_PROTOCOL_MAPPER_WRITE,
             "parameter_hints": {
@@ -529,6 +537,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_USER_WRITE,
             "parameter_hints": {
@@ -571,6 +580,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_USER_WRITE,
             "parameter_hints": {
@@ -618,6 +629,7 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "role-mapping", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_ROLE_MAPPING_WRITE,
             "parameter_hints": {
@@ -676,6 +688,8 @@ WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "session", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="stops",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_USER_LOGOUT,
             "parameter_hints": {

@@ -985,6 +985,8 @@ _RKE2_TOKEN_ROTATE_OP = Rke2Op(
     tags=("write", "token", "rotate", "credential", "rke2"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_use": _WHEN_TO_USE_TOKEN_WRITE,
         "parameter_hints": {},
@@ -1132,6 +1134,8 @@ _RKE2_CONFIG_UPDATE_OP = Rke2Op(
     tags=("write", "rke2", "config"),
     safety_level="dangerous",
     requires_approval=True,
+    hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_use": _WHEN_TO_USE_NODE_WRITE,
         "parameter_hints": {

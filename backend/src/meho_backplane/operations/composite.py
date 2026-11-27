@@ -1437,8 +1437,10 @@ async def _gate_subop(
             # caller passes ``destructive`` today, but the seam must never write a
             # weaker row than the dispatcher would for the same tier. #4647: the
             # refusal is audited as a ``denied`` row on the sub-op's path, linked
-            # to the parent's audit id, like the preflight refusal below.
-            if descriptor.safety_level == "destructive":
+            # to the parent's audit id, like the preflight refusal below. With
+            # CUSTOM_POLICY on, a stored ``destructive`` level of the step's
+            # operation counts too (``step_rule_rows``), as for a child call.
+            if any(row.safety_level == "destructive" for row in (descriptor, *rule_rows)):
                 refusal = await _destructive_binding_refusal(
                     op_id=op_id,
                     connector_id=connector_id,

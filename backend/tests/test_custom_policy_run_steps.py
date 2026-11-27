@@ -46,18 +46,15 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import PrincipalKind
-from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.operations import dispatch, run_step_rules
+from meho_backplane.operations import run_step_rules
 from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
-from meho_backplane.operations.composite import composite_resume_state, enforce_subop_policy
 from tests import _composite_wait_audit_helpers as h
+from tests import _custom_policy_remote_steps_helpers as r
 from tests import _custom_policy_run_steps_helpers as c
 from tests._custom_policy_run_steps_helpers import Step
-from tests._people_behind_helpers import give_service_a_known_person
 
 pytestmark = pytest.mark.asyncio
 
@@ -379,123 +376,8 @@ async def test_a_step_an_override_raised_to_destructive_is_denied(
 
 # -- a built-in row and the tenant's own row of a step-gate step ------------------
 
-_REMOTE_RUN = "probe.composite.remote_steps"
-_REMOTE_CONNECTOR = "probehub-1.x"
 _FETCH = Step("POST:/probe/things/{id}/fetch", "dangerous", False)
 _ZAP = Step("POST:/probe/things/{id}/zap", "dangerous", False)
-_PLAIN_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"url": {"type": "string"}}}
-
-
-class _ProbeHubConnector(h.NoOpVaultConnector):
-    product = "probehub"
-    version = "1.x"
-    impl_id = "probehub"
-
-
-async def remote_steps(operator: Any, target: Any, params: dict[str, Any]) -> Any:
-    """A step that waits, then the step under test, checked under connector ``probe-1.x``."""
-    if composite_resume_state(_REMOTE_RUN) is None:
-        gated = await enforce_subop_policy(
-            operator=operator,
-            connector_id=_REMOTE_CONNECTOR,
-            op_id=h.STEP_A,
-            safety_level="safe",
-            requires_approval=True,
-            target=target,
-            params={"name": "vm-1"},
-        )
-        if gated is not None:
-            return gated
-        c.ran.append(h.STEP_A)
-    [step] = c.current
-    gated = await enforce_subop_policy(
-        operator=operator,
-        connector_id="probe-1.x",
-        op_id=step.op_id,
-        safety_level=step.safety_level,
-        requires_approval=step.requires_approval,
-        target=target,
-        params={},
-        resume_state={"at": "remote"},
-        after_main_effect=True,
-    )
-    if gated is not None:
-        return gated
-    c.ran.append(step.op_id)
-    return {"done": True}
-
-
-def _probe_row(step: Step, tenant_id: UUID | None, facts: dict[str, Any]) -> EndpointDescriptor:
-    """A stored row of the step's operation under ``probe-1.x``."""
-    method, path = step.op_id.split(":", 1)
-    return EndpointDescriptor(
-        tenant_id=tenant_id,
-        product="probe",
-        version="1.x",
-        impl_id="probe",
-        op_id=step.op_id,
-        source_kind="ingested",
-        method=method,
-        path=path,
-        summary="The step under test.",
-        description="The step under test.",
-        tags=facts.get("tags", []),
-        parameter_schema=facts.get("schema", _PLAIN_SCHEMA),
-        safety_level=step.safety_level,
-        requires_approval=step.requires_approval,
-        is_enabled=True,
-        embedding=h.EMBEDDING,
-    )
-
-
-async def _run_remote(
-    session: AsyncSession,
-    stub: AsyncMock,
-    step: Step,
-    built_in: dict[str, Any] | None,
-    tenant_row: dict[str, Any] | None,
-) -> Any:
-    """Store the rows, start the run as a service login, approve with a token, go on."""
-    await h.register_child(stub)
-    register_connector_v2(
-        product="probehub", version="1.x", impl_id="probehub", cls=_ProbeHubConnector
-    )
-    async with get_sessionmaker()() as s, s.begin():
-        if built_in is not None:
-            s.add(_probe_row(step, None, built_in))
-        if tenant_row is not None:
-            s.add(_probe_row(step, h.TENANT_ID, tenant_row))
-    session.add(
-        EndpointDescriptor(
-            tenant_id=None,
-            product="probehub",
-            version="1.x",
-            impl_id="probehub",
-            op_id=_REMOTE_RUN,
-            source_kind="composite",
-            handler_ref=f"{__name__}.remote_steps",
-            summary="The run.",
-            description="The run.",
-            tags=[],
-            parameter_schema={"type": "object"},
-            safety_level="safe",
-            requires_approval=False,
-            is_enabled=True,
-            embedding=h.EMBEDDING,
-        )
-    )
-    await session.commit()
-    c.current.append(step)
-    service = h.operator(sub=c.SERVICE_SUB, principal_kind=PrincipalKind.SERVICE)
-    await give_service_a_known_person(h.TENANT_ID, c.SERVICE_SUB)
-    first = await dispatch(
-        operator=service, connector_id=_REMOTE_CONNECTOR, op_id=_REMOTE_RUN, target=None, params={}
-    )
-    assert first.status == "awaiting_approval", first.error
-    request = await h.approve(UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB)
-    return await resume_dispatch_after_approval(
-        operator=c.token_approver(), request=request, params=None
-    )
 
 
 _ADDRESS = {"schema": _ADDRESS_SCHEMA}
@@ -526,7 +408,7 @@ async def test_the_facts_of_the_built_in_row_and_the_tenant_row_both_count(
 ) -> None:
     c.switch(monkeypatch, on=on)
     reads = _Reads(monkeypatch)
-    result = await _run_remote(session, stub_embedding_service, step, built_in, tenant_row)
+    result = await r.run_remote(session, stub_embedding_service, step, built_in, tenant_row)
     if on:
         assert reads.reads == [step.op_id]
         [(_, copies)] = reads.rows
@@ -535,7 +417,7 @@ async def test_the_facts_of_the_built_in_row_and_the_tenant_row_both_count(
         assert reads.reads == []
     if on and waits_on:
         assert result.status == "awaiting_approval", result.error
-        await c.assert_waits(step, child=False, run_op_id=_REMOTE_RUN)
+        await c.assert_waits(step, child=False, run_op_id=r.REMOTE_RUN)
     else:
         assert result.status == "ok", result.error
-        await c.assert_went_ahead(step, child=False, run_op_id=_REMOTE_RUN)
+        await c.assert_went_ahead(step, child=False, run_op_id=r.REMOTE_RUN)

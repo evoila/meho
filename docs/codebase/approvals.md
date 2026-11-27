@@ -971,11 +971,16 @@ With the switch on, a step keeps its own approval when one of these holds:
 
 The step gate asks these rules with the stored facts of the step's
 operation, when a row is stored (`step_rule_rows`): its parameter schema,
-HTTP verb, tags, class and `hard_to_undo`. When both a built-in row and a
-row of the caller's tenant are stored, the rules are asked once for each
-row, so a fact counts when either row holds it. The facts go only into
-copies of the step's row. The gate, the card and the approval request use
-the step's declared values. With the switch off, no stored row is read.
+HTTP verb, tags, class and risk level. A copy's risk level is the higher of
+the step's declared level and the stored one. So a stored `destructive`
+level makes the step keep its own approval. Such a step cannot wait without
+a preview hash, so it gets the refusal a `destructive` child call gets.
+The copies also carry the stored `hard_to_undo`; no fixed rule reads it.
+When both a built-in row and a row of the caller's tenant are stored, the
+rules are asked once for each row, so a fact counts when either row holds
+it. The facts go only into copies of the step's row. The gate, the card and
+the approval request use the step's declared values. With the switch off,
+no stored row is read.
 
 In a run that goes on after a person's approval, these rules hold also
 when a step's policy answer lets it run at once

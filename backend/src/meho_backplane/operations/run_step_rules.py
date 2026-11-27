@@ -36,8 +36,12 @@ With the switch on:
   shell mark). ``fixed_rule_for`` alone has no root-shell rule.
 * The step gate asks these rules with the stored facts of the step's
   operation (:func:`step_rule_rows`): its parameter schema, HTTP verb, tags,
-  class and ``hard_to_undo``. When both a built-in row and a row of the
-  caller's tenant are stored, a fact counts when either row holds it.
+  class and risk level. The risk level of such a copy is the higher of the
+  step's declared level and the stored one, so a stored ``destructive``
+  level makes the step keep its own approval. When both a built-in row and
+  a row of the caller's tenant are stored, a fact counts when either row
+  holds it.
+  The copies also carry the stored ``hard_to_undo``; no fixed rule reads it.
 * In a run that goes on after a person's approval, these rules hold also
   when the step's policy answer lets it run at once
   (:func:`step_wait_reason_after_approval`). The reason MEHO stores for
@@ -51,7 +55,7 @@ two callers stay where they are; they hold with the switch in both states.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from sqlalchemy import ColumnElement, or_, select
@@ -76,6 +80,8 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+_LEVEL_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
 
 #: The start of the reason MEHO stores when the step rule makes a step wait
 #: (the ``wait_reason`` of the step's ``approval.request`` audit row).
@@ -149,10 +155,12 @@ async def step_rule_rows(
     the switch on it holds one copy of *step* for each stored row of the
     step's operation (the built-in row and the row of the caller's tenant),
     with the stored facts of that row: the parameter schema, the HTTP verb,
-    the tags, the class and ``hard_to_undo``. A fact counts when either
-    row holds it: the step keeps its own approval when the rule holds for
-    one copy. With no stored row it is ``[step]``. *step* keeps its
-    declared values: the gate, the card and the approval request use it.
+    the tags and the class. Its risk level is the higher of the step's
+    declared level and the stored one. A fact counts when either row holds
+    it: the step keeps its own approval when the rule holds for one copy.
+    The copies also carry the stored ``hard_to_undo``; no fixed rule reads it.
+    With no stored row it is ``[step]``. *step* keeps its declared values:
+    the gate, the card and the approval request use it.
     """
     if not custom_policy_on(get_settings()):
         return [step]
@@ -161,14 +169,14 @@ async def step_rule_rows(
 
 
 def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> EndpointDescriptor:
-    """A copy of *step* with the stored facts of *stored*."""
+    """A copy of *step* with the stored facts of *stored*, at the higher of the two levels."""
     row = EndpointDescriptor(
         product=step.product,
         version=step.version,
         impl_id=step.impl_id,
         op_id=step.op_id,
         source_kind=step.source_kind,
-        safety_level=step.safety_level,
+        safety_level=max(step.safety_level, stored.safety_level, key=_level_rank),
         requires_approval=step.requires_approval,
         parameter_schema=stored.parameter_schema,
         method=stored.method,
@@ -183,6 +191,11 @@ def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> 
     row.code_requires_approval = step.code_requires_approval
     row.code_parameter_schema = stored.parameter_schema
     return row
+
+
+def _level_rank(level: str) -> int:
+    """The rank of a risk level; an unknown level counts as ``safe``."""
+    return _LEVEL_RANK.get(level, 0)
 
 
 async def _stored_step_rows(

@@ -21,9 +21,10 @@ It holds:
   set of categories (:mod:`meho_backplane.policy.bindings`). Only a
   tenant's file holds bindings.
 * ``limits``: in the install's file only, how far a tenant's policy may go
-  (:mod:`meho_backplane.policy.limits`). A file that holds the key is
-  refused unless the caller passes ``custom_policy=True``, and a tenant's
-  file that holds it is always refused.
+  (:mod:`meho_backplane.policy.limits`). The install's file may hold it
+  only while the ``CUSTOM_POLICY`` switch is on (the caller passes
+  ``custom_policy=True``), and a tenant's file that holds it is always
+  refused.
 
 The file reserves seven top-level keys: ``limits`` and six refused keys,
 ``agents``, ``approvers``, ``role_bindings``, ``risk_levels``,

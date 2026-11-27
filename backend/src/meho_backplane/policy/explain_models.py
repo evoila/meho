@@ -17,6 +17,7 @@ __all__ = [
     "ExplainClassification",
     "ExplainEntry",
     "ExplainEvaluator",
+    "ExplainOwnApproval",
     "ExplainRule",
     "ExplainStoredRequest",
     "ExplainToday",
@@ -82,6 +83,20 @@ class ExplainApprovers(_Frozen):
         "install's routing as it is now, as at the approve click. Null when no install entry "
         "fits, and for a caller who is not a tenant admin or a platform admin.",
     )
+
+
+class ExplainOwnApproval(_Frozen):
+    """May the person who asked approve the request that the call makes?
+
+    The answer of the approve step for that request, once for each way to
+    approve: a click in the web console (``web``), and the command line or
+    REST (``token``). Each reason is the text the approve step shows.
+    """
+
+    web: bool = Field(description="True when a click in the web console approves it.")
+    web_reason: str = Field(description="Why, in the words of the approve step.")
+    token: bool = Field(description="True when an approve on the command line or REST does.")
+    token_reason: str = Field(description="Why, in the words of the approve step.")
 
 
 class ExplainEntry(_Frozen):
@@ -159,6 +174,12 @@ class PolicyExplainResponse(_Frozen):
     decided_by: Literal["today"] | None = None
     approvers: ExplainApprovers | None = Field(
         default=None, description="Who may approve; only when the answer is wait."
+    )
+    own_approval: ExplainOwnApproval | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Only with CUSTOM_POLICY on, and only when the answer is wait: whether "
+        "the person who asked may approve their own request. Left out otherwise.",
     )
     today: ExplainToday | None = None
     evaluator: ExplainEvaluator | None = Field(

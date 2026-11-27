@@ -225,6 +225,9 @@ func printExplain(w io.Writer, a api.PolicyExplainResponse) {
 	if a.Approvers != nil {
 		printApprovers(w, *a.Approvers)
 	}
+	if a.OwnApproval != nil {
+		printOwnApproval(w, *a.OwnApproval)
+	}
 	if a.Today != nil {
 		line := a.Today.PolicyVerdict
 		if r := deref(a.Today.Reason); r != "" {
@@ -263,6 +266,21 @@ func printApprovers(w io.Writer, a api.ExplainApprovers) {
 	if floor := deref(a.Floor); floor != "" {
 		fmt.Fprintf(w, "Install's floor: %s (a tenant's routing can only narrow it)\n", sanitize(floor))
 	}
+}
+
+// printOwnApproval says whether the person who asked may approve their own
+// request, for each way to approve. Only with CUSTOM_POLICY on.
+func printOwnApproval(w io.Writer, o api.ExplainOwnApproval) {
+	fmt.Fprintln(w, "May you approve your own request:")
+	fmt.Fprintf(w, "  in the web console: %s (%s)\n", yesNo(o.Web), sanitize(o.WebReason))
+	fmt.Fprintf(w, "  with a token: %s (%s)\n", yesNo(o.Token), sanitize(o.TokenReason))
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
 }
 
 func ruleLine(r api.ExplainRule) string {

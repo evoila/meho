@@ -6944,6 +6944,25 @@ type ExplainEvaluator struct {
 // ExplainEvaluatorVerdict defines model for ExplainEvaluator.Verdict.
 type ExplainEvaluatorVerdict string
 
+// ExplainOwnApproval May the person who asked approve the request that the call makes?
+//
+// The answer of the approve step for that request, once for each way to
+// approve: a click in the web console (“web“), and the command line or
+// REST (“token“). Each reason is the text the approve step shows.
+type ExplainOwnApproval struct {
+	// Token True when an approve on the command line or REST does.
+	Token bool `json:"token"`
+
+	// TokenReason Why, in the words of the approve step.
+	TokenReason string `json:"token_reason"`
+
+	// Web True when a click in the web console approves it.
+	Web bool `json:"web"`
+
+	// WebReason Why, in the words of the approve step.
+	WebReason string `json:"web_reason"`
+}
+
 // ExplainRule One rule. “path“ is its place in the policy, when the policy set it.
 type ExplainRule struct {
 	// Path Place in the policy, for example tenant:classifications[2].
@@ -9250,6 +9269,13 @@ type PolicyExplainResponse struct {
 	// NotChecked Each check after the policy gate that explain does not ask and that can still refuse the call, by a fixed name. Empty for deny. Null for a stored approval request and for an error.
 	NotChecked *[]string `json:"not_checked"`
 	OpId       *string   `json:"op_id"`
+
+	// OwnApproval May the person who asked approve the request that the call makes?
+	//
+	// The answer of the approve step for that request, once for each way to
+	// approve: a click in the web console (``web``), and the command line or
+	// REST (``token``). Each reason is the text the approve step shows.
+	OwnApproval *ExplainOwnApproval `json:"own_approval,omitempty"`
 
 	// Request The rule stored on an approval request.
 	Request *ExplainStoredRequest       `json:"request,omitempty"`

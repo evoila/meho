@@ -52,6 +52,7 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
+from ._production_log_lines import json_lines, production_logging, request_context_fields
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-00000000c10a")
 _TENANT_B = uuid.UUID("00000000-0000-0000-0000-00000000c10b")
@@ -357,10 +358,17 @@ async def test_a_database_error_in_the_sign_in_check_answers_503_and_keeps_the_b
     assert await _unblock_rows() == []
 
 
+#: The fields a warning of the sign-in check adds of its own to the request log context.
+_LINE_FIELDS = {"event", "level", "timestamp"}
+
+
 @pytest.mark.parametrize("step", ["lock", "scan"])
 @pytest.mark.asyncio
-async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_in_key(
-    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch, step: str
+async def test_a_failed_sign_in_check_adds_no_login_field_of_its_own_and_no_error_text(
+    _client: tuple[httpx.AsyncClient, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    step: str,
 ) -> None:
     ac, key = _client
     # With the level check off, no other line of the call names the login.
@@ -378,13 +386,31 @@ async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_i
         monkeypatch.setattr(approval_queue, "take_approval_lock", _fail)
     else:
         monkeypatch.setattr(principal_block, "earlier_sign_in_uses", _fail)
+    capfd.readouterr()
 
+    # The line as production writes it, after the request log context was merged.
+    with production_logging():
+        response = await _unblock(ac, _sign_in(key, "s-log-database", sub=login), login)
+    out = capfd.readouterr().out
+    assert response.status_code == 503, response.text
+    lines = json_lines(out)
+    context = request_context_fields(lines)
+    assert {"request_id", "operator_sub", "tenant_id"} <= context
+    failed = [line for line in lines if line["event"] == "principal_unblock_sign_in_check_failed"]
+    assert len(failed) == 1, lines
+    assert set(failed[0]) == context | _LINE_FIELDS | {"operation", "error_type"}
+    assert failed[0]["level"] == "warning"
+    assert failed[0]["operation"] == "sign_in_check"
+    assert failed[0]["error_type"] == "OperationalError"
+    assert failed[0]["operator_sub"] == login
+    assert sign_in_key not in out
+    assert "SELECT" not in out
+
+    # The line before the merge: the call adds no login field of its own.
     with structlog.testing.capture_logs() as logs:
         response = await _unblock(ac, _sign_in(key, "s-log-database", sub=login), login)
-
     assert response.status_code == 503, response.text
-    failed = [e for e in logs if e["event"] == "principal_unblock_sign_in_check_failed"]
-    assert failed == [
+    assert [e for e in logs if e["event"] == "principal_unblock_sign_in_check_failed"] == [
         {
             "event": "principal_unblock_sign_in_check_failed",
             "log_level": "warning",
@@ -398,8 +424,10 @@ async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_i
 
 
 @pytest.mark.asyncio
-async def test_a_reused_sign_in_logs_no_login(
-    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+async def test_a_reused_sign_in_adds_no_login_field_of_its_own_and_no_error_text(
+    _client: tuple[httpx.AsyncClient, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     ac, key = _client
     monkeypatch.setenv("APPROVAL_SIGN_IN_LEVEL", "off")
@@ -407,10 +435,23 @@ async def test_a_reused_sign_in_logs_no_login(
     plain = await _park(destructive=False)
     assert (await _approve(ac, plain, _sign_in(key, "s-log-reused"))).status_code == 200
     await _seed_block()
+    capfd.readouterr()
 
+    # The line as production writes it, after the request log context was merged.
+    with production_logging():
+        _assert_used(await _unblock(ac, _sign_in(key, "s-log-reused")))
+    lines = json_lines(capfd.readouterr().out)
+    context = request_context_fields(lines)
+    assert {"request_id", "operator_sub", "tenant_id"} <= context
+    reused = [line for line in lines if line["event"] == "principal_unblock_sign_in_reused"]
+    assert len(reused) == 1, lines
+    assert set(reused[0]) == context | _LINE_FIELDS
+    assert reused[0]["level"] == "warning"
+    assert reused[0]["operator_sub"] == _PERSON
+
+    # The line before the merge: the call adds no login field of its own.
     with structlog.testing.capture_logs() as logs:
         _assert_used(await _unblock(ac, _sign_in(key, "s-log-reused")))
-
-    reused = [e for e in logs if e["event"] == "principal_unblock_sign_in_reused"]
-    assert reused == [{"event": "principal_unblock_sign_in_reused", "log_level": "warning"}]
+    reused_events = [e for e in logs if e["event"] == "principal_unblock_sign_in_reused"]
+    assert reused_events == [{"event": "principal_unblock_sign_in_reused", "log_level": "warning"}]
     assert _PERSON not in repr(logs)

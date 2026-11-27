@@ -50,7 +50,6 @@ _SMOKE_WORKFLOW = "second-site-smoke.yml"
 _PICK = _SCRIPTS / "pick_second_site.sh"
 _WATCHDOG = _SCRIPTS / "second_site_watchdog.sh"
 _SMOKE = _SCRIPTS / "second_site_smoke.sh"
-_REPO_SECRETS = _SCRIPTS / "repo_secrets.sh"
 
 _SITE_LABEL = "meho-runners-ci-heavy-site2"
 _HEAVY = "meho-runners-ci-heavy"

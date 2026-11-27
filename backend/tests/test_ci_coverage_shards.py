@@ -381,8 +381,10 @@ def test_map_check_is_red_when_it_cannot_read_the_artifacts(tmp_path: Path) -> N
 
     assert run.returncode == 1
     assert (
-        "::error title=No unit test map::Could not read the artifacts of the nightly run."
-        " Nightly run: https://github.com/example/repo/actions/runs/77"
+        "::error title=Could not check the unit test map::Could not read the artifacts"
+        " of the nightly run. Nightly run: https://github.com/example/repo/actions/runs/77"
     ) in run.stdout
+    assert "No unit test map" not in run.stdout + summary, "the map may have been uploaded"
+    assert summary.startswith("## Could not check the unit test map\n")
     assert "six unit shards" not in run.stdout + summary
     assert "- Python coverage (SonarCloud, shard 2/8): failure" in summary

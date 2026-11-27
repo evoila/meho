@@ -49,7 +49,10 @@ jobs:
         run: |
           set -u -o pipefail
           api="repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          title="No unit test map"
           if ! count="$(gh api "${api}/artifacts?name=unit-test-map" --jq '[.artifacts[] | select(.expired == false)] | length')"; then
+            # The map may be there: only the check failed. Still red.
+            title="Could not check the unit test map"
             reason="could not read the artifacts of the nightly run"
           elif [ "${count}" -gt 0 ]; then
             echo "The nightly run made the unit test map: ${RUN_URL}"
@@ -66,7 +69,7 @@ jobs:
             jobs="- every coverage job passed: read the step \"Make the unit test map\" of the coverage combine job"
           fi
           {
-            echo "## No unit test map"
+            echo "## ${title}"
             echo
             echo "${reason^}."
             echo
@@ -76,5 +79,5 @@ jobs:
             echo
             echo "${jobs}"
           } | tee -a "${GITHUB_STEP_SUMMARY}"
-          echo "::error title=No unit test map::${reason^}. Nightly run: ${RUN_URL}"
+          echo "::error title=${title}::${reason^}. Nightly run: ${RUN_URL}"
           exit 1

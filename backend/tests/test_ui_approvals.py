@@ -2805,6 +2805,120 @@ def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
     assert 'data-testid="approval-run-commands"' not in plain
 
 
+def test_modal_summarises_each_object_of_an_apply() -> None:
+    """The card says for each object: new or exists, other writers, risky fields."""
+    summary = [
+        {
+            "api_group": "apps",
+            "kind": "Deployment",
+            "namespace": "prod",
+            "name": "web",
+            "state": "exists",
+            "built_in": True,
+            "cluster_wide": False,
+            "other_writers": [{"manager": "helm", "operation": "Update"}],
+            "risky_fields": [
+                "uses Secret web-creds",
+                "runs as service account web-runner",
+                "a container asks for full access to its host",
+            ],
+        },
+        {
+            "api_group": "core",
+            "kind": "ConfigMap",
+            "namespace": "prod",
+            "name": "settings",
+            "state": "not_read",
+            "state_note": (
+                "The live object was not read: the login that asked has a role below Operator."
+            ),
+            "built_in": True,
+            "cluster_wide": False,
+            "other_writers": None,
+            "risky_fields": [],
+        },
+        {
+            "api_group": "example.test",
+            "kind": "Widget",
+            "namespace": None,
+            "name": "w1",
+            "state": "new",
+            "built_in": False,
+            "cluster_wide": True,
+            "other_writers": [],
+            "risky_fields": [],
+        },
+    ]
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview": {"dry_run": True, "object_summary": summary},
+            "preview_populated": True,
+        }
+    )
+    block = body.split('data-testid="approval-object-summary"')[1].split("</ul>\n        </div>")[0]
+    assert "apps / Deployment prod/web" in block
+    assert "exists already" in block
+    assert "helm (Update)" in block
+    assert "uses Secret web-creds" in block
+    assert "runs as service account web-runner" in block
+    assert "not a built-in kind" in block
+    assert "cluster-wide" in block
+    assert "a container asks for full access to its host" in block
+    assert "It does not change who must approve." in block
+    assert (
+        "This is what the cluster held when the request was made. The run does not check it again."
+        in block
+    )
+    assert "not read" in block
+    assert "has a role below Operator." in block
+    # The list is shown by its own block, not again as raw JSON in the field table.
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert "object_summary" not in table
+
+
+def test_modal_keeps_the_manifest_and_says_the_summary_could_not_be_made() -> None:
+    """A failed dry run of an apply shows the manifest, the stop and the summary sentence."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="k8s.apply",
+        proposed_effect={
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "safety_level": "dangerous",
+            "op_class": "kubernetes_write",
+            "preview_unavailable": True,
+            "preview_error": "dry run refused",
+            "subject": "Namespace/web, Deployment/web/api",
+            "dry_run_stop": "The dry run stopped at document 2 of 2 (Deployment/web/api).",
+            "manifest": [{"kind": "Namespace"}, {"kind": "Deployment", "spec": {"replicas": 7}}],
+        },
+    )
+    body = _render_modal_of(rid)
+    sends = body.split('data-testid="approval-failed-apply-manifest"')[1].split("</div>")[0]
+    assert "Namespace/web, Deployment/web/api" in sends
+    assert "The dry run stopped at document 2 of 2 (Deployment/web/api)." in sends
+    assert "&#34;replicas&#34;: 7" in sends or '"replicas": 7' in sends
+    block = body.split('data-testid="approval-object-summary"')[1].split("</div>")[0]
+    assert "The summary of the objects could not be made, because the dry run failed." in block
+
+
+def test_modal_of_another_failed_preview_has_no_apply_summary_line() -> None:
+    body = _render_modal(
+        {
+            "op_id": "vsphere.vm.create",
+            "safety_level": "dangerous",
+            "preview_unavailable": True,
+            "preview_error": "builder failed",
+        }
+    )
+    assert 'data-testid="approval-object-summary"' not in body
+
+
 def test_modal_shows_no_classification_without_one() -> None:
     """A request made with the switch off has no classification block."""
     plain = _render_modal(
@@ -4073,3 +4187,89 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
     assert "Approved, but the run failed" not in body
     assert "did not succeed" not in body
     assert "Request approved" not in body
+
+
+# ---------------------------------------------------------------------------
+# New requests appear without a reload (#6932)
+# ---------------------------------------------------------------------------
+
+
+def _new_notice_baseline(body: str) -> int | None:
+    """The ``data-baseline`` of the list's new-requests line, or None without one."""
+    match = re.search(r"<div hidden data-approvals-new-notice[^>]*>", body)
+    assert match is not None, "the list has no new-requests line"
+    baseline = re.search(r'data-baseline="(\d+)"', match.group(0))
+    return int(baseline.group(1)) if baseline else None
+
+
+def _badge_count_of(body: str) -> int:
+    match = re.search(r'data-pending-count="(\d+)"', body)
+    assert match is not None
+    return int(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("routing", "tabs"),
+    [(False, ("pending",)), (True, ("pending", "for_you"))],
+    ids=["routing-off", "routing-on"],
+)
+def test_list_baseline_is_the_bell_count_for_the_same_session(
+    monkeypatch: pytest.MonkeyPatch, routing: bool, tabs: tuple[str, ...]
+) -> None:
+    """The Pending and For you lists carry the bell's count as ``data-baseline``.
+
+    With routing on, the bell counts only what this person may approve, so
+    the own request below is left out of both numbers.
+    """
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true" if routing else "false")
+    get_settings.cache_clear()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.one")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.two")
+    _seed_request(tenant_id=_TENANT_A, op_id="own.request", principal_sub=_REVIEWER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+    ):
+        client = _authenticated_client(session_id)
+        badge = _badge_count_of(client.get("/ui/approvals/badge", headers=_HX_HEADERS).text)
+        bodies = [
+            client.get(f"/ui/approvals/list?tab={tab}", headers=_HX_HEADERS).text for tab in tabs
+        ]
+        bodies.append(client.get(f"/ui/approvals?tab={tabs[-1]}").text)
+
+    assert badge == (2 if routing else 3)
+    for body in bodies:
+        assert _new_notice_baseline(body) == badge
+        # "Show" fetches the same list a tab does; nothing is polled for it.
+        assert body.count('hx-trigger="meho:approval-bump from:body, meho:approval-decided') == 1
+
+
+def test_other_views_have_no_new_requests_line() -> None:
+    """Decided tabs, and the "Load more" rows get no new-requests line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        approved = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+        rows = client.get("/ui/approvals/list?tab=pending&partial=rows", headers=_HX_HEADERS)
+
+    assert "data-approvals-new-notice" not in approved.text
+    assert "data-approvals-new-notice" not in rows.text
+
+
+def test_bell_script_shows_the_line_from_the_polled_count_only() -> None:
+    """The script reads the badge swap; it adds no timer, no request and no count."""
+    script = (static_root_dir() / "src" / "app" / "approvals-bell.js").read_text(encoding="utf-8")
+    assert script.count("setInterval(") == 1
+    assert "htmx:afterSwap" in script
+    assert "data-approvals-new-notice" in script
+    # The starting count comes from the server; the script never sets one.
+    assert re.search(r"dataset\.baseline\s*=[^=]", script) is None
+    for request_marker in ("fetch(", "XMLHttpRequest", "htmx.ajax", "hx-get"):
+        assert request_marker not in script.split("// Show the new-requests line", 1)[1]

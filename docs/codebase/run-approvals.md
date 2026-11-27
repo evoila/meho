@@ -104,7 +104,9 @@ covers the call, it calls `consult_and_record_run_approval`:
   for per-call approval, one that connects to an address the caller
   gives, one classified to always wait, or one with a delete sign (the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
-  delete name or pattern). The standing grant check uses the same
+  delete name or pattern, or, with the switch `CUSTOM_POLICY` on,
+  `hard_to_undo` on the operation's own definition). The standing grant
+  check uses the same
   function. On top of it, a run approval never covers an operation that
   runs a command as root on the host. Those wait for a person on each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same

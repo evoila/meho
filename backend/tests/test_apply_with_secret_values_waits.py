@@ -230,7 +230,9 @@ def test_the_value_check_reads_the_names_of_a_shared_env_list_once(
     )
 
     assert manifest_holds_credential({"manifest": manifest}) is False
-    assert len(checked) <= 1_000
+    # Each key is read a few times by the rules of one map, never once per
+    # alias: 200 aliases read again would make more than 200,000 checks.
+    assert len(checked) <= 5_000
 
 
 def test_the_value_check_reads_the_keys_of_a_shared_data_map_once(
@@ -245,7 +247,9 @@ def test_the_value_check_reads_the_keys_of_a_shared_data_map_once(
     manifest = f"apiVersion: v1\nkind: List\nshared: &data {{{keys}}}\nitems:\n{items}\n"
 
     assert manifest_holds_credential({"manifest": manifest}) is False
-    assert len(checked) <= 1_000
+    # Each key is read a few times by the rules of one map, never once per
+    # alias: 200 aliases read again would make more than 200,000 checks.
+    assert len(checked) <= 5_000
 
 
 # ---------------------------------------------------------------------------

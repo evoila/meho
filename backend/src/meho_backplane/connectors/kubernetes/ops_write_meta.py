@@ -616,6 +616,7 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "apply", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_APPLY_LLM,
     ),
     KubernetesOp(
@@ -635,6 +636,7 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "delete", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=_DELETE_LLM,
     ),
     KubernetesOp(
@@ -659,6 +661,7 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "secret", "credential", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_SECRET_CREATE_LLM,
     ),
     KubernetesOp(

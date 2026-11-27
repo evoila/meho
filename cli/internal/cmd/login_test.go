@@ -386,6 +386,26 @@ func TestLoginCommandHelpDocumentsKeyringEscape(t *testing.T) {
 	}
 }
 
+// TestLoginCommandHelpNamesAddressCodeAndGrant pins the sign-in steps
+// of the help text word for word. A person reads "address" and "code",
+// the same words the prompt prints, and learns to click Yes when the
+// page asks to grant access.
+func TestLoginCommandHelpNamesAddressCodeAndGrant(t *testing.T) {
+	out := newLoginCmd().Long
+	const want = "The CLI prints an address and a short code. " +
+		"Open the address on any device with a browser, enter the code, " +
+		"and sign in. If the page asks you to grant access, click Yes. " +
+		"No browser opens on the machine where the CLI runs."
+	if !strings.Contains(out, want) {
+		t.Errorf("login help must hold the sign-in steps word for word:\n%s\ngot:\n%s", want, out)
+	}
+	for _, forbidden := range []string{"verification URL", "user_code"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("login help must not say %q; got:\n%s", forbidden, out)
+		}
+	}
+}
+
 // TestLoginCommandHelpDoesNotClaimEndpointUnshipped pins the breadcrumb
 // fix from G0.9.1-T9 / Signal #16. The v0.3.1 help text claimed
 // `/api/v1/auth-config` was still on the way ("Until that endpoint

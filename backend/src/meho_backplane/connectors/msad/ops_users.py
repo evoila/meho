@@ -27,7 +27,7 @@ https://learn.microsoft.com/en-us/powershell/module/activedirectory/
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.msad.ops import (
@@ -337,6 +337,8 @@ def _account_action_op(
     *,
     safety_level: str,
     requires_approval: bool,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
 ) -> MsadOp:
     """Build one identity-only user write op (enable / disable / delete)."""
     note = (
@@ -363,6 +365,8 @@ def _account_action_op(
         tags=("write", "user", verb),
         safety_level=safety_level,  # type: ignore[arg-type]
         requires_approval=requires_approval,
+        hard_to_undo=hard_to_undo,
+        changes_rights=changes_rights,
         llm_instructions={
             "when_to_use": f"{verb.capitalize()} an AD user account. {note} " + SSH_TRANSPORT_NOTE,
             "parameter_hints": {"identity": "Required. sAMAccountName / DN / GUID / SID."},
@@ -595,5 +599,7 @@ USER_OPS: tuple[MsadOp, ...] = (
         "Remove-ADUser",
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
     ),
 )

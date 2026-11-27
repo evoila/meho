@@ -29,9 +29,11 @@ It reuses the three foundations the T1 keystone (``net.tcp_check``,
   **redirect** hop keeps ``status="ok"`` with ``reachable=true``,
   because the prior hop did answer — that is a real observation.
 * **Audit-visible URL** — the handler's return dict carries the literal
-  requested ``url`` and the ``final_url`` actually reached (a URL is not
-  a secret), so the durable audit row's ``raw_payload`` answers "who
-  probed what". The dispatcher stores the handler's return value as
+  requested ``url``, so the durable audit row's ``raw_payload`` answers
+  "who probed what". The address of a redirect hop is the vendor's
+  choice, so ``final_url`` and each ``redirect_chain`` entry hold only the
+  origin (``scheme://host[:port]``) and ``blocked_redirect`` only the host
+  name. The dispatcher stores the handler's return value as
   ``raw_payload`` verbatim.
 * **Return-failures contract** — a refused, timed-out, DNS-failed,
   TLS-failed, redirect-blocked, or too-many-redirects probe is the
@@ -66,7 +68,12 @@ import anyio
 import httpx
 import structlog
 
-from meho_backplane.connectors._shared.log_host import host_for_log
+from meho_backplane.connectors._shared.log_host import (
+    UNPARSEABLE_ADDRESS,
+    UNREADABLE_LOCATION_ERRORS,
+    host_for_log,
+    unreadable_location_error,
+)
 from meho_backplane.connectors.net.allowlist import (
     ProbeNotAllowedError,
     assert_probe_allowed,
@@ -203,7 +210,11 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "redirect_chain": {
             "type": "array",
-            "description": "One {url, status} entry per redirect hop, in order.",
+            "description": (
+                "One {url, status} entry per redirect hop, in order. Each url "
+                "is the origin only (scheme://host[:port]): no path, query or "
+                "user part."
+            ),
             "items": {
                 "type": "object",
                 "properties": {
@@ -243,13 +254,17 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "final_url": {
             "type": ["string", "null"],
-            "description": "The last URL actually dialed (audit-visible); null on early refusal.",
+            "description": (
+                "The origin (scheme://host[:port]) of the last address actually "
+                "dialed: no path, query or user part; null on early refusal."
+            ),
         },
         "blocked_redirect": {
             "type": ["string", "null"],
             "description": (
-                "Host of a redirect target that was refused by the "
-                "allowlist and never dialed; else null."
+                "Host name of a redirect target that was refused by the "
+                "allowlist and never dialed; else null. Only the host name, "
+                "never a path, query or user part."
             ),
         },
         "error_detail": {
@@ -655,6 +670,35 @@ def _host_header_build_kwargs(host_header: str | None, *, is_https: bool) -> dic
     return kwargs
 
 
+def _origin(url: httpx.URL) -> str:
+    """Return ``scheme://host[:port]`` of *url*: no path, query, fragment or user part.
+
+    The address of a redirect hop is the vendor's choice, so the result
+    holds only the host name httpx reads (or one fixed mark) and the port.
+    """
+    host = host_for_log(url)
+    if host == UNPARSEABLE_ADDRESS:
+        return host
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{url.port}" if url.port is not None else ""
+    return f"{url.scheme}://{host}{port}"
+
+
+class _ProbeClient(httpx.AsyncClient):
+    """An ``AsyncClient`` whose error for an unreadable ``Location`` has one fixed text."""
+
+    def _build_redirect_request(
+        self, request: httpx.Request, response: httpx.Response
+    ) -> httpx.Request:
+        # Raised outside the ``except`` so httpx's error is not its context.
+        try:
+            return super()._build_redirect_request(request, response)
+        except UNREADABLE_LOCATION_ERRORS as exc:
+            error = unreadable_location_error(exc, request)
+        raise error
+
+
 def _advance_or_halt(
     *,
     response: httpx.Response,
@@ -676,7 +720,7 @@ def _advance_or_halt(
     *redirect_chain*.
     """
     status = response.status_code
-    redirect_chain.append({"url": str(request.url), "status": status})
+    redirect_chain.append({"url": _origin(request.url), "status": status})
     if len(redirect_chain) > _MAX_REDIRECTS:
         return _result(
             url=url,
@@ -686,7 +730,7 @@ def _advance_or_halt(
             status=status,
             redirect_chain=redirect_chain,
             timing_ms=_elapsed_ms(started),
-            final_url=str(request.url),
+            final_url=_origin(request.url),
         )
     # httpx's own correctly-built follow-up request (method downgrade on
     # 301/302/303, relative-Location resolution).
@@ -704,7 +748,7 @@ def _advance_or_halt(
             redirect_chain=redirect_chain,
             tls=_tls_summary(response),
             timing_ms=_elapsed_ms(started),
-            final_url=str(request.url),
+            final_url=_origin(request.url),
         )
     next_host = next_request.url.host
     try:
@@ -725,8 +769,8 @@ def _advance_or_halt(
             status=status,
             redirect_chain=redirect_chain,
             timing_ms=_elapsed_ms(started),
-            final_url=str(request.url),
-            blocked_redirect=next_host,
+            final_url=_origin(request.url),
+            blocked_redirect=host_for_log(next_request.url),
         )
     return str(next_request.url), next_request.method
 
@@ -799,7 +843,7 @@ async def _walk_redirects(
                 timing_ms=_elapsed_ms(started),
                 body_size=body_size,
                 body_sha256=body_sha256,
-                final_url=str(request.url),
+                final_url=_origin(request.url),
             )
         finally:
             await response.aclose()
@@ -826,14 +870,12 @@ async def _open_clients(
     """
     cookie_jar = CookieJar()
     client = await stack.enter_async_context(
-        httpx.AsyncClient(
-            follow_redirects=False, timeout=httpx.Timeout(timeout), cookies=cookie_jar
-        )
+        _ProbeClient(follow_redirects=False, timeout=httpx.Timeout(timeout), cookies=cookie_jar)
     )
     if not trust.pinned:
         return client, None
     pinned_client = await stack.enter_async_context(
-        httpx.AsyncClient(
+        _ProbeClient(
             follow_redirects=False,
             timeout=httpx.Timeout(timeout),
             verify=trust.build_ssl_context(),
@@ -869,8 +911,8 @@ async def _probe_url(
     DNS-failed / TLS-failed probe returns a structured payload with
     ``status="ok"`` (the return-failures contract); nothing is raised as
     a ``connector_*`` error. The returned dict carries the literal
-    ``url`` and ``final_url`` so the durable audit row records what was
-    probed.
+    ``url`` so the durable audit row records what was probed, and the
+    origin of ``final_url``.
     """
     url = str(params["url"])
     method = str(params.get("method", "HEAD")).upper()

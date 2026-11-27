@@ -31,7 +31,11 @@ from meho_backplane.policy.document import (
     file_sha256,
     parse_policy_file,
 )
-from meho_backplane.policy.limits import limits_diff, personal_agent_limit
+from meho_backplane.policy.limits import (
+    LIMITS_NEED_CUSTOM_POLICY,
+    limits_diff,
+    personal_agent_limit,
+)
 from meho_backplane.policy.service import (
     NO_CHANGE,
     apply_policy,
@@ -137,7 +141,7 @@ def test_limits_need_the_switch() -> None:
     on = check_document(
         document, scope="install", install_document=document, ops=[], custom_policy=True
     )
-    assert off == [_NOT_READ.format("limits")]
+    assert off == [LIMITS_NEED_CUSTOM_POLICY]
     assert on == []
 
 
@@ -284,7 +288,7 @@ async def test_with_the_switch_off_the_import_refuses_limits() -> None:
         plan = await build_plan(
             session, scope="install", tenant_id=None, content=_install_file("caution").encode()
         )
-    assert plan.mistakes == [_NOT_READ.format("limits")]
+    assert plan.mistakes == [LIMITS_NEED_CUSTOM_POLICY]
     assert plan.diff is None
     assert await _stored_install() is None
 

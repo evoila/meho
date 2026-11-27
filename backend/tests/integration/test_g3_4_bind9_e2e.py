@@ -242,9 +242,12 @@ _BIND9_VAULT_PATH: str = "kv/dev/bind9/e2e"
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_BOOKWORM_IMAGE = "debian:bookworm-slim"
+
 _DOCKERFILE: str = textwrap.dedent(
     """\
-    FROM debian:bookworm-slim
+    ARG DEBIAN_IMAGE=debian:bookworm-slim
+    FROM ${DEBIAN_IMAGE}
 
     ENV DEBIAN_FRONTEND=noninteractive
 
@@ -328,7 +331,15 @@ def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
         dockerfile.write_text(_DOCKERFILE)
         tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
 
-        image = DockerImage(path=build_dir, tag=tag)
+        image = DockerImage(
+            path=build_dir,
+            tag=tag,
+            buildargs={
+                "DEBIAN_IMAGE": os.environ.get(
+                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
+                )
+            },
+        )
         image.build()
 
         container = DockerContainer(tag).with_exposed_ports(22)

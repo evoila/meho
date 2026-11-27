@@ -135,9 +135,12 @@ def _container_vault_secrets() -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_BOOKWORM_IMAGE = "debian:bookworm-slim"
+
 _DOCKERFILE: str = textwrap.dedent(
     """\
-    FROM debian:bookworm-slim
+    ARG DEBIAN_IMAGE=debian:bookworm-slim
+    FROM ${DEBIAN_IMAGE}
 
     ENV DEBIAN_FRONTEND=noninteractive
 
@@ -249,7 +252,15 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
         # regression and must surface as a test failure rather than a
         # skip. The pre-fix shape wrapped this in ``except Exception:
         # pytest.skip(...)`` and lost CI signal on broken images.
-        image = DockerImage(path=build_dir, tag=tag)
+        image = DockerImage(
+            path=build_dir,
+            tag=tag,
+            buildargs={
+                "DEBIAN_IMAGE": os.environ.get(
+                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
+                )
+            },
+        )
         image.build()
 
         container = DockerContainer(tag).with_exposed_ports(22)

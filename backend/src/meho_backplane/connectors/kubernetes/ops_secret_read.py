@@ -367,6 +367,7 @@ SECRET_READ_OPS: tuple[KubernetesOp, ...] = (
         tags=("read", "secret", "credential", "kubeconfig", "caution"),
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="overwrites",
         llm_instructions=_LLM_INSTRUCTIONS,
     ),
 )

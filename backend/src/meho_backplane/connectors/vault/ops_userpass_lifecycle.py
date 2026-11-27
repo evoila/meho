@@ -230,6 +230,8 @@ _LIFECYCLE_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_AUTH_USERPASS_DISABLE_PARAMETER_SCHEMA,
         "llm_instructions": VAULT_AUTH_USERPASS_DISABLE_LLM_INSTRUCTIONS,
+        "hard_to_undo": "stops",
+        "changes_rights": True,
         "tags": ["write", "auth", "identity", "access-removal"],
     },
     {
@@ -242,6 +244,7 @@ _LIFECYCLE_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_AUTH_USERPASS_ENABLE_PARAMETER_SCHEMA,
         "llm_instructions": VAULT_AUTH_USERPASS_ENABLE_LLM_INSTRUCTIONS,
+        "changes_rights": True,
         "tags": ["write", "auth", "identity"],
     },
 )
@@ -272,6 +275,8 @@ async def register_vault_userpass_lifecycle_operations(
             tags=spec["tags"],
             safety_level="dangerous",
             requires_approval=True,
+            hard_to_undo=spec.get("hard_to_undo"),
+            changes_rights=spec.get("changes_rights", False),
             llm_instructions=spec["llm_instructions"],
             embedding_service=embedding_service,
         )

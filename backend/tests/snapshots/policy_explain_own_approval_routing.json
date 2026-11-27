@@ -1,0 +1,273 @@
+{
+  "adm-token approve": {
+    "token": [
+      true,
+      ""
+    ],
+    "web": [
+      true,
+      ""
+    ]
+  },
+  "op-token approve": {
+    "token": [
+      false,
+      "The install's routing (`install:routing[0]`) lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it."
+    ],
+    "web": [
+      false,
+      "The install's routing (`install:routing[0]`) lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it."
+    ]
+  },
+  "operator": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "shadow",
+    "error": null,
+    "evaluator": {
+      "floor": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rule": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rules": [
+        {
+          "path": null,
+          "rule_id": "person.token.caution",
+          "source": "default",
+          "text": "risk level caution waits",
+          "verdict": "wait"
+        },
+        {
+          "path": null,
+          "rule_id": "token_runs_only_safe",
+          "source": "floor",
+          "text": "risk level caution: a call made with a token runs only safe operations at once",
+          "verdict": "wait"
+        }
+      ],
+      "same_as_today": true,
+      "verdict": "wait"
+    },
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "own_approval": {
+      "token": false,
+      "token_reason": "The install's routing lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it.",
+      "web": false,
+      "web_reason": "The install's routing lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it."
+    },
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "platform_admin_with_groups": {
+    "answer": "wait",
+    "approvers": {
+      "floor": "install:routing[0]",
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "install:routing[0]"
+    },
+    "asker": {
+      "groups": [
+        "MEHO-Operators"
+      ],
+      "kind": "user",
+      "me": false,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": "other",
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "shadow",
+    "error": null,
+    "evaluator": {
+      "floor": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rule": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rules": [
+        {
+          "path": null,
+          "rule_id": "person.token.caution",
+          "source": "default",
+          "text": "risk level caution waits",
+          "verdict": "wait"
+        },
+        {
+          "path": null,
+          "rule_id": "token_runs_only_safe",
+          "source": "floor",
+          "text": "risk level caution: a call made with a token runs only safe operations at once",
+          "verdict": "wait"
+        }
+      ],
+      "same_as_today": true,
+      "verdict": "wait"
+    },
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "own_approval": {
+      "token": false,
+      "token_reason": "The install's routing (`install:routing[0]`) lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it.",
+      "web": false,
+      "web_reason": "The install's routing (`install:routing[0]`) lets only MEHO-Admins approve this change. You are in MEHO-Operators. A tenant's routing can only narrow it."
+    },
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "tenant_admin": {
+    "answer": "wait",
+    "approvers": {
+      "floor": "install:routing[0]",
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "install:routing[0]"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": "other",
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "shadow",
+    "error": null,
+    "evaluator": {
+      "floor": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rule": {
+        "path": null,
+        "rule_id": "token_runs_only_safe",
+        "source": "floor",
+        "text": "risk level caution: a call made with a token runs only safe operations at once",
+        "verdict": "wait"
+      },
+      "rules": [
+        {
+          "path": null,
+          "rule_id": "person.token.caution",
+          "source": "default",
+          "text": "risk level caution waits",
+          "verdict": "wait"
+        },
+        {
+          "path": null,
+          "rule_id": "token_runs_only_safe",
+          "source": "floor",
+          "text": "risk level caution: a call made with a token runs only safe operations at once",
+          "verdict": "wait"
+        }
+      ],
+      "same_as_today": true,
+      "verdict": "wait"
+    },
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "own_approval": {
+      "token": true,
+      "token_reason": "This is your own change. You may approve it, because members of MEHO-Admins may approve their own changes. The audit log records it as a self-approval.",
+      "web": true,
+      "web_reason": "This is your own change. You may approve it, because members of MEHO-Admins may approve their own changes. The audit log records it as a self-approval."
+    },
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  }
+}

@@ -56,6 +56,7 @@ own page:
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
 | `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
+| `/ui/policy` (menu entry "Policy", only with the switch `CUSTOM_POLICY` on; else the address does not exist) | read only: the fixed rules (`policy/fixed_rules.py`) and the risk-level edits (the rows of `/ui/connectors/overrides`), for a tenant admin; `ui/routes/policy/` |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
@@ -209,10 +210,39 @@ upcoming T4 login flow writes to:
   `created_at`, `expires_at`, `access_token` (bytea, Fernet
   ciphertext), `refresh_token` (bytea, Fernet ciphertext),
   `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted),
-  and since migration `0133` (#5240) `tenant_chosen` and
-  `can_switch_tenant` (see "Current tenant, picker and switch").
+  since migration `0133` (#5240) `tenant_chosen` and
+  `can_switch_tenant` (see "Current tenant, picker and switch"),
+  since migration `0176` (#6282) `approval_token` (bytea, Fernet
+  ciphertext, nullable), and since migration `0192`
+  `display_name` (see "Person's name on the session" below).
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
+- **Person's name on the session** — `display_name` holds
+  the `name` claim of the access token the login callback verified
+  (`Operator.name`), for the console's user menu. What is stored and
+  why:
+  - **Encrypted like the tokens.** Fernet ciphertext under
+    `UI_SESSION_ENCRYPTION_KEY`, the same key and envelope as
+    `access_token`. The name is already inside `access_token` on the
+    same row, so the column shows nothing a leaked row did not: with
+    the key, the token already gave the name; without it, both are
+    ciphertext. A plain-text column would have let a database dump
+    without the key show names, so it is not plain text.
+  - **Only the `name` claim.** No fallback to `preferred_username`
+    or `email`: those are login identifiers, not names. `NULL` when
+    the token had no `name` claim.
+  - **Written at login only.** A token refresh keeps the stored
+    name. A person renamed in Keycloak sees the new name after the
+    next sign-in. Sessions from before migration `0192` have no name
+    until the person signs in again.
+  - **Kept as long as the tokens.** Nothing deletes `web_session`
+    rows today (`revoked_at` is a soft delete; the `expires_at` index
+    is for a future sweep). The name lives and goes with the tokens
+    it came from; that sweep will remove both.
+  - **Never the `sub` in its place.** With no name, pages that name
+    the signed-in person show a neutral label (the user menu: a
+    person icon and "Your account"), never the `sub` or letters
+    taken from it.
 - **ORM model** — [`WebSession` in
   `db/models.py`](../../backend/src/meho_backplane/db/models.py).
   Mirrors the column shape; no helper methods (write-once /
@@ -589,13 +619,19 @@ The id also stays in the attributes that address the DOM —
 pins both halves: the name reaches the rendered text, and
 `data-meho-tenant` still carries the UUID.
 
-The processor also exposes `session_operator_sub` (the signed-in
-operator's Keycloak `sub`, or `None` outside a session). The sidebar
-account chip (`base.html`) used to be the hardcoded literal
-"OP / Operator"; it now renders the real `sub` (a two-char avatar +
-the truncated `sub`) with an Account menu item linking to
-`/ui/account`, and a comment slot for a future tenant selector
-(G10.11-T1 #1892). The chip deliberately does **not** show the role
+The processor also exposes `session_display_name` (the signed-in
+person's name from the login token, see "Person's name on the
+session") and `session_initials` (its avatar initials, from
+`person_initials` in `ui/templating.py`), both `None` when there is no
+name or no session. The sidebar account chip (`base.html`) shows the
+name and its initials, with an Account menu item linking to
+`/ui/account` (G10.11-T1 #1892). It used to show the Keycloak `sub`;
+with no name it now shows a person icon and
+"Your account". The processor deliberately exposes no `sub`: a page
+that names the signed-in person must not fall back to an identifier.
+The dashboard greeting and the "My recent activity" panel follow the
+same rule; the account page shows the name and, in its own row
+labelled "Subject ID", the `sub`. The chip deliberately does **not** show the role
 -- labelling it would cost a fresh JWT verify on every page render;
 the live role is shown on `/ui/account` instead, where the route pays
 that verify once.
@@ -4054,7 +4090,9 @@ admin block list (`docs/codebase/principal-block.md`):
   block form.
 - `POST /ui/blocked-people` -- block a login (`sub`, `reason`). Done:
   303 back to the page. Refused: 422, the page again with the typed
-  values and the message next to its field.
+  values and the message next to its field. The database answers the
+  write with an error: 503 `principal_block_check_unavailable`, and no
+  block is written.
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
   the scope (all tenants for a platform admin). The confirm form carries
@@ -4063,13 +4101,23 @@ admin block list (`docs/codebase/principal-block.md`):
   login changed in between (a block was added, removed or set again),
   MEHO removes nothing and answers 200 with the confirm page again, the
   new blocks and a note, so the admin confirms again. The audit row
-  `principal.unblock` names only the removed blocks. The admin's own login: 403 `own_login`. A platform
-  admin removes a block on their own login with `meho principal unblock
-  <sub> --reason <text>`, run in the tenant of that block, with a fresh
-  sign-in. On their own login, MEHO removes only the block of the
-  current tenant. A block in every tenant stays until another platform
-  admin removes it.
+  `principal.unblock` names only the removed blocks. The admin's own
+  login: 403 `own_login`. The console never removes a block on the
+  admin's own login. A platform admin removes a block on their own login
+  with `meho principal unblock <sub> --reason <text>`, run in the tenant
+  of that block, with a fresh sign-in. It removes only the block of that
+  tenant. A block in every tenant stays until another platform admin
+  removes it. A tenant admin cannot remove a block on their own login.
+  Another tenant admin of that tenant removes a block of that tenant, and
+  a platform admin with `tenant_admin` in the current tenant removes
+  every block of another login, on the Blocked people page or with
+  `meho principal unblock`. Only a platform admin removes a block in
+  every tenant.
   No block to remove: 404. The blocks cannot be read: 503.
+
+A 503 or a 403 can also come as plain text from the session check that
+runs before the page (the block list cannot be read, or the admin's own
+login is blocked). The OpenAPI entries name both formats.
 
 Every form is a plain `POST` form with the CSRF token and the page's
 tenant (`meho_tenant`) in hidden fields, so it works without JavaScript.

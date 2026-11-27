@@ -84,6 +84,8 @@ class FreeipaTypedOp:
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None
+    changes_rights: bool = False
 
 
 _TEXT_SCHEMA: Final[dict[str, Any]] = {
@@ -277,6 +279,8 @@ def write_op(
     llm_instructions: dict[str, Any],
     any_of: list[dict[str, Any]] | None = None,
     dependent_required: dict[str, list[str]] | None = None,
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None,
+    changes_rights: bool = False,
 ) -> FreeipaTypedOp:
     """A write. It always waits until a second person approves.
 
@@ -306,4 +310,6 @@ def write_op(
         safety_level=safety_level,
         requires_approval=True,
         llm_instructions=llm_instructions,
+        hard_to_undo=hard_to_undo,
+        changes_rights=changes_rights,
     )

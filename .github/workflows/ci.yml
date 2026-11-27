@@ -695,14 +695,14 @@ jobs:
       matrix:
         shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || '[1, 2, 3, 4, 5, 6]') }}
     # 35-min cap: hang backstop only. Expected job wall is ~17-21 min (setup
-    # ~2 min + pytest ~15-19 min). It was 30 min until the per-shard budget
-    # went to 1500 s: setup plus 1500 s must stay under the cap, so the
-    # budget check always fails a slow shard before the job is stopped.
-    # A 20-min cap once cut good shards. The perf-budget step below is the
-    # PR-level early-warning gate that fires well before this cap. The slow
-    # "Install PHP CLI" step has its own short limit, so one stalled download
-    # cannot use up the job's time. The pre-shard lane's 25-min cap
-    # covered a ~18-min serial pytest wall; a ~6-min shard needs far less. The
+    # ~2-3 min + pytest ~15-19 min). Setup plus the 1500 s budget stays under
+    # the cap. So a shard whose pytest ends after 1500 s but before the cap
+    # fails on the budget check with its measured time. A shard whose pytest
+    # still runs at the cap is stopped by this limit, and the budget check
+    # does not run. A 20-min cap once cut good shards. The perf-budget step
+    # below is the PR-level early-warning gate that fires well before this
+    # cap. The slow "Install PHP CLI" step has its own short limit, so one
+    # stalled download cannot use up the job's time. The
     # old lane's OOM/heartbeat history (why the whole-suite lane dropped --cov
     # and pinned -n 3) is preserved verbatim in the pytest step comment below.
     timeout-minutes: 35
@@ -1404,17 +1404,26 @@ jobs:
           # All six shards: 1500 s (#7160). Merge-queue run 46001005720
           # failed only on time: shard 3 took 1212 s, every test passed.
           # Measured pytest wall in the green merge-queue runs 45967904368,
-          # 45974330390, 45989298583 and 45989659807: 908-1124 s. Five pull
+          # 45974330390, 45989298583 and 45989659807: 907-1123 s. Five pull
           # request runs took 827-1136 s. So every shard was near 1200 s, and
           # any merge could fail by chance on a busy runner. Fresh file times
           # do not help: they were refreshed on 2026-11-26 (#7033), and the
           # split already gives each shard about 2248 s of test time. A
           # seventh shard needs a seventh runner in the merge-queue runner
           # set, which is sized outside this repository. Against 1500 s the
-          # slowest measured shard (1213 s) uses 81 percent and the average
+          # slowest measured shard (1212 s) uses 81 percent and the average
           # shard (about 1040 s) about 70 percent. The gate stays on as the
           # early warning. The job limit went from 30 to 35 minutes, so it
           # still sits above setup plus 1500 s.
+          # Fixture timing of shard 3 of 6 (MEHO_FIXTURE_TIMING_FILE +
+          # MEHO_LIFESPAN_TIMING, -n 3 --dist loadscope, local run on
+          # 2026-11-27, all tests passed). Top five fixtures: `kc` 334 setups
+          # 743.6 s, `_audit_db_url` 15 setups 351.3 s, `keycloak` 139
+          # setups 232.4 s, `client_with_operator` 135 setups 215.8 s,
+          # `registered` 33 setups 108.8 s. Top three start-up steps:
+          # `operation_catalog_write` 206 calls 47.1 s,
+          # `_preload_embedding_model` 206 calls 6.9 s,
+          # `_eager_import_connectors` 211 calls 0.3 s.
           budget_s=1500
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM

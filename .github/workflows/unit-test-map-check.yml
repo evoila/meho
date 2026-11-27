@@ -5,10 +5,11 @@
 # check is red when that run uploaded no `unit-test-map` artifact.
 #
 # Why: pull requests use the map to run only the unit tests that their
-# change can break (#5642, the `changes` job in ci.yml). With no map, every
-# pull request runs all six unit shards. The jobs that make the map may
-# fail without failing the CI run (whole-job continue-on-error), so from
-# 20 to 26 Nov 2026 no map was made and the nightly run still showed green.
+# change can break (#5642, the `changes` job in ci.yml). With no new map,
+# pull requests soon run all six unit shards again. The jobs that make the
+# map may fail without failing the CI run (whole-job continue-on-error), so
+# from 20 to 26 Nov 2026 no map was made and the nightly run still showed
+# green.
 #
 # Why a separate workflow, and not a job in ci.yml that may not fail: a red
 # job would turn the nightly CI run red. quality-gate.yml runs SonarCloud
@@ -67,7 +68,7 @@ jobs:
           {
             echo "## No unit test map"
             echo
-            echo "${reason^}. Until a nightly run makes a map, every pull request runs all six unit shards."
+            echo "${reason^}."
             echo
             echo "Nightly run: ${RUN_URL}"
             echo
@@ -75,5 +76,5 @@ jobs:
             echo
             echo "${jobs}"
           } | tee -a "${GITHUB_STEP_SUMMARY}"
-          echo "::error title=No unit test map::${reason^}. Every pull request runs all six unit shards until a nightly run makes a map. Nightly run: ${RUN_URL}"
+          echo "::error title=No unit test map::${reason^}. Nightly run: ${RUN_URL}"
           exit 1

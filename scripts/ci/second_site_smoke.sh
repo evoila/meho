@@ -8,13 +8,16 @@
 # Usage: second_site_smoke.sh --image <image> <url>...
 #   --image  a public test image; `docker pull` must get it (on the site it
 #            comes through the site's own Docker Hub cache)
-#   <url>    the URLs this runner must reach
+#   <url>    the URLs this runner must reach. Name a file that exists: the
+#            check needs a 2xx answer, after redirects. An error answer such
+#            as a 502 from a proxy does not count as reached.
 #
 # The runner must have MEHO_CI_SITE=site2 in its pod env. It proves the job
 # reached the second site.
 #
 # The addresses this runner must NOT reach come from the private pod env
-# MEHO_CI_DENY_PROBE_HOSTS, a comma-separated list of host or host:port. Each
+# MEHO_CI_DENY_PROBE_HOSTS, a list of host or host:port. A comma or a line
+# break ends an entry, so a list that wraps onto a new line is read whole. Each
 # one must end in a curl timeout (exit code 28). Every other result fails the
 # check: a success, a refused connection or a certificate error means the
 # packets got through, and any other error means the check proved nothing.
@@ -63,7 +66,12 @@ if ! command -v docker >/dev/null 2>&1; then
   fail "docker is not installed on this runner."
 fi
 
-IFS=',' read -ra raw_entries <<<"${MEHO_CI_DENY_PROBE_HOSTS:-}"
+# `read` stops at the first line break, so every line break becomes a comma
+# first. Otherwise the entries after it would never be checked.
+deny_list="${MEHO_CI_DENY_PROBE_HOSTS:-}"
+deny_list="${deny_list//$'\r'/,}"
+deny_list="${deny_list//$'\n'/,}"
+IFS=',' read -ra raw_entries <<<"${deny_list}"
 deny_urls=()
 position=0
 for entry in ${raw_entries[@]+"${raw_entries[@]}"}; do
@@ -95,12 +103,19 @@ if [[ "${total}" -eq 0 ]]; then
 fi
 
 for url in "$@"; do
-  if curl --silent --head --connect-timeout "${connect_seconds}" --max-time "${reach_max_seconds}" \
-    --output /dev/null "${url}" 2>/dev/null; then
-    echo "reached ${url}"
-  else
-    fail "Cannot reach ${url} (curl exit code $?). Unit test shards need it, so this site must not count as online."
+  # Only a 2xx answer counts. A proxy that cannot reach the server answers
+  # with an error status (for example 502), and curl still ends with 0.
+  status="$(curl --silent --head --location --connect-timeout "${connect_seconds}" \
+    --max-time "${reach_max_seconds}" --output /dev/null --write-out '%{http_code}' \
+    "${url}" 2>/dev/null)"
+  code=$?
+  if [[ "${code}" -ne 0 ]]; then
+    fail "Cannot reach ${url} (curl exit code ${code}). Unit test shards need it, so this site must not count as online."
   fi
+  if [[ ! "${status}" =~ ^2[0-9][0-9]$ ]]; then
+    fail "Cannot reach ${url} (HTTP status ${status:-none}). Unit test shards need it, so this site must not count as online."
+  fi
+  echo "reached ${url} (HTTP status ${status})"
 done
 
 if docker pull --quiet "${image}" >/dev/null 2>&1; then

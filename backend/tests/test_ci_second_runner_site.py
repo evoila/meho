@@ -285,7 +285,14 @@ def test_smoke_workflow_names_no_secret_environment_or_id_token() -> None:
     workflow = _workflow(_SMOKE_WORKFLOW)
     _assert_no_secret_environment_or_id_token(yaml.safe_dump(workflow))
     assert workflow["permissions"] == {"contents": "read"}
-    assert set(workflow["jobs"]["smoke"]) == {"name", "if", "runs-on", "timeout-minutes", "steps"}
+    assert set(workflow["jobs"]["smoke"]) == {
+        "name",
+        "needs",
+        "if",
+        "runs-on",
+        "timeout-minutes",
+        "steps",
+    }
 
 
 @pytest.mark.parametrize(
@@ -337,7 +344,11 @@ def test_smoke_workflow_is_safe_by_construction() -> None:
     assert workflow[True]["schedule"] == [{"cron": "7,37 * * * *"}]
     assert workflow["concurrency"]["cancel-in-progress"] is True
     job = workflow["jobs"]["smoke"]
-    assert job["if"] == "github.event_name != 'schedule' || vars.MEHO_CI_SECOND_SITE == 'on'"
+    assert job["needs"] == "switch"
+    assert job["if"] == "needs.switch.outputs.run == 'true'"
+    switch = workflow["jobs"]["switch"]
+    assert switch["runs-on"] == "ubuntu-latest"
+    assert switch["outputs"] == {"run": "${{ steps.switch.outputs.run }}"}
     assert "env" not in job, "a private value must stay on the pod, not in the log"
     checkout = job["steps"][0]
     assert checkout["with"] == {"persist-credentials": False}
@@ -346,6 +357,51 @@ def test_smoke_workflow_is_safe_by_construction() -> None:
     args = job["steps"][-1]["run"].split()
     assert args[:4] == ["bash", "scripts/ci/second_site_smoke.sh", "--image", args[3]]
     assert args[4] == "https://github.com"
+
+
+def _switch(tmp_path: Path, event: str, value: str | None) -> bool:
+    """Whether the smoke job runs: the `if` of the switch job, then its step.
+
+    GitHub compares strings in an `if` without regard to case.
+    """
+    switch = _workflow(_SMOKE_WORKFLOW)["jobs"]["switch"]
+    assert switch["if"] == ("github.event_name != 'schedule' || vars.MEHO_CI_SECOND_SITE == 'on'")
+    if event == "schedule" and (value or "").lower() != "on":
+        return False
+    (step,) = switch["steps"]
+    output = tmp_path / "output.txt"
+    output.touch()
+    env = {"EVENT_NAME": event, "MEHO_CI_SECOND_SITE": value or "", "GITHUB_OUTPUT": str(output)}
+    result = _bash_step(step["run"], tmp_path, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    (line,) = output.read_text().splitlines()
+    return line == "run=true"
+
+
+@pytest.mark.parametrize(
+    ("event", "value", "runs"),
+    [
+        ("schedule", "on", True),
+        ("schedule", "ON", False),
+        ("schedule", "On", False),
+        ("schedule", "off", False),
+        ("schedule", None, False),
+        ("workflow_dispatch", None, True),
+        ("workflow_dispatch", "ON", True),
+    ],
+)
+def test_smoke_schedule_needs_the_exact_value_on(
+    tmp_path: Path, event: str, value: str | None, runs: bool
+) -> None:
+    assert _switch(tmp_path, event, value) is runs
+
+
+def test_upper_case_on_leaves_both_paths_off(tmp_path: Path) -> None:
+    (tmp_path / "switch").mkdir()
+    (tmp_path / "pick").mkdir()
+    assert _switch(tmp_path / "switch", "schedule", "ON") is False
+    value, _ = _pick(tmp_path / "pick", runs=[_smoke_run(60)], MEHO_CI_SECOND_SITE="ON")
+    assert value == ""
 
 
 def test_smoke_pulls_one_of_the_unit_test_images() -> None:
@@ -528,15 +584,22 @@ def _iso(age_seconds: int) -> str:
 
 
 def _smoke_run(
-    age_seconds: int, conclusion: str = "success", head: str = _REPO, branch: str = "main"
+    age_seconds: int,
+    conclusion: str = "success",
+    head: str | None = _REPO,
+    branch: str = "main",
+    repo: str | None = _REPO,
 ) -> dict[str, Any]:
-    return {
+    run: dict[str, Any] = {
         "conclusion": conclusion,
         "head_branch": branch,
         "run_started_at": _iso(age_seconds),
-        "head_repository": {"full_name": head},
-        "repository": {"full_name": _REPO},
     }
+    if head is not None:
+        run["head_repository"] = {"full_name": head}
+    if repo is not None:
+        run["repository"] = {"full_name": repo}
+    return run
 
 
 def _pick(
@@ -674,6 +737,10 @@ def test_pick_uses_the_newest_pass_in_any_order(tmp_path: Path) -> None:
         pytest.param({"conclusion": "failure"}, id="failed"),
         pytest.param({"head": "stranger/fork"}, id="other-repository"),
         pytest.param({"branch": "feature"}, id="other-branch"),
+        pytest.param({"head": None, "repo": None}, id="both-names-missing"),
+        pytest.param({"head": None}, id="head-name-missing"),
+        pytest.param({"repo": None}, id="repository-name-missing"),
+        pytest.param({"head": "other/repo", "repo": "other/repo"}, id="both-another-repository"),
     ],
 )
 def test_pick_ignores_a_run_that_does_not_count(tmp_path: Path, run: dict[str, str]) -> None:
@@ -742,6 +809,13 @@ def _shards(**statuses: str) -> str:
     for key, status in statuses.items():
         jobs.append({"name": f"Python unit shard {key[1:]}/6", "status": status})
     return json.dumps({"jobs": jobs})
+
+
+def _no_status(*keys: str, **statuses: str) -> str:
+    """Like ``_shards``, but the shards in ``keys`` have no status field."""
+    answer = json.loads(_shards(**statuses))
+    answer["jobs"] += [{"name": f"Python unit shard {key[1:]}/6"} for key in keys]
+    return json.dumps(answer)
 
 
 def _watch(
@@ -879,11 +953,35 @@ def test_watchdog_never_cancels_when_it_cannot_read_the_jobs(tmp_path: Path) -> 
     assert _cancels(calls) == []
 
 
-def test_watchdog_never_cancels_while_a_shard_is_not_listed(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, [_shards(s4="queued", s5="queued")])
+def test_watchdog_cancels_when_a_fresh_read_shows_a_waiting_shard(tmp_path: Path) -> None:
+    """Two shards still wait and the answer leaves out the third."""
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + [_shards(s4="queued", s5="queued")])
     assert result.returncode == 0
+    assert len(_cancels(calls)) == 1
+    _assert_read_right_before_each_cancel(calls)
+    assert "2 unit shard(s) waited 30 minutes" in result.stdout
+
+
+def test_watchdog_never_cancels_on_shards_with_no_status(tmp_path: Path) -> None:
+    """An incomplete answer: three shards, none with a status."""
+    result, calls = _watch(tmp_path, [_no_status("s4", "s5", "s6")])
+    assert result.returncode == 1
     assert _cancels(calls) == []
-    assert "no shard is known to be stuck" in result.stdout
+    assert len(calls) == _POLLS + 3, "the polls go on, then three fresh reads"
+    assert "Could not stop this run, or could not read its jobs in full" in result.stdout
+
+
+def test_watchdog_does_not_end_early_on_shards_with_no_status(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_no_status("s6", s4="in_progress", s5="in_progress")])
+    assert result.returncode == 1
+    assert _cancels(calls) == []
+    assert "Nothing left to watch" not in result.stdout
+
+
+def test_watchdog_never_cancels_when_no_listed_shard_waits(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, [_shards(s4="in_progress", s5="completed")])
+    assert result.returncode == 1
+    assert _cancels(calls) == []
 
 
 def test_watchdog_reports_when_it_cannot_stop_the_run(tmp_path: Path) -> None:
@@ -931,23 +1029,36 @@ def _smoke(
     pull_exit: int = 0,
     resolved: str = "0.000100",
     connected: str = "0.000000",
+    statuses: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the smoke check with a fake curl and docker.
 
-    ``exits`` gives the exit code for a URL. By default a reach check works
-    and a deny check times out.
+    ``exits`` gives the exit code for a URL, ``statuses`` the HTTP status of
+    a reach check. By default a reach check gets 200 and a deny check times
+    out.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     calls = tmp_path / "curl.log"
     rules = "\n".join(f'  "{url}") code={code} ;;' for url, code in (exits or {}).items())
+    status_rules = "\n".join(
+        f'  "{url}") status={code} ;;' for url, code in (statuses or {}).items()
+    )
     _fake(
         bin_dir,
         "curl",
         f"""echo "$*" >> "{calls}"
 for url; do :; done
 code=0
-if [[ "$*" == *--write-out* ]]; then code=28; printf '%s %s' '{resolved}' '{connected}'; fi
+status=200
+case "$url" in
+{status_rules}
+esac
+if [[ "$*" == *--noproxy* ]]; then
+  code=28; printf '%s %s' '{resolved}' '{connected}'
+else
+  printf '%s' "$status"
+fi
 case "$url" in
 {rules}
 esac
@@ -1052,6 +1163,38 @@ def test_smoke_checks_every_address(tmp_path: Path) -> None:
     assert "address 3 of 3: exit code 28" in result.stdout
     assert len(calls) == 5, "one reach check, one pull and three deny checks"
     _assert_private(result, _ADDRESS, "second.example", "third.example")
+
+
+def test_smoke_reads_a_list_that_wraps_onto_a_new_line(tmp_path: Path) -> None:
+    """The second address is reachable, so the check must fail."""
+    deny = f"{_ADDRESS},\nsecond.example\r\nthird.example"
+    result, calls = _smoke(tmp_path, deny, _REACH, exits={"https://second.example/": 7})
+    assert result.returncode == 1
+    assert "address 1 of 3: exit code 28" in result.stdout
+    assert "Address 2 of 3: exit code 7" in result.stdout
+    assert "address 3 of 3: exit code 28" in result.stdout
+    assert calls[-1].endswith("https://third.example/")
+    _assert_private(result, _ADDRESS, "second.example", "third.example")
+
+
+@pytest.mark.parametrize("status", ["502", "404", "403", "301", "000"])
+def test_smoke_needs_a_2xx_answer_to_count_a_url_as_reached(tmp_path: Path, status: str) -> None:
+    """A proxy that cannot reach the server answers 502, and curl ends with 0."""
+    result, calls = _smoke(tmp_path, _ADDRESS, _REACH, statuses={_REACH: status})
+    assert result.returncode == 1
+    assert f"Cannot reach {_REACH} (HTTP status {status})" in result.stdout
+    assert "reached" not in result.stdout
+    assert len(calls) == 1, "no other check runs when a reach check fails"
+
+
+def test_smoke_reach_check_follows_redirects_and_reads_the_status(tmp_path: Path) -> None:
+    result, calls = _smoke(tmp_path, _ADDRESS, _REACH)
+    assert result.returncode == 0, result.stdout
+    assert f"reached {_REACH} (HTTP status 200)" in result.stdout
+    reach_call = calls[0]
+    assert reach_call.endswith(_REACH)
+    assert "--location" in reach_call
+    assert "%{http_code}" in reach_call
 
 
 def test_smoke_masks_each_address_before_it_is_used(tmp_path: Path) -> None:

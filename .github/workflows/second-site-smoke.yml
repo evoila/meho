@@ -39,13 +39,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  smoke:
-    name: Smoke check of the second runner site
+  switch:
+    name: Check the switch of the second runner site
     # The schedule runs only when a person has switched the site on, so no
     # run waits for a site that does not exist. A run started by hand is how
-    # a person tests the site before switching it on. A skipped run counts
-    # as `skipped`, not as a pass.
+    # a person tests the site before switching it on.
+    #
+    # GitHub compares strings without regard to case, so `ON` would pass
+    # this `if`. The step below checks the exact value `on`, the same way
+    # scripts/ci/pick_second_site.sh does. The `if` only saves a job when
+    # the variable is unset or clearly off.
     if: github.event_name != 'schedule' || vars.MEHO_CI_SECOND_SITE == 'on'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      run: ${{ steps.switch.outputs.run }}
+    steps:
+      - name: Check the exact value of MEHO_CI_SECOND_SITE
+        id: switch
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
+        run: |
+          if [[ "${EVENT_NAME}" != "schedule" || "${MEHO_CI_SECOND_SITE}" == "on" ]]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Second runner site smoke::Not switched on: only the exact value 'on' of MEHO_CI_SECOND_SITE counts."
+          fi
+
+  smoke:
+    name: Smoke check of the second runner site
+    needs: switch
+    # A skipped run counts as `skipped`, not as a pass.
+    if: needs.switch.outputs.run == 'true'
     runs-on: meho-runners-ci-heavy-site2
     # Starts when a runner takes the job, so it does not limit the wait.
     timeout-minutes: 15
@@ -60,13 +87,16 @@ jobs:
         # github.com, and the other hosts a unit test shard stops without:
         # Python packages (uv sync), Helm (setup-helm), the embedding model
         # (on a cache miss) and Ubuntu packages (PHP for the pfSense tests).
+        # Each URL names a file that exists, because the check needs a 2xx
+        # answer: the root of some of these hosts answers 404. The Helm file
+        # is of the Helm version that ci.yml pins.
         # If the site gets these through a mirror, change this list.
         run: >-
           bash scripts/ci/second_site_smoke.sh
           --image docker.io/valkey/valkey:8
           https://github.com
-          https://pypi.org
-          https://files.pythonhosted.org
-          https://get.helm.sh
+          https://pypi.org/simple/pip/
+          https://files.pythonhosted.org/packages/8a/6a/19e9fe04fca059ccf770861c7d5721ab4c2aebc539889e97c7977528a53b/pip-24.0-py3-none-any.whl
+          https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz.sha256sum
           https://huggingface.co
-          http://archive.ubuntu.com
+          http://archive.ubuntu.com/ubuntu/

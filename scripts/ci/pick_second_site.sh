@@ -68,10 +68,14 @@ fi
 
 # Prints the age in seconds of the newest smoke run that passed on main of
 # this repository. jq's `max` so the order of the answer does not matter.
-age="$(jq -er '
+# Both names must be this repository: two missing names are equal in jq, so
+# comparing them only to each other proves nothing.
+age="$(jq -er --arg repo "${GITHUB_REPOSITORY:-}" '
   [.workflow_runs[]
    | select(.conclusion == "success" and .head_branch == "main"
-            and .head_repository.full_name == .repository.full_name)
+            and $repo != ""
+            and .head_repository.full_name == $repo
+            and .repository.full_name == $repo)
    | .run_started_at | fromdateiso8601]
   | max // empty
   | now - . | floor' <<<"${runs}" 2>/dev/null)"

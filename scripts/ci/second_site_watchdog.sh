@@ -24,27 +24,33 @@ expected=3
 
 api="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
 
-# Prints "<found> <waiting>" for shards 4-6 (the job
-# python-unit-shard-second-site names them like the other shards). A job that is in_progress or
-# completed has a runner; every other status is still waiting for one.
+# Prints "<found> <waiting> <started>" for shards 4-6 (the job
+# python-unit-shard-second-site names them like the other shards). A job that
+# is in_progress or completed has started on a runner. A job that is queued,
+# waiting, requested or pending still waits for one. Any other status, or
+# none, counts as neither: an incomplete answer proves nothing.
 read_shards() {
   local jobs
   jobs="$(gh api "${api}" 2>/dev/null)" || return 1
   jq -er '
     [.jobs[] | select(.name | test("^Python unit shard [456]/6$"))]
-    | "\(length) \(map(select(.status != "in_progress" and .status != "completed")) | length)"
+    | [length,
+       (map(select(.status == "queued" or .status == "waiting"
+                   or .status == "requested" or .status == "pending")) | length),
+       (map(select(.status == "in_progress" or .status == "completed")) | length)]
+    | map(tostring) | join(" ")
   ' <<<"${jobs}" 2>/dev/null
 }
 
 while (( polls_left > 0 )); do
   polls_left=$(( polls_left - 1 ))
   if result="$(read_shards)"; then
-    read -r found waiting_now <<<"${result}"
-    if [[ "${found}" -eq "${expected}" && "${waiting_now}" -eq 0 ]]; then
+    read -r found waiting_now started <<<"${result}"
+    if [[ "${found}" -eq "${expected}" && "${started}" -eq "${expected}" ]]; then
       echo "Every unit shard on the second site has a runner. Nothing left to watch."
       exit 0
     fi
-    echo "shards found: ${found}/${expected}, still waiting for a runner: ${waiting_now}"
+    echo "shards found: ${found}/${expected}, started: ${started}, still waiting for a runner: ${waiting_now}"
   else
     echo "could not read this run's jobs; looking again next time"
   fi
@@ -52,32 +58,32 @@ while (( polls_left > 0 )); do
 done
 
 # What the loop saw is at least a minute old, and a shard may have started
-# since. So every cancel comes right after a fresh read, and a read that fails
-# never leads to a cancel.
+# since. So every cancel comes right after a fresh read, and only when that
+# read shows at least one shard that still waits. A read that fails, or that
+# shows no waiting shard but not every shard started, never leads to a
+# cancel: it is read again.
 for (( try = 1; try <= last_tries; try++ )); do
-  if result="$(read_shards)"; then
-    read -r found waiting_now <<<"${result}"
-    # A shard that is not listed is not known to be stuck.
-    if [[ "${found}" -ne "${expected}" ]]; then
-      echo "Stopped watching after ${limit_minutes} minutes: no shard is known to be stuck, so the run goes on."
-      exit 0
-    fi
-    if [[ "${waiting_now}" -eq 0 ]]; then
+  if ! result="$(read_shards)"; then
+    echo "could not read this run's jobs before stopping it"
+  else
+    read -r found waiting_now started <<<"${result}"
+    if [[ "${waiting_now}" -gt 0 ]]; then
+      echo "::error title=Second runner site::${waiting_now} unit shard(s) waited ${limit_minutes} minutes for a runner of the second site, so this run is stopped. Re-run it: a re-run uses today's runners. If this repeats, set the repository variable MEHO_CI_SECOND_SITE to off."
+      if gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+        echo "Cancel request accepted."
+        exit 0
+      fi
+      echo "the cancel request failed"
+    elif [[ "${found}" -eq "${expected}" && "${started}" -eq "${expected}" ]]; then
       echo "Every unit shard on the second site has a runner now. Nothing to stop."
       exit 0
+    else
+      echo "shards found: ${found}/${expected}, started: ${started}, none known to wait; reading again"
     fi
-    echo "::error title=Second runner site::${waiting_now} unit shard(s) waited ${limit_minutes} minutes for a runner of the second site, so this run is stopped. Re-run it: a re-run uses today's runners. If this repeats, set the repository variable MEHO_CI_SECOND_SITE to off."
-    if gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-      echo "Cancel request accepted."
-      exit 0
-    fi
-    echo "the cancel request failed"
-  else
-    echo "could not read this run's jobs before stopping it"
   fi
   if (( try < last_tries )); then
     sleep "${retry_seconds}"
   fi
 done
-echo "::error title=Second runner site::Could not stop this run, or could not read its jobs. Check it, and cancel it by hand if shards still wait."
+echo "::error title=Second runner site::Could not stop this run, or could not read its jobs in full. Check it, and cancel it by hand if shards still wait."
 exit 1

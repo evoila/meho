@@ -2629,14 +2629,16 @@ registry or release secret.
 shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
 `second_site=on` only when all of these hold:
 
-- the repository variable `MEHO_CI_SECOND_SITE` is `on`;
+- the repository variable `MEHO_CI_SECOND_SITE` is exactly `on` (lower
+  case; `ON` counts as off);
 - the event is `pull_request`, from this repository (not a fork);
 - the actor is not Dependabot;
 - it is the first attempt of the run;
 - all six shards really run (not docs-only, a backend change, not a
   one-connector run, not a test map run);
-- the newest passed run of `second-site-smoke.yml` on `main` started at most
-  45 minutes ago.
+- the newest passed run of `second-site-smoke.yml` on `main` of this
+  repository started at most 45 minutes ago. Both repository names of that
+  run must be this repository; a missing name does not count.
 
 Every doubt (an API error, an odd answer, no smoke run) gives empty, which
 means today's pool. The step never fails the job. Its notice says why.
@@ -2662,19 +2664,26 @@ The fan-in `Python (ruff + mypy + pytest)` needs both jobs to succeed when
 the site is on. When it is off, the second-site job must be skipped.
 
 **The smoke check.** `second-site-smoke.yml` runs by hand, and at minutes 7
-and 37 of each hour while the variable is `on`. It has no `pull_request`
-and no `pull_request_target` trigger. `scripts/ci/second_site_smoke.sh`
-fails unless the runner has `MEHO_CI_SITE=site2`, reaches the hosts a shard
-needs, and pulls one test image. Every address in the private pod env
-`MEHO_CI_DENY_PROBE_HOSTS` must end in a timeout with no connection made. A
+and 37 of each hour while the variable is exactly `on`. GitHub compares
+strings in an `if` without regard to case, so a small job on a GitHub-hosted
+runner checks the exact value in bash before the smoke job is queued on the
+site. It has no `pull_request` and no `pull_request_target` trigger.
+`scripts/ci/second_site_smoke.sh` fails unless the runner has
+`MEHO_CI_SITE=site2`, reaches the hosts a shard needs, and pulls one test
+image. Each host is checked on a file that exists, and only a 2xx answer
+counts: an error answer from a proxy (for example 502) fails the check.
+Every address in the private pod env `MEHO_CI_DENY_PROBE_HOSTS` (a comma or
+a line break ends an entry) must end in a timeout with no connection made. A
 refused connection, a certificate error, a success, a name that never
 resolved and an empty list all fail. The log shows only the position and
 the exit code of each address, never the address.
 
 **When the site dies.** The job `second-site-watchdog` runs on a
 GitHub-hosted runner when the site was picked. After 30 minutes, if a
-shard of the second-site job still has no runner, it reads the jobs again
-and cancels the run. A failed read never leads to a cancel. Only this job
+shard of the second-site job still has no runner, it reads the jobs again.
+It cancels the run only when that fresh read shows at least one shard with a
+waiting status (queued, waiting, requested or pending). A failed read, or a
+shard with no status, never leads to a cancel. Only this job
 and `merge-queue-watchdog` have `actions: write`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check

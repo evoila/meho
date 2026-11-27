@@ -9,7 +9,8 @@ the new file affects. MEHO stores the whole card. Each view that shows a
 stored card (the REST approvals routes, the MCP approval tools, the web
 console) passes it through :func:`card_for_reader`:
 
-* a platform admin who is a person reads the card as stored;
+* a platform admin who is a person, in a call of their own, reads the
+  card as stored;
 * every other reader reads it as the operation's filter gives it back
   (:func:`register_platform_admin_card_filter`).
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import is_human_principal
 
 if TYPE_CHECKING:
@@ -47,11 +49,18 @@ def register_platform_admin_card_filter(
 
 
 def reads_platform_admin_parts(reader: Operator | None) -> bool:
-    """True when *reader* is a platform admin who is a person.
+    """True when *reader* is a platform admin who is a person, in a call of their own.
 
-    ``None`` (a view that does not name its reader) is not.
+    ``None`` (a view that does not name its reader) is not. A call that runs
+    with an acting agent (:func:`~meho_backplane.auth.delegation.actor_delegation`,
+    for example a hosted agent run a platform admin started) is not either.
     """
-    return reader is not None and reader.platform_admin and is_human_principal(reader)
+    return (
+        reader is not None
+        and reader.platform_admin
+        and is_human_principal(reader)
+        and resolve_actor_sub() is None
+    )
 
 
 def card_for_reader(

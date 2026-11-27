@@ -146,9 +146,10 @@ async def test_own_approval_says_what_the_approve_does(
     for level in ("dangerous", "destructive"):
         own = by[(OPERATOR_TOKEN.name, op(level))]
         assert own is not None and not own["web"] and not own["token"]
-    # It covers a safe change.
+    # With CUSTOM_POLICY on, a safe change with only the plain mark counts as
+    # dangerous, so the own-approval setting does not cover it either.
     marked = by[(OPERATOR_TOKEN.name, op(SAFE_MARKED))]
-    assert marked is not None and marked["web"] is marked["token"] is on
+    assert marked is not None and not marked["web"] and not marked["token"]
     # A MEHO-Admin approves their own change at every level.
     admin = by[(ADMIN_TOKEN.name, op("destructive"))]
     assert admin is not None and admin["web"] and admin["token"]
@@ -245,7 +246,8 @@ async def test_a_hosted_run_reads_what_the_approve_does(
         done = await approve(person, request_id, web=web)
         assert getattr(own, way) is done.accepted, (way, own)
         assert getattr(own, f"{way}_reason") == done.reason or done.accepted, (way, own)
-    expected = person is ADMIN_TOKEN or (self_approval == "true" and name != "dangerous")
+    # The safe change with only the plain mark counts as dangerous (CUSTOM_POLICY on).
+    expected = person is ADMIN_TOKEN or (self_approval == "true" and name == "caution")
     assert own.web is own.token is expected, own
 
 

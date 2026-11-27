@@ -84,6 +84,13 @@ never a `destructive` one, and never an op that shows a secret: also an
 ingested op whose row stores `credential_read`, set by a connector floor
 ([spec-ingestion.md](spec-ingestion.md#a-floor-sees-the-answer-and-sets-the-op-class)).
 
+With the switch `CUSTOM_POLICY` on, the plain mark (`requires_approval`
+with no reason behind it) no longer decides by itself. A `safe` or
+`caution` op with it counts as `dangerous`, and that level makes an
+agent's call wait through the risk-level ceiling, whatever its grant says.
+The agent sees `dangerous` in search, the call contract and the preview.
+See [approvals.md](approvals.md#the-plain-approval-mark-counts-as-dangerous-switch-custom_policy).
+
 "Waits for approval" means MEHO stores an approval request and returns
 `awaiting_approval`. The op runs only after someone approves it. See
 [approvals.md](approvals.md).

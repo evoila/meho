@@ -123,6 +123,7 @@ from meho_backplane.operations._validate import (
 )
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.license_reads import is_license_read
+from meho_backplane.operations.op_policy import plain_mark_counts_as_level
 from meho_backplane.operations.preview_needs_switch import preview_needs_switch
 from meho_backplane.operations.switch_params import schema_for_checks
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
@@ -300,15 +301,19 @@ def _is_previewable(descriptor: EndpointDescriptor) -> bool:
     is on. Off (the default), a typed op previews as before: when it is
     destructive, or when it carries ``requires_approval``, is not a
     credential-class op and is not listed in
-    :mod:`~meho_backplane.operations.preview_needs_switch`.
+    :mod:`~meho_backplane.operations.preview_needs_switch`. With
+    ``CUSTOM_POLICY`` on, the code's plain approval mark counts here too,
+    although the effective flag no longer carries it
+    (:func:`~meho_backplane.operations.op_policy.plain_mark_counts_as_level`).
     """
+
     if descriptor.source_kind == "ingested":
         return True
     if descriptor.safety_level == "destructive":
         return True
     if not get_settings().preview_typed_writes:
         return (
-            descriptor.requires_approval
+            (descriptor.requires_approval or plain_mark_counts_as_level(descriptor))
             and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
             and not preview_needs_switch(descriptor.op_id)
         )

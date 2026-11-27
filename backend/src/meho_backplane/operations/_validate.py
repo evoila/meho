@@ -866,7 +866,11 @@ def _non_agent_park_reason(
       grant can pre-clear it either: ``consult_and_record_grant`` refuses
       the destructive tier (decision ``governed-delete-operations.md``
       requirement 1).
-    * ``requires_approval`` (G11.7-T1): the approval queue.
+    * ``requires_approval`` (G11.7-T1): the approval queue. This is the
+      effective flag. With ``CUSTOM_POLICY`` on it no longer holds the
+      code's plain mark: such an operation is ``dangerous`` instead
+      (:func:`~meho_backplane.operations.op_policy.plain_mark_counts_as_level`),
+      and its level makes the call wait.
     * Service principals: :func:`_service_safety_gate_reason` (#3152). They
       keep their standing-grant rule and are not under the token rule.
     * Everyone else: :func:`_person_park_reason` (#3980).
@@ -1411,6 +1415,11 @@ async def _agent_verdict(
     :func:`~meho_backplane.auth.permissions.resolve_verdict`, because only
     the row here carries the class a connector's floor stored on an
     ingested operation.
+
+    ``descriptor.requires_approval`` is the effective flag. With
+    ``CUSTOM_POLICY`` on it no longer holds the code's plain mark; the
+    level ``dangerous`` that replaces it waits through the risk-level
+    ceiling of :func:`~meho_backplane.auth.permissions.resolve_verdict`.
     """
     from meho_backplane.operations.service_grants import descriptor_credential_waits
 

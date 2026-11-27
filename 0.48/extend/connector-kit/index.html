@@ -3782,7 +3782,10 @@ and must not touch the database.</p>
     still runs. When you fix the mark, the next start uses the operation
     again, with the settings an operator stored on it.</li>
 <li><code>changes_rights=True</code> when a call gives or takes rights, a login or
-    an access policy in the target system. The default is <code>False</code>.</li>
+    an access policy in the target system. The default is <code>False</code>. MEHO
+    leaves an operation that sets <code>changes_rights</code> at the risk level
+    <code>safe</code> out at registration, and the log line names it. Every other
+    operation registers.</li>
 </ul>
 <p>MEHO stores both on the operation. Set them from what the call does,
   not from its name.

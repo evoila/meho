@@ -219,10 +219,8 @@ class TargetSummary(BaseModel):
 
     @field_validator("fingerprint")
     @classmethod
-    def _shown_fingerprint(
-        cls, value: Mapping[str, Any] | None, info: ValidationInfo
-    ) -> Mapping[str, Any] | None:
-        return shown_fingerprint(info.data.get("product"), value)
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
 
 
 class TargetListResponse(BaseModel):
@@ -366,10 +364,8 @@ class Target(BaseModel):
 
     @field_validator("fingerprint")
     @classmethod
-    def _shown_fingerprint(
-        cls, value: Mapping[str, Any] | None, info: ValidationInfo
-    ) -> Mapping[str, Any] | None:
-        return shown_fingerprint(info.data.get("product"), value)
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
 
 
 class TargetWriteResult(Target):

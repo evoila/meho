@@ -3217,3 +3217,58 @@ async def test_another_product_keeps_its_realm_name_differs_key_while_the_switch
     (row,) = listed.json()["items"]
     assert detail.json()["fingerprint"]["extras"] == own
     assert row["fingerprint"]["extras"] == own
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_product", "probe_product", "shown"),
+    [
+        ("vault", "keycloak", False),
+        ("keycloak", "vault", True),
+    ],
+    ids=["changed-from-keycloak", "changed-to-keycloak"],
+)
+async def test_the_saved_probe_s_own_product_decides_if_the_realm_name_note_shows(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    target_product: str,
+    probe_product: str,
+    shown: bool,
+) -> None:
+    """An operator can change a target's product after its probe was saved.
+
+    With the switch off, a saved Keycloak probe loses ``realm_name_differs``
+    also when the target now names another product. A saved probe of another
+    product keeps its own key of that name also when the target now names
+    Keycloak. No new probe runs.
+    """
+    own = {"realm_name_differs": "a field of the probe", "other": 1}
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="example-changed",
+        product=target_product,
+        host="changed.example.invalid",
+        fingerprint={
+            "vendor": probe_product,
+            "product": probe_product,
+            "version": "1.0.0",
+            "reachable": True,
+            "probed_at": datetime.now(UTC).isoformat(),
+            "probe_method": "GET /",
+            "extras": own,
+        },
+    )
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_operator_token(key, tenant_id)}"}
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "false")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        detail = client.get("/api/v1/targets/example-changed", headers=headers)
+        listed = client.get("/api/v1/targets", headers=headers)
+    assert detail.status_code == 200
+    assert listed.status_code == 200
+    (row,) = listed.json()["items"]
+    expected = own if shown else {"other": 1}
+    assert detail.json()["fingerprint"]["extras"] == expected
+    assert row["fingerprint"]["extras"] == expected

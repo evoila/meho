@@ -16,9 +16,11 @@ MEHO's own sign-in realm comes from its settings: the realm in
 
 A probe made while the switch ``KEYCLOAK_ANSWER_REALM`` is on can save the
 line :data:`REALM_NAME_DIFFERS` in the probe's ``extras``.
-:func:`shown_fingerprint` leaves it out of a Keycloak target's saved probe
-while the switch is off, so a target read shows it only while the switch is
-on. The probe of a target of another product is shown as it is.
+:func:`shown_fingerprint` leaves it out of a saved Keycloak probe while the
+switch is off, so a target read shows it only while the switch is on. The
+probe's own ``product`` decides this, not the target's current product: an
+operator can change the product of a target after its probe was saved. A
+probe of another product is shown as it is.
 """
 
 from __future__ import annotations
@@ -58,18 +60,17 @@ def answer_realm_on() -> bool:
     return parse_bool_env(os.environ.get("KEYCLOAK_ANSWER_REALM"))
 
 
-def shown_fingerprint(
-    product: object, fingerprint: Mapping[str, Any] | None
-) -> Mapping[str, Any] | None:
-    """Return the saved probe of a target of *product* as a target read shows it.
+def shown_fingerprint(fingerprint: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Return a saved probe as a target read shows it.
 
-    While the switch is off, the probe of a Keycloak target loses
+    While the switch is off, a probe whose own ``product`` is Keycloak loses
     :data:`REALM_NAME_DIFFERS` from its ``extras``. The ``extras`` of a probe
-    belong to its connector, so the probe of a target of another product is
+    belong to the connector that made it, so a probe of another product is
     returned as it is, also when it has a key of the same name.
     """
     if fingerprint is None or answer_realm_on():
         return fingerprint
+    product = fingerprint.get("product")
     if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
         return fingerprint
     extras = fingerprint.get("extras")

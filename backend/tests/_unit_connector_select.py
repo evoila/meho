@@ -124,6 +124,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_people_behind_docs.py",
     # Sets of credential class names, read from every module in the package.
     "tests/test_op_classes.py",
+    # Direct reads of the policy switches, read from every module in the package.
+    "tests/test_custom_policy_switch.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")

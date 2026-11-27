@@ -18,6 +18,10 @@ see ``docs/codebase/policy.md``. The work is in
   switch is off.
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
+* ``GET /api/v1/policy/carry-over/dry-run`` -- every saved "always wait"
+  and what changes for each one if MEHO reads it as ``destructive``
+  (:mod:`meho_backplane.policy.carry_over`). Writes only its audit row.
+  An agent login gets 403; every other caller gets the export's answer.
 * ``POST /api/v1/policy/explain`` -- why a call runs, waits or is denied,
   and who may approve it (:mod:`meho_backplane.policy.explain`). Runs
   nothing and writes nothing. Asking for yourself (``me``) needs the
@@ -49,13 +53,14 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
 from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import ApprovalNotFoundError
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.policy.carry_over import CarryOverDryRun, carry_over_dry_run
 from meho_backplane.policy.document import MAX_POLICY_BYTES
 from meho_backplane.policy.explain import (
     FILE_NEEDS_CLASSIFICATION,
@@ -332,6 +337,31 @@ async def history(
     return [PolicyRevisionView.model_validate(row) for row in rows]
 
 
+@router.get("/carry-over/dry-run", response_model=CarryOverDryRun)
+async def carry_over(
+    operator: Annotated[Operator, _policy_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    scope: Annotated[PolicyScope, Query()] = "tenant",
+) -> CarryOverDryRun:
+    """Every saved "always wait" of *scope*, and what changes if MEHO reads it as ``destructive``.
+
+    An agent login gets 403, also one with the platform admin mark. Every
+    other caller gets the export's answer. Writes only its audit row and
+    reads no switch.
+    """
+    _bind_audit("policy.carry_over.dry_run", "read")
+    if operator.principal_kind is PrincipalKind.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An agent login cannot run the dry run.",
+        )
+    _check_scope(operator, scope)
+    try:
+        return await carry_over_dry_run(session, scope=scope, tenant_id=operator.tenant_id)
+    except InvalidStoredPolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Explain
 # ---------------------------------------------------------------------------
@@ -445,8 +475,8 @@ async def explain(
     """Why a call runs, waits or is denied, and who may approve it. Runs nothing.
 
     The answer is today's answer (the policy gate, decide-only), the policy
-    evaluator's answer with every rule it matched (with
-    ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
+    evaluator's answer with every rule it matched (with ``CUSTOM_POLICY``
+    or ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
     the groups that may approve. No audit row for a call, no approval
     request, no call to an outside system. A caller who is not a tenant
     admin or a platform admin gets the answer without the policy's entries

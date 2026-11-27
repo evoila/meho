@@ -36,8 +36,9 @@ for the credentials also in a remembered browser.
 
 Inside the window one sign-in may approve several requests. A request
 whose operation is ``destructive`` is stricter: its sign-in must not have
-approved anything else. The age check and that rule need the request (its
-risk level) and the audit log, so they live in
+approved anything else, and must not have removed the person's own block.
+The age check and that rule need the request (its risk level) and the
+audit log, so they live in
 :func:`~meho_backplane.operations.approval_queue.approve_request`.
 :func:`check_fresh_approval_sign_in` and
 :func:`check_fresh_web_approval_sign_in` run before the request is read;

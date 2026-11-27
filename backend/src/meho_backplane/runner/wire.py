@@ -53,10 +53,18 @@ treats it purely as a cache key — it never parses it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    model_validator,
+)
 
 from meho_backplane.auth.operator import PrincipalKind, TenantRole
 
@@ -64,6 +72,7 @@ __all__ = [
     "FEATURES_HEADER",
     "FEATURE_SCHEDULED_CHECKS",
     "SCHEMA_VERSION",
+    "SET_ASIDE_NOTICES_MAX",
     "WIRE_VERSION_HEADER",
     "WIRE_VERSION_MISMATCH",
     "WIRE_VERSION_WHEN_MISSING",
@@ -339,10 +348,90 @@ class RefusedResult(BaseModel):
     reason: str
 
 
+#: The most set-aside notices of one post: 1,000. The runner sends no more in
+#: one post, and MEHO reads only the first 1,000.
+SET_ASIDE_NOTICES_MAX = 1000
+
+
+def _count_or_none(value: object) -> object:
+    """*value* when it is a whole number, else ``None``. ``true`` and ``1.5`` are no count."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _time_or_none(value: object) -> datetime | None:
+    """*value* when it is a date-time text or a ``datetime``, else ``None``.
+
+    A number, or a text of digits, is no time: it is never read as seconds
+    since 1970.
+    """
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+class SetAsideNotice(BaseModel):
+    """A result of a batch that MEHO refused every time, so the runner set it aside.
+
+    The runner keeps the batch in its set-aside folder and sends only this
+    notice: which check, which result, the status and the code MEHO answered
+    with (never the free text of the answer), and the runner time of the result.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    check_ref: str
+    result_uid: str
+    status: int
+    code: str | None = None
+    produced_at: datetime | None = None
+
+
 class RunnerResultBatch(BaseModel):
-    """A batch of results the runner reports (or spools) in one POST."""
+    """A batch of results the runner reports (or spools) in one POST.
+
+    ``set_aside`` names the results of batches the runner set aside since its
+    last notice. ``set_aside_total`` and ``set_aside_last_at`` say how many
+    batches are in the runner's set-aside folder and when the newest one was
+    set aside. All three stay empty on a batch without a notice. MEHO reads at
+    most the first 1,000 entries of ``set_aside`` and skips the rest before it
+    checks any entry. It keeps a ``set_aside_total`` that is a whole number from
+    0 to 2147483647 and a ``set_aside_last_at`` that is a date-time text with a
+    time zone; it drops any other value of these two (also ``true`` or a
+    number) and still takes the batch.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     runner_id: str
     results: list[RunnerResult] = Field(default_factory=list)
+    set_aside: list[SetAsideNotice] = Field(default_factory=list)
+    set_aside_total: Annotated[int | None, BeforeValidator(_count_or_none)] = None
+    set_aside_last_at: Annotated[datetime | None, BeforeValidator(_time_or_none)] = None
+    _set_aside_skipped: int = PrivateAttr(default=0)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _read_first_notices(
+        cls, data: Any, read: ModelWrapValidatorHandler[RunnerResultBatch]
+    ) -> RunnerResultBatch:
+        """Keep the first 1,000 entries of ``set_aside`` before any entry is checked."""
+        notices = data.get("set_aside") if isinstance(data, dict) else None
+        skipped = 0
+        if isinstance(notices, list) and len(notices) > SET_ASIDE_NOTICES_MAX:
+            skipped = len(notices) - SET_ASIDE_NOTICES_MAX
+            data = {**data, "set_aside": notices[:SET_ASIDE_NOTICES_MAX]}
+        batch = read(data)
+        batch._set_aside_skipped = skipped
+        return batch
+
+    @property
+    def set_aside_skipped(self) -> int:
+        """How many entries of ``set_aside`` came after the first 1,000 and were skipped."""
+        return self._set_aside_skipped

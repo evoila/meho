@@ -327,12 +327,12 @@ async def test_runner_answers_and_errors_get_the_secret_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_a_slightly_future_time_is_refused_and_named_in_a_mixed_batch(
+async def test_a_future_time_beyond_the_allowance_is_refused_and_named_in_a_mixed_batch(
     client: TestClient, switch_on: None
 ) -> None:
     await _seed_identities()
     sensor_id = await _seed_sensor()
-    soon = datetime.now(UTC) + timedelta(seconds=5)
+    soon = datetime.now(UTC) + timedelta(minutes=5)
 
     resp = _post(
         client,

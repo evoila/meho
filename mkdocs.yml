@@ -109,6 +109,7 @@ nav:
       - guides/first-operations.md
       - guides/sensors-quickstart.md
       - Approvals and break-glass: guides/approvals-and-break-glass.md
+      - "Who is calling: person, personal agent, service agent": guides/who-is-calling.md
       - Add a tenant: guides/tenant-bootstrap.md
       - One person in several tenants: guides/several-tenants.md
       - Topology: guides/topology.md

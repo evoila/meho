@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -95,9 +96,23 @@ def _client(
     return client, mock, csrf
 
 
-def _confirmed(sub: str) -> dict[str, str]:
+def _confirmed(sub: str, shown: str = "") -> dict[str, str]:
     """The fields of the confirm page's form."""
-    return {"sub": sub, "confirm": "yes"}
+    return {"sub": sub, "confirm": "yes", "shown": shown}
+
+
+def _shown(confirm_page: Any) -> str:
+    """The set of shown blocks that the form of a confirm page carries."""
+    match = re.search(r'name="shown" value="([0-9a-f]+)"', confirm_page.text)
+    assert match is not None, confirm_page.text
+    return match.group(1)
+
+
+def _confirm_form(client: Any, csrf: str, sub: str) -> dict[str, str]:
+    """Open the confirm page of *sub* and return the fields of its form."""
+    page = client.post(_UNBLOCK, data={"sub": sub}, headers=_csrf_headers(csrf))
+    assert page.status_code == 200, page.text
+    return _confirmed(sub, _shown(page))
 
 
 def _seed_blocks(*rows: tuple[str, str, str]) -> None:
@@ -187,7 +202,8 @@ def test_tenant_admin_blocks_and_unblocks_in_their_own_tenant_with_one_audit_row
             headers=_csrf_headers(csrf),
         )
         listed = client.get(_PAGE)
-        unblocked = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+        form = _confirm_form(client, csrf, _BLOCKED)
+        unblocked = client.post(_UNBLOCK, data=form, headers=_csrf_headers(csrf))
         again = client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
         other_tenant = client.post(_UNBLOCK, data=_confirmed("in-b"), headers=_csrf_headers(csrf))
         other_tenant_page = client.post(_UNBLOCK, data={"sub": "in-b"}, headers=_csrf_headers(csrf))
@@ -222,8 +238,8 @@ def test_a_block_and_an_unblock_each_write_one_row_with_their_name_and_one_reque
     client, mock, csrf = _client()
     try:
         client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r"}, headers=_csrf_headers(csrf))
-        client.post(_UNBLOCK, data={"sub": _BLOCKED}, headers=_csrf_headers(csrf))
-        client.post(_UNBLOCK, data=_confirmed(_BLOCKED), headers=_csrf_headers(csrf))
+        form = _confirm_form(client, csrf, _BLOCKED)
+        client.post(_UNBLOCK, data=form, headers=_csrf_headers(csrf))
     finally:
         mock.stop()
     assert len(_audit_payloads("principal.block")) == 1
@@ -287,13 +303,15 @@ def test_unblock_confirm_page_names_the_login_and_its_scope_when_two_tenants_blo
             _UNBLOCK, data={"sub": "shared-login"}, headers=_csrf_headers(tenant_csrf)
         )
         tenant_unblock = tenant.post(
-            _UNBLOCK, data=_confirmed("shared-login"), headers=_csrf_headers(tenant_csrf)
+            _UNBLOCK,
+            data=_confirmed("shared-login", _shown(tenant_confirm)),
+            headers=_csrf_headers(tenant_csrf),
         )
     finally:
         tenant_mock.stop()
     assert platform_page.text.count("Unblock in all tenants") == 2
     assert platform_confirm.status_code == 200
-    assert "removes every block of this login in all tenants" in platform_confirm.text
+    assert "removes the blocks of this login below, in all tenants" in platform_confirm.text
     assert "reason a" in platform_confirm.text and "reason b" in platform_confirm.text
     assert "in all tenants" not in tenant_page.text
     assert tenant_confirm.status_code == 200
@@ -303,9 +321,8 @@ def test_unblock_confirm_page_names_the_login_and_its_scope_when_two_tenants_blo
     assert _block_rows() == [("shared-login", str(_TENANT_B), "reason b")]
     platform, platform_mock, platform_csrf = _client(platform_admin=True)
     try:
-        platform_unblock = platform.post(
-            _UNBLOCK, data=_confirmed("shared-login"), headers=_csrf_headers(platform_csrf)
-        )
+        form = _confirm_form(platform, platform_csrf, "shared-login")
+        platform_unblock = platform.post(_UNBLOCK, data=form, headers=_csrf_headers(platform_csrf))
     finally:
         platform_mock.stop()
     assert platform_unblock.status_code == 303
@@ -320,7 +337,9 @@ def test_the_first_click_on_unblock_only_shows_the_confirm_page() -> None:
         first = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
         rows_after_first = _block_rows()
         audit_after_first = _audit_payloads("principal.unblock")
-        confirmed = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
+        confirmed = client.post(
+            _UNBLOCK, data={**_confirmed("in-a", _shown(first)), "csrf_token": csrf}
+        )
     finally:
         mock.stop()
     assert first.status_code == 200, first.text
@@ -486,7 +505,10 @@ def test_both_forms_post_with_the_token_in_a_hidden_field_and_work_without_htmx(
         page = client.get(_PAGE)
         blocked = client.post(_PAGE, data={"sub": _BLOCKED, "reason": "r", "csrf_token": csrf})
         refused = client.post(_PAGE, data={"sub": _OP_A, "reason": "r", "csrf_token": csrf})
-        unblocked = client.post(_UNBLOCK, data={**_confirmed("in-a"), "csrf_token": csrf})
+        first = client.post(_UNBLOCK, data={"sub": "in-a", "csrf_token": csrf})
+        unblocked = client.post(
+            _UNBLOCK, data={**_confirmed("in-a", _shown(first)), "csrf_token": csrf}
+        )
     finally:
         mock.stop()
     assert page.text.count('method="post"') == 2

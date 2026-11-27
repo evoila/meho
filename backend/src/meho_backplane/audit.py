@@ -131,17 +131,20 @@ import asyncio
 import json
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.audit_cutover import (
     classified_record_id,
     close_classified_record_scope,
+    note_request_record,
     open_classified_record_scope,
     rest_request_is_routine,
     wrapper_row_class,
@@ -168,7 +171,7 @@ from meho_backplane.operations._audit import (
 from meho_backplane.request_usage.collector import open_request_usage
 from meho_backplane.work_ref import WorkRefError
 
-__all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
+__all__ = ["AuditMiddleware", "bind_preallocated_audit_id", "commit_with_request_audit_row"]
 
 #: Body returned when the audit insert fails (fail-closed 500). Pinned
 #: as a module constant so the contract is greppable from tests.
@@ -222,6 +225,10 @@ _AUDIT_ID_HEADER: Final[bytes] = b"meho-audit-id"
 #: send messages until the inner app returns delivers zero bytes to the
 #: client for the life of the connection (#1389).
 _EVENT_STREAM_MEDIA_TYPE: Final[bytes] = b"text/event-stream"
+
+#: When the audited request started (``time.monotonic``), for the
+#: ``duration_ms`` of a row the route commits itself.
+_request_started_var: ContextVar[float | None] = ContextVar("audit_request_started", default=None)
 
 
 def _is_event_stream_start(message: Message) -> bool:
@@ -419,6 +426,51 @@ def _resolve_target_id() -> uuid.UUID | None:
         return None
 
 
+def _build_audit_row(
+    *,
+    audit_id: uuid.UUID,
+    event_class: AuditEventClass,
+    operator_sub: str,
+    tenant_id: uuid.UUID | None,
+    target_id: uuid.UUID | None,
+    method: str,
+    path: str,
+    status_code: int,
+    request_id: uuid.UUID | None,
+    duration_ms: float,
+    payload: dict[str, Any],
+) -> AuditLog:
+    """Build the request's ``AuditLog`` row. See :func:`_write_audit_row`."""
+    client = request_client_block()
+    if client is not None:
+        payload[CLIENT_PAYLOAD_KEY] = client
+    # Read the external change-ticket reference
+    # off the contextvar. The ``work_ref`` column is added by migration
+    # ``0039``; guard on the attribute so the writer stays
+    # forward-compatible if the model predates the migration (the same
+    # discipline the dispatcher writer uses for the runbook columns).
+    soft_fk_kwargs: dict[str, Any] = {}
+    if hasattr(AuditLog, "work_ref"):
+        soft_fk_kwargs["work_ref"] = work_ref_var.get()
+    return AuditLog(
+        id=audit_id,
+        event_class=event_class,
+        occurred_at=datetime.now(UTC),
+        operator_sub=operator_sub,
+        actor_sub=resolve_actor_sub(),
+        agent_session_id=client_session_id_var.get(),
+        tenant_id=tenant_id,
+        target_id=target_id,
+        method=method,
+        path=path,
+        status_code=status_code,
+        request_id=request_id,
+        duration_ms=Decimal(str(duration_ms)),
+        payload=payload,
+        **soft_fk_kwargs,
+    )
+
+
 async def _write_audit_row(
     *,
     audit_id: uuid.UUID,
@@ -459,39 +511,110 @@ async def _write_audit_row(
     bound for this request (:mod:`meho_backplane.auth.client_identity`) is
     added to *payload*. A request without a checked login has none.
     """
-    client = request_client_block()
-    if client is not None:
-        payload[CLIENT_PAYLOAD_KEY] = client
-    sessionmaker = get_sessionmaker()
-    # work_ref I1-T1 #1655 -- read the external change-ticket reference
-    # off the contextvar. The ``work_ref`` column is added by migration
-    # ``0039``; guard on the attribute so the writer stays
-    # forward-compatible if the model predates the migration (the same
-    # discipline the dispatcher writer uses for the runbook columns).
-    # ``None`` until the bind source (I1-T2) lands.
-    soft_fk_kwargs: dict[str, Any] = {}
-    if hasattr(AuditLog, "work_ref"):
-        soft_fk_kwargs["work_ref"] = work_ref_var.get()
-    async with sessionmaker() as session:
-        row = AuditLog(
-            id=audit_id,
+    row = _build_audit_row(
+        audit_id=audit_id,
+        event_class=event_class,
+        operator_sub=operator_sub,
+        tenant_id=tenant_id,
+        target_id=target_id,
+        method=method,
+        path=path,
+        status_code=status_code,
+        request_id=request_id,
+        duration_ms=duration_ms,
+        payload=payload,
+    )
+    async with get_sessionmaker()() as session:
+        session.add(row)
+        await session.commit()
+
+
+async def _resolve_request_payload(
+    *, method: str, path: str, tenant_id: uuid.UUID | None
+) -> dict[str, Any]:
+    """The request row's payload: the ``audit_*`` keys plus the broadcast detail.
+
+    The broadcast detail is resolved BEFORE the audit row
+    commits so ``broadcast_detail_origin`` lands in the audit payload. The
+    resolver needs a tenant_id to consult its per-tenant cache -- for
+    malformed JWT-claim cases (tenant_id is None) the row has no origin
+    key. No Broadcast event is published: the feed carries
+    deliberate agent announcements only.
+    """
+    payload = _resolve_audit_payload()
+    if tenant_id is None:
+        return payload
+    broadcast_op_id, broadcast_op_class_override = _resolve_op_id_and_class_override(
+        method=method,
+        path=path,
+        payload=payload,
+    )
+    broadcast_decision = await compute_effective_broadcast_detail(
+        op_id=broadcast_op_id,
+        tenant_id=tenant_id,
+        raw_params=payload,
+        request_override=read_request_override(),
+        op_class_override=broadcast_op_class_override,
+    )
+    # A route-declared class goes through the same mapping as the other
+    # write paths (resolve_op_class). A row with no declared class keeps
+    # none: audit query derives it from the op id with the same mapping.
+    if "op_class" in payload:
+        payload["op_class"] = broadcast_decision[0]
+    payload["broadcast_detail_origin"] = broadcast_decision[2]
+    # Record the resolver's effective detail alongside the
+    # origin so ``meho audit query`` can answer both "who/what decided" and
+    # "what detail did they get".
+    payload["broadcast_detail_effective"] = broadcast_decision[1]
+    return payload
+
+
+async def commit_with_request_audit_row(
+    session: AsyncSession, scope: Scope, audit_id: uuid.UUID
+) -> None:
+    """Add the request's audit row to *session*, then commit both together.
+
+    For a route that owns its transaction, so its change and the audit row
+    commit together or not at all. The row is the one this middleware
+    would write for a 200 answer: the same class (``legacy_request``, or
+    ``operation_execution`` after the cutover), columns and payload,
+    including ``target_id``, the ``client`` block and the time since the
+    request started. After the commit the middleware writes no row of its
+    own and sends *audit_id* in the ``Meho-Audit-Id`` header. When the
+    commit raises, nothing is noted, and the middleware records the failed
+    request as for any other route.
+    """
+    operator_sub = structlog.contextvars.get_contextvars().get("operator_sub")
+    if not isinstance(operator_sub, str) or not operator_sub:
+        raise RuntimeError("commit_with_request_audit_row needs an authenticated request")
+    method, path, request_id = _resolve_request_metadata(scope)
+    status_code = 200
+    event_class = (
+        wrapper_row_class(status_code=status_code, routine=False, operator_sub=operator_sub)
+        or AuditEventClass.OPERATION_EXECUTION
+    )
+    tenant_id = _resolve_tenant_id(
+        operator_sub=operator_sub, method=method, path=path, log=structlog.get_logger()
+    )
+    started = _request_started_var.get()
+    duration_ms = 0.0 if started is None else round((time.monotonic() - started) * 1000, 2)
+    session.add(
+        _build_audit_row(
+            audit_id=audit_id,
             event_class=event_class,
-            occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
-            actor_sub=resolve_actor_sub(),
-            agent_session_id=client_session_id_var.get(),
             tenant_id=tenant_id,
-            target_id=target_id,
+            target_id=_resolve_target_id(),
             method=method,
             path=path,
             status_code=status_code,
             request_id=request_id,
-            duration_ms=Decimal(str(duration_ms)),
-            payload=payload,
-            **soft_fk_kwargs,
+            duration_ms=duration_ms,
+            payload=await _resolve_request_payload(method=method, path=path, tenant_id=tenant_id),
         )
-        session.add(row)
-        await session.commit()
+    )
+    await session.commit()
+    note_request_record(audit_id)
 
 
 def _resolve_op_id_and_class_override(
@@ -925,6 +1048,7 @@ class AuditMiddleware:
             work_ref_token = work_ref_var.set(work_ref_header)
         session_token = client_session_id_var.set(_extract_session_id(scope))
         command_token = client_command_var.set(_extract_command(scope))
+        started_token = _request_started_var.set(start)
         try:
             # G0.5-T5 (#250): MCP requests are audited at per-operation
             # granularity by the MCP handlers themselves, not at the
@@ -939,6 +1063,7 @@ class AuditMiddleware:
                 return
             await self._run_and_finalize(scope, receive, send, start)
         finally:
+            _request_started_var.reset(started_token)
             client_command_var.reset(command_token)
             client_session_id_var.reset(session_token)
             if work_ref_token is not None:
@@ -1111,39 +1236,7 @@ class AuditMiddleware:
         audit_id = _resolve_preallocated_audit_id() or uuid.uuid4()
         target_id = _resolve_target_id()
 
-        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit row
-        # commits so ``broadcast_detail_origin`` lands in the audit
-        # payload. The resolver needs a tenant_id to consult its
-        # per-tenant cache -- for malformed JWT-claim cases (tenant_id
-        # is None) the audit row commits with no origin key. No
-        # Broadcast event is published (#3758): the feed carries
-        # deliberate agent announcements only.
-        payload = _resolve_audit_payload()
-        broadcast_op_id, broadcast_op_class_override = _resolve_op_id_and_class_override(
-            method=method,
-            path=path,
-            payload=payload,
-        )
-        broadcast_decision: tuple[str, Literal["full", "aggregate"], str] | None = None
-        if tenant_id is not None:
-            broadcast_decision = await compute_effective_broadcast_detail(
-                op_id=broadcast_op_id,
-                tenant_id=tenant_id,
-                raw_params=payload,
-                request_override=read_request_override(),
-                op_class_override=broadcast_op_class_override,
-            )
-            # A route-declared class goes through the same mapping as the
-            # other write paths (resolve_op_class).
-            # A row with no declared class keeps none: audit query derives
-            # it from the op id with the same mapping.
-            if "op_class" in payload:
-                payload["op_class"] = broadcast_decision[0]
-            payload["broadcast_detail_origin"] = broadcast_decision[2]
-            # G6.3-T3 (#380): record the resolver's effective detail
-            # alongside the origin so ``meho audit query`` can answer
-            # both "who/what decided" and "what detail did they get".
-            payload["broadcast_detail_effective"] = broadcast_decision[1]
+        payload = await _resolve_request_payload(method=method, path=path, tenant_id=tenant_id)
 
         # ``work_ref_var`` is bound for the whole request by
         # ``_handle_http`` (#1657 / #3804); ``_write_audit_row`` reads it.

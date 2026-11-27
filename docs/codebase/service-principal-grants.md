@@ -114,10 +114,19 @@ above (`approval_off_rights_change`), for an operation with a caller-address
 parameter (`approval_off_caller_address`), and for a destructive operation
 (`approval_off_destructive`). The table "Edit rules" in `spec-ingestion.md`
 has the full list.
-At call time one function gives these refusals: `never_covered_reason` in
-`service_grants.py`. It returns the kind and the reason of the first that
-holds: a credential call, per-call approval, a caller-address field,
-always wait, a delete sign. The run approval gate uses the same function
+At call time, for a service login outside sandbox mode, the gate first
+asks `policy/fixed_rules.py::fixed_rule_for`. When it names a rule (a
+credential call, a change of rights or of the policy, a destructive
+operation, a delete, a caller-address field), the gate looks up no
+standing grant and no run approval, and logs
+`policy_gate_fixed_rule_no_grant` with the rule id. The wait reason the
+caller reads stays the same. In the other cases (per-call approval,
+always wait, a root shell command) and in sandbox mode, one function gives
+these refusals: `never_covered_reason` in `service_grants.py`. It returns
+the kind and the reason of the first that holds: a credential call,
+per-call approval, a caller-address field, always wait, a delete sign.
+The run approval gate uses the same function in `_never_covered`, and
+also refuses a root shell command there
 ([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
 a sandbox delete grant.
 
@@ -508,7 +517,8 @@ delete-shaped ops:
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
   default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`,
-  `POST:/vswitch/*`),
+  `POST:/vswitch/*`; with the switch `CUSTOM_POLICY` on, the setting only
+  adds to these and never removes one),
 - **by vendor action name** (#4632): an ingested op id whose last path part
   starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
   `POST:/VirtualMachine/{moId}/Destroy_Task`. The word may also follow a

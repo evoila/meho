@@ -40,7 +40,7 @@ import pytest
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.handlers import _tool_result_is_error
-from meho_backplane.mcp.registry import ToolDefinition
+from meho_backplane.mcp.registry import ToolDefinition, _wire_safe_output_schema
 from meho_backplane.operations.delivery_budget import (
     measure_delivered_wire_bytes,
     sent_wire_bytes,
@@ -147,7 +147,9 @@ def test_every_declared_output_schema_is_valid_2020_12() -> None:
 
 
 def test_output_schema_survives_to_wire() -> None:
-    """``to_wire`` publishes the declared ``outputSchema`` verbatim.
+    """``to_wire`` publishes the declared ``outputSchema``, with no ``null`` in an ``enum``.
+
+    That is the only change. ``tests/test_mcp_strict_output_schemas.py`` checks it.
 
     The client-side validation contract only exists because the schema
     is published on ``tools/list``; a wire-shape regression that drops
@@ -156,8 +158,8 @@ def test_output_schema_survives_to_wire() -> None:
     """
     for name, defn in sorted(_declaring_tools().items()):
         wire = defn.to_wire()
-        assert wire.get("outputSchema") == defn.outputSchema, (
-            f"{name}: to_wire() must publish outputSchema verbatim"
+        assert wire.get("outputSchema") == _wire_safe_output_schema(defn.outputSchema), (
+            f"{name}: to_wire() must publish outputSchema, changed only for a null in an enum"
         )
 
 

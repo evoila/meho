@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -626,24 +627,40 @@ const (
 		"(a change of rights only with a click in the web console; " +
 		"in MEHO's own login realm a change of rights needs a platform admin, " +
 		"one you sent with a token needs a second person who is a platform admin, " +
-		"and so does one that can change the approval sign-in)"
-	approvalsOperator = "a second person approves your changes; you may approve " +
+		"and so does one that can change the approval sign-in, " +
+		"which never runs alone, also not for a platform admin); " +
+		"MEHO refuses a change that resets or sets the password of your own login"
+	approvalsOperatorOff = "a second person approves your changes; you may approve " +
 		"your own `caution` change that waited because you sent it with a token, " +
 		"with a click in the web console; a change of rights is not covered"
+	approvalsOperator = approvalsOperatorOff + "; " +
+		"a few operations, for example registering a target, need the Admin role: " +
+		"you cannot run them or approve them"
 	approvalsReader = "you cannot run changes"
 	approvalsOther  = "who may approve depends on your group in the current tenant " +
 		"(see Who may approve in the approvals guide)"
 
-	breakGlassOperator = "break-glass is on: you may approve your own `safe` or " +
+	breakGlassOperatorOff = "break-glass is on: you may approve your own `safe` or " +
 		"`caution` change; `dangerous` and `destructive` changes still need a second person; " +
 		"a change of rights is not covered"
+	breakGlassOperator = breakGlassOperatorOff + "; " +
+		"a few operations, for example registering a target, need the Admin role: " +
+		"you cannot run them or approve them, also with break-glass on"
 	breakGlassAdmin = approvalsAdmin +
 		"; break-glass is on: anyone may approve their own `safe` or `caution` change; " +
-		"the switch does not cover a change of rights"
+		"the switch does not cover a change of rights or an operation that needs the Admin role"
 	breakGlassOther = "break-glass is on: a person who may run changes may approve " +
 		"their own `safe` or `caution` change; a change of rights is not covered; " +
+		"a few operations need the Admin role, also with break-glass on; " +
 		"the group rules still apply"
 )
+
+// RoleFloorExampleEnv is the switch for the Operator text that names an
+// operation which needs the Admin role. It is off by default until it is
+// measured (#7007); "1" turns it on. Off, the Operator text is as before.
+const RoleFloorExampleEnv = "MEHO_STATUS_ROLE_FLOOR_EXAMPLE"
+
+func roleFloorExampleOn() bool { return os.Getenv(RoleFloorExampleEnv) == "1" }
 
 // approvalsPosture says who may approve what, for the caller's role in
 // the current tenant. With no current tenant, or a role the CLI does not
@@ -658,10 +675,14 @@ func approvalsPosture(op api.OperatorIdentity, breakGlass bool) string {
 		return breakGlassAdmin
 	case role == api.TenantRoleTenantAdmin:
 		return approvalsAdmin
-	case role == api.TenantRoleOperator && breakGlass:
+	case role == api.TenantRoleOperator && breakGlass && roleFloorExampleOn():
 		return breakGlassOperator
-	case role == api.TenantRoleOperator:
+	case role == api.TenantRoleOperator && breakGlass:
+		return breakGlassOperatorOff
+	case role == api.TenantRoleOperator && roleFloorExampleOn():
 		return approvalsOperator
+	case role == api.TenantRoleOperator:
+		return approvalsOperatorOff
 	case role == api.TenantRoleReadOnly:
 		return approvalsReader
 	case breakGlass:

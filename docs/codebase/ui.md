@@ -61,6 +61,7 @@ own page:
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |
 | `/ui/checks`, `/ui/conventions`, `/ui/operations`, `/ui/connectors/registry` (menu entry "Connectors") | the `meho_backplane.ui.routes` row of "Key types" below |
 | `/ui/event-sources` | no section yet (`ui/routes/event_source/`) |
+| `/ui/settings` | [`settings.md`](settings.md#the-settings-file-page-of-the-web-console) |
 
 ## List-surface detail-navigation convention (#2463)
 
@@ -4056,8 +4057,13 @@ admin block list (`docs/codebase/principal-block.md`):
   values and the message next to its field.
 - `POST /ui/blocked-people/unblock` -- unblock a login (`sub`). Without
   `confirm=yes`: 200, the confirm page with the login, its blocks and
-  the scope (all tenants for a platform admin). With `confirm=yes`: 303
-  back to the page. The admin's own login: 403 `own_login`. A platform
+  the scope (all tenants for a platform admin). The confirm form carries
+  the set of blocks the page showed (`shown`). With `confirm=yes`, MEHO
+  removes only those blocks: 303 back to the page. When the blocks of the
+  login changed in between (a block was added, removed or set again),
+  MEHO removes nothing and answers 200 with the confirm page again, the
+  new blocks and a note, so the admin confirms again. The audit row
+  `principal.unblock` names only the removed blocks. The admin's own login: 403 `own_login`. A platform
   admin removes a block on their own login with `meho principal unblock
   <sub> --reason <text>`, run in the tenant of that block, with a fresh
   sign-in. On their own login, MEHO removes only the block of the

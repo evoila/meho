@@ -61,6 +61,7 @@ _AREA_LANDING_TEMPLATES = (
     "vault/index.html",
     "approvals/index.html",
     "audit/index.html",
+    "settings/index.html",
 )
 
 _INCLUDE_TAG = '{% include "_maturity_badge.html" %}'

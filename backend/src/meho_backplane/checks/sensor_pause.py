@@ -24,6 +24,7 @@ from sqlalchemy import select
 from meho_backplane.checks.schemas import SensorRead
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorStatus
+from meho_backplane.settings import get_settings
 
 __all__ = ["PAUSED_BY_OPERATOR", "SensorStatusResult", "set_sensor_status"]
 
@@ -77,6 +78,55 @@ async def set_sensor_status(
         after = {"status": row.status, "status_reason": row.status_reason}
         await session.commit()
         await session.refresh(row)
-        return SensorStatusResult(
+        has_runner = row.runner_name is not None
+        result = SensorStatusResult(
             SensorRead.model_validate(row, from_attributes=True), before, after
         )
+    if status is SensorStatus.ACTIVE and has_runner and get_settings().runner_checks_enabled:
+        await _mark_if_runner_stale(tenant_id, sensor_id, now)
+    return result
+
+
+async def _mark_if_runner_stale(tenant_id: uuid.UUID, sensor_id: uuid.UUID, now: datetime) -> None:
+    """Record ``unknown`` on a resumed Sensor whose runner is marked stale.
+
+    A runner that is away does not run the check, so the resumed Sensor
+    must not keep its old state. Runs in its own transaction after the
+    resume: it takes the runner's assignment lock first and the Sensor
+    second, the same order as a result batch.
+    """
+    from meho_backplane.db.models import RunnerAssignmentRow
+    from meho_backplane.gateway.repository import lock_assignment_row
+    from meho_backplane.gateway.runner_checks import after_commit, mark_sensor_unknown
+
+    async with get_sessionmaker()() as session:
+        runner_name = await session.scalar(
+            select(Sensor.runner_name).where(Sensor.id == sensor_id, Sensor.tenant_id == tenant_id)
+        )
+        if runner_name is None:
+            return
+        await lock_assignment_row(session, tenant_id=tenant_id, runner_name=runner_name)
+        stale_at = await session.scalar(
+            select(RunnerAssignmentRow.stale_at).where(
+                RunnerAssignmentRow.tenant_id == tenant_id,
+                RunnerAssignmentRow.runner_name == runner_name,
+            )
+        )
+        if stale_at is None:
+            return
+        sensor = await session.scalar(
+            select(Sensor)
+            .where(
+                Sensor.id == sensor_id,
+                Sensor.status == SensorStatus.ACTIVE.value,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if sensor is None:
+            return
+        counted = await mark_sensor_unknown(
+            session, sensor, now=now, reason="runner_stale", runner=runner_name
+        )
+        await session.commit()
+    await after_commit(tenant_id, [counted])

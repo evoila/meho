@@ -89,20 +89,30 @@ that user or group (`--user` or `--group` in place of
 
 This makes a kubeconfig file (a login file for `kubectl` and Helm) with a
 token that lasts 8 hours. Give the file to the installer in a safe way.
+The step removes an old file of that name first, so the new file is
+always readable only by you (mode 600).
 
 ```bash
-umask 077
-SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-kubectl config view --minify --raw \
-  -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > cluster-ca.crt
-TOKEN=$(kubectl -n meho create token meho-installer --duration=8h)
-KC=meho-installer.kubeconfig
-printf 'apiVersion: v1\nkind: Config\nusers:\n- name: meho-installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
-kubectl config --kubeconfig=$KC set-cluster vks --server="$SERVER" \
-  --certificate-authority=cluster-ca.crt --embed-certs=true
-kubectl config --kubeconfig=$KC set-context meho --cluster=vks --user=meho-installer --namespace=meho
-kubectl config --kubeconfig=$KC use-context meho
-unset TOKEN; rm -f cluster-ca.crt
+{
+  umask 077
+  KC=meho-installer.kubeconfig
+  TOKEN=$(kubectl -n meho create token meho-installer --duration=8h)
+  if [ -n "$TOKEN" ]; then
+    SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+    kubectl config view --minify --raw \
+      -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > cluster-ca.crt
+    rm -f $KC
+    printf 'apiVersion: v1\nkind: Config\nusers:\n- name: meho-installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
+    kubectl config --kubeconfig=$KC set-cluster vks --server="$SERVER" \
+      --certificate-authority=cluster-ca.crt --embed-certs=true
+    kubectl config --kubeconfig=$KC set-context meho --cluster=vks --user=meho-installer --namespace=meho
+    kubectl config --kubeconfig=$KC use-context meho
+    rm -f cluster-ca.crt
+  else
+    echo 'No token came back. No login file was made.'
+  fi
+  unset TOKEN
+}
 ```
 
 Check the file:
@@ -261,9 +271,20 @@ image has one layer of about 240 MB, and a slow or cut connection stops
 the upload.
 
 ```bash
-read -rsp "Password of the push login: " PUSH_PASSWORD; echo
-printf '%s' "$PUSH_PASSWORD" | crane auth login registry.example.com -u <push user> --password-stdin
-unset PUSH_PASSWORD
+{
+  printf 'Password of the push login: '; IFS= read -rs PUSH_PASSWORD; echo
+  if [ -n "$PUSH_PASSWORD" ]; then
+    printf '%s' "$PUSH_PASSWORD" | crane auth login registry.example.com -u <push user> --password-stdin
+  else
+    echo 'No password was typed. No login was made.'
+  fi
+  unset PUSH_PASSWORD
+}
+```
+
+Then copy the images:
+
+```bash
 while read -r source path; do
   crane copy "$source" "registry.example.com/meho/$path"
 done < meho-chart/images.txt
@@ -299,12 +320,18 @@ may only pull. `read -rs` keeps the password out of the screen and out
 of your shell history.
 
 ```bash
-read -rsp "Password of the pull login: " PULL_PASSWORD; echo
-printf '{"auths":{"registry.example.com":{"auth":"%s"}}}' \
-  "$(printf '%s:%s' '<pull user>' "$PULL_PASSWORD" | base64 | tr -d '\n')" \
-  | kubectl -n meho create secret generic registry-pull \
-      --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
-unset PULL_PASSWORD
+{
+  printf 'Password of the pull login: '; IFS= read -rs PULL_PASSWORD; echo
+  if [ -n "$PULL_PASSWORD" ]; then
+    printf '{"auths":{"registry.example.com":{"auth":"%s"}}}' \
+      "$(printf '%s:%s' '<pull user>' "$PULL_PASSWORD" | base64 | tr -d '\n')" \
+      | kubectl -n meho create secret generic registry-pull \
+          --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset PULL_PASSWORD
+}
 ```
 
 You should see `secret/registry-pull created`.

@@ -96,10 +96,16 @@ Put the secret from step 1 into a Kubernetes Secret in MEHO's
 namespace. The chart reads it by name and never prints it.
 
 ```bash
-read -rs CLIENT_SECRET     # paste the client secret; it is not shown
-printf '%s' "$CLIENT_SECRET" \
-  | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
-unset CLIENT_SECRET
+{
+  printf 'Paste the client secret (not shown): '; IFS= read -rs CLIENT_SECRET; echo
+  if [ -n "$CLIENT_SECRET" ]; then
+    printf '%s' "$CLIENT_SECRET" \
+      | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
+  else
+    echo 'No secret was typed. Nothing was made.'
+  fi
+  unset CLIENT_SECRET
+}
 ```
 
 If a private CA signs your Keycloak's certificate, also store the CA

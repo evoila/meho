@@ -982,11 +982,17 @@ console admin and points here. Make one once by hand:
 6. Optional: keep the login in a Secret, as a new install does:
 
     ```bash
-    read -rs ADMIN_PASSWORD   # type the temporary password; it is not shown
-    printf '%s' "$ADMIN_PASSWORD" \
-      | kubectl -n <namespace> create secret generic <release>-core-console-admin \
-          --from-literal=username=console-admin --from-file=password=/dev/stdin
-    unset ADMIN_PASSWORD
+    {
+      printf 'Temporary password (not shown): '; IFS= read -rs ADMIN_PASSWORD; echo
+      if [ -n "$ADMIN_PASSWORD" ]; then
+        printf '%s' "$ADMIN_PASSWORD" \
+          | kubectl -n <namespace> create secret generic <release>-core-console-admin \
+              --from-literal=username=console-admin --from-file=password=/dev/stdin
+      else
+        echo 'No password was typed. Nothing was made.'
+      fi
+      unset ADMIN_PASSWORD
+    }
     ```
 
     The next `helm upgrade` then prints `console admin: kept`.

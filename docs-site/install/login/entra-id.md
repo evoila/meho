@@ -61,10 +61,16 @@ Put the Entra client secret into a Kubernetes Secret in MEHO's
 namespace. The chart reads it by name and never prints it.
 
 ```bash
-read -rs CLIENT_SECRET     # paste the Entra client secret; it is not shown
-printf '%s' "$CLIENT_SECRET" \
-  | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
-unset CLIENT_SECRET
+{
+  printf 'Paste the Entra client secret (not shown): '; IFS= read -rs CLIENT_SECRET; echo
+  if [ -n "$CLIENT_SECRET" ]; then
+    printf '%s' "$CLIENT_SECRET" \
+      | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
+  else
+    echo 'No secret was typed. Nothing was made.'
+  fi
+  unset CLIENT_SECRET
+}
 ```
 
 ## 4. Add the Helm values

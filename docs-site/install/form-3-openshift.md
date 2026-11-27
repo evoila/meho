@@ -155,17 +155,31 @@ Back to the admin login later with `kubectl config use-context $ADMIN_CONTEXT`.
 kubectl -n $NS create serviceaccount $NS-installer
 kubectl -n $NS create rolebinding $NS-installer-admin \
   --clusterrole=admin --serviceaccount=$NS:$NS-installer
-umask 077
-TOKEN=$(kubectl -n $NS create token $NS-installer --duration=8h)
-KC=$W/installer.kubeconfig
-printf 'apiVersion: v1\nkind: Config\nusers:\n- name: installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
-kubectl config --kubeconfig=$KC set-cluster ocp --server="$API"
-kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > $W/cluster-ca.crt
-[ -s $W/cluster-ca.crt ] && kubectl config --kubeconfig=$KC set-cluster ocp --certificate-authority=$W/cluster-ca.crt --embed-certs=true
-kubectl config --kubeconfig=$KC set-context installer --cluster=ocp --user=installer --namespace=$NS
-kubectl config --kubeconfig=$KC use-context installer
-unset TOKEN; rm -f $W/cluster-ca.crt
-export KUBECONFIG=$KC
+```
+
+Then make the login file. The step removes an old file of that name
+first, so the new file is always readable only by you (mode 600):
+
+```bash
+{
+  umask 077
+  KC=$W/installer.kubeconfig
+  TOKEN=$(kubectl -n $NS create token $NS-installer --duration=8h)
+  if [ -n "$TOKEN" ]; then
+    rm -f $KC
+    printf 'apiVersion: v1\nkind: Config\nusers:\n- name: installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
+    kubectl config --kubeconfig=$KC set-cluster ocp --server="$API"
+    kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > $W/cluster-ca.crt
+    [ -s $W/cluster-ca.crt ] && kubectl config --kubeconfig=$KC set-cluster ocp --certificate-authority=$W/cluster-ca.crt --embed-certs=true
+    kubectl config --kubeconfig=$KC set-context installer --cluster=ocp --user=installer --namespace=$NS
+    kubectl config --kubeconfig=$KC use-context installer
+    rm -f $W/cluster-ca.crt
+    export KUBECONFIG=$KC
+  else
+    echo 'No token came back. No login file was made.'
+  fi
+  unset TOKEN
+}
 ```
 
 The token ends after 8 hours. If your admin login has no certificate
@@ -320,13 +334,13 @@ name. With a port, the port comes after two dots instead of a colon,
 for example `harbor.example.com..5000`: the first line makes that key.
 
 ```bash
-REG_KEY=${REG_HOST/:/..}; echo "key: $REG_KEY"
-kubectl -n openshift-config create configmap registry-ca --from-file=$REG_KEY=registry-ca.crt
+REG_CM_ENTRY=${REG_HOST/:/..}; echo "key: $REG_CM_ENTRY"
+kubectl -n openshift-config create configmap registry-ca --from-file=$REG_CM_ENTRY=registry-ca.crt
 kubectl patch image.config.openshift.io/cluster --type=merge \
   -p '{"spec":{"additionalTrustedCA":{"name":"registry-ca"}}}'
 ```
 
-**If it prints a name**, add your key (`$REG_KEY`, with the two dots) to
+**If it prints a name**, add your key (`$REG_CM_ENTRY`, with the two dots) to
 that ConfigMap instead:
 `kubectl -n openshift-config edit configmap <that name>`.
 
@@ -339,13 +353,19 @@ only pull. `read` keeps the password out of the screen and out of your
 shell history.
 
 ```bash
-read -r 'PULL_USER?Pull user: ' 2>/dev/null || read -rp 'Pull user: ' PULL_USER
-read -rs 'PULL_PASSWORD?Pull password: ' 2>/dev/null || read -rsp 'Pull password: ' PULL_PASSWORD; echo
-printf '{"auths":{"%s":{"auth":"%s"}}}' "$REG_HOST" \
-  "$(printf '%s:%s' "$PULL_USER" "$PULL_PASSWORD" | base64 | tr -d '\n')" \
-  | kubectl -n $NS create secret generic registry-pull \
-      --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
-unset PULL_USER PULL_PASSWORD
+{
+  printf 'Pull user: '; IFS= read -r PULL_USER
+  printf 'Pull password: '; IFS= read -rs PULL_PASSWORD; echo
+  if [ -n "$PULL_USER" ] && [ -n "$PULL_PASSWORD" ]; then
+    printf '{"auths":{"%s":{"auth":"%s"}}}' "$REG_HOST" \
+      "$(printf '%s:%s' "$PULL_USER" "$PULL_PASSWORD" | base64 | tr -d '\n')" \
+      | kubectl -n $NS create secret generic registry-pull \
+          --type=kubernetes.io/dockerconfigjson --from-file=.dockerconfigjson=/dev/stdin
+  else
+    echo 'No user or no password was typed. Nothing was made.'
+  fi
+  unset PULL_USER PULL_PASSWORD
+}
 ```
 
 The two `read` lines work in zsh and in bash. You should see

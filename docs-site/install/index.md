@@ -517,16 +517,30 @@ DSN at the key `url`, using the **async** driver prefix:
 
 ```bash
 kubectl create namespace meho
-printf 'Database password: '; read -rs DB_PASSWORD; echo   # it is not shown
-printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' "$DB_PASSWORD" \
-  | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin
-unset DB_PASSWORD
+```
+
+Then make the Secret. The password you type is not shown:
+
+```bash
+{
+  printf 'Database password: '; IFS= read -rs DB_PASSWORD; echo
+  if [ -n "$DB_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' "$DB_PASSWORD" \
+      | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_PASSWORD
+}
 ```
 
 `read` and `printf` are built into bash and zsh. They start no program,
 so the password is in no process list and in no shell history. The same
 idea holds for every secret in this guide: it comes from a file or from
 standard input, never from an argument of a command.
+
+Each such block is one command in braces (`{` to `}`). Paste the whole
+block, then type the value. An empty value makes nothing.
 
 Three things bite here if missed:
 
@@ -568,10 +582,16 @@ password is not in the SQL text and not in the server log:
 ```
 
 ```bash
-printf 'Password of meho_app: '; read -rs APP_PASSWORD; echo   # it is not shown
-printf 'postgresql+asyncpg://meho_app:%s@<host>:5432/meho' "$APP_PASSWORD" \
-  | kubectl create secret generic meho-postgres-app -n meho --from-file=url=/dev/stdin
-unset APP_PASSWORD
+{
+  printf 'Password of meho_app: '; IFS= read -rs APP_PASSWORD; echo
+  if [ -n "$APP_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://meho_app:%s@<host>:5432/meho' "$APP_PASSWORD" \
+      | kubectl create secret generic meho-postgres-app -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset APP_PASSWORD
+}
 ```
 
 Then name both in the
@@ -696,11 +716,17 @@ password of the Keycloak role to the one in the Secret
 `<release>-core-postgres-keycloak`, which the install makes by itself.
 
 ```bash
-printf 'Admin password: '; read -rs DB_ADMIN_PASSWORD; echo   # it is not shown
-printf '%s' "$DB_ADMIN_PASSWORD" \
-  | kubectl create secret generic keycloak-db-admin \
-      --from-literal=username=<admin-user> --from-file=password=/dev/stdin
-unset DB_ADMIN_PASSWORD
+{
+  printf 'Admin password: '; IFS= read -rs DB_ADMIN_PASSWORD; echo
+  if [ -n "$DB_ADMIN_PASSWORD" ]; then
+    printf '%s' "$DB_ADMIN_PASSWORD" \
+      | kubectl create secret generic keycloak-db-admin \
+          --from-literal=username=<admin-user> --from-file=password=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_ADMIN_PASSWORD
+}
 ```
 
 ```yaml

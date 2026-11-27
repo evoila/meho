@@ -160,10 +160,16 @@ Put the authentik client secret into a Kubernetes Secret in MEHO's
 namespace. The chart reads it by name and never prints it.
 
 ```bash
-read -rs CLIENT_SECRET     # paste the authentik client secret; it is not shown
-printf '%s' "$CLIENT_SECRET" \
-  | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
-unset CLIENT_SECRET
+{
+  printf 'Paste the authentik client secret (not shown): '; IFS= read -rs CLIENT_SECRET; echo
+  if [ -n "$CLIENT_SECRET" ]; then
+    printf '%s' "$CLIENT_SECRET" \
+      | kubectl create secret generic meho-company-login -n meho --from-file=client_secret=/dev/stdin
+  else
+    echo 'No secret was typed. Nothing was made.'
+  fi
+  unset CLIENT_SECRET
+}
 ```
 
 If a private CA signs authentik's certificate, also store the CA in a
@@ -377,12 +383,24 @@ ID:
 The authentik issuer ends with a `/`. Keep it. Then run:
 
 ```bash
-REALM=<realm>
-read -rs CLIENT_SECRET     # paste the authentik client secret; it is not shown
-jq --arg s "$CLIENT_SECRET" '.config.clientSecret = $s' company-idp.json \
-  | kcadm.sh create identity-provider/instances -r "$REALM" -f -
-unset CLIENT_SECRET
+{
+  REALM=<realm>
+  printf 'Paste the authentik client secret (not shown): '; IFS= read -rs CLIENT_SECRET; echo
+  if [ -n "$CLIENT_SECRET" ]; then
+    printf '%s' "$CLIENT_SECRET" \
+      | jq --rawfile s /dev/stdin '.config.clientSecret = $s' company-idp.json \
+      | kcadm.sh create identity-provider/instances -r "$REALM" -f -
+  else
+    echo 'No secret was typed. Nothing was made.'
+  fi
+  unset CLIENT_SECRET
+}
+```
 
+`jq` reads the secret on standard input, so it is not an argument of
+`jq`. Then add the group mappers and the login step:
+
+```bash
 for G in MEHO-Readers MEHO-Operators MEHO-Admins; do
   jq -n --arg g "$G" '{name: ("meho-group-" + $g), identityProviderAlias: "company",
       identityProviderMapper: "oidc-advanced-group-idp-mapper",

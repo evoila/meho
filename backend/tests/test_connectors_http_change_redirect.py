@@ -492,9 +492,11 @@ async def test_trace_of_an_options_redirect_names_the_get_that_followed() -> Non
 async def test_trace_of_an_options_redirect_names_the_get_that_timed_out() -> None:
     recorded, (start_patch, record_patch) = _recording()
     errors: list[str] = []
+    error_paths: list[str] = []
 
     def record_error(_start: Any, *, method: str, exc: Exception) -> None:
         errors.append(method)
+        error_paths.append(exc.request.url.path)  # type: ignore[attr-defined]
 
     conn = _Conn()
     with (
@@ -511,6 +513,8 @@ async def test_trace_of_an_options_redirect_names_the_get_that_timed_out() -> No
 
     assert recorded == [("OPTIONS", 303, "/items")]
     assert errors == ["GET"]
+    # The error entry names the address MEHO asked for.
+    assert error_paths == ["/items"]
 
 
 @pytest.mark.asyncio
@@ -793,11 +797,12 @@ async def test_trace_of_an_operation_that_sends_a_secret_masks_the_path_value_af
             )
     await conn.aclose()
 
+    # Both entries name the address MEHO asked for, with the path mask on it.
     assert [(span.name, span.status) for span in spans] == [
         (f"PUT {_MASKED}", "307"),
-        (f"PUT {_MASKED}/", "200"),
+        (f"PUT {_MASKED}", "200"),
     ]
-    assert [span.attributes["url"] for span in spans] == [_MASKED, f"{_MASKED}/"]
+    assert [span.attributes["url"] for span in spans] == [_MASKED, _MASKED]
     assert _SECRET_NAME not in _dumped(spans)
 
 
@@ -834,7 +839,7 @@ async def test_trace_of_another_operation_keeps_the_path() -> None:
             await conn._post_json(_target(), "/items/7", operator=_operator(), verb="PUT")
     await conn.aclose()
 
-    assert [span.attributes["url"] for span in spans] == [f"{_BASE}/items/7", f"{_BASE}/items/7/"]
+    assert [span.attributes["url"] for span in spans] == [f"{_BASE}/items/7", f"{_BASE}/items/7"]
 
 
 @pytest.mark.asyncio

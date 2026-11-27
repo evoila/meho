@@ -847,12 +847,19 @@ _operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+#: Set on the first request when a followed request fails: the method of
+#: the request that failed (a GET after an OPTIONS that got a 303).
+_FAILED_METHOD_EXTENSION = "meho_failed_method"
+
+
 def _failed_method(exc: httpx.TransportError, sent_method: str) -> str:
     """The method of the request that failed: after a redirect it can differ from the sent one."""
     try:
-        return exc.request.method
+        request = exc.request
     except RuntimeError:
         return sent_method
+    failed = request.extensions.get(_FAILED_METHOD_EXTENSION)
+    return failed if isinstance(failed, str) else request.method
 
 
 def _encoded_path(url: httpx.URL) -> str:
@@ -1172,6 +1179,7 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         try:
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
         except httpx.TransportError as exc:
+            first_request.extensions[_FAILED_METHOD_EXTENSION] = request.method
             exc.request = first_request
             raise
         response.extensions[flight_recorder_capture.FIRST_REQUEST_URL_EXTENSION] = first_request.url

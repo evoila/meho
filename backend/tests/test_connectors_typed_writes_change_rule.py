@@ -174,7 +174,8 @@ async def test_a_307_or_308_to_the_same_path_with_a_slash_sends_the_write_once_m
     assert answered == 200
     assert (first.call_count, again.call_count) == (1, 1), name
     # One trace entry for each request that was sent: the write and its repeat
-    # (the Harbor robot read before the delete has its own entry).
+    # (the Harbor robot read before the delete has its own entry). Both name
+    # the address MEHO asked for.
     writes = [span for span in spans if span.attributes["method"] == method]
     assert [span.status for span in writes] == [str(status), "200"]
-    assert [span.attributes["url"] for span in writes] == [f"{_BASE}{path}", f"{_BASE}{path}/"]
+    assert [span.attributes["url"] for span in writes] == [f"{_BASE}{path}", f"{_BASE}{path}"]

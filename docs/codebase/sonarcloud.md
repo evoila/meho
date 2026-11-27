@@ -218,9 +218,12 @@ Nothing turns red because the coverage jobs are non-blocking by design.
    **Again in November 2026 (#7103):** with the C tracer of the test map
    (#5642) a serial shard ran 35 to more than 45 minutes, and from 20 to
    26 Nov nearly every shard hit the limit. **Fix:** each shard runs three
-   test workers (`-n 3`), like the unit shards. A serial shard used only
-   about 2 GiB of program memory of the 14 GiB limit, on a runner with
-   6 CPUs.
+   test workers (`-n 3`), like the unit shards, and the sweep runs as
+   10 shards. The heavy runner has a limit of 7 CPUs and 7 GiB; a serial
+   shard used only about 2 GiB of program memory. With three workers and
+   8 shards, pytest took 17 to 37 minutes and 3.4 to 3.8 GiB of program
+   memory. A fourth worker would leave too little memory, so the shard
+   count went to 10 for room below the 45-minute limit.
 
 **Where to look.**
 

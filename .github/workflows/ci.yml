@@ -2100,7 +2100,7 @@ jobs:
           fi
 
   python-coverage:
-    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/10)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -2180,12 +2180,14 @@ jobs:
     # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
     # tests still ran 19-29 min of pytest and peaked at the memory limit.
     # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
-    # THREE WORKERS PER SHARD (#7103): with the C tracer (#5642) and a
+    # THREE WORKERS, 10 SHARDS (#7103): with the C tracer (#5642) and a
     # growing suite, the serial shards ran 35-45+ min, and on 20-26 Nov 2026
     # nearly every shard hit the 45-min step cap, so no test map was made.
-    # The runner has 6 CPUs, and a serial shard used only about 2 GiB of
-    # program memory (Print peak memory), far below the 14 GiB limit. So each
-    # shard now runs -n 3, like the unit shards (devops.md "Runner-CPU rule").
+    # The runner has a 7-CPU and 7 GiB limit, and a serial shard used only
+    # about 2 GiB of program memory (Print peak memory). So each shard runs
+    # -n 3, like the unit shards (devops.md "Runner-CPU rule"). Measured with
+    # 8 shards: pytest 17-37 min, program memory 3.4-3.8 GiB. A fourth worker
+    # would leave too little memory, so the count went to 10 for headroom.
     # If a shard's wall approaches its 45-min step cap, or its memory nears
     # the runner's limit, raise the shard count — bump the matrix, TOTAL in
     # the pytest step AND the combine job's download steps, in lockstep
@@ -2211,12 +2213,12 @@ jobs:
     # runs in the merge queue.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
+      # 10 stride shards (#3172 started with 3) — see the SHARDED paragraph in
       # the header comment. fail-fast off: one shard's red tests must not
       # cancel the other shards' coverage data (partial coverage beats none).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -2417,9 +2419,8 @@ jobs:
           # (SonarCloud parity).
           COVERAGE_CORE: ctrace
         # Same unit sweep as the required lane (--ignore=tests/integration),
-        # with -n 3 like the unit shards (#7103; the memory of one shard is far
-        # below the pod limit, see THREE WORKERS PER SHARD in this job's
-        # header). Each worker writes its own data file. --dist loadscope keeps a
+        # with -n 3 like the unit shards (#7103; see THREE WORKERS, 10 SHARDS
+        # in this job's header). Each worker writes its own data file. --dist loadscope keeps a
         # module's tests on one worker so session-scoped fixtures instantiate
         # once. No --maxfail: a coverage run wants the whole suite measured even
         # if one test is flaky; redness here is non-blocking anyway.
@@ -2455,10 +2456,10 @@ jobs:
           # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
-          # eight shards partition the full set exactly (NR mod 8 hits
+          # ten shards partition the full set exactly (NR mod 10 hits
           # each residue once); integration stays excluded by the find,
           # matching the old --ignore.
-          TOTAL=8
+          TOTAL=10
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -2479,7 +2480,7 @@ jobs:
         # for THIS shard — the python-coverage-combine job below merges every
         # shard's set and writes the single coverage.xml quality-gate.yml
         # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
-        # data from eight different runners combines cleanly.
+        # data from ten different runners combines cleanly.
         # include-hidden-files: upload-artifact v4+ excludes dotfiles by
         # default, and every coverage data file is a dotfile.
         # timeout-minutes (#3172): same job-cap-cancel hole as every
@@ -2567,7 +2568,7 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/8)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/10)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-coverage-combine:
@@ -2593,11 +2594,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 33 > the 29 min of bounded step caps below + ~1-2 min of honest
+    # 37 > the 33 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 33
+    timeout-minutes: 37
     continue-on-error: true
     defaults:
       run:
@@ -2621,7 +2622,7 @@ jobs:
 
       - name: Download shard 1 coverage data
         id: shard-1
-        # Same pinned download-artifact as quality-gate.yml. Eight explicit
+        # Same pinned download-artifact as quality-gate.yml. Ten explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
         # a shard that produced no artifact (see the job header).
@@ -2695,11 +2696,29 @@ jobs:
           name: python-coverage-data-shard-8
           path: backend
 
+      - name: Download shard 9 coverage data
+        id: shard-9
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-9
+          path: backend
+
+      - name: Download shard 10 coverage data
+        id: shard-10
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-10
+          path: backend
+
       - name: Combine coverage + write XML (offline, all shards)
         # Runs in this fan-in job with every shard's pytest long gone, so
         # `coverage combine` merges the downloaded per-worker parallel data
         # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the eight shard runners and for
+        # so paths are repo-relative across the ten shard runners and for
         # SonarCloud cross-job mapping (#1987 AC6).
         #
         # `if: always()` + the ls guard: combine whatever shards delivered —
@@ -2720,9 +2739,9 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this run", the documented lossy contract. This fan-in
-        # job's budget: downloads 8 x 2 + this step 4 + upload 2 + the test
-        # map 5 + its upload 2 = 29 min of bounded steps + checkout/uv/sync
-        # (~1-2 min honest) under the 33-min job cap, so step caps always
+        # job's budget: downloads 10 x 2 + this step 4 + upload 2 + the test
+        # map 5 + its upload 2 = 33 min of bounded steps + checkout/uv/sync
+        # (~1-2 min honest) under the 37-min job cap, so step caps always
         # fire first.
         if: always()
         timeout-minutes: 4
@@ -2761,7 +2780,7 @@ jobs:
         # #5642. The map says which tests run each source file. Pull
         # requests use it to run only the tests their change can break (the
         # `changes` job, step `map`). Only the nightly run on `main` makes
-        # it, and only when all 8 shards delivered their data: a map from
+        # it, and only when all 10 shards delivered their data: a map from
         # partial data would pick too few tests. The download steps and the
         # junit count below are not proof of that: a crashed worker leaves
         # a junit file but no coverage data, and the download still works.
@@ -2774,14 +2793,15 @@ jobs:
           steps.shard-1.outcome == 'success' && steps.shard-2.outcome == 'success' &&
           steps.shard-3.outcome == 'success' && steps.shard-4.outcome == 'success' &&
           steps.shard-5.outcome == 'success' && steps.shard-6.outcome == 'success' &&
-          steps.shard-7.outcome == 'success' && steps.shard-8.outcome == 'success'
+          steps.shard-7.outcome == 'success' && steps.shard-8.outcome == 'success' &&
+          steps.shard-9.outcome == 'success' && steps.shard-10.outcome == 'success'
         # No map tonight is fine: pull requests then run all the shards.
         continue-on-error: true
         timeout-minutes: 5
         run: |
           mapfile -t junit < <(ls pytest-coverage-junit-*.xml 2>/dev/null)
-          if [ "${#junit[@]}" -ne 8 ]; then
-            echo "::warning::found ${#junit[@]} of 8 junit files; no test map tonight"
+          if [ "${#junit[@]}" -ne 10 ]; then
+            echo "::warning::found ${#junit[@]} of 10 junit files; no test map tonight"
             exit 0
           fi
           uv run python tests/_unit_test_map.py build --data .coverage \

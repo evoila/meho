@@ -2530,15 +2530,15 @@ run, not a broken `main`.
   makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
   so the coverage data records which test function ran each line. That
   needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
-  coverage pytest step may take 45 minutes. Each shard runs three test
-  workers (`-n 3`, #7103): serial shards needed more than 45 minutes by
-  November 2026, so no map was made. `.coveragerc.ci` leaves out files in
+  coverage pytest step may take 45 minutes. Since #7103 the sweep runs in
+  10 shards with three test workers each (`-n 3`): 8 serial shards needed
+  more than 45 minutes by November 2026, so no map was made. `.coveragerc.ci` leaves out files in
   pytest temp folders: a test that imports a package from its temp folder
   made `coverage xml` fail with "No source for code". Each coverage shard also writes
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
   (kept 8 days). It does this only on the `schedule` run, and only when all
-  eight shards delivered their data. A crashed worker leaves a junit file
+  ten shards delivered their data. A crashed worker leaves a junit file
   but no coverage data (the worker writes its data only at the end of its
   session), and the download of that shard still works. So the tool checks
   each junit file: one that reports a crashed worker, or whose tests are
@@ -2929,7 +2929,7 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
-# The CI coverage run is nightly, in 8 shards, with COVERAGE_CORE=ctrace;
+# The CI coverage run is nightly, in 10 shards, with COVERAGE_CORE=ctrace;
 # see "Coverage handoff to SonarCloud" above and sonarcloud.md.
 
 # Go

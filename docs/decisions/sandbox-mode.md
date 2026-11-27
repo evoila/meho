@@ -7,6 +7,7 @@
 **Adds one exception to:** requirement 1 of [governed-delete-operations.md](governed-delete-operations.md), on a sandbox instance only
 **Same pattern as:** the boot-only switch for delegated decisions ([#3693](https://github.com/evoila/meho/issues/3693))
 **Amended 2026-10-28:** a boot setting lets REST and the CLI create delete grants too ([#5251](https://github.com/evoila/meho/issues/5251)); see "Grants in sandbox mode".
+**Amended 2026-11-27:** `hard_to_undo` named as a delete sign with the switch `CUSTOM_POLICY` on.
 
 ## The decision
 
@@ -28,6 +29,7 @@
 - **Delete grant:** a standing grant that only sandbox mode allows: for an operation with a delete sign, or for a delete step of a multi-step operation. Every other grant is an **ordinary grant** and works as today.
 - **Sandbox mode:** one setting for the whole instance. It says that the instance holds only disposable systems.
 - **Delete sign:** how the code sees that an operation deletes something: the safety level `destructive`, the HTTP verb `DELETE`, the tag `destructive`, or a delete name (`DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`; [#4632](https://github.com/evoila/meho/issues/4632) adds vendor action names such as `Destroy_Task`).
+  - With the switch `CUSTOM_POLICY` on, the value `hard_to_undo` in an operation's own definition is a delete sign too, so a delete grant can cover such an operation in sandbox mode. One limit: for an operation that waits on every call because it can read, write or make a credential, `hard_to_undo` alone never opens the delete grant.
 - **Preview hash:** a check value of a preview result. A `destructive` call must send the value that its preview gave.
 - **Blast radius:** what a delete affects: the object, its child objects, and whether it can be undone.
 - **Multi-step operation:** one operation that runs several steps (the code calls it a composite). Each step that writes passes its own check, the step gate.

@@ -172,6 +172,8 @@ class HypervOp:
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None
+    changes_rights: bool = False
 
 
 def normalise_json_rows(payload: Any) -> list[dict[str, Any]]:

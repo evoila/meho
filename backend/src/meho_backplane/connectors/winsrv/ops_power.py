@@ -271,6 +271,7 @@ POWER_OPS: tuple[WinsrvOp, ...] = (
         tags=("write", "power", "shutdown"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="stops",
         llm_instructions={
             "when_to_use": (
                 "Power a Windows Server host down (it stays off until powered "

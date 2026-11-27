@@ -3824,43 +3824,17 @@ could not be made, because the dry run failed." A key that cannot be built
 and that sentence stay.
 
 When MEHO cannot read the manifest text (it is not valid YAML or JSON),
-MEHO keeps the manifest only in the encrypted hand-off, as for every
-manifest that holds a secret value (see `connectors-kubernetes.md`). With
-`APPROVAL_HANDOFF_ENCRYPTION_KEY` set, the call waits for approval.
-Without it, MEHO refuses the call at once with the refusal text of
-`HANDOFF_KEY_REFUSAL` ("MEHO cannot keep this request: ... Set
-APPROVAL_HANDOFF_ENCRYPTION_KEY on the MEHO server (in the Helm chart:
-approvalHandoff), then send the call again."). The `preview_error` of a
-waiting call is
-`ApplyManifestError: manifest is not valid YAML/JSON`, followed by one of
-these (`connectors/kubernetes/manifest_yaml.py`):
-
-- The explanation of the parser with the line and the column of each part,
-  for example `expected ',' or ']', but got '<stream end>' (line 1,
-  column 6)`. A quoted part stays when it names a token of the YAML
-  grammar, or when it is fixed text of the parser that says what it
-  wanted (`expected a digit or '.'`) and not the text it read (after
-  `found` or `got`). Any other quoted part (an alias name, a tag, a
-  character of the manifest) becomes `'…'`.
-- For a `%` escape in a tag that is not UTF-8 (`!<tag:%FF>`): `a
-  %-escape in a tag is not valid UTF-8`, with the line and the column and
-  no byte value.
-- For a character the reader refuses (a control character):
-  `unacceptable character: special characters are not allowed (position
-  N)`, where N counts the characters from the start of the text.
-- For a value that its tag cannot read (`!!int abc`): `a value cannot be
-  read as the type its tag names (line L, column C)`.
-- Nothing more for an error with no explanation (for example an object
-  nested too deep).
+the call is refused before the wait: no approval request is stored and no
+card is made. The refusal is "document N is not valid YAML or JSON (KIND,
+line L, column C)", with one fixed phrase for KIND and no text of the
+manifest or of the YAML reader (see "`k8s.apply` manifest form" in
+`connectors-kubernetes.md`). The same text is in the answer of
+`preview_operation`, and the audit row and the logs quote no value of the
+manifest.
 
 In every `preview_error` (of any operation), a null character becomes
 the two characters `\0`, because PostgreSQL cannot store it in the row
 (`preview_failure_reason` in `operations/_preview.py`).
-
-The text quotes nothing of the manifest. The same text is in the stored
-request, the console card, the REST views, the MCP approvals tools, the
-audit rows, the log line `proposed_effect_preview_failed` and the answer
-of the run after approval.
 
 ## Credential writes: what the approver sees (#4850)
 

@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block_run import (
+    in_cleanup,
     mark_step_refused,
     run_login,
     step_refused_in_run,
@@ -296,7 +297,9 @@ async def raise_if_send_refused() -> None:
     refusal. A request that is already on its way to a system runs to its
     end. The login is the one the dispatcher noted for the running call
     (:func:`~meho_backplane.auth.principal_block_run.tracking_run`), plus
-    every login bound with :func:`checking_logins_for_steps`.
+    every login bound with :func:`checking_logins_for_steps`. A clean-up
+    (:func:`~meho_backplane.auth.principal_block_run.cleanup_without_block_check`)
+    is not checked.
 
     Raises :class:`PrincipalBlockedStepError` when an earlier step of the
     run was refused, when a login is blocked, or when the list cannot be
@@ -305,7 +308,7 @@ async def raise_if_send_refused() -> None:
     in that time.
     """
     login = run_login()
-    if login is None:
+    if login is None or in_cleanup():
         return
     refusal = await _refusal_for_login(login[0], login[1], only_in_steps=False)
     if refusal is not None:

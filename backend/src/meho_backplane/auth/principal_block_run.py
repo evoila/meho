@@ -20,6 +20,12 @@ below the record of the operation.
 
 Both marks also reach the records above, so the multi-step operation knows
 what its steps did.
+
+* :func:`cleanup_without_block_check` marks a clean-up: the removal of an
+  account, user or token that the same run just made on a target and could
+  not store. Its requests run with no block check (:func:`in_cleanup`).
+  :func:`note_not_removed` notes what such a clean-up could not remove, so
+  the answer names it (:func:`not_removed`).
 """
 
 from __future__ import annotations
@@ -31,9 +37,13 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 __all__ = [
+    "cleanup_without_block_check",
+    "in_cleanup",
     "mark_request_sent",
     "mark_step_refused",
     "mark_step_sent",
+    "not_removed",
+    "note_not_removed",
     "raise_if_step_was_refused",
     "request_was_sent",
     "run_login",
@@ -51,6 +61,7 @@ class _Run:
     sent: bool = False
     steps_sent: list[str] = field(default_factory=list)
     refused: Exception | None = None
+    not_removed: list[str] = field(default_factory=list)
 
     def with_parents(self) -> Iterator[_Run]:
         run: _Run | None = self
@@ -60,6 +71,7 @@ class _Run:
 
 
 _run_var: ContextVar[_Run | None] = ContextVar("principal_block_run", default=None)
+_cleanup_var: ContextVar[bool] = ContextVar("principal_block_cleanup", default=False)
 
 
 @contextmanager
@@ -160,3 +172,39 @@ def step_refused_in_run() -> Exception | None:
     if run is None:
         return None
     return next((each.refused for each in run.with_parents() if each.refused is not None), None)
+
+
+@contextmanager
+def cleanup_without_block_check() -> Iterator[None]:
+    """Run the requests of this block with no block check: the one way to skip it.
+
+    Only for a clean-up: the removal of an account, user or token that the
+    same run just made on a target and could not store, and the end of
+    MEHO's own Vault login. The requests still count as sent.
+    """
+    token = _cleanup_var.set(True)
+    try:
+        yield
+    finally:
+        _cleanup_var.reset(token)
+
+
+def in_cleanup() -> bool:
+    """True inside :func:`cleanup_without_block_check`."""
+    return _cleanup_var.get()
+
+
+def note_not_removed(what: str) -> None:
+    """Note that a clean-up of the running operation could not remove *what*."""
+    run = _run_var.get()
+    if run is None:
+        return
+    for each in run.with_parents():
+        if what not in each.not_removed:
+            each.not_removed.append(what)
+
+
+def not_removed() -> list[str]:
+    """What the clean-ups of the running operation could not remove, in order."""
+    run = _run_var.get()
+    return [] if run is None else list(run.not_removed)

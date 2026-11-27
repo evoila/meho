@@ -54,7 +54,6 @@ if a token leaks via a future log-instrumentation regression.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -66,7 +65,8 @@ import requests.exceptions
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.send_check import to_thread_checked
+from meho_backplane.auth.principal_block_run import cleanup_without_block_check
+from meho_backplane.auth.send_check import checked_requests_adapter, to_thread_checked
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
@@ -148,12 +148,17 @@ def _build_client(settings: Settings, *, token: str | None = None) -> hvac.Clien
             "set VAULT_ADDR, or use CREDENTIAL_BACKEND=gsm for a "
             "Vault-free install."
         )
-    return hvac.Client(
+    client = hvac.Client(
         url=str(settings.vault_addr).rstrip("/"),
         namespace=settings.vault_namespace,
         timeout=settings.vault_timeout_seconds,
         token=token,
     )
+    # Each request of the client passes the block check of the running call
+    # (:mod:`meho_backplane.auth.send_check`).
+    for prefix in ("http://", "https://"):
+        client.session.mount(prefix, checked_requests_adapter())
+    return client
 
 
 def _do_jwt_login(client: hvac.Client, *, role: str, jwt: str, mount_path: str) -> None:
@@ -200,8 +205,9 @@ async def _to_thread_jwt_login(
 
 
 async def _to_thread_revoke_self(client: hvac.Client) -> None:
-    """Run :func:`_do_revoke_self` off the event loop."""
-    await asyncio.to_thread(_do_revoke_self, client)
+    """Run :func:`_do_revoke_self` off the event loop, as a clean-up with no block check."""
+    with cleanup_without_block_check():
+        await to_thread_checked(_do_revoke_self, client)
 
 
 def _do_read_health(client: hvac.Client) -> Any:

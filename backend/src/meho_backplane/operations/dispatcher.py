@@ -299,7 +299,7 @@ import ssl
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import httpx
 import hvac.exceptions
@@ -312,6 +312,7 @@ from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise
 from meho_backplane.auth.principal_block_run import (
     mark_request_sent,
     raise_if_step_was_refused,
+    step_refused_in_run,
     tracking_run,
 )
 from meho_backplane.auth.secret_read_as import track_secret_read_as
@@ -889,6 +890,13 @@ async def _run_source_kind_branch(
     return raw
 
 
+#: The handlers of the Vault connector note each request they send: every
+#: Vault request passes the block check and is noted on its own
+#: (:mod:`meho_backplane.auth.send_check`). So the dispatcher does not count
+#: such an operation as sent from its start.
+_HANDLERS_THAT_NOTE_EACH_SEND: Final[str] = "meho_backplane.connectors.vault."
+
+
 async def _run_source_kind_handler(
     *,
     descriptor: EndpointDescriptor,
@@ -915,9 +923,14 @@ async def _run_source_kind_handler(
     # a login blocked while the call waited for its policy gate or its
     # credentials gets no handler run (``auth.principal_block``).
     await raise_if_send_refused()
-    if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
-        # Only the HTTP connector base notes each request it sends. Any other
-        # client (SSH, a vendor library) counts as sent from its start.
+    if (
+        descriptor.source_kind != "composite"
+        and not hasattr(connector_instance, "_request_json")
+        and not (descriptor.handler_ref or "").startswith(_HANDLERS_THAT_NOTE_EACH_SEND)
+    ):
+        # The HTTP connector base and the Vault operations note each request
+        # they send. Any other client (SSH, another vendor library) counts as
+        # sent from its start.
         mark_request_sent()
     if descriptor.source_kind == "ingested":
         assert connector_instance is not None  # resolver miss handled by caller
@@ -4030,14 +4043,36 @@ async def _handle_needs_approval(
     # banner at park time instead of failing only after a four-eyes
     # approval. Fail-soft too: a probe fault degrades to no banner. When the
     # build raises, the request still stores the catalog risk level.
-    proposed_effect = await _build_park_effect(
+    # The preview and the permission check may send requests (a Vault login
+    # and a capabilities request). They run with the caller's block check,
+    # like the call itself: a caller blocked while they run gets the block
+    # refusal and no approval request.
+    with tracking_run(
+        is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
+        login=(operator.sub, operator.tenant_id),
         op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
+    ):
+        proposed_effect = await _build_park_effect(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+        refused_while_preparing = step_refused_in_run()
+    if isinstance(refused_while_preparing, PrincipalBlockedStepError):
+        return await _audit_denied_and_return(
+            refusal_for_blocked_step(op_id, refused_while_preparing).model_copy(
+                update={"duration_ms": duration_ms}
+            ),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
     # #3197: the destructive tier refuses to park (fail-closed, no approval
     # row) unless the caller presented a matching preview_hash and the

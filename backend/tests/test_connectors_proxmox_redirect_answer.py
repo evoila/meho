@@ -22,7 +22,6 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-import meho_backplane.connectors.proxmox  # noqa: F401 -- registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.proxmox import ProxmoxConnector
 from meho_backplane.connectors.proxmox.session import ProxmoxCredentials

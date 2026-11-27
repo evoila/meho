@@ -50,6 +50,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPermission, ApprovalRequest, AuditLog, PermissionVerdict
 from meho_backplane.mcp.tools.approvals import _row_to_dict
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
+from meho_backplane.operations.role_floors import READER_CHANGE_CODE, READER_CHANGE_SENTENCE
 from tests.test_k8s_apply_object_summary import _Response
 from tests.test_ui_approvals import (
     _RESOLVE_OPERATOR,
@@ -66,7 +67,6 @@ _TENANT = uuid.UUID("00000000-0000-0000-0000-00000000c4d2")
 _CONNECTOR_ID = "k8s-1.x"
 _AGENT_CLIENT = "agent:apply-card"
 _SUMMARY_FAILED = "The summary of the objects could not be made, because the dry run failed."
-_NOT_READ = "The live object was not read: the login that asked has a role below Operator."
 
 
 @pytest.fixture(autouse=True)
@@ -340,18 +340,31 @@ _LIVE = {
 
 
 def test_a_read_only_login_makes_no_live_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Reader's apply is refused before the card is made: no live read, nothing stored."""
     server = _StandInServer(live=_LIVE)
     _setup(monkeypatch, server)
 
-    row = _park(_login("reader", role=TenantRole.READ_ONLY), _DEPLOYMENT)
+    async def _do() -> tuple[Any, int]:
+        result = await dispatch(
+            operator=_login("reader", role=TenantRole.READ_ONLY),
+            connector_id=_CONNECTOR_ID,
+            op_id="k8s.apply",
+            target=_Target(),
+            params={"manifest": _DEPLOYMENT},
+        )
+        async with get_sessionmaker()() as session:
+            stored = (
+                await session.execute(select(func.count()).select_from(ApprovalRequest))
+            ).scalar_one()
+        return result, int(stored)
 
+    result, stored = asyncio.run(_do())
+
+    assert result.status == "denied", result
+    assert result.extras["reason_code"] == READER_CHANGE_CODE
+    assert READER_CHANGE_SENTENCE in result.extras["reason"]
+    assert stored == 0
     assert server.reads() == 0
-    (entry,) = row.proposed_effect["preview"]["object_summary"]
-    assert entry["state"] == "not_read"
-    card = _console_card(row)
-    assert "not read" in card
-    assert _NOT_READ in card
-    assert "helm" not in card
 
 
 @pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.TENANT_ADMIN])

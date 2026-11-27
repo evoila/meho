@@ -48526,6 +48526,11 @@
             "type": "object",
             "nullable": true,
             "title": "Client"
+          },
+          "display_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Display Name"
           }
         },
         "type": "object",

@@ -35,12 +35,11 @@ from __future__ import annotations
 
 import functools
 import inspect
-import os
 from typing import Any, Final
 
 from meho_backplane.connectors.keycloak.session import resolve_realm_config
 from meho_backplane.operations.required_fields import register_required_fields
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.targets.keycloak_realm_warnings import answer_realm_on
 
 __all__ = ["REALM_FIELD", "answer_realm_on", "name_the_realm"]
 
@@ -48,15 +47,6 @@ __all__ = ["REALM_FIELD", "answer_realm_on", "name_the_realm"]
 REALM_FIELD: Final = "managed_realm"
 
 _HANDLER_PARAMS: Final = ["self", "operator", "target", "params"]
-
-
-def answer_realm_on() -> bool:
-    """Return the state of the ``KEYCLOAK_ANSWER_REALM`` switch.
-
-    Read from the env name, with the same parser as
-    :attr:`~meho_backplane.settings.Settings.keycloak_answer_realm`.
-    """
-    return parse_bool_env(os.environ.get("KEYCLOAK_ANSWER_REALM"))
 
 
 def _wrap(handler: Any) -> Any:

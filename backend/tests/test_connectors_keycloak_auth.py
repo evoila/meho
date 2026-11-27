@@ -458,6 +458,33 @@ async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [{}, {"realm": ""}, {"realm": None}, {"realm": 7}],
+    ids=["no-realm-field", "empty", "null", "not-text"],
+)
+async def test_fingerprint_says_nothing_about_the_name_when_keycloak_gives_none(
+    answer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the switch on, an answer with no realm name gets no realm-name line."""
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true")
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
+        )
+        mock.get("/admin/realms/example").respond(200, json=answer)
+        mock.get("/admin/serverinfo").respond(404)
+        fp = await connector.fingerprint(_TARGET, operator=_make_operator())
+
+    assert fp.extras["managed_realm"] == "example"
+    assert "realm_name_differs" not in fp.extras
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_fingerprint_version_none_when_serverinfo_unavailable() -> None:
     """A 404 on /admin/serverinfo leaves version=None but keeps reachable=True."""
     connector = _make_connector()

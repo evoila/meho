@@ -3099,3 +3099,80 @@ async def test_probe_missing_target_secret_returns_422_with_fix(
     assert ref in detail["message"]
     assert "http" not in str(detail)
     assert "fingerprint_failed" not in str(detail)
+
+
+@pytest.mark.asyncio
+async def test_a_saved_realm_name_note_shows_only_while_the_answer_realm_switch_is_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe made with the switch on saves ``realm_name_differs``.
+
+    After the switch is turned off, the target read and the target list leave
+    the line out of the saved probe, with no new probe. Turned on again, the
+    read shows it.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import register_connector
+    from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
+
+    note = "Keycloak answered with a realm name that is not the managed realm."
+    fingerprint = FingerprintResult(
+        vendor="keycloak",
+        product="keycloak",
+        version="26.0.5",
+        reachable=True,
+        probed_at=datetime.now(UTC),
+        probe_method="GET /admin/realms/example",
+        extras={"realm": "Example", "managed_realm": "example", "realm_name_differs": note},
+    )
+    probes = 0
+
+    class _FakeConnector(Connector):
+        product = "keycloak"
+
+        async def probe(self, target: Any) -> ProbeResult:
+            raise NotImplementedError
+
+        async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+            nonlocal probes
+            probes += 1
+            return fingerprint
+
+        async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+            raise NotImplementedError
+
+    register_connector("keycloak", _FakeConnector)
+    tenant_id = DEFAULT_TENANT_ID
+    await _insert_target(
+        tenant_id=uuid.UUID(tenant_id),
+        name="example-keycloak",
+        product="keycloak",
+        host="keycloak.example.invalid",
+    )
+    key = make_rsa_keypair("kid-A")
+    headers = {"Authorization": f"Bearer {_operator_token(key, tenant_id)}"}
+
+    def _saved_extras() -> tuple[dict[str, Any], dict[str, Any]]:
+        detail = client.get("/api/v1/targets/example-keycloak", headers=headers)
+        listed = client.get("/api/v1/targets", headers=headers)
+        assert detail.status_code == 200
+        assert listed.status_code == 200
+        (row,) = listed.json()["items"]
+        return detail.json()["fingerprint"]["extras"], row["fingerprint"]["extras"]
+
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true")
+        probed = client.post("/api/v1/targets/example-keycloak/probe", headers=headers)
+        assert probed.status_code == 200
+        assert probed.json()["extras"]["realm_name_differs"] == note
+
+        monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "false")
+        for extras in _saved_extras():
+            assert "realm_name_differs" not in extras
+            assert extras["realm"] == "Example"
+
+        monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true")
+        for extras in _saved_extras():
+            assert extras["realm_name_differs"] == note
+    assert probes == 1

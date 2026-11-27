@@ -435,8 +435,15 @@ async def test_create_of_the_managed_realm_works(operator: Operator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_works_through_a_target_whose_probe_failed(operator: Operator) -> None:
-    """The realm does not exist yet, so the probe found nothing: the create still makes it."""
+async def test_create_works_through_a_target_whose_probe_failed(
+    operator: Operator,
+    real_managed_realm_check: None,
+) -> None:
+    """The realm does not exist yet, so the probe found nothing: the create still makes it.
+
+    The realm read answers 404, as for a realm that does not exist, and the
+    realm check really runs.
+    """
     async with get_sessionmaker()() as session:
         row = await resolve_target(session, operator.tenant_id, _TARGET_NAME)
         row.fingerprint = {
@@ -448,6 +455,7 @@ async def test_create_works_through_a_target_whose_probe_failed(operator: Operat
         await session.commit()
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         _mount_token(mock)
+        mock.get(_REALM_PATH).respond(404, json={"error": "Realm not found."})
         post_route = mock.post("/admin/realms").respond(201)
         result = await _dispatch(operator, _CREATE, _fenced_params(_CREATE, _REALM), approved=True)
 

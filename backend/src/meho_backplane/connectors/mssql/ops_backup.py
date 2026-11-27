@@ -95,7 +95,7 @@ BACKUP_OPS: tuple[MssqlOp, ...] = (
             "when_to_use": (
                 "Back up a database to a disk device the SQL Server service "
                 "account can write. It overwrites an older backup at the same "
-                "path: that older backup is gone. Use a new path to keep it. "
+                "path: that older backup is gone. "
                 "Recoverable; safety_level=caution. " + TDS_TRANSPORT_NOTE
             ),
             "parameter_hints": {

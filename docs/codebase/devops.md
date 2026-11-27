@@ -2153,11 +2153,11 @@ prints `df -h /` right after the build step. On the first hosted run
 (#4626, step 3) the build waited 3 seconds, took 2 minutes 20 seconds
 with a warm cache, and left 85 GB free.
 
-Each `python-unit-shard` carries a 20-minute
+Each `python-unit-shard` carries a 35-minute
 `timeout-minutes` (hang backstop only — the expected shard job wall is
-~8 min: ~2 min setup + ~6 min pytest, down from the pre-#3251
-monolithic lane's ~15-18 min serial pytest wall); a per-shard
-perf-budget-guard step (`budget_s=1200` for all six shards; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
+~17-21 min: ~2 min setup + ~15-19 min pytest on busy runners; it was
+30 minutes until 2026-11-27); a per-shard
+perf-budget-guard step (`budget_s=1500` for all six shards; 1200 s until 2026-11-27; 900 s until 2026-11-18; 660 s until 2026-10-24, scaled
 from the old 1320 s whole-suite budget) is the PR-level early-warning
 gate that fires well below the cap. `python-lint` and the fan-in carry
 10 and 5 minutes.
@@ -2245,7 +2245,20 @@ shape (deterministic file-level matrix + fan-in):
   Measured in that merge-queue run: 765, 915, 873, 850, 805 and 854 s,
   which is 64 to 76 percent of 1200 s, so every shard stays under 80
   percent. The gate stays on. A seventh shard was not added: it changes
-  the required check names. To change the count, edit the
+  the required check names. On 2026-11-27 a merge-queue run failed only
+  on time: shard 3 took 1212 s, with every test passing (#7160). In four
+  green merge-queue runs the shards took 908-1124 s, and in five pull
+  request runs 827-1136 s, so every shard was near 1200 s. Fresh file
+  times do not help: they were refreshed on 2026-11-26 (#7033), and the
+  split already gives each shard about 2,248 s of test time. A seventh
+  shard needs a seventh runner in the merge-queue runner set, which is
+  sized outside this repository. So all six shards now have a budget of
+  1500 s. The slowest measured shard (1213 s) uses 81 percent of it,
+  and the average shard (about 1040 s) about 70 percent. The time check
+  stays on as an early warning: it still fails a shard that runs longer
+  than 1500 s. The job limit went from 30 to 35 minutes, so setup plus
+  1500 s still fits under it and the time check always fires first.
+  To change the count, edit the
   matrix and `TOTAL` in the pytest step together; `tests/test_unit_shard_split.py` checks that they match. File-level sharding is
   strictly coarser than what xdist `--dist loadscope` already does across
   workers (whole modules stay together, conftest semantics identical to a

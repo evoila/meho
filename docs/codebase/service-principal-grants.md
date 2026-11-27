@@ -256,6 +256,16 @@ and no run approval covers it.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
   (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
+- With the switch `CUSTOM_POLICY` on, the params of one call can also give
+  it a delete sign: a connector's delete check (`declare_delete_check`,
+  `op_classes.py`) says the call deletes something, for example
+  `argocd.app.sync` or `argocd.app.rollback` with `prune` `true`. The
+  row of that call gets `delete_call_reason`, and
+  `_delete_shaped_reason_by_descriptor` reads it. No grant and no run
+  approval covers the call; grant create still takes the operation, since
+  its calls without the param delete nothing. The approval request has
+  `delete_wait` in its proposed effect, the sentence of the check, and the
+  approval card shows it.
 - A grant row that names such an op stays stored, but it never runs the
   call. `meho service-principals grants list` shows it as before.
 - The child operation check (`governed_subops.classify_subop_grantability`)

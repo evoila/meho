@@ -3645,6 +3645,9 @@ async def _build_proposed_effect(
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
             base["credential_wait"] = CREDENTIAL_CARD_LINE
+        # With CUSTOM_POLICY on: why a call whose params delete something waits.
+        if descriptor.delete_call_reason is not None:
+            base["delete_wait"] = descriptor.delete_call_reason
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so

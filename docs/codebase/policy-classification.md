@@ -406,6 +406,29 @@ connector kit (kit 1.7 or higher).
   runs a workload) carries no `hard_to_undo` on the whole operation. Its
   `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`
   names these calls and checks their stored rows.
+- With the switch `CUSTOM_POLICY` on, such a call can have a delete sign
+  of its own, read from its params. A connector registers a delete check
+  with `declare_delete_check` (`op_classes.py`). The check gets the params
+  of one call and returns one plain sentence that says what the call
+  deletes, or `None`. A check that fails counts as a call that deletes.
+  `raise_descriptor_for_params` (`operations/wait_when_set.py`) asks the
+  check only with the switch on. It sets `requires_approval` and
+  `delete_call_reason` on the row of that one call; the stored row does
+  not change. The dispatcher and the preview both run it before the
+  policy gate, so the preview shows the same wait as the call.
+  `_delete_shaped_reason_by_descriptor` reads `delete_call_reason` as a
+  delete sign: a standing grant and a run approval do not cover the call,
+  and the fixed rule `floor:delete_waits` names it. The approval card
+  shows the sentence (`proposed_effect.delete_wait`).
+  - `argocd.app.sync` and `argocd.app.rollback`: a call with `prune`
+    `true` waits for a person. A call with `prune` `false` or without
+    `prune` keeps the rules of its operation.
+  - `argocd.app.refresh` has no check: none of its params deletes.
+  - `argocd.app.set`, `k8s.apply`, `k8s.job.create` and `k8s.exec` have no
+    check: each of their calls waits for a person already, with the switch
+    on or off.
+  - `tests/test_delivery_call_delete_sign.py` sends each call through
+    `call_operation` and `preview_operation`, with the switch on and off.
 
 ## Known limits
 

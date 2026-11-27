@@ -36,10 +36,12 @@ from typing import Any, Final
 
 __all__ = [
     "DECLARABLE_OP_CLASSES",
+    "UNREADABLE_DELETE_REASON",
     "call_always_waits",
     "declare_credential_capable",
     "declare_credential_capable_match",
     "declare_credential_check",
+    "declare_delete_check",
     "declare_hidden_stored_param",
     "declare_no_secret_value",
     "declare_op_classes",
@@ -56,6 +58,7 @@ __all__ = [
     "is_root_shell",
     "is_safe_write",
     "needs_per_call_approval",
+    "params_delete_reason",
     "params_make_credential_call",
     "returns_no_secret_value",
     "sandbox_delete_grant_allowed",
@@ -81,6 +84,7 @@ _CREDENTIAL_CAPABLE: set[str] = set()
 _CREDENTIAL_CAPABLE_MATCHES: list[Callable[[str], bool]] = []
 _SANDBOX_DELETE_GRANT: set[str] = set()
 _CREDENTIAL_CHECKS: dict[str, Callable[[Mapping[str, Any]], bool]] = {}
+_DELETE_CHECKS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {}
 #: ``op_id`` -> (param name, check, refusal text or ``None``).
 _HIDDEN_STORED_PARAMS: dict[str, tuple[str, Callable[[Mapping[str, Any]], bool], str | None]] = {}
 
@@ -331,6 +335,46 @@ def params_make_credential_call(op_id: str, params: Mapping[str, Any]) -> bool:
         return True
 
 
+#: The reason of a call whose delete check could not read its params.
+UNREADABLE_DELETE_REASON: Final[str] = (
+    "MEHO cannot tell from this call if it deletes something, so a person checks it."
+)
+
+
+def declare_delete_check(op_id: str, check: Callable[[Mapping[str, Any]], str | None]) -> None:
+    """Register *check* to tell from the params whether a call of *op_id* deletes something.
+
+    *check* gets the params of one call. It returns one plain sentence that
+    says what the call deletes, or ``None`` when the call deletes nothing.
+    The sentence goes on the approval card. Only with the switch
+    ``CUSTOM_POLICY`` on does MEHO ask the check
+    (:func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`):
+    then a call that deletes something has a delete sign, so it waits for a
+    person, and no standing grant and no run approval covers it. A call
+    for which *check* returns ``None`` keeps the rules of the operation. A
+    new check for the same op id replaces the old one.
+    """
+    _DELETE_CHECKS[op_id] = check
+
+
+def params_delete_reason(op_id: str, params: Mapping[str, Any]) -> str | None:
+    """Return the sentence of the check of :func:`declare_delete_check` for *params*, or ``None``.
+
+    A check that raises, or that returns something other than a text or
+    ``None``, counts as a call that deletes: a call MEHO cannot read waits.
+    """
+    check = _DELETE_CHECKS.get(op_id)
+    if check is None:
+        return None
+    try:
+        reason = check(params)
+    except Exception:
+        return UNREADABLE_DELETE_REASON
+    if reason is None or (isinstance(reason, str) and reason):
+        return reason
+    return UNREADABLE_DELETE_REASON
+
+
 def call_always_waits(op_id: str, params: Mapping[str, Any]) -> bool:
     """Return ``True`` when a call of *op_id* with *params* waits for a person every time.
 
@@ -415,4 +459,5 @@ def _reset_declared_op_classes_for_testing() -> None:
     _CREDENTIAL_CAPABLE_MATCHES.clear()
     _SANDBOX_DELETE_GRANT.clear()
     _CREDENTIAL_CHECKS.clear()
+    _DELETE_CHECKS.clear()
     _HIDDEN_STORED_PARAMS.clear()

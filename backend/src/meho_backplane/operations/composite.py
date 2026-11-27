@@ -1313,9 +1313,15 @@ async def _gate_subop(
     if cleared:
         # The approved step is checked again, as a single call is: its risk
         # level now against its card, and the agent that asked
-        # (:mod:`.approved_run_rights`).
+        # (:mod:`.approved_run_rights`). With CUSTOM_POLICY on, the stored
+        # level of the step's operation counts too (``step_rule_rows``), as
+        # for a child call; with it off nothing more is read.
         step_refusal = await approved_step_refusal_now(
-            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+            operator=operator,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            target=target,
+            level_rows=await step_rule_rows(descriptor, operator.tenant_id),
         )
         if step_refusal is None:
             return _GoAhead.PERSON

@@ -41,7 +41,11 @@ With the switch on:
   level makes the step keep its own approval. When both a built-in row and
   a row of the caller's tenant are stored, a fact counts when either row
   holds it.
-  The copies also carry the stored ``hard_to_undo``; no fixed rule reads it.
+  The copies also carry the stored ``hard_to_undo``. With the switch on
+  it is a delete sign, so a step whose stored row has it keeps its own
+  approval, as a child call of the same operation does. The re-check of a
+  step's own approval reads the stored levels too
+  (:func:`~meho_backplane.operations.approved_run_rights.approved_step_refusal_now`).
 * In a run that goes on after a person's approval, these rules hold also
   when the step's policy answer lets it run at once
   (:func:`step_wait_reason_after_approval`). The reason MEHO stores for
@@ -158,7 +162,8 @@ async def step_rule_rows(
     the tags and the class. Its risk level is the higher of the step's
     declared level and the stored one. A fact counts when either row holds
     it: the step keeps its own approval when the rule holds for one copy.
-    The copies also carry the stored ``hard_to_undo``; no fixed rule reads it.
+    The copies also carry the stored ``hard_to_undo``: with the switch on it
+    is a delete sign, so a step whose stored row has it keeps its own approval.
     With no stored row it is ``[step]``. *step* keeps its declared values:
     the gate, the card and the approval request use it.
     """

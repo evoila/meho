@@ -977,12 +977,21 @@ HTTP verb, tags, class and risk level. A copy's risk level is the higher of
 the step's declared level and the stored one. So a stored `destructive`
 level makes the step keep its own approval. Such a step cannot wait without
 a preview hash, so it gets the refusal a `destructive` child call gets.
-The copies also carry the stored `hard_to_undo`; no fixed rule reads it.
+The copies also carry the stored `hard_to_undo`. With the switch on it is
+a delete sign, so a step whose stored row has `hard_to_undo` keeps its own
+approval, as a child call of the same operation does.
 When both a built-in row and a row of the caller's tenant are stored, the
 rules are asked once for each row, so a fact counts when either row holds
 it. The facts go only into copies of the step's row. The gate, the card and
 the approval request use the step's declared values. With the switch off,
 no stored row is read.
+
+When a person approved a step's own request and the run goes on, the step
+is checked again before it runs. With the switch on, its level then is the
+higher of its declared level and the levels of the stored rows of its
+operation. When that level is higher than the one on the step's approval
+card, the step does not run: it gets the refusal a child call of the same
+operation gets. With the switch off, nothing more is read.
 
 In a run that goes on after a person's approval, these rules hold also
 when a step's policy answer lets it run at once
@@ -1002,8 +1011,11 @@ refused with `composite_resume_read_not_sent`.
 
 Tests: `backend/tests/test_custom_policy_run_steps.py`,
 `backend/tests/test_custom_policy_run_steps_routes.py`,
-`backend/tests/test_custom_policy_run_steps_console_rights.py` and
-`backend/tests/test_custom_policy_run_steps_resend.py`. The switch-off
+`backend/tests/test_custom_policy_run_steps_console_rights.py`,
+`backend/tests/test_custom_policy_run_steps_resend.py`,
+`backend/tests/test_custom_policy_run_steps_stored_level.py`,
+`backend/tests/test_custom_policy_run_steps_hard_to_undo.py` and
+`backend/tests/test_custom_policy_run_steps_own_recheck.py`. The switch-off
 answers in these tests are fixed values recorded from a run on main.
 
 ## A credential call always waits for a person

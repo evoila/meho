@@ -584,7 +584,8 @@ async def test_the_trace_masks_a_path_value_of_an_operation_that_sends_a_secret(
     _, spans = await _stored_trace(result.audit_id)
     urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
     masked = f"https://{_HOST}/v1/keys/[redacted]"
-    assert urls == ([masked, f"{masked}/"] if redirected else [masked])
+    # Each entry names the address MEHO asked for, also after the 307.
+    assert urls == ([masked, masked] if redirected else [masked])
     agent_copy = await _agent_copy(result)
     assert masked in agent_copy
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
@@ -693,14 +694,12 @@ async def test_a_redirect_in_another_letter_case_still_masks_the_path_value(
     assert result.audit_id is not None
     _, spans = await _stored_trace(result.audit_id)
     urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
-    assert urls == [
-        f"https://{_HOST}/v1/proxy/keys/[redacted]",
-        f"https://{_HOST}/V1/PROXY/KEYS/[redacted]",
-    ]
+    # Both entries name the address MEHO asked for.
+    assert urls == [f"https://{_HOST}/v1/proxy/keys/[redacted]"] * 2
     agent_copy = await _agent_copy(result)
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
         assert "zq7" not in text.lower(), f"the path value is in {label}"
-        assert f"https://{_HOST}/V1/PROXY/KEYS/[redacted]" in text, label
+        assert f"https://{_HOST}/v1/proxy/keys/[redacted]" in text, label
 
 
 @pytest.mark.parametrize("redirected", [False, True], ids=["plain", "after-a-307"])
@@ -735,7 +734,7 @@ async def test_a_typed_operation_keeps_a_fixed_segment_equal_to_a_body_value(
     _, spans = await _stored_trace(result.audit_id)
     urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
     sent = f"https://{_HOST}{path}"
-    assert urls == ([sent, f"{sent}/"] if redirected else [sent])
+    assert urls == ([sent, sent] if redirected else [sent])
     agent_copy = await _agent_copy(result)
     assert sent in agent_copy
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):
@@ -783,7 +782,7 @@ async def test_the_trace_masks_a_filled_path_value_that_the_body_carries_too(
     _, spans = await _stored_trace(result.audit_id)
     urls = [span.attributes["url"] for span in spans if span.span_kind == "vendor_call"]
     masked = f"https://{_HOST}/v1/stores/[redacted]"
-    assert urls == ([masked, f"{masked}/"] if sent == "after-a-307" else [masked])
+    assert urls == ([masked, masked] if sent == "after-a-307" else [masked])
     agent_copy = await _agent_copy(result)
     assert masked in agent_copy
     for label, text in (("the trace", _as_text(spans)), ("the agent copy", agent_copy)):

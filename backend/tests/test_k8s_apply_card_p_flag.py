@@ -9,8 +9,8 @@ then a second person approves it and MEHO runs it. Each value is made up,
 with no word a hide rule knows.
 
 * The card's list of what each container runs shows ``-p`` and then the
-  hidden mark, as the Job previews do for the same command line, in the
-  console card, the person REST view and the stored card, also after the run.
+  hidden mark in the console card, the person REST view and the stored
+  card, also after the run.
 * A custom kind with a map under a secret name (``credentials``) shows the
   whole map hidden, on every card and in every view.
 """
@@ -23,9 +23,7 @@ import uuid
 from typing import Any
 
 import pytest
-import yaml
 
-from meho_backplane.connectors.kubernetes.op_classes import hide_command_secrets
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from tests.test_k8s_apply_card_secrets import _approve_and_run, _made_up
@@ -106,28 +104,6 @@ def test_the_card_hides_the_argument_of_p_after_any_program(
     after = _stored(row.id)
     assert _command_line(after.proposed_effect) == line
     assert value not in json.dumps(_run_commands(_views(after)["rest-person"]))
-
-
-@pytest.mark.parametrize("form", sorted(_P_FORMS))
-def test_the_card_hides_the_argument_of_p_as_the_job_previews_do(
-    monkeypatch: pytest.MonkeyPatch, form: str
-) -> None:
-    server = _RecordingServer()
-    _setup(monkeypatch, server)
-    value = _made_up()
-    container = _P_FORMS[form].format(v=value)
-    manifest = _pod_block(container)
-
-    row = _park(_login("person-token"), manifest)
-
-    (entry,) = _run_commands(row.proposed_effect)
-    assert _command_line(row.proposed_effect) == hide_command_secrets(_raw_line(manifest))
-    assert value not in json.dumps(entry)
-
-
-def _raw_line(manifest: str) -> list[Any]:
-    (container,) = yaml.safe_load(manifest)["spec"]["containers"]
-    return [*container.get("command", []), *container.get("args", [])]
 
 
 def test_a_map_under_credentials_is_hidden_on_every_card(monkeypatch: pytest.MonkeyPatch) -> None:

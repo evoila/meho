@@ -89,9 +89,17 @@ value. So the error never quotes text of the manifest. The run after approval an
 The storage rule of a `k8s.apply` (`manifest_holds_credential` in
 `op_classes.py`) decides when the stored request keeps the manifest only
 in the encrypted one-time handoff of the run, as a credential write does.
-The card hides each value this rule counts. The card also hides every
-`env` and `httpHeaders` value, a whole map or list under a secret name,
-and the `kubectl.kubernetes.io/last-applied-configuration` annotation.
+The card hides a command line as the Job previews do, and it also hides
+every command-line value the storage rule counts. So a command-line value
+that makes MEHO keep a request only in the encrypted hand-off never shows
+on the card. For each item of `command` and `args`, the card joins the two
+answers (`_hide_command_line` with `apply_card=True` in
+`ops_write_preview.py`): when they are equal, or only one of them changed
+the item, the card shows that answer; when both changed the item in
+different ways, the card shows the whole item as one hidden mark. The card
+also hides every `env` and `httpHeaders` value, a whole map or list under
+a secret name, and the `kubectl.kubernetes.io/last-applied-configuration`
+annotation.
 The run after approval applies the manifest the caller sent, unchanged.
 The manifest is kept only in the handoff when:
 
@@ -116,8 +124,9 @@ The manifest is kept only in the handoff when:
   any name;
 - the `command` and `args` of a map at any depth, read as one command
   line, hold one of these values (`hide_command_secrets` with
-  `p_after_programs=True`; the card's list of what each container runs
-  hides each of them too):
+  `p_after_programs=True`). Inside one list item the rule reads words that
+  a space or a line continuation separates, and a new line ends a command
+  for it, as in a shell script:
   - the value after `NAME=` or `--name=` whose name holds one of the
     words above (`PGPASSWORD=x`, `--auth-mode=rbac`,
     `KEYCLOAK_URL=...`);
@@ -132,10 +141,8 @@ The manifest is kept only in the handoff when:
     glued to `-p` (`-pVALUE`) counts too. `mkdir -p /data`, `-p 8080`,
     `nc -l -p 8080`, `psql -p 5432` and `ssh -p 22` do not count: such a
     call waits for approval with its params on the row, also without the
-    key. The card's `-p` rule is wider: its list of what each container
-    runs hides the argument after `-p` after any program, as the Job
-    previews do (`p_any_program=True`), so it shows `mkdir -p` and then
-    the hidden mark;
+    key. The card still hides the argument after `-p` there, as the Job
+    previews do, so it shows `mkdir -p` and then the hidden mark;
   - the password of `user:password` after `-u` or `--user`, also glued
     to `-u` (`curl -uroot:x`);
   - inside the item after `sh -c` (or `-ec`, `-lc`), the same rules,

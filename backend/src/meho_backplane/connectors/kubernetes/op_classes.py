@@ -245,35 +245,28 @@ def _argument_text(part: Any) -> str | None:
     return str(part)
 
 
-def _hide_apply_item(
-    text: str, previous: str, *, p_program: bool, p_any_program: bool
-) -> tuple[str, str | None]:
-    """One item of a ``k8s.apply`` command line with its secret values hidden.
+def _hide_apply_item(text: str, previous: str, *, p_program: bool) -> tuple[str, str | None]:
+    """One item of a ``k8s.apply`` command line with the values the storage rule counts hidden.
 
-    A value glued to ``-p`` (``-pVALUE``) is hidden only in a command of a
-    program that takes a password there
-    (:func:`~meho_backplane.redaction.command_line.takes_password_after_p`,
-    *p_program* for the items before this one). The argument after ``-p``
-    is hidden there too, and with *p_any_program* (the card) after any
-    program. ``-uuser:password`` hides the password. Returned with the text
-    is the secret flag that waits for the next item.
+    ``-p`` takes a password only in a command of a program that takes one
+    there (:func:`~meho_backplane.redaction.command_line.takes_password_after_p`,
+    *p_program* for the items before this one). There a value glued to it
+    (``-pVALUE``) is hidden too. ``-uuser:password`` hides the password.
+    Returned with the text is the secret flag that waits for the next item.
     """
     shell = reads_shell_script(previous)
-    if not shell and text.startswith("-p") and (p_program or (p_any_program and text == "-p")):
+    if p_program and not shell and text.startswith("-p"):
         return (text, "secret") if text == "-p" else (f"-p{HIDDEN}", None)
     return hide_command_text(
         hide_in_text(text),
         None,
         shell=shell,
         p_programs=PASSWORD_P_PROGRAMS,
-        p_any_program=p_any_program,
         p_program_before=p_program and not shell,
     )
 
 
-def hide_command_secrets(
-    parts: list[Any], *, p_after_programs: bool = False, p_any_program: bool = False
-) -> list[Any]:
+def hide_command_secrets(parts: list[Any], *, p_after_programs: bool = False) -> list[Any]:
     """Copy one command line (``command`` + ``args``) with its secret values hidden.
 
     The words stay, so the approver still reads what runs. Hidden are: what
@@ -294,16 +287,15 @@ def hide_command_secrets(
     backslash escapes included (``"a\\" b"``, ``a\\ b``), and an unquoted
     shell operator ends it (``PGPASSWORD=x;id`` keeps ``id``).
 
-    *p_after_programs* is the rule of ``k8s.apply`` (:func:`_hide_apply_item`):
-    a value glued to ``-p`` is hidden after a program that takes a password
-    there (``mysql -pVALUE``), a password glued to ``-u`` is hidden
-    (``curl -uuser:password``), and the item after a secret flag is its
-    value also when it starts with a dash (``--password -x``). Alone, it is
-    the rule of the check of the stored request: ``-p`` is a secret flag
-    only after such a program (``mysql -p x``; ``mkdir -p /data`` stays).
-    With *p_any_program* it is the rule of the approval card: the argument
-    after ``-p`` is hidden after any program, as in the Job previews
-    (``mkdir -p /data`` shows ``-p`` and the hidden mark).
+    *p_after_programs* is the storage rule of ``k8s.apply``
+    (:func:`_hide_apply_item`): ``-p`` is a secret flag only after a program
+    that takes a password there (``mysql -p x``; ``mkdir -p /data`` stays),
+    and there a value glued to it is hidden too (``mysql -pVALUE``). A
+    password glued to ``-u`` is hidden (``curl -uuser:password``), and the
+    item after a secret flag is its value also when it starts with a dash
+    (``--password -x``). Inside one item it reads words that a space or a
+    line continuation separates, and a new line ends a command, as in a
+    shell script.
     """
     hidden: list[Any] = []
     pending: str | None = None
@@ -321,9 +313,7 @@ def hide_command_secrets(
             shown = hide_flag_value(pending, text)
             pending = None
         elif p_after_programs:
-            shown, pending = _hide_apply_item(
-                text, previous, p_program=p_program, p_any_program=p_any_program
-            )
+            shown, pending = _hide_apply_item(text, previous, p_program=p_program)
         else:
             shown, pending = hide_command_text(
                 hide_in_text(text), pending, shell=reads_shell_script(previous)

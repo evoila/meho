@@ -266,22 +266,37 @@ _NAME_VALUE_LISTS = ("env", "httpHeaders")
 _COMMAND_LISTS = ("command", "args")
 
 
+def _join_hidden_item(raw: Any, preview: Any, storage: Any) -> Any:
+    """One command-line item of the ``k8s.apply`` card from its two hidden forms.
+
+    *preview* is the item as the Job previews hide it, *storage* as the
+    storage rule hides it. When only one of them changed the item, the card
+    shows that one. When both changed it in different ways, the whole item
+    is one hidden mark, so the card shows no value that either one hides.
+    """
+    if preview == storage or storage == raw:
+        return preview
+    if preview == raw:
+        return storage
+    return _HIDDEN
+
+
 def _hide_command_line(node: dict[str, Any], *, apply_card: bool = False) -> dict[str, list[Any]]:
     """The ``command`` and ``args`` lists of *node* with their secret values hidden.
 
     Both lists are read as one command line, so a secret flag that ends
     ``command`` hides the first argument of ``args``. Keys whose value is
-    not a list are left out. *apply_card* is the rule of the ``k8s.apply``
-    card (:func:`~.op_classes.hide_command_secrets` with ``p_after_programs``
-    and ``p_any_program``): the argument after ``-p`` is hidden after any
-    program, as in the Job previews.
+    not a list are left out. With *apply_card* (the ``k8s.apply`` card) an
+    item is hidden when the Job previews hide it or the storage rule
+    (:func:`~.op_classes.hide_command_secrets` with ``p_after_programs``)
+    counts it (:func:`_join_hidden_item`).
     """
     lists = {key: node[key] for key in _COMMAND_LISTS if isinstance(node.get(key), list)}
-    hidden = hide_command_secrets(
-        [part for parts in lists.values() for part in parts],
-        p_after_programs=apply_card,
-        p_any_program=apply_card,
-    )
+    line = [part for parts in lists.values() for part in parts]
+    hidden = hide_command_secrets(line)
+    if apply_card:
+        storage = hide_command_secrets(line, p_after_programs=True)
+        hidden = [_join_hidden_item(*item) for item in zip(line, hidden, storage, strict=True)]
     out: dict[str, list[Any]] = {}
     start = 0
     for key, parts in lists.items():
@@ -765,9 +780,9 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     has the object (named as the card shows the document), the container
     name, the image, the
     ``command`` and ``args``, and in ``exec_commands`` the ``exec`` command of
-    each lifecycle hook and probe (:func:`_exec_commands`). Secret values are
-    hidden the way the Job previews hide them
-    (:func:`~.op_classes.hide_command_secrets`). Then *redact*, the shared
+    each lifecycle hook and probe (:func:`_exec_commands`). A value is hidden
+    when the Job previews hide it or the storage rule counts it
+    (:func:`_hide_command_line` with ``apply_card``). Then *redact*, the shared
     params redaction, runs over the entries. An empty list when
     no document runs a container.
 

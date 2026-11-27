@@ -168,7 +168,7 @@ the token stays valid.
 """
 
 from enum import StrEnum
-from typing import Final, NamedTuple
+from typing import Final, Literal, NamedTuple
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -177,6 +177,7 @@ __all__ = [
     "MACHINE_PRINCIPAL_KINDS",
     "OLD_GROUPS",
     "RUN_STOP_RULE",
+    "CallerKind",
     "GroupGrant",
     "Operator",
     "PrincipalKind",
@@ -257,6 +258,14 @@ class PrincipalKind(StrEnum):
     SERVICE = "service"
     AGENT = "agent"
     RUNNER = "runner"
+
+
+#: The kind of caller, from
+#: :func:`~meho_backplane.auth.caller_kind.caller_kind`. ``person`` is a
+#: person in the web console; ``personal_agent`` a person's token used by a
+#: tool; ``service_agent`` an agent or service login and a hosted agent run;
+#: ``runner`` a runner login; ``system`` a login that MEHO's own code makes.
+CallerKind = Literal["person", "personal_agent", "service_agent", "runner", "system"]
 
 
 class RoleGroup(StrEnum):
@@ -491,6 +500,22 @@ class Operator(BaseModel):
     #: with ``?results=structured`` (#4716). Only the MCP route sets it, from
     #: the URL; see :mod:`meho_backplane.mcp.structured_results`.
     mcp_structured_results: bool = False
+    #: The token of this call was checked by the REST or MCP token check,
+    #: for every kind of login, also on the status route. Only the four
+    #: token checks set it: :func:`~meho_backplane.auth.jwt.verify_jwt`,
+    #: :func:`~meho_backplane.auth.jwt.verify_jwt_allow_unchosen`,
+    #: :func:`~meho_backplane.auth.jwt.verify_jwt_platform_admin_way_back`
+    #: and :func:`~meho_backplane.mcp.auth.verify_mcp_jwt`. The web console
+    #: session, the scheduled agent run and every login that code builds
+    #: keep it ``False``.
+    token_checked: bool = False
+    #: The kind of caller that a login carries from where it was built.
+    #: Every place that builds an ``Operator`` itself sets it (a test scans
+    #: the source for them). The five console steps that check a person's
+    #: token with the shared token check set ``person``: the console
+    #: sign-in, the approval sign-in, the tenant choice, the reset of a
+    #: session whose tenant is gone, and the read of the approval sign-in.
+    in_code_kind: CallerKind | None = None
 
     @property
     def may_self_approve(self) -> bool:

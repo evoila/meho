@@ -6944,6 +6944,32 @@ type ExplainEvaluator struct {
 // ExplainEvaluatorVerdict defines model for ExplainEvaluator.Verdict.
 type ExplainEvaluatorVerdict string
 
+// ExplainOwnApproval May the person who asked approve the request that the call makes?
+//
+// The answer of the approve step for that request, once for each way to
+// approve: a click in the web console (“web“), and the command line or
+// REST (“token“). Each reason is the text the approve step shows.
+//
+// For an agent login or a service login, “web“ and “token“ are
+// “false“ for every operation, with the text of the approve sign: only
+// a person approves. For a person, “web“ and “token“ are “null“
+// when the approve step reads facts that only the call has (its values,
+// or what MEHO reads from them or from the target). Then both reasons
+// say so.
+type ExplainOwnApproval struct {
+	// Token True when an approve on the command line or REST does. False for an agent or service login. Null for a person when it depends on the values of the call.
+	Token *bool `json:"token"`
+
+	// TokenReason Why, in the words of the approve step.
+	TokenReason string `json:"token_reason"`
+
+	// Web True when a click in the web console approves it. False for an agent or service login. Null for a person when it depends on the values of the call.
+	Web *bool `json:"web"`
+
+	// WebReason Why, in the words of the approve step.
+	WebReason string `json:"web_reason"`
+}
+
 // ExplainRule One rule. “path“ is its place in the policy, when the policy set it.
 type ExplainRule struct {
 	// Path Place in the policy, for example tenant:classifications[2].
@@ -9250,6 +9276,20 @@ type PolicyExplainResponse struct {
 	// NotChecked Each check after the policy gate that explain does not ask and that can still refuse the call, by a fixed name. Empty for deny. Null for a stored approval request and for an error.
 	NotChecked *[]string `json:"not_checked"`
 	OpId       *string   `json:"op_id"`
+
+	// OwnApproval May the person who asked approve the request that the call makes?
+	//
+	// The answer of the approve step for that request, once for each way to
+	// approve: a click in the web console (``web``), and the command line or
+	// REST (``token``). Each reason is the text the approve step shows.
+	//
+	// For an agent login or a service login, ``web`` and ``token`` are
+	// ``false`` for every operation, with the text of the approve sign: only
+	// a person approves. For a person, ``web`` and ``token`` are ``null``
+	// when the approve step reads facts that only the call has (its values,
+	// or what MEHO reads from them or from the target). Then both reasons
+	// say so.
+	OwnApproval *ExplainOwnApproval `json:"own_approval,omitempty"`
 
 	// Request The rule stored on an approval request.
 	Request *ExplainStoredRequest       `json:"request,omitempty"`

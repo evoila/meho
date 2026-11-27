@@ -14,6 +14,7 @@ same order, so the sign never says something else than the approve does:
 
 1. A machine login never approves (:func:`_check_reviewer_role`).
 2. A ``read_only`` person without the ``approver`` flag cannot decide.
+   :func:`decide_refusal` gives these first two answers.
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
    for an admin, with a click in the web interface (the admin may be the
@@ -65,6 +66,7 @@ __all__ = [
     "ApproveRightReason",
     "approve_right",
     "approve_right_any_status",
+    "decide_refusal",
     "self_approval_confirmation",
 ]
 
@@ -220,15 +222,22 @@ def approve_right(
 
 
 def approve_right_any_status(
-    operator: Operator, request: ApprovalRequest, *, floor: InstallFloor | None = None
+    operator: Operator,
+    request: ApprovalRequest,
+    *,
+    floor: InstallFloor | None = None,
+    place: bool = True,
 ) -> ApproveRight:
     """Like :func:`approve_right`, but without the "still pending" check.
 
     The push messages (:mod:`meho_backplane.web_push.recipients`) ask who
     may approve a request also after it was decided: its decision message
-    goes to the same people as its first message.
+    goes to the same people as its first message. With *place* ``False`` a
+    routing refusal does not name the places of routing entries in the
+    policy (``meho policy explain`` for a caller who is not an admin).
     """
-    return _routed(operator, request, _right(operator, request, check_pending=False), floor)
+    right = _right(operator, request, check_pending=False)
+    return _routed(operator, request, right, floor, place=place)
 
 
 def _routed(
@@ -236,20 +245,28 @@ def _routed(
     request: ApprovalRequest,
     right: ApproveRight,
     floor: InstallFloor | None,
+    *,
+    place: bool = True,
 ) -> ApproveRight:
     """*right*, or a refusal when the install's routing or the stored group kinds refuse."""
     if not right.may_approve or not routing_enabled():
         return right
-    refusal = floor.refusal(operator, request) if floor is not None else None
+    refusal = floor.refusal(operator, request, place=place) if floor is not None else None
     if refusal is not None:
         return _refused(ApproveRightReason.NOT_ROUTED, refusal)
-    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule)
+    refusal = routing_refusal(operator, request.approver_roles, request.approver_rule, place=place)
     if refusal is None:
         return right
     return _refused(ApproveRightReason.NOT_ROUTED, refusal)
 
 
-def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool) -> ApproveRight:
+def decide_refusal(operator: Operator) -> ApproveRight | None:
+    """The refusal of the check the approve runs first, or ``None`` when *operator* may decide.
+
+    A machine login never approves, and a ``read_only`` person without the
+    ``approver`` flag cannot decide. The approve refuses these before it
+    reads anything of the request.
+    """
     try:
         _check_reviewer_role(operator)
     except NonHumanApprovalError:
@@ -263,6 +280,13 @@ def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool)
             "Your role cannot decide approval requests "
             "(operator role or the approver capability required).",
         )
+    return None
+
+
+def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool) -> ApproveRight:
+    refusal = decide_refusal(operator)
+    if refusal is not None:
+        return refusal
     if check_pending and request.status != ApprovalRequestStatus.PENDING.value:
         return _refused(
             ApproveRightReason.NOT_PENDING,

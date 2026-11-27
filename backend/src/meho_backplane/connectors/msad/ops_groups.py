@@ -327,6 +327,7 @@ def _member_write_op(op_id: str, handler_attr: str, verb: str, cmdlet: str) -> M
         tags=("write", "group", verb),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 f"{verb.replace('-', ' ').capitalize()} of an AD group (e.g. "
@@ -586,6 +587,8 @@ GROUP_OPS: tuple[MsadOp, ...] = (
         tags=("write", "group", "delete"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Delete an AD group. Irreversible; approval-gated — parks for a "

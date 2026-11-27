@@ -91,7 +91,7 @@ import sys
 import zipfile
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
@@ -121,6 +121,10 @@ _DOCS = re.compile(r"(^docs/|\.md$)")
 _CRASHED = "crashed while running"
 
 
+# The junit property that names the xdist worker of a test (tests/conftest.py).
+WORKER_PROPERTY = "xdist_worker"
+
+
 @dataclass
 class Shard:
     """What the pytest junit file of one coverage shard says."""
@@ -128,6 +132,8 @@ class Shard:
     name: str
     test_ids: list[str]
     crashed: list[str]  # Test ids whose xdist worker died while running them.
+    # xdist worker -> the test ids it ran. "" holds tests that name no worker.
+    workers: dict[str, list[str]] = field(default_factory=dict)
 
 
 def read_junit(path: Path, backend_root: Path) -> Shard:
@@ -136,7 +142,8 @@ def read_junit(path: Path, backend_root: Path) -> Shard:
     A test case carries ``classname`` (the dotted file path plus the class
     names) and ``name`` (the function name with its parameters). The path
     is the longest dotted prefix of ``classname`` that is a ``.py`` file
-    under ``backend_root``.
+    under ``backend_root``. The property ``xdist_worker`` of a test case
+    names the worker that ran it.
     """
     from defusedxml.ElementTree import parse
 
@@ -144,11 +151,20 @@ def read_junit(path: Path, backend_root: Path) -> Shard:
     for case in parse(path).getroot().iter("testcase"):
         dotted = case.get("classname", "").split(".")
         name = case.get("name", "")
+        worker = next(
+            (
+                prop.get("value", "")
+                for prop in case.iter("property")
+                if prop.get("name") == WORKER_PROPERTY
+            ),
+            "",
+        )
         for cut in range(len(dotted), 0, -1):
             file = "/".join(dotted[:cut]) + ".py"
             if (backend_root / file).is_file():
                 test_id = "::".join([file, *dotted[cut:], name])
                 shard.test_ids.append(test_id)
+                shard.workers.setdefault(worker, []).append(test_id)
                 reports = (child.get("message", "") + (child.text or "") for child in case)
                 if any(_CRASHED in report for report in reports):
                     shard.crashed.append(test_id)
@@ -160,22 +176,31 @@ def _check_shard(shard: Shard, recorded: set[str]) -> None:
     """Refuse a shard that did not finish or whose coverage data is missing.
 
     xdist reports a crashed worker as a failed test, and the tests after
-    it never run. A worker writes its coverage data only at the end of its
-    session, so after a crash the shard has a junit file but no data. One
-    worker runs a whole shard (``-n 1``), so the data of a shard is there
-    when any of its tests is recorded.
+    it never run. Each xdist worker writes its own coverage data file, at
+    the end of its session, so a crashed or killed worker leaves junit
+    entries but no data. So every worker of the shard must have at least
+    one of its tests in the coverage data. A test that names no worker
+    makes that check impossible, so it refuses the shard too.
     """
     if shard.crashed:
         raise ValueError(
             f"{shard.name}: a worker crashed while running {shard.crashed[0]},"
             " so the shard did not finish"
         )
-    names = {context_name(function_id(test_id)) for test_id in shard.test_ids}
-    if not names & recorded:
+    if not shard.workers:
+        raise ValueError(f"{shard.name}: the junit file has no tests")
+    if "" in shard.workers:
         raise ValueError(
-            f"{shard.name}: none of its {len(names)} tests is in the coverage data,"
-            " so the shard did not save its coverage"
+            f"{shard.name}: test {shard.workers[''][0]} names no xdist worker,"
+            " so the check cannot see whether every worker saved its coverage"
         )
+    for worker, test_ids in sorted(shard.workers.items()):
+        names = {context_name(function_id(test_id)) for test_id in test_ids}
+        if not names & recorded:
+            raise ValueError(
+                f"{shard.name}: none of the {len(names)} tests of worker {worker}"
+                " is in the coverage data, so that worker did not save its coverage"
+            )
 
 
 def function_id(test_id: str) -> str:

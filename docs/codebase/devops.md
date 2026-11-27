@@ -2540,13 +2540,16 @@ run, not a broken `main`.
   (kept 8 days). It does this only on the `schedule` run, and only when all
   ten shards delivered their data. A crashed worker leaves a junit file
   but no coverage data (the worker writes its data only at the end of its
-  session), and the download of that shard still works. So the tool checks
-  each junit file: one that reports a crashed worker, or whose tests are
-  not in the coverage data, means no map that night. A pull request with
+  session), and the download of that shard still works. In the coverage
+  job, each test in the junit file names its xdist worker (property
+  `xdist_worker`, set in `tests/conftest.py`). So the tool checks each
+  junit file: one that reports a crashed worker, a test without its
+  worker, or a worker none of whose tests are in the coverage data, means
+  no map that night. A pull request with
   the `ci-coverage-validate` label never makes a map.
-- **Who decides.** The `changes` job, step `map`. It runs on every pull
-  request. It uses the map only on a pull request that is not docs-only,
-  has a backend change and is not a one-connector run. It downloads the newest `unit-test-map` artifact of a
+- **Who decides.** The `changes` job, step `map`. It uses the map only on
+  a pull request of a branch of this repo that is not docs-only, has a
+  backend change and is not a one-connector run. It downloads the newest `unit-test-map` artifact of a
   run of this repo on `main` (the job has `actions: read` for that). It
   pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
   (standard library only). The step `upload-selection` stores the picked
@@ -2595,19 +2598,28 @@ run, not a broken `main`.
 - **Old test ids.** The map can be a few days old. A test id whose file is
   gone is dropped. A test id that its file no longer defines picks the
   whole file, so pytest never gets an id it cannot find.
-- **The log.** The step prints one line, and writes it to the step
-  summary of the `changes` job, for example
+- **Old map.** A map older than 2 days (`STALE_DAYS`) means all the
+  shards too: the nightly run made no new map since then (#7103). The tool
+  still picks with such a map and keeps its 7-day limit; the step `map`
+  then drops the picked list.
+- **The log.** The last step of the `changes` job, `report`, writes one
+  line on every pull request, as an annotation and in the step summary. It
+  runs after the upload of the picked tests, so it says what the unit
+  test jobs really do, for example
   `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
   `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
-  A full run shows the line as a warning, so a missing or old map is seen
-  (#7103). A run with the map, and a pull request that needs no unit
-  shards (`no unit tests: only docs changed`) or runs one connector, shows
-  a notice. When the map is older than 2 days (`STALE_DAYS`), the step
-  shows one more warning, `Old unit test map`: the nightly run made no new
-  map. The map is still used until it is 7 days old.
+  A failed upload gives `full suite: could not store the picked tests`.
+  When the unit tests run without the map, or do not run, the line is a
+  warning, so a missing or old map is seen (#7103). This is also so for a
+  pull request from a fork (the unit test jobs need this repo's runners)
+  and one with no backend change (only `python-outside-backend` runs). A
+  run with the map, one connector's tests, or a docs-only change shows a
+  notice. An old map gives one more warning, `Old unit test map`.
 - **The alarm.** `.github/workflows/unit-test-map-check.yml` runs after
   each nightly CI run. It is red when that run uploaded no `unit-test-map`
   artifact, and its summary lists the coverage jobs that did not pass. It
+  says only what it found in that run: pull requests may still use an
+  older map for 2 days. It
   is a separate workflow, not a job in `ci.yml`: a red job would turn the
   nightly run red, and `quality-gate.yml` runs SonarCloud only after a
   green nightly run.

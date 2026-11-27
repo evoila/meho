@@ -104,8 +104,13 @@ def _map(made_at: datetime = NOW) -> dict[str, Any]:
     return test_map.build_map(CONTEXTS, [_shard(ITEMS)], "abc1234def", made_at)
 
 
-def _shard(test_ids: list[str], name: str = "pytest-coverage-junit-1.xml") -> test_map.Shard:
-    return test_map.Shard(name, test_ids, [])
+def _shard(
+    test_ids: list[str],
+    name: str = "pytest-coverage-junit-1.xml",
+    workers: dict[str, list[str]] | None = None,
+) -> test_map.Shard:
+    """A shard; without ``workers``, one worker ``gw0`` ran every test."""
+    return test_map.Shard(name, test_ids, [], {"gw0": test_ids} if workers is None else workers)
 
 
 @pytest.fixture
@@ -151,14 +156,49 @@ def test_build_map_refuses_a_shard_that_did_not_save_its_coverage() -> None:
         path: names - {"tests.test_service.TestService.test_run", "tests.test_unrelated.test_u"}
         for path, names in CONTEXTS.items()
     }
-    with pytest.raises(ValueError, match=r"junit-2\.xml: none of its 2 tests is in the coverage"):
+    with pytest.raises(
+        ValueError, match=r"junit-2\.xml: none of the 2 tests of worker gw0 is in the coverage"
+    ):
         test_map.build_map(lost, [first, second], "abc", NOW)
-    with pytest.raises(ValueError, match=r"junit-1\.xml: none of its 1 tests is in the coverage"):
+    with pytest.raises(
+        ValueError, match=r"junit-1\.xml: none of the 1 tests of worker gw0 is in the coverage"
+    ):
         test_map.build_map(CONTEXTS, [_shard([ITEMS[0]]), second], "abc", NOW)
 
 
+def test_build_map_refuses_a_shard_when_one_of_three_workers_saved_no_coverage() -> None:
+    """Each xdist worker writes its own data file; one missing file loses its tests only."""
+    workers = {
+        "gw0": [ITEMS[2], ITEMS[3]],
+        "gw1": [ITEMS[5], ITEMS[6]],
+        "gw2": [ITEMS[7], ITEMS[8]],
+    }
+    shard = _shard([test for tests in workers.values() for test in tests], workers=workers)
+    assert test_map.build_map(CONTEXTS, [shard], "abc", NOW)["total_tests"] == 6
+
+    gw1_lost = {
+        path: names - {"tests.test_service.TestService.test_run"}
+        for path, names in CONTEXTS.items()
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"junit-1\.xml: none of the 1 tests of worker gw1 is in the coverage data,"
+        r" so that worker did not save its coverage",
+    ):
+        test_map.build_map(gw1_lost, [shard], "abc", NOW)
+
+
+def test_build_map_refuses_a_test_without_its_worker_and_an_empty_shard() -> None:
+    no_worker = _shard([ITEMS[2], ITEMS[5]], workers={"gw0": [ITEMS[2]], "": [ITEMS[5]]})
+    with pytest.raises(ValueError, match=r"test_run\[x\] names no xdist worker"):
+        test_map.build_map(CONTEXTS, [no_worker], "abc", NOW)
+
+    with pytest.raises(ValueError, match=r"junit-1\.xml: the junit file has no tests"):
+        test_map.build_map(CONTEXTS, [_shard([], workers={})], "abc", NOW)
+
+
 def test_build_map_refuses_a_shard_whose_worker_crashed() -> None:
-    crashed = test_map.Shard("pytest-coverage-junit-3.xml", ITEMS, [ITEMS[2]])
+    crashed = test_map.Shard("pytest-coverage-junit-3.xml", ITEMS, [ITEMS[2]], {"gw0": ITEMS})
 
     with pytest.raises(
         ValueError, match=r"junit-3.xml: a worker crashed while running .*core\[a\]"
@@ -182,11 +222,33 @@ def test_read_junit_sees_a_crashed_worker(tmp_path: Path) -> None:
 
     shard = test_map.read_junit(junit, tmp_path)
 
+    ids = ["tests/test_core.py::test_core[a]", "tests/test_core.py::test_core[b]"]
     assert shard == test_map.Shard(
-        "pytest-coverage-junit-2.xml",
-        ["tests/test_core.py::test_core[a]", "tests/test_core.py::test_core[b]"],
-        ["tests/test_core.py::test_core[b]"],
+        "pytest-coverage-junit-2.xml", ids, ["tests/test_core.py::test_core[b]"], {"": ids}
     )
+
+
+def test_read_junit_groups_the_tests_by_their_xdist_worker(tmp_path: Path) -> None:
+    _write_tree(tmp_path, {"tests/__init__.py": "", "tests/test_core.py": ""})
+    junit = tmp_path / "pytest-coverage-junit-1.xml"
+    junit.write_text(
+        "<testsuites><testsuite>"
+        + "".join(
+            f'<testcase classname="tests.test_core" name="test_core[{case}]"><properties>'
+            f'<property name="xdist_worker" value="{worker}"/></properties></testcase>'
+            for case, worker in (("a", "gw0"), ("b", "gw1"), ("c", "gw0"))
+        )
+        + "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+
+    shard = test_map.read_junit(junit, tmp_path)
+
+    assert shard.crashed == []
+    assert shard.workers == {
+        "gw0": ["tests/test_core.py::test_core[a]", "tests/test_core.py::test_core[c]"],
+        "gw1": ["tests/test_core.py::test_core[b]"],
+    }
 
 
 def test_junit_test_ids_from_a_real_pytest_run(tmp_path: Path) -> None:
@@ -248,6 +310,10 @@ def test_coverage_contexts_reads_test_names(tmp_path: Path) -> None:
     }
 
 
+# The junit property the coverage workers write (tests/conftest.py).
+_GW0 = '<properties><property name="xdist_worker" value="gw0"/></properties>'
+
+
 def test_build_command_writes_the_map(tmp_path: Path) -> None:
     from coverage import CoverageData
 
@@ -258,8 +324,10 @@ def test_build_command_writes_the_map(tmp_path: Path) -> None:
     data.write()
     junit = tmp_path / "junit.xml"
     junit.write_text(
-        '<testsuites><testsuite><testcase classname="tests.test_core" name="test_core[a]"/>'
-        '<testcase classname="tests.test_core" name="test_core[b]"/></testsuite></testsuites>',
+        "<testsuites><testsuite>"
+        f'<testcase classname="tests.test_core" name="test_core[a]">{_GW0}</testcase>'
+        f'<testcase classname="tests.test_core" name="test_core[b]">{_GW0}</testcase>'
+        "</testsuite></testsuites>",
         encoding="utf-8",
     )
     out = tmp_path / "unit-test-map.json"
@@ -300,8 +368,8 @@ def test_build_command_makes_no_map_when_a_shard_delivered_only_its_junit_file(
     data.write()
     for shard, file in ((1, "test_core"), (2, "test_b")):
         (tmp_path / f"pytest-coverage-junit-{shard}.xml").write_text(
-            f'<testsuites><testsuite><testcase classname="tests.{file}" name="{file}"/>'
-            "</testsuite></testsuites>",
+            f'<testsuites><testsuite><testcase classname="tests.{file}" name="{file}">'
+            f"{_GW0}</testcase></testsuite></testsuites>",
             encoding="utf-8",
         )
     out = tmp_path / "unit-test-map.json"
@@ -311,7 +379,10 @@ def test_build_command_makes_no_map_when_a_shard_delivered_only_its_junit_file(
 
     assert test_map._main([*args, *junit]) == 1
     assert not out.exists()
-    assert "no test map: pytest-coverage-junit-2.xml: none of its 1 tests" in capfd.readouterr().err
+    assert (
+        "no test map: pytest-coverage-junit-2.xml: none of the 1 tests of worker gw0"
+        in capfd.readouterr().err
+    )
 
     assert test_map._main([*args, junit[0]]) == 0
     assert out.exists()
@@ -929,17 +1000,15 @@ def _run_map_step(
     artifacts: list[dict[str, Any]] | None = None,
     *,
     map_age: timedelta = timedelta(0),
-    detect: dict[str, str] | None = None,
 ) -> tuple[str, str, Path, list[str]]:
     """Run the real step ``map`` of the ``changes`` job.
 
     A fake ``gh`` lists ``artifacts`` (default: one from a run of this repo
     on main) and applies the step's own ``--jq`` filter with the real ``jq``.
     Any download gives the zip of the fake map, made ``map_age`` ago.
-    ``detect`` overrides the outputs of the step ``detect`` (default: a
-    backend change that needs the unit shards). Returns the step's stdout,
-    the value of ``test_map``, the folder of the picked list and the ``gh``
-    calls. The step summary is in ``tmp_path / "step_summary"``.
+    Returns the step's stdout, the value of ``test_map``, the folder of the
+    picked list and the ``gh`` calls. All outputs are in
+    :func:`_map_outputs`.
     """
     repo = tmp_path / "repo"
     _write_tree(repo, TREE)
@@ -986,14 +1055,9 @@ def _run_map_step(
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/local/bin",
         "GITHUB_OUTPUT": str(output),
-        "GITHUB_STEP_SUMMARY": str(tmp_path / "step_summary"),
         "GITHUB_REPOSITORY": "example/repo",
         "RUNNER_TEMP": str(runner_temp),
         "EVENT_NAME": event,
-        "DOCS_ONLY": "false",
-        "BACKEND_PYTHON": "true",
-        "SINGLE_CONNECTOR": "",
-        **(detect or {}),
     }
     run = subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
@@ -1006,9 +1070,60 @@ def _run_map_step(
     assert run.returncode == 0, run.stdout + run.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     gh_calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
-    if event != "pull_request" or detect:
+    if event != "pull_request":
         assert not gh_calls, "no artifact lookup when the map is not needed"
     return run.stdout, outputs["test_map"], runner_temp / "unit-test-map", gh_calls
+
+
+def _map_outputs(tmp_path: Path) -> dict[str, str]:
+    """The outputs that the last :func:`_run_map_step` wrote."""
+    text = (tmp_path / "github_output").read_text(encoding="utf-8")
+    return dict(line.split("=", 1) for line in text.splitlines())
+
+
+def _run_report_step(tmp_path: Path, **env: str) -> tuple[str, str]:
+    """Run the real step ``report`` of the ``changes`` job; return stdout and summary.
+
+    ``env`` sets the step's inputs. The default is a pull request of a
+    branch of this repo with a backend change that needs the unit shards,
+    with no output of the step ``map`` and no upload.
+    """
+    script = tmp_path / "report.sh"
+    script.write_text(_step("changes", step_id="report")["run"], encoding="utf-8")
+    summary = tmp_path / "report_summary"
+    summary.write_text("", encoding="utf-8")
+    inputs = {
+        "SAME_REPO": "true",
+        "DOCS_ONLY": "false",
+        "BACKEND_PYTHON": "true",
+        "SINGLE_CONNECTOR": "",
+        "TEST_MAP": "",
+        "MAP_LINE": "",
+        "OLD_MAP": "",
+        "UPLOAD": "",
+        **env,
+    }
+    run = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", str(script)],
+        env={"PATH": "/usr/bin:/bin", "GITHUB_STEP_SUMMARY": str(summary), **inputs},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    return run.stdout, summary.read_text(encoding="utf-8")
+
+
+def _report_after_map(tmp_path: Path, upload: str = "success") -> tuple[str, str]:
+    """Run the step ``report`` with the outputs of the last :func:`_run_map_step`."""
+    outputs = _map_outputs(tmp_path)
+    return _run_report_step(
+        tmp_path,
+        TEST_MAP=outputs["test_map"],
+        MAP_LINE=outputs["line"],
+        OLD_MAP=outputs["old_map"],
+        UPLOAD=upload if outputs["test_map"] == "true" else "skipped",
+    )
 
 
 needs_git = pytest.mark.skipif(
@@ -1027,24 +1142,46 @@ def test_ci_pull_request_with_a_schema_change_runs_the_picked_tests(tmp_path: Pa
     assert "tests/test_schemas_direct.py" in picked
     assert "tests/test_api.py" in picked
     assert set(connector_select.CONTRACT_TESTS) <= set(picked)
-    assert "test map from " in stdout
-    assert stdout.count("\n") == 2, "one line, plus the same line as a notice"
-    assert "::notice title=Unit tests::test map from " in stdout
-    summary = (tmp_path / "step_summary").read_text(encoding="utf-8")
-    assert summary.startswith("Unit tests: test map from ")
-    assert "Old unit test map" not in summary
+    assert stdout.startswith("test map from ")
+    assert stdout.count("\n") == 1, "one line"
+    assert _map_outputs(tmp_path)["old_map"] == ""
+
+    report, summary = _report_after_map(tmp_path)
+    assert report == f"::notice title=Unit tests::{stdout}"
+    assert summary == f"Unit tests: {stdout}"
+
+
+@needs_git
+def test_ci_failed_upload_of_the_picked_tests_reports_the_full_suite(tmp_path: Path) -> None:
+    """The job output test_map is false then; the line says the same, as a warning."""
+    _run_map_step(tmp_path, "pull_request", {f"{SRC}/schemas.py": "class S:\n    x = 1\n"})
+
+    for outcome in ("failure", "cancelled"):
+        report, summary = _report_after_map(tmp_path, upload=outcome)
+
+        line = f"full suite: could not store the picked tests (upload: {outcome})"
+        assert report == f"::warning title=Unit tests::{line}\n"
+        assert summary == f"Unit tests: {line}\n"
+
+    changes = _jobs()["changes"]
+    steps = [step.get("id") for step in changes["steps"]]
+    assert steps.index("report") == len(steps) - 1, "the line is written after the upload"
+    assert steps.index("upload-selection") < steps.index("report")
+    output = changes["outputs"]["test_map"]
+    assert "steps.upload-selection.outcome == 'success'" in output
 
 
 @needs_git
 def test_ci_pull_request_with_a_migration_runs_the_full_suite(tmp_path: Path) -> None:
-    stdout, selected, _folder, _calls = _run_map_step(
+    _stdout, selected, _folder, _calls = _run_map_step(
         tmp_path, "pull_request", {"backend/alembic/versions/0002_y.py": "x = 1\n"}
     )
 
     assert selected == "false"
+    report, summary = _report_after_map(tmp_path)
     line = "full suite: a migration changed (backend/alembic/versions/0002_y.py)"
-    assert f"::warning title=Unit tests::{line}\n" in stdout, "a full run is a warning"
-    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
+    assert report == f"::warning title=Unit tests::{line}\n", "a full run is a warning"
+    assert summary == f"Unit tests: {line}\n"
 
 
 @needs_git
@@ -1075,7 +1212,7 @@ def test_ci_map_comes_only_from_a_run_of_this_repo_on_main(tmp_path: Path) -> No
 
 @needs_git
 def test_ci_no_map_from_a_run_of_this_repo_on_main_means_the_full_suite(tmp_path: Path) -> None:
-    stdout, selected, _folder, calls = _run_map_step(
+    _stdout, selected, _folder, calls = _run_map_step(
         tmp_path,
         "pull_request",
         {f"{SRC}/schemas.py": "class S:\n    x = 1\n"},
@@ -1083,34 +1220,45 @@ def test_ci_no_map_from_a_run_of_this_repo_on_main_means_the_full_suite(tmp_path
     )
 
     assert selected == "false"
+    report, summary = _report_after_map(tmp_path)
     line = "full suite: no test map from a nightly run of this repo on main"
-    assert f"::warning title=Unit tests::{line}\n" in stdout
-    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
+    assert report == f"::warning title=Unit tests::{line}\n"
+    assert summary == f"Unit tests: {line}\n"
     assert not any(call.endswith("/zip") for call in calls)
 
 
 @needs_git
-def test_ci_map_older_than_two_days_is_used_with_a_warning(tmp_path: Path) -> None:
-    stdout, selected, _folder, _calls = _run_map_step(
+def test_ci_map_older_than_two_days_gives_the_full_suite_with_a_warning(tmp_path: Path) -> None:
+    _stdout, selected, folder, _calls = _run_map_step(
         tmp_path,
         "pull_request",
         {f"{SRC}/schemas.py": "class S:\n    x = 1\n"},
         map_age=timedelta(days=3),
     )
 
-    assert selected == "true", "the map is still used until it is 7 days old"
-    assert "::notice title=Unit tests::test map from " in stdout
+    assert selected == "false", "a map older than 2 days picks no tests"
+    assert not (folder / "selection.txt").exists(), "nothing to upload"
+    report, summary = _report_after_map(tmp_path)
+    assert "::warning title=Unit tests::full suite: the test map is too old to pick tests\n" in (
+        report
+    )
     warning = "::warning title=Old unit test map::the test map is older than 2 days (made "
-    assert warning in stdout
-    summary = (tmp_path / "step_summary").read_text(encoding="utf-8").splitlines()
-    assert summary[0].startswith("Unit tests: test map from ")
-    assert summary[1].startswith("Old unit test map: the test map is older than 2 days")
-    assert summary[1].endswith("the nightly run made no new map since then")
+    assert warning in report
+    lines = summary.splitlines()
+    assert lines[0] == "Unit tests: full suite: the test map is too old to pick tests"
+    assert lines[1].startswith("Old unit test map: the test map is older than 2 days")
+    assert lines[1].endswith("the nightly run made no new map since then")
+
+    # The job output and so the unit shard matrix: all six shards.
+    changes = _jobs()["changes"]
+    assert "steps.map.outputs.test_map == 'true'" in changes["outputs"]["test_map"]
+    shard = _jobs()["python-unit-shard"]
+    assert "'[1, 2, 3, 4, 5, 6]'" in shard["strategy"]["matrix"]["shard"]
 
 
 @needs_git
 def test_ci_old_map_and_a_full_run_give_two_warnings(tmp_path: Path) -> None:
-    stdout, selected, _folder, _calls = _run_map_step(
+    _stdout, selected, _folder, _calls = _run_map_step(
         tmp_path,
         "pull_request",
         {"backend/alembic/versions/0002_y.py": "x = 1\n"},
@@ -1118,47 +1266,78 @@ def test_ci_old_map_and_a_full_run_give_two_warnings(tmp_path: Path) -> None:
     )
 
     assert selected == "false"
-    assert "::warning title=Unit tests::full suite: a migration changed" in stdout
-    assert "::warning title=Old unit test map::" in stdout
+    report, _summary = _report_after_map(tmp_path)
+    assert "::warning title=Unit tests::full suite: a migration changed" in report
+    assert "::warning title=Old unit test map::" in report
 
 
-@needs_git
 @pytest.mark.parametrize(
-    ("detect", "line"),
+    ("inputs", "level", "line"),
     [
-        ({"DOCS_ONLY": "true"}, "no unit tests: only docs changed"),
-        ({"BACKEND_PYTHON": "false"}, "no unit tests: no backend Python change"),
+        ({"DOCS_ONLY": "true"}, "notice", "no unit tests: only docs changed"),
+        (
+            {"DOCS_ONLY": "true", "SAME_REPO": "false"},
+            "notice",
+            "no unit tests: only docs changed",
+        ),
+        (
+            {"SAME_REPO": "false"},
+            "warning",
+            "no unit tests: the pull request comes from a fork,"
+            " and the unit test jobs run only for branches of this repo",
+        ),
+        (
+            {"SAME_REPO": "false", "BACKEND_PYTHON": "false"},
+            "warning",
+            "no unit tests: the pull request comes from a fork,"
+            " and the unit test jobs run only for branches of this repo",
+        ),
+        (
+            {"BACKEND_PYTHON": "false"},
+            "warning",
+            'no unit shards: no backend change, so only the job "Python tests that read'
+            ' files outside backend" runs',
+        ),
         (
             {"SINGLE_CONNECTOR": "acme"},
+            "notice",
             "no test map needed: the tests of connector acme run",
         ),
+        ({}, "warning", "full suite: the test map step gave no result"),
     ],
+    ids=["docs", "fork-docs", "fork", "fork-no-backend", "no-backend", "connector", "no-map-step"],
 )
-def test_ci_pull_request_that_needs_no_full_run_says_why_as_a_notice(
-    tmp_path: Path, detect: dict[str, str], line: str
+def test_ci_report_names_the_job_that_runs_or_why_none_runs(
+    tmp_path: Path, inputs: dict[str, str], level: str, line: str
 ) -> None:
-    stdout, selected, _folder, _calls = _run_map_step(
-        tmp_path, "pull_request", {"docs/x.md": "x\n"}, detect=detect
-    )
+    report, summary = _run_report_step(tmp_path, **inputs)
 
-    assert selected == "false"
-    assert f"::notice title=Unit tests::{line}\n" in stdout
-    assert "::warning" not in stdout
-    assert (tmp_path / "step_summary").read_text(encoding="utf-8") == f"Unit tests: {line}\n"
+    assert report == f"::{level} title=Unit tests::{line}\n"
+    assert summary == f"Unit tests: {line}\n"
 
 
-def test_ci_map_step_runs_on_every_pull_request_and_reads_the_detect_outputs() -> None:
-    step = _step("changes", step_id="map")
-    assert step["if"] == "github.event_name == 'pull_request'"
-    assert step["env"]["DOCS_ONLY"] == "${{ steps.detect.outputs.docs_only }}"
-    assert step["env"]["BACKEND_PYTHON"] == "${{ steps.detect.outputs.backend_python }}"
-    assert step["env"]["SINGLE_CONNECTOR"] == "${{ steps.detect.outputs.single_connector }}"
+def test_ci_report_step_matches_the_jobs_that_run() -> None:
+    """The cases of the step ``report`` follow the ``if:`` of the jobs it names."""
+    jobs = _jobs()
+    same_repo = "github.event.pull_request.head.repo.full_name == github.repository"
+    for job in ("python-unit-shard", "python-outside-backend"):
+        assert same_repo in jobs[job]["if"], f"{job} skips a pull request from a fork"
+    assert "needs.changes.outputs.backend_python == 'false'" in jobs["python-outside-backend"]["if"]
 
-    changes = _jobs()["changes"]
+    report = _step("changes", step_id="report")
+    assert report["if"] == "always() && github.event_name == 'pull_request'"
+    assert report["env"]["SAME_REPO"] == f"${{{{ {same_repo} }}}}"
+    assert report["env"]["UPLOAD"] == "${{ steps.upload-selection.outcome }}"
+    assert report["env"]["DOCS_ONLY"] == "${{ steps.detect.outputs.docs_only }}"
+    assert report["env"]["BACKEND_PYTHON"] == "${{ steps.detect.outputs.backend_python }}"
+    assert report["env"]["SINGLE_CONNECTOR"] == "${{ steps.detect.outputs.single_connector }}"
+
+    pick = _step("changes", step_id="map")
+    assert same_repo in pick["if"]
+    assert "steps.detect.outputs.single_connector == ''" in pick["if"]
+
+    changes = jobs["changes"]
     assert changes["permissions"] == {"contents": "read", "actions": "read"}
-    output = changes["outputs"]["test_map"]
-    assert "steps.map.outputs.test_map == 'true'" in output
-    assert "steps.upload-selection.outcome == 'success'" in output
     upload = _step("changes", step_id="upload-selection")
     assert upload["with"]["name"] == "unit-test-selection"
 

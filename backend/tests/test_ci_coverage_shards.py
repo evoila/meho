@@ -35,6 +35,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -184,6 +185,33 @@ def test_worker_save_tolerates_no_started_coverage(monkeypatch: pytest.MonkeyPat
     conftest._save_worker_coverage_data()
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        (
+            {"PYTEST_XDIST_WORKER": "gw2", "COVERAGE_PROCESS_START": ".coveragerc.ci"},
+            [("xdist_worker", "gw2")],
+        ),
+        ({"COVERAGE_PROCESS_START": ".coveragerc.ci"}, []),
+        ({"PYTEST_XDIST_WORKER": "gw2"}, []),
+    ],
+    ids=["coverage-worker", "controller", "unit-shard-worker"],
+)
+def test_coverage_worker_names_itself_in_the_junit_file(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: list[tuple[str, str]]
+) -> None:
+    """The test map builder checks the coverage data of each worker by this name."""
+    for var in ("PYTEST_XDIST_WORKER", "COVERAGE_PROCESS_START"):
+        monkeypatch.delenv(var, raising=False)
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    item = SimpleNamespace(user_properties=[])
+
+    conftest.pytest_itemcollected(cast("pytest.Item", item))
+
+    assert item.user_properties == expected
+
+
 def test_ci_runs_once_a_night_on_a_schedule(ci_workflow: dict[Any, Any]) -> None:
     schedule = _triggers(ci_workflow)["schedule"]
     assert len(schedule) == 1, "one nightly cron line"
@@ -325,9 +353,11 @@ def test_map_check_is_red_and_names_the_failed_coverage_jobs_without_a_map(
     assert run.returncode == 1
     assert (
         "::error title=No unit test map::The nightly run made no unit test map."
-        " Every pull request runs all six unit shards until a nightly run makes a map."
         " Nightly run: https://github.com/example/repo/actions/runs/77"
     ) in run.stdout
+    assert "six unit shards" not in run.stdout + summary, (
+        "an older map may still be in use: the alarm says only what it found in this run"
+    )
     assert "## No unit test map" in summary
     assert "- Python coverage (SonarCloud, shard 2/8): failure" in summary
     assert "- Python coverage combine (SonarCloud artifact): failure" in summary
@@ -350,7 +380,9 @@ def test_map_check_is_red_when_it_cannot_read_the_artifacts(tmp_path: Path) -> N
     run, summary = _run_map_check(tmp_path, None, _COVERAGE_JOBS_OF_A_RUN)
 
     assert run.returncode == 1
-    assert "::error title=No unit test map::Could not read the artifacts of the nightly run." in (
-        run.stdout
-    )
+    assert (
+        "::error title=No unit test map::Could not read the artifacts of the nightly run."
+        " Nightly run: https://github.com/example/repo/actions/runs/77"
+    ) in run.stdout
+    assert "six unit shards" not in run.stdout + summary
     assert "- Python coverage (SonarCloud, shard 2/8): failure" in summary

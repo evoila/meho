@@ -261,14 +261,15 @@ jobs:
     #                merge_group / nightly run give empty (the full run).
     #
     #   test_map — `true` when the test map picked the unit tests of a PR
-    #                (#5642). Only computed on a PR that is not docs-only, has
-    #                a backend change and is not a one-connector run; every
-    #                other PR gets one line that says why (#7103). The
+    #                (#5642). Only computed on a PR of a branch of this repo
+    #                that is not docs-only, has a backend change and is not a
+    #                one-connector run. The step `report` writes one line on
+    #                every PR that says what runs, or why not (#7103). The
     #                step `map` downloads the newest map that the nightly run
     #                on `main` made, and backend/tests/_unit_test_map.py picks
     #                the tests. The step `upload-selection` stores them for
     #                the `python-unit-shard` job. Same fail-closed rule: no
-    #                map, an old map, a file the map cannot judge, too many
+    #                map, a map older than 2 days, a file the map cannot judge, too many
     #                tests, any error, and every merge_group / nightly run give
     #                `false` (the full run).
     #
@@ -472,40 +473,31 @@ jobs:
             echo "single_connector=${single_connector}"
           } >> "$GITHUB_OUTPUT"
       - name: Pick unit tests with the test map
-        # #5642. The map is used only on a pull request that would otherwise
-        # run all the unit shards. Every failure below gives test_map=false
-        # (the full run); the step itself never fails. The artifact must come
-        # from a run of this repo on `main`: only the nightly run makes it
-        # (python-coverage-combine).
-        # #7103: every pull request gets one line in the step summary. A full
-        # run says why as a warning, so a missing or old map is seen. A map
-        # older than STALE_DAYS (2) days in _unit_test_map.py gives one more
-        # warning. A pull request that needs no full run gets a notice only.
+        # #5642. Only on a pull request of a branch of this repo that would
+        # otherwise run all the unit shards. Every failure below gives
+        # test_map=false (the full run); the step itself never fails. The
+        # artifact must come from a run of this repo on `main`: only the
+        # nightly run makes it (python-coverage-combine).
+        # #7103: a map older than STALE_DAYS (2) days in _unit_test_map.py
+        # also gives the full run, and the outputs `old_map` says so. The
+        # step `report` below writes the line of every pull request.
         id: map
-        if: github.event_name == 'pull_request'
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.detect.outputs.docs_only == 'false' &&
+          steps.detect.outputs.backend_python == 'true' &&
+          steps.detect.outputs.single_connector == ''
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
-          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
-          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
         run: |
           set +e -o pipefail
           test_map=false
-          level=warning
           dir="${RUNNER_TEMP}/unit-test-map"
           mkdir -p "${dir}"
           if [ "${EVENT_NAME}" != "pull_request" ]; then
             line="full suite: not a pull request (${EVENT_NAME})"
-          elif [ "${DOCS_ONLY}" = "true" ]; then
-            level=notice
-            line="no unit tests: only docs changed"
-          elif [ "${BACKEND_PYTHON}" = "false" ]; then
-            level=notice
-            line="no unit tests: no backend Python change"
-          elif [ -n "${SINGLE_CONNECTOR}" ]; then
-            level=notice
-            line="no test map needed: the tests of connector ${SINGLE_CONNECTOR} run"
           elif ! artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=unit-test-map&per_page=20" --jq '[.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main" and .workflow_run.head_repository_id == .workflow_run.repository_id)][0].id // empty')"; then
             line="full suite: could not list the test map artifacts"
           elif [ -z "${artifact}" ]; then
@@ -514,19 +506,24 @@ jobs:
             line="full suite: could not download the test map"
           elif ! line="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD | python3 backend/tests/_unit_test_map.py pick --map "${dir}/map.zip" --out "${dir}/selection.txt" --warning-out "${dir}/warning.txt")"; then
             line="full suite: the test map tool failed"
-          elif [ -s "${dir}/selection.txt" ]; then
+          elif [ ! -s "${dir}/selection.txt" ]; then
+            :  # The tool chose the full run; its line says why.
+          elif [ -s "${dir}/warning.txt" ]; then
+            line="full suite: the test map is too old to pick tests"
+            rm -f "${dir}/selection.txt"
+          else
             test_map=true
-            level=notice
+          fi
+          old_map=
+          if [ -s "${dir}/warning.txt" ]; then
+            old_map="$(head -n 1 "${dir}/warning.txt")"
           fi
           echo "${line}"
-          echo "::${level} title=Unit tests::${line}"
-          echo "Unit tests: ${line}" >> "${GITHUB_STEP_SUMMARY}"
-          if [ -s "${dir}/warning.txt" ]; then
-            warning="$(cat "${dir}/warning.txt")"
-            echo "::warning title=Old unit test map::${warning}"
-            echo "Old unit test map: ${warning}" >> "${GITHUB_STEP_SUMMARY}"
-          fi
-          echo "test_map=${test_map}" >> "$GITHUB_OUTPUT"
+          {
+            echo "test_map=${test_map}"
+            echo "line=${line}"
+            echo "old_map=${old_map}"
+          } >> "$GITHUB_OUTPUT"
       - name: Store the picked unit tests
         # The python-unit-shard job downloads this list. A failed upload
         # gives test_map=false (see the job outputs), so the full run.
@@ -540,6 +537,52 @@ jobs:
           path: ${{ runner.temp }}/unit-test-map/selection.txt
           retention-days: 1
           if-no-files-found: error
+      - name: Say how the unit tests run
+        # #7103. One line on every pull request, in the step summary and as
+        # an annotation, after the upload above: the same choice as the job
+        # output `test_map`. When the unit tests run without the map, or do
+        # not run, the line is a warning. It is a notice when they run the
+        # picked tests or one connector's tests, or when only docs changed.
+        # A pull request with no backend change runs the job
+        # python-outside-backend instead of the unit shards. A pull request
+        # from a fork runs neither: those jobs need this repo's runners.
+        id: report
+        if: always() && github.event_name == 'pull_request'
+        env:
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          TEST_MAP: ${{ steps.map.outputs.test_map }}
+          MAP_LINE: ${{ steps.map.outputs.line }}
+          OLD_MAP: ${{ steps.map.outputs.old_map }}
+          UPLOAD: ${{ steps.upload-selection.outcome }}
+        run: |
+          level=warning
+          if [ "${DOCS_ONLY}" = "true" ]; then
+            level=notice
+            line="no unit tests: only docs changed"
+          elif [ "${SAME_REPO}" != "true" ]; then
+            line="no unit tests: the pull request comes from a fork, and the unit test jobs run only for branches of this repo"
+          elif [ "${BACKEND_PYTHON}" = "false" ]; then
+            line="no unit shards: no backend change, so only the job \"Python tests that read files outside backend\" runs"
+          elif [ -n "${SINGLE_CONNECTOR}" ]; then
+            level=notice
+            line="no test map needed: the tests of connector ${SINGLE_CONNECTOR} run"
+          elif [ "${TEST_MAP}" != "true" ]; then
+            line="${MAP_LINE:-full suite: the test map step gave no result}"
+          elif [ "${UPLOAD}" != "success" ]; then
+            line="full suite: could not store the picked tests (upload: ${UPLOAD:-not run})"
+          else
+            level=notice
+            line="${MAP_LINE}"
+          fi
+          echo "::${level} title=Unit tests::${line}"
+          echo "Unit tests: ${line}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ -n "${OLD_MAP}" ]; then
+            echo "::warning title=Old unit test map::${OLD_MAP}"
+            echo "Old unit test map: ${OLD_MAP}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -2785,7 +2828,9 @@ jobs:
         # junit count below are not proof of that: a crashed worker leaves
         # a junit file but no coverage data, and the download still works.
         # So the tool refuses a junit file that reports a crashed worker,
-        # or whose tests are not in the coverage data, and makes no map.
+        # or that has a worker (property xdist_worker, set in
+        # tests/conftest.py) none of whose tests are in the coverage data,
+        # and makes no map.
         id: test-map
         if: >-
           always() && github.event_name == 'schedule' &&

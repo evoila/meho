@@ -3912,32 +3912,72 @@ own command, <code>meho-host</code>.</p>
 </tr>
 </tbody>
 </table>
-<p>The install refuses a machine below the minimum.</p>
+<p>The install refuses a machine below the minimum. Processors means the
+logical processors that Linux sees, for example the vCPUs of a virtual
+machine. The install counts them with <code>getconf _NPROCESSORS_ONLN</code>.</p>
 <p>The machine also needs:</p>
 <ul>
 <li><strong>Root access.</strong> You run the install with <code>sudo</code>, over SSH or on the
   console of the machine.</li>
+<li><strong>A fixed IPv4 address.</strong> The built-in Kubernetes and the DNS record
+  use the address of the machine, so it must not change later, for example
+  by DHCP.</li>
 <li><strong>A DNS name.</strong> A full DNS name for the machine, for example
   <code>meho.example.com</code>. Your DNS server must have an A record for it that
   points to an address of the machine. An entry in <code>/etc/hosts</code> does not
-  count. The install does not create the record.</li>
-<li><strong>A time server.</strong> The clock of the machine must be synchronised, for
-  example with <code>systemd-timesyncd</code> or <code>chrony</code>. <code>timedatectl</code> must show
-  <code>System clock synchronized: yes</code>.</li>
-<li><strong>The address range of your admin network.</strong> After the install, only
+  count. The install does not create the record. The server needs no
+  internet, but it needs a DNS server in your network that it can reach.
+  When a load balancer or other address translation inside your network is
+  in front of the machine, the A record points to that address instead.
+  Then give that address to the install with <code>--public-address</code> (see
+  <a href="#the-options">The options</a>).</li>
+<li><strong>A time server.</strong> The clock of the machine must be synchronised with a
+  time server in your network, for example with <code>systemd-timesyncd</code> or
+  <code>chrony</code>. <code>timedatectl</code> must show <code>System clock synchronized: yes</code>.</li>
+<li><strong>The address range of your admin network.</strong> The admin network is the
+  network from which your administrators use SSH. After the install, only
   this range may use SSH. See <a href="#the-admin-network">The admin network</a>.</li>
 <li><strong>The networks of the systems that MEHO manages</strong>, for example of your
   vCenter and your switches. MEHO accepts a system on a private address
   only inside these networks. See <a href="#the-target-networks">The target networks</a>.</li>
+<li><strong>Two address ranges for the built-in Kubernetes.</strong> Its pods and
+  services use <code>10.42.0.0/16</code> and <code>10.43.0.0/16</code> by default. When a system
+  that MEHO will manage has an address in one of them, choose two other
+  ranges. The ranges cannot change after the install. See
+  <a href="#the-pod-and-service-ranges">The pod and service ranges</a>.</li>
 <li><strong>Nothing else that runs containers.</strong> No Docker, containerd, k3s,
   RKE2 or other Kubernetes may be on the machine. The ports of the
-  built-in Kubernetes must be free. The install checks both.</li>
+  built-in Kubernetes must be free: TCP 80, 443, 2379 to 2382, 6443, 8081,
+  9091, 9099, 9345, 10010, 10248 to 10250 and 10256 to 10259, and UDP</li>
+<li>The install checks both.</li>
 </ul>
 <p>You also need a computer on the management network with a browser:
-Chrome 111, Safari 16.4 or Firefox 128, or newer.</p>
+Chrome 111, Safari 16.4 or Firefox 128, or newer. The management network
+is the network from which your users open the console.</p>
+<p>Have these ready too:</p>
+<ul>
+<li>for the download, a second machine with internet, with
+  <a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>
+  version 3 or newer, a checksum tool and a way to copy files to the
+  server, for example <code>scp</code> (<a href="#step-2-download-and-check">Step 2</a>);</li>
+<li>about 4 GB of disk space on the server for the download and its
+  unpacked folder (<a href="#step-2-download-and-check">Step 2</a>);</li>
+<li>a phone with an authenticator app, and a password store for the
+  recovery codes and the unseal key (<a href="#step-4-first-login">Step 4</a>);</li>
+<li>for production, a certificate for the DNS name from your own
+  certificate authority (CA)
+  (<a href="#use-a-certificate-from-your-own-ca">Use a certificate from your own CA</a>);</li>
+<li>a way to take a VM snapshot or a backup of the machine before each
+  <a href="#update">update</a>;</li>
+<li>for each system that MEHO will manage, its address and a login for
+  MEHO. You add them after the install, with your first tenant (see
+  <a href="../setup-page/">the setup page</a>).</li>
+</ul>
 <p><strong>Plan for a second platform admin.</strong> An admin makes most changes of rights alone in the web console. A few changes in MEHO's own login realm need a platform admin other than you, and MEHO refuses some changes there completely. The approvals guide lists them. See <a href="../../guides/approvals-and-break-glass/#changes-of-rights-need-another-admin">who approves a change of rights</a>.</p>
 <p>MEHO runs on your management network only, never on the internet. Users
-reach it on ports 80 and 443 from the management network. MEHO holds the
+reach it on ports 80 and 443 from the management network. The MEHO
+firewall leaves these two ports open to every address, so only the place
+of the machine in your network keeps MEHO off the internet. MEHO holds the
 logins for your systems, so an address on the internet is a risk you do
 not need. See
 <a href="../first-start-checks/#meho-stays-on-the-management-network">MEHO stays on the management network</a>.</p>
@@ -3955,7 +3995,9 @@ download. You need
 <a href="https://docs.sigstore.dev/cosign/system_config/installation/">cosign</a>
 version 3 or newer. Version 2 cannot read the signature file of the
 release: it stops with <code>bundle does not contain cert for verification</code>.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>v&lt;version&gt;
+<p>The tag of a release has a <code>v</code>, and the file names have none. For
+example, release <code>v0.48.0</code> has the download <code>meho-linux-0.48.0-amd64.tar</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">TAG</span><span class="o">=</span>v0.48.0
 cosign<span class="w"> </span>verify-blob<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--certificate-identity<span class="w"> </span><span class="s2">"https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/</span><span class="nv">$TAG</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--certificate-oidc-issuer<span class="w"> </span>https://token.actions.githubusercontent.com<span class="w"> </span><span class="se">\</span>
@@ -3965,9 +4007,26 @@ sha256sum<span class="w"> </span>-c<span class="w"> </span>SHA256SUMS-linux
 <p>Both commands must succeed. cosign checks that the release workflow of
 evoila/meho signed the checksum file for this tag. <code>sha256sum</code> prints
 <code>OK</code> for the download.</p>
+<p>On Windows, use PowerShell. The signature check is the same command with
+PowerShell syntax. Go on only when it succeeds:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">$Tag</span> <span class="p">=</span> <span class="s2">"v0.48.0"</span>
+<span class="n">cosign</span> <span class="n">verify-blob</span> <span class="p">`</span>
+  <span class="p">-</span><span class="n">-certificate-identity</span> <span class="s2">"https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/$Tag"</span> <span class="p">`</span>
+  <span class="p">-</span><span class="n">-certificate-oidc-issuer</span> <span class="n">https</span><span class="p">://</span><span class="n">token</span><span class="p">.</span><span class="n">actions</span><span class="p">.</span><span class="n">githubusercontent</span><span class="p">.</span><span class="n">com</span> <span class="p">`</span>
+  <span class="p">-</span><span class="n">-bundle</span> <span class="n">SHA256SUMS-linux</span><span class="p">.</span><span class="n">cosign</span><span class="p">.</span><span class="n">bundle</span> <span class="n">SHA256SUMS-linux</span>
+</code></pre></div>
+<p>Windows has no <code>sha256sum</code>. These two lines must show the same value:</p>
+<div class="highlight"><pre><span></span><code><span class="p">(</span><span class="nb">Get-FileHash</span> <span class="n">-Algorithm</span> <span class="n">SHA256</span> <span class="n">meho-linux</span><span class="p">-</span><span class="n">0</span><span class="p">.</span><span class="n">48</span><span class="p">.</span><span class="n">0-amd64</span><span class="p">.</span><span class="n">tar</span><span class="p">).</span><span class="n">Hash</span><span class="p">.</span><span class="n">ToLower</span><span class="p">()</span>
+<span class="p">(</span><span class="nb">Select-String</span> <span class="n">-Path</span> <span class="n">SHA256SUMS-linux</span> <span class="n">-Pattern</span> <span class="s1">'meho-linux-0.48.0-amd64.tar'</span><span class="p">).</span><span class="n">Line</span><span class="p">.</span><span class="n">Split</span><span class="p">(</span><span class="s1">' '</span><span class="p">)[</span><span class="n">0</span><span class="p">]</span>
+</code></pre></div>
 <p>Copy the download and <code>SHA256SUMS-linux</code> to the server, for example with
-<code>scp</code>. Then run <code>sha256sum -c SHA256SUMS-linux</code> on the server too. So you
-know that the copy is complete.</p>
+<code>scp</code> to your home folder. Then run <code>sha256sum -c SHA256SUMS-linux</code> on the
+server too. So you know that the copy is complete.</p>
+<p>The download is about 2 GB, and its unpacked folder takes about as much
+again. When the folder you copy it to is on the same file system as
+<code>/var/lib</code>, this space counts against the 80 GB that the install needs
+free there. After the install, MEHO does not use the download or the
+unpacked folder, so you can delete both.</p>
 <h2 id="step-3-install">Step 3: Install<a class="headerlink" href="#step-3-install" title="Permanent link">&para;</a></h2>
 <p>Unpack the download and run the install script as root:</p>
 <div class="highlight"><pre><span></span><code>tar<span class="w"> </span>-xf<span class="w"> </span>meho-linux-&lt;version&gt;-amd64.tar
@@ -4008,7 +4067,7 @@ sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span 
 </tr>
 <tr>
 <td><code>--first-tenant-id &lt;uuid&gt;</code></td>
-<td>The id of the first tenant. Give the old id when you move MEHO to another machine.</td>
+<td>The id of the first tenant. A tenant is one customer or team space in MEHO. Give the old id when you move MEHO to another machine.</td>
 <td>A new random id.</td>
 </tr>
 <tr>
@@ -4031,8 +4090,7 @@ sudo<span class="w"> </span>./install.sh<span class="w"> </span>--hostname<span 
 <p>An update keeps these answers and refuses these options. Only the SSH
 range and the target networks can change after the install, with
 <code>meho-host admin-network</code> and <code>meho-host target-networks</code> (see
-<a href="#daily-work">Daily work</a>). The options to join a second server are not
-tested yet.</p>
+<a href="#daily-work">Daily work</a>).</p>
 <h3 id="the-admin-network">The admin network<a class="headerlink" href="#the-admin-network" title="Permanent link">&para;</a></h3>
 <p>After the install, SSH answers only from the admin network. A range must
 start at its first address: <code>192.0.2.0/24</code> is right, <code>192.0.2.7/24</code> is
@@ -4130,7 +4188,8 @@ manage. When one of them, for example a vCenter, has an address in one
 of these ranges, MEHO cannot reach it. The machine sends that traffic to
 its own pods or services. Then choose two other ranges that no system of
 your site uses, and give them with <code>--cluster-cidr</code> and
-<code>--service-cidr</code>. Decide this before the install.</p>
+<code>--service-cidr</code>. Decide this before the install: the ranges cannot
+change after it.</p>
 <h3 id="what-the-script-does">What the script does<a class="headerlink" href="#what-the-script-does" title="Permanent link">&para;</a></h3>
 <ol>
 <li><strong>It checks the machine.</strong> Each check prints <code>[ok]</code> or <code>[WARN]</code>. When
@@ -4170,14 +4229,20 @@ this:</p>
   Target networks:       10.20.0.0/16,10.30.0.5:443
   First-start list:      after the first login, open https://meho.example.com/ui/first-start, or run "meho login https://meho.example.com" and then "meho status --first-start"
 </code></pre></div>
-<p>Read the list after the first login (<a href="#step-4-first-login">Step 4</a>).</p>
+<p>Read the list after the first login (<a href="#step-4-first-login">Step 4</a>).
+You can run <code>meho login</code> on the server or on a laptop with the <code>meho</code>
+command (see <a href="../laptop-tools/">Tools for your laptop</a>). In both cases the
+computer must trust the console CA first (see
+<a href="#the-console-certificate">The console certificate</a>).</p>
 <p>Before v0.49.0, the result has no <code>Target networks</code> line. In v0.47.0
 and v0.48.0, the script reads the list itself and shows its lines under
 the last line. Before v0.47.0, the result has no <code>Console CA</code>
 line, and the last line says <code>First-start list: not in this version yet</code>.</p>
 <h2 id="step-4-first-login">Step 4: First login<a class="headerlink" href="#step-4-first-login" title="Permanent link">&para;</a></h2>
 <p>The install made one Admin login with a temporary password. It is in
-<code>MEHO-Admins</code> and <code>MEHO-Platform-Admins</code>.</p>
+the group <code>MEHO-Admins</code>, the admins of the first tenant, and in the group
+<code>MEHO-Platform-Admins</code>, which gives rights across all tenants (see
+<a href="../../guides/several-tenants/#the-platform-admin-role">The platform admin role</a>).</p>
 <ol>
 <li>
 <p>On the server, read the file with the passwords:</p>
@@ -4220,7 +4285,7 @@ backup and in an emergency. See
    <code>https://meho.example.com/ui/first-start</code>. The page is described in
    <a href="../first-start-checks/">The first-start checks</a>. With the install's
    own certificate, the <code>certificate</code> line is red. That is expected (see
-   the next step).</p>
+   <a href="#the-console-certificate">The console certificate</a>).</p>
 </li>
 <li>
 <p>On the server, check the built-in Kubernetes and the hardening:</p>
@@ -4232,8 +4297,12 @@ backup and in an emergency. See
 <h2 id="step-5-the-certificate-and-the-unseal-key">Step 5: The certificate and the unseal key<a class="headerlink" href="#step-5-the-certificate-and-the-unseal-key" title="Permanent link">&para;</a></h2>
 <h3 id="the-console-certificate">The console certificate<a class="headerlink" href="#the-console-certificate" title="Permanent link">&para;</a></h3>
 <p>The install made a certificate for the DNS name. It is signed by the
-install's own certificate authority (CA), "MEHO install CA". Your
-browsers and laptops do not know this CA. So:</p>
+install's own certificate authority (CA), "MEHO install CA". It is valid
+for 825 days, and nothing renews it. From 30 days before the end, the
+<code>console-certificate</code> line of <code>meho-host check</code> is a <code>[WARN]</code>. Put a
+certificate from your own CA in place before then (see
+<a href="#use-a-certificate-from-your-own-ca">Use a certificate from your own CA</a>).
+Your browsers and laptops do not know this CA. So:</p>
 <ul>
 <li>browsers warn at the first visit;</li>
 <li>the <code>certificate</code> line of the first-start list is red;</li>
@@ -4255,7 +4324,8 @@ says how a computer trusts it. MEHO itself does not trust this CA, so the
 in place.</p>
 <ol>
 <li>Get a certificate for the DNS name of the install from your CA. It
-   must be made for a TLS server. You need two files:<ul>
+   must be made for a TLS server: ask your CA team for the extended key
+   usage "TLS Web Server Authentication". You need two files:<ul>
 <li><code>chain.pem</code>: the server certificate first, then every intermediate
   CA certificate, and your CA certificate last;</li>
 <li><code>key.pem</code>: the private key of the server certificate, without a pass
@@ -4335,7 +4405,9 @@ the same machine. There is no other update command.</p>
    fails, you go back to it. There is no other way back.</li>
 <li>Download and check the new download as in
    <a href="#step-2-download-and-check">Step 2</a>. Copy it to the server and
-   unpack it.</li>
+   unpack it. The update checks the free space as the install does: 80 GB
+   free under <code>/var/lib</code>. So delete the old download and its folder
+   first.</li>
 <li>
 <p>Run its install script, without the options of a first install:</p>
 <div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>meho-linux-&lt;new<span class="w"> </span>version&gt;-amd64
@@ -4450,8 +4522,9 @@ first admin) lost the phone with the one-time code
 app and also the recovery codes, so they cannot log in any more.</p>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>reset-second-factor<span class="w"> </span>&lt;user&gt;
 </code></pre></div>
-<p><code>&lt;user&gt;</code> is the person's user name in MEHO's login (realm <code>meho</code>). The
-command:</p>
+<p><code>&lt;user&gt;</code> is the person's user name in MEHO's login server, Keycloak (its
+realm <code>meho</code> holds the local users of MEHO). The command runs on the
+server, so it also helps when the person is the only admin. The command:</p>
 <ul>
 <li>removes the person's one-time code and recovery codes;</li>
 <li>makes the next login of the person ask for a new password and a new
@@ -4459,7 +4532,8 @@ command:</p>
 <li>writes one row into the MEHO audit for each tenant of the person. It
   names your Linux user (the one behind <code>sudo</code>), this server, the person's
   user name and the time. An admin of each of these tenants finds it with
-  <code>meho audit query --op-id meho-host.reset-second-factor</code>.</li>
+  <code>meho audit query --op-id meho-host.reset-second-factor</code>, on a computer
+  with the <code>meho</code> command, after <code>meho login</code>.</li>
 </ul>
 <p>It prints what it removed. An unknown user name changes nothing, and the
 command ends with exit code 1. Run as another user than root, it changes
@@ -4468,15 +4542,22 @@ audit row, it does not report success. When Keycloak does not answer a
 change in time, the change may still have happened: the command says so,
 writes the audit row with it, and ends with exit code 1. Run it again; a
 second run is safe.</p>
-<p>Give the person a new temporary password in a safe way, for example in
-the Keycloak admin console (see <a href="../login/local-users/">Local users</a>). It
-does not apply to people who log in through your company login: their
-second factor belongs to the company login.</p>
+<p>The person then logs in with their password and sets a new one. Only
+when the person also forgot the password, give them a new temporary
+password in a safe way, for example in the Keycloak admin console (see
+<a href="../login/local-users/">Local users</a>). The command does not apply to people
+who log in through your company login: their second factor belongs to the
+company login.</p>
 <h3 id="get-help-from-support">Get help from support<a class="headerlink" href="#get-help-from-support" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>meho-host<span class="w"> </span>support-bundle
 </code></pre></div>
 <p>The command writes one file to <code>/var/lib/meho/support/</code> and prints its
-path. Only root can read the file. It holds:</p>
+path, for example:</p>
+<div class="highlight"><pre><span></span><code>/var/lib/meho/support/meho-support-meho.example.com-20261127T002212Z.tar.gz
+Send it to evoila support, then delete it: it holds the logs and the state of this machine.
+</code></pre></div>
+<p>The name holds the host name of the machine and the time in UTC. Only
+root can read the file. It holds:</p>
 <ul>
 <li>the check list;</li>
 <li>the logs of MEHO and of its web entry point (Traefik);</li>
@@ -4490,21 +4571,23 @@ whose name has PASSWORD, TOKEN, SECRET or KEY in it. It cannot find
 every secret in the logs. For example, it keeps a login token after
 <code>Authorization: Bearer</code>, and a password inside an address such as
 <code>https://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;</code>.</p>
-<p>So unpack the file and search it. Use the path that the command
-printed:</p>
-<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>/root/support-check
-sudo<span class="w"> </span>tar<span class="w"> </span>-xzf<span class="w"> </span>/var/lib/meho/support/&lt;file&gt;.tar.gz<span class="w"> </span>-C<span class="w"> </span>/root/support-check
+<p>So unpack the file and search it. Put the path that the command printed
+into <code>bundle</code>, in the same shell session as the commands after it:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">bundle</span><span class="o">=</span>/var/lib/meho/support/meho-support-meho.example.com-20261127T002212Z.tar.gz
+sudo<span class="w"> </span>install<span class="w"> </span>-d<span class="w"> </span>-m<span class="w"> </span><span class="m">0700</span><span class="w"> </span>/root/support-check
+sudo<span class="w"> </span>tar<span class="w"> </span>-xzf<span class="w"> </span><span class="s2">"</span><span class="nv">$bundle</span><span class="s2">"</span><span class="w"> </span>-C<span class="w"> </span>/root/support-check
 sudo<span class="w"> </span>grep<span class="w"> </span>-r<span class="w"> </span>-n<span class="w"> </span>-i<span class="w"> </span>-E<span class="w"> </span><span class="s1">'authorization:|bearer |://[^/@ ]+:[^/@ ]+@|--password'</span><span class="w"> </span>/root/support-check
 </code></pre></div>
 <p>The search shows the usual places where a secret can stay. It does not
-find every secret. Read each line it shows. When a line holds a secret,
+find every secret. When it finds nothing, it prints nothing and ends with
+exit code 1. Read each line it shows. When a line holds a secret,
 replace the secret in that file, for example with <code>[removed]</code>. Then
 pack the folder again and send the new file to evoila support:</p>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>tar<span class="w"> </span>-czf<span class="w"> </span>/root/meho-support-checked.tar.gz<span class="w"> </span>-C<span class="w"> </span>/root/support-check<span class="w"> </span>.
 </code></pre></div>
 <p>When support has the file, delete the bundle, the folder and the new
 file:</p>
-<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>rm<span class="w"> </span>-r<span class="w"> </span>/var/lib/meho/support/&lt;file&gt;.tar.gz<span class="w"> </span>/root/support-check<span class="w"> </span>/root/meho-support-checked.tar.gz
+<div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>rm<span class="w"> </span>-r<span class="w"> </span><span class="s2">"</span><span class="nv">$bundle</span><span class="s2">"</span><span class="w"> </span>/root/support-check<span class="w"> </span>/root/meho-support-checked.tar.gz
 </code></pre></div>
 <h2 id="who-keeps-the-operating-system-up-to-date">Who keeps the operating system up to date<a class="headerlink" href="#who-keeps-the-operating-system-up-to-date" title="Permanent link">&para;</a></h2>
 <p>You do. The machine and its Linux are yours, with your patch cycle and
@@ -4515,7 +4598,9 @@ package mirror.</p>
 <p>While MEHO is on the machine:</p>
 <ul>
 <li>Install operating system updates as usual. A restart is fine: RKE2
-  and MEHO start again by themselves, and OpenBao unseals itself.</li>
+  and MEHO start again by themselves, and OpenBao unseals itself. In
+  keyholder mode, a keyholder runs <code>sudo meho-host unseal</code> after each
+  restart (see <a href="#the-unseal-key">The unseal key</a>).</li>
 <li>Do not change or delete <code>/var/lib/rancher</code>, <code>/etc/rancher</code>,
   <code>/var/lib/meho</code> or <code>/etc/meho</code>. They hold the built-in Kubernetes, the
   data of MEHO, its settings and the firewall file. There are three
@@ -4558,12 +4643,17 @@ package mirror.</p>
 </tbody>
 </table>
 <p>The ports of the built-in Kubernetes are closed from outside too. A port
-scan from another machine shows only the ports above. The traffic that
+scan from another machine shows only the ports above. Ports 80 and 443
+answer every address, so the firewall does not keep MEHO off the
+internet: the place of the machine in your network does (see
+<a href="#step-1-check-what-the-machine-needs">Step 1</a>). The traffic that
 leaves the machine is not filtered, because the operating system and its
 other software are yours.</p>
 <h3 id="what-meho-connects-to">What MEHO connects to<a class="headerlink" href="#what-meho-connects-to" title="Permanent link">&para;</a></h3>
-<p>MEHO connects to the systems it manages and to the AI service. From
-v0.47.0, the network rule of MEHO lets it connect to every address
+<p>MEHO connects to the systems it manages, and to the services that you
+set up for it yourself, for example an AI service (see
+<a href="../../deployment-shapes/#what-leaves-your-network">What leaves your network</a>).
+From v0.47.0, the network rule of MEHO lets it connect to every address
 outside the built-in Kubernetes, on every port.</p>
 <p>MEHO also checks each system before it connects to it. It accepts a
 system on a private address only inside the target networks (see
@@ -4585,14 +4675,19 @@ it cannot reach the systems it manages. Update to v0.47.0 or later.</p>
 <h3 id="the-firewall-file">The firewall file<a class="headerlink" href="#the-firewall-file" title="Permanent link">&para;</a></h3>
 <p>The rules are in one file, <code>/etc/meho/firewall.nft</code>, with comments for
 your security team. The file is for nftables, the firewall of the Linux
-kernel. It holds only its own table, <code>inet meho</code>, and leaves the rules
+kernel. The install needs the package nftables (the command <code>nft</code>), and
+it stops when the command is missing. It holds only its own table, <code>inet meho</code>, and leaves the rules
 of other tables in place.</p>
 <p>The service <code>meho-firewall.service</code> loads the file at every start of the
 machine, before the network and before RKE2. RKE2 does not start while
 the rules are missing.</p>
 <p>To let more traffic in, add your own accept rules to the chain
-<code>prerouting</code>, before its last rule (<code>counter</code>). Then check the file and
-load it again:</p>
+<code>prerouting</code>, before its last rule (<code>counter</code>). For example, this rule
+lets a monitoring server on <code>192.0.2.10</code> reach port 9100 of the machine:</p>
+<div class="highlight"><pre><span></span><code>fib daddr type local ip saddr 192.0.2.10 tcp dport 9100 accept
+</code></pre></div>
+<p>An update and <code>meho-host admin-network</code> keep your own rules. Check the
+file and load it again:</p>
 <div class="highlight"><pre><span></span><code>sudo<span class="w"> </span>nft<span class="w"> </span>-c<span class="w"> </span>-f<span class="w"> </span>/etc/meho/firewall.nft
 sudo<span class="w"> </span>systemctl<span class="w"> </span>reload<span class="w"> </span>meho-firewall.service
 </code></pre></div>

@@ -383,6 +383,10 @@ connector kit (kit 1.7 or higher).
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
+- `backend/tests/test_operation_marks_stored.py` checks that each start
+  stores the values of the code for every built-in operation, also on an
+  upgraded database. It reads the values from the definitions in code, so
+  it fails when a connector's register call does not pass the two fields on.
 - No rule of MEHO reads the two fields. No call waits, runs or is refused
   because of them.
 - A delivery call of the Argo CD or Kubernetes connector (it deploys or

@@ -657,7 +657,7 @@ async def _redispatch_approved(
     either runs on that catalog or is refused when the target's detected
     version no longer fits it.
     """
-    from meho_backplane.auth.principal_block import checking_logins_for_steps
+    from meho_backplane.auth.principal_block import checking_logins_for_steps, may_be_agent
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import composite_resume_binding, requester_of
     from meho_backplane.operations.approved_run_rights import bind_approved_run
@@ -666,8 +666,12 @@ async def _redispatch_approved(
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
         with (
-            # Each step of the run also checks the person who asked.
-            checking_logins_for_steps(request.principal_sub, request.tenant_id),
+            # Each step of the run also checks the login who asked.
+            checking_logins_for_steps(
+                request.principal_sub,
+                request.tenant_id,
+                maybe_agent=may_be_agent(request.principal_kind),
+            ),
             # The rights of who asked are checked again for the run.
             bind_approved_run(request),
             composite_resume_binding(

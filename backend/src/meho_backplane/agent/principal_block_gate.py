@@ -34,6 +34,7 @@ from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.tools import ToolDefinition
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import login_name
 from meho_backplane.operations._principal_block_gate import (
     UNAVAILABLE_ERROR_CODE,
     refuse_if_principal_blocked,
@@ -57,7 +58,9 @@ class PrincipalBlockedRunError(Exception):
 
 
 async def _stop_if_blocked(operator: Operator, step: str) -> None:
-    refusal = await refuse_if_principal_blocked(step, operator.sub, operator.tenant_id)
+    refusal = await refuse_if_principal_blocked(
+        step, operator.sub, operator.tenant_id, client_id=login_name(operator)
+    )
     if refusal is None:
         return
     unavailable = refusal.extras.get("error_code") == UNAVAILABLE_ERROR_CODE

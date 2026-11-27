@@ -4329,7 +4329,7 @@ meho principal
 
 ### `meho principal block`
 
-Block a person in MEHO (tenant_admin)
+Block a login or an agent in MEHO (tenant_admin)
 
 ```
 meho principal block <sub> --reason <text> [flags]
@@ -4337,7 +4337,7 @@ meho principal block <sub> --reason <text> [flags]
 
 - `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw JSON instead of the human summary
-- `--reason` — why the person is blocked (required)
+- `--reason` — why the login is blocked (required)
 
 ### `meho principal blocked`
 

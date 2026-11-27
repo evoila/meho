@@ -1684,9 +1684,11 @@ type AgentPrincipalListResponse struct {
 
 // AgentPrincipalRead Row representation returned by every accessor.
 type AgentPrincipalRead struct {
-	CreatedAt          time.Time          `json:"created_at"`
-	CreatedBySub       string             `json:"created_by_sub"`
-	Id                 openapi_types.UUID `json:"id"`
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	Id           openapi_types.UUID `json:"id"`
+
+	// KeycloakClientId A block of this name (POST /api/v1/principals/blocked) stops every token of the agent.
 	KeycloakClientId   string             `json:"keycloak_client_id"`
 	KeycloakInternalId string             `json:"keycloak_internal_id"`
 	Name               string             `json:"name"`
@@ -2840,7 +2842,23 @@ type BackendReadiness struct {
 // BlockCreate Body of “POST /api/v1/principals/blocked“.
 type BlockCreate struct {
 	Reason string `json:"reason"`
-	Sub    string `json:"sub"`
+
+	// Sub The login id (sub), or the agent name agent:<name> from the agent list.
+	Sub string `json:"sub"`
+}
+
+// BlockCreated Response of “POST /api/v1/principals/blocked“.
+type BlockCreated struct {
+	// Agent The agent name (agent:<name>) of the blocked login, when it is an agent.
+	Agent        *string   `json:"agent"`
+	BlockedAt    time.Time `json:"blocked_at"`
+	BlockedBySub string    `json:"blocked_by_sub"`
+
+	// Message One sentence that says the block is stored.
+	Message string `json:"message"`
+	Reason  string `json:"reason"`
+	Scope   string `json:"scope"`
+	Sub     string `json:"sub"`
 }
 
 // BlockListResponse Response of “GET /api/v1/principals/blocked“.
@@ -2850,6 +2868,8 @@ type BlockListResponse struct {
 
 // BlockRead One block of the list.
 type BlockRead struct {
+	// Agent The agent name (agent:<name>) of the blocked login, when it is an agent.
+	Agent        *string   `json:"agent"`
 	BlockedAt    time.Time `json:"blocked_at"`
 	BlockedBySub string    `json:"blocked_by_sub"`
 	Reason       string    `json:"reason"`
@@ -2859,6 +2879,7 @@ type BlockRead struct {
 
 // BodyBlockUiBlockedPeoplePost defines model for Body__block_ui_blocked_people_post.
 type BodyBlockUiBlockedPeoplePost struct {
+	Agent  *string `json:"agent,omitempty"`
 	Reason *string `json:"reason,omitempty"`
 	Sub    *string `json:"sub,omitempty"`
 }
@@ -61678,7 +61699,7 @@ func (r ListBlockedPrincipalsApiV1PrincipalsBlockedGetResponse) StatusCode() int
 type BlockPrincipalRouteApiV1PrincipalsBlockedPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON201      *BlockRead
+	JSON201      *BlockCreated
 	JSON422      *HTTPValidationError
 }
 
@@ -80143,7 +80164,7 @@ func ParseBlockPrincipalRouteApiV1PrincipalsBlockedPostResponse(rsp *http.Respon
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest BlockRead
+		var dest BlockCreated
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

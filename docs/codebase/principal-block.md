@@ -2,8 +2,47 @@
 
 ## Overview
 
-An admin can block a person in MEHO. MEHO then refuses every request of
-that login within 5 seconds, on every MEHO process.
+An admin can block a person or an agent in MEHO. MEHO then refuses every
+request of that login within a few seconds on every MEHO process: the
+refresh time of the block list, `BLOCK_CACHE_SECONDS` in
+`auth/principal_block.py`.
+
+What a block names (`auth/principal_block_agents.py`):
+
+- A text that starts with `agent:` names an agent: the
+  `keycloak_client_id` of the agent list (REST and console). It must name
+  an agent registered in the admin's reach (the own tenant, or every
+  tenant for a platform admin), also a revoked one. Else MEHO answers 422
+  `unknown_login` with a plain sentence and stores no block. The block
+  stops every token of that agent, the one in use and every new one: the
+  token check compares the token's client id when it starts with `agent:`
+  (`login_name` in `auth/principal_block.py`).
+- Every other text is a login id (the token's `sub`). MEHO stores its
+  block and never compares the text with agent names, in any tenant. The
+  block stops only the login with that id. A token's client id that does
+  not start with `agent:` is never compared with the block list.
+- The 201 answer (`message`) says: "The block is stored. MEHO refuses
+  this login within a few seconds on every MEHO process." (with "this
+  agent" for a block of an agent name). Each process keeps the block list
+  for `BLOCK_CACHE_SECONDS`, so the block reaches every process within
+  that time.
+- The block answer and the list name the agent (`agent`) for a block of
+  an agent name, and for a block of a login id that MEHO saw as an agent.
+
+A check that knows only a login id finds a block of an agent name too: the
+resume of an approved call the agent asked for, a step of an approved run,
+and a send of a running call. The list that each process keeps holds:
+
+- the login id behind the agent: at block time MEHO asks Keycloak for the
+  service-account user of the agent's client (by `keycloak_internal_id`)
+  and stores its id with the block (`principal_block.login_sub`);
+- every login id that MEHO saw with that agent name
+  (`machine_login.client_id`).
+
+When Keycloak cannot be read at block time, the block by name is stored
+all the same. Then a resume, a step of an approved run, or a send, for a
+login that may be an agent and whose agent name MEHO does not know, is
+refused with `principal_blocked` while such a block is in scope.
 
 MEHO checks sign-in tokens itself, with no question to the login server
 for each request. A person who is disabled in the login server keeps
@@ -70,17 +109,30 @@ To stop a platform admin: another platform admin blocks the person in
 every tenant. In the login server, take the platform admin role away and
 end the person's sessions and long logins.
 
-A blocked person reads: "This person is blocked in MEHO. Ask an admin."
+A blocked login reads: "This login is blocked in MEHO. Ask an admin."
 The text names no admin and no reason.
 
 ## Key types
 
 - Table `principal_block` (`PrincipalBlock`, migration `0186`): one row
-  for each `(sub, scope)`. `scope` is `*` or the tenant id. It holds the
-  reason, the admin's `sub` and the time.
+  for each `(sub, scope)`. `sub` is a login id or an agent name. `scope`
+  is `*` or the tenant id. It holds the reason, the admin's `sub` and the
+  time.
+- Column `machine_login.client_id` (migration `0190`): the client id that
+  MEHO saw with a machine login id. `note_machine_login`
+  (`auth/machine_logins.py`) writes it on each REST and MCP call that
+  passes the token check, and on the start of a hosted agent run. A token
+  that the token check refuses by its agent name writes it too, so a
+  later check by the login id alone finds the block.
+- Column `principal_block.login_sub` (migration `0190`): for a block of
+  an agent name, the login id behind the agent that Keycloak answered at
+  block time; `NULL` when Keycloak could not be read.
 - `meho_backplane/auth/principal_block.py`: the reader with its cache,
   and `block_principal`, `unblock_principal`, `list_blocked`,
   `block_set_digest`.
+- `meho_backplane/auth/principal_block_agents.py`: what a block text
+  names, the lookup of the login id behind an agent in Keycloak, and the
+  agents the console offers to pick.
 - `meho_backplane/api/v1/principal_blocks.py`: the REST routes.
 - `meho_backplane/operations/_principal_block_gate.py`: the check for
   operation calls.
@@ -94,10 +146,11 @@ The text names no admin and no reason.
 
 ## Control flow
 
-The reader keeps the whole list in memory for 5 seconds per process
-(`BLOCK_CACHE_SECONDS`). A block or unblock clears the cache of the
-process that made it. Every other process sees the change when its cache
-is 5 seconds old. A process that cannot read the table refuses the
+The reader keeps the whole list in memory per process for the refresh
+time of the block list (`BLOCK_CACHE_SECONDS`). A block or unblock clears
+the cache of the process that made it. Every other process sees the
+change within a few seconds, when its cache is older than
+`BLOCK_CACHE_SECONDS`. A process that cannot read the table refuses the
 request (503 `principal_block_check_unavailable`); it never answers "not
 blocked" for an unknown state.
 
@@ -156,7 +209,8 @@ who asked is blocked between two steps, the next step is refused. This
 holds for a step through `dispatch()`, a governed direct step, and a
 request sent straight to the target.
 
-A new request of a blocked person is refused within 5 seconds. An open
+A new request of a blocked person is refused within a few seconds (the
+refresh time of the block list, `BLOCK_CACHE_SECONDS`). An open
 live stream of the person ends within a few seconds too. The console's
 live stream (`/ui/broadcast/stream`) and `GET /api/v1/feed` each read the
 block list in their liveness check (`StreamLiveness.still_valid`), at every
@@ -188,8 +242,11 @@ REST routes (`/api/v1/principals/blocked`):
 
 - `GET`: the list. A platform admin sees every block, a tenant admin sees
   the blocks of their tenant.
-- `POST` with `{"sub", "reason"}`: block. A second block in the same
-  scope updates the reason.
+- `POST` with `{"sub", "reason"}`: block. `sub` is a login id or an agent
+  name. A second block in the same scope updates the reason. An agent
+  name MEHO does not know gets 422 in the shape of the published field
+  errors: `detail` is a list with one error of type `unknown_login`
+  whose `msg` is the plain sentence.
 - `DELETE /{sub}`: unblock. A platform admin with `tenant_admin` removes
   every block of the login, but on their own login only the block of the
   current tenant. A tenant admin removes the block of their tenant. 404
@@ -212,8 +269,8 @@ On a 401 with the challenge, `unblock` opens the browser approval sign-in
 that token; the token stays in memory for this one run.
 
 Console: the page `/ui/blocked-people` lists the blocks the admin may see
-(login id, tenant, reason, who blocked, when), blocks a login with a
-reason, and unblocks a login after a confirm step. It calls the same
+(login id, agent, tenant, reason, who blocked, when), blocks a login id
+or an agent name with a reason, and unblocks a login after a confirm step. It calls the same
 functions as the REST routes, so the rules are the same: only a person
 with `tenant_admin` may open the page or send a form (403 for anyone
 else), a tenant admin works in their own tenant, a platform admin in

@@ -31,6 +31,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 __all__ = [
+    "CheckedLogin",
     "mark_request_sent",
     "mark_step_refused",
     "mark_step_sent",
@@ -43,10 +44,26 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True)
+class CheckedLogin:
+    """A login the block list checks while an operation runs.
+
+    *client_id* is its agent name (``agent:<name>``) when MEHO knows it.
+    *maybe_agent* is true when the login may be an agent whose name MEHO
+    does not know: an approved call or step of an agent, checked by the
+    login id that asked.
+    """
+
+    sub: str
+    tenant_id: uuid.UUID | None
+    client_id: str | None = None
+    maybe_agent: bool = False
+
+
 @dataclass
 class _Run:
     parent: _Run | None
-    login: tuple[str, uuid.UUID | None] | None = None
+    login: CheckedLogin | None = None
     op_id: str | None = None
     sent: bool = False
     steps_sent: list[str] = field(default_factory=list)
@@ -64,7 +81,12 @@ _run_var: ContextVar[_Run | None] = ContextVar("principal_block_run", default=No
 
 @contextmanager
 def tracking_run(
-    *, is_step: bool, login: tuple[str, uuid.UUID | None], op_id: str | None = None
+    *,
+    is_step: bool,
+    login: tuple[str, uuid.UUID | None],
+    op_id: str | None = None,
+    client_id: str | None = None,
+    maybe_agent: bool = False,
 ) -> Iterator[None]:
     """Keep a record while one operation runs.
 
@@ -73,16 +95,19 @@ def tracking_run(
     tenant_id)`` of the operation's operator, the login every send of the
     operation checks (:func:`run_login`). *op_id* is the operation id; for a
     step, the records above note it when the step sends (:func:`sent_steps`).
+    *client_id* and *maybe_agent* say what MEHO knows of the agent name of
+    the login (:class:`CheckedLogin`).
     """
     parent = _run_var.get() if is_step else None
-    token = _run_var.set(_Run(parent=parent, login=login, op_id=op_id))
+    checked = CheckedLogin(login[0], login[1], client_id, maybe_agent)
+    token = _run_var.set(_Run(parent=parent, login=checked, op_id=op_id))
     try:
         yield
     finally:
         _run_var.reset(token)
 
 
-def run_login() -> tuple[str, uuid.UUID | None] | None:
+def run_login() -> CheckedLogin | None:
     """The login of the running operation, or ``None`` outside one."""
     run = _run_var.get()
     return None if run is None else run.login

@@ -11088,7 +11088,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BlockRead"
+                  "$ref": "#/components/schemas/BlockCreated"
                 }
               }
             }
@@ -28349,7 +28349,8 @@
           },
           "keycloak_client_id": {
             "type": "string",
-            "title": "Keycloak Client Id"
+            "title": "Keycloak Client Id",
+            "description": "A block of this name (POST /api/v1/principals/blocked) stops every token of the agent."
           },
           "keycloak_internal_id": {
             "type": "string",
@@ -30344,7 +30345,8 @@
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
-            "title": "Sub"
+            "title": "Sub",
+            "description": "The login id (sub), or the agent name agent:<name> from the agent list."
           },
           "reason": {
             "type": "string",
@@ -30361,6 +30363,53 @@
         ],
         "title": "BlockCreate",
         "description": "Body of ``POST /api/v1/principals/blocked``."
+      },
+      "BlockCreated": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "blocked_by_sub": {
+            "type": "string",
+            "title": "Blocked By Sub"
+          },
+          "blocked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Blocked At"
+          },
+          "agent": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent",
+            "description": "The agent name (agent:<name>) of the blocked login, when it is an agent."
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "One sentence that says the block is stored."
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "scope",
+          "reason",
+          "blocked_by_sub",
+          "blocked_at",
+          "message"
+        ],
+        "title": "BlockCreated",
+        "description": "Response of ``POST /api/v1/principals/blocked``."
       },
       "BlockListResponse": {
         "properties": {
@@ -30401,6 +30450,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Blocked At"
+          },
+          "agent": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent",
+            "description": "The agent name (agent:<name>) of the blocked login, when it is an agent."
           }
         },
         "type": "object",
@@ -30419,6 +30474,11 @@
           "sub": {
             "type": "string",
             "title": "Sub",
+            "default": ""
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent",
             "default": ""
           },
           "reason": {

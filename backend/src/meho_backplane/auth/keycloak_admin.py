@@ -636,8 +636,14 @@ class KeycloakAdminClient:
             raise KeycloakAdminError(
                 f"Keycloak get_service_account_user_id failed: HTTP {resp.status_code}"
             )
-        representation: dict[str, Any] = resp.json()
-        service_account_sub = str(representation.get("id", "")).strip()
+        try:
+            representation: Any = resp.json()
+        except ValueError as exc:
+            raise KeycloakAdminError(
+                "Keycloak get_service_account_user_id answered with a body that is not JSON"
+            ) from exc
+        user_id = representation.get("id") if isinstance(representation, dict) else None
+        service_account_sub = user_id.strip() if isinstance(user_id, str) else ""
         if not service_account_sub:
             raise KeycloakAdminError(
                 f"Keycloak get_service_account_user_id returned no user id for "

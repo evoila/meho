@@ -160,7 +160,11 @@ class AgentPrincipalRead(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     name: str
-    keycloak_client_id: str
+    keycloak_client_id: str = Field(
+        description=(
+            "A block of this name (POST /api/v1/principals/blocked) stops every token of the agent."
+        )
+    )
     keycloak_internal_id: str
     owner_sub: str
     revoked: bool

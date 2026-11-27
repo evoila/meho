@@ -1077,6 +1077,8 @@
   "tests/test_preview_credential_write_mark.py": 0.72,
   "tests/test_preview_grant_cover.py": 0.74,
   "tests/test_principal_block.py": 10.11,
+  "tests/test_principal_block_agent_name.py": 44.0,
+  "tests/test_principal_block_agent_paths.py": 42.0,
   "tests/test_principal_block_direct_steps.py": 1.19,
   "tests/test_principal_block_inventory.py": 2.49,
   "tests/test_principal_block_running_call.py": 1.82,

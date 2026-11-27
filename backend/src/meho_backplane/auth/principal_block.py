@@ -1,12 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The admin block list: people MEHO refuses on every request.
+"""The admin block list: logins MEHO refuses on every request.
 
 MEHO checks sign-in tokens itself, so a person disabled in the login
 server keeps working until the token ends. An admin can also block a
-person in MEHO. A blocked login is refused within
+login in MEHO. A blocked login is refused within
 :data:`BLOCK_CACHE_SECONDS` on every MEHO process.
+
+What a block names (:mod:`meho_backplane.auth.principal_block_agents`):
+
+* A text that starts with ``agent:`` names an agent: the
+  ``keycloak_client_id`` of the agent list. It must name an agent
+  registered in the admin's reach, else MEHO refuses it
+  (:class:`UnknownLoginError`). The block stops every token of that
+  agent: the token check compares the token's client id when it starts
+  with ``agent:`` (:func:`login_name`).
+* Every other text is a login id (the token's ``sub``). It stops only
+  the login with that id.
+
+A check that knows only a login id finds a block of an agent name by:
+
+* the login id behind the agent, which MEHO reads from Keycloak at block
+  time and stores with the block (``principal_block.login_sub``);
+* each login id that MEHO saw with that agent name
+  (``machine_login.client_id``);
+* while a block of an agent name is in scope: a machine login (any login
+  that is not a person) whose agent name MEHO does not know is refused. A
+  machine login whose agent name MEHO knows is refused when that name is
+  blocked. This holds also when the block has a stored login id.
 
 Scope of a block:
 
@@ -51,27 +73,37 @@ import json
 import time
 import uuid
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
 import structlog
-from sqlalchemy import Insert, delete, select
+from sqlalchemy import Insert, delete, func, select, union
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
+from meho_backplane.auth.principal_block_agents import (
+    AGENT_NAME_PREFIX,
+    UnknownLoginError,
+    agent_login_id,
+    agent_names,
+    agent_of_block_text,
+    is_agent_name,
+    keep_refused_agent_link,
+)
 from meho_backplane.auth.principal_block_run import (
+    CheckedLogin,
     mark_step_refused,
     run_login,
     step_refused_in_run,
 )
 from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import PrincipalBlock
+from meho_backplane.db.models import MachineLogin, PrincipalBlock
 from meho_backplane.session_store.audit import add_audit_row
 
 __all__ = [
@@ -86,11 +118,16 @@ __all__ = [
     "PrincipalBlockedStepError",
     "PrincipalNotBlockedError",
     "SignInAlreadyUsedError",
+    "UnknownLoginError",
     "block_principal",
     "checking_logins_for_steps",
+    "checking_operator_for_steps",
     "first_blocked_step_login",
     "is_principal_blocked",
+    "keep_agent_link_if_refused_by_name",
     "list_blocked",
+    "login_name",
+    "may_be_agent",
     "raise_if_send_refused",
     "refusal_of_step",
     "reset_block_cache",
@@ -104,8 +141,8 @@ BLOCK_CACHE_SECONDS: Final[float] = 5.0
 #: ``scope`` of a block that holds in every tenant.
 BLOCK_SCOPE_ALL: Final[str] = "*"
 
-#: What a blocked person reads. It names no admin and no reason.
-PRINCIPAL_BLOCKED_MESSAGE: Final[str] = "This person is blocked in MEHO. Ask an admin."
+#: What a blocked login reads. It names no admin and no reason.
+PRINCIPAL_BLOCKED_MESSAGE: Final[str] = "This login is blocked in MEHO. Ask an admin."
 
 #: Longest reason an admin can type.
 REASON_MAX_LENGTH: Final[int] = 500
@@ -156,13 +193,27 @@ class BlockedPerson:
     reason: str
     blocked_by_sub: str
     blocked_at: datetime
+    #: The agent name (``agent:<name>``) of the blocked login, when it is an agent.
+    agent: str | None = None
+
+
+@dataclass(frozen=True)
+class _Entries:
+    """The block list as one process keeps it.
+
+    ``blocked`` holds every blocked ``(login, scope)``. ``agent_scopes``
+    holds the scope of each block of an agent name.
+    """
+
+    blocked: frozenset[tuple[str, str]]
+    agent_scopes: frozenset[str] = frozenset()
 
 
 @dataclass
 class _Cache:
     loaded_at: float
     owner: object
-    entries: frozenset[tuple[str, str]]
+    entries: _Entries
 
 
 _cache: _Cache | None = None
@@ -175,15 +226,39 @@ def reset_block_cache() -> None:
     _cache = None
 
 
-async def _load_entries(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> frozenset[tuple[str, str]]:
+async def _load_entries(sessionmaker: async_sessionmaker[AsyncSession]) -> _Entries:
+    """Read the block list.
+
+    A block of an agent name also adds the login id stored with it and
+    each login id that MEHO saw with that agent name, so a check by login
+    id alone refuses it too. Only a block text that starts with
+    ``agent:`` is compared with agent names.
+    """
+    by_agent_name = func.substr(PrincipalBlock.sub, 1, len(AGENT_NAME_PREFIX)) == AGENT_NAME_PREFIX
+    blocks = select(PrincipalBlock.sub, PrincipalBlock.scope)
+    linked = select(PrincipalBlock.login_sub, PrincipalBlock.scope).where(
+        by_agent_name, PrincipalBlock.login_sub.is_not(None)
+    )
+    seen = (
+        select(MachineLogin.sub, PrincipalBlock.scope)
+        .select_from(MachineLogin)
+        .join(PrincipalBlock, PrincipalBlock.sub == MachineLogin.client_id)
+        .where(by_agent_name)
+    )
+    agent_scopes = select(PrincipalBlock.scope).where(by_agent_name)
     async with sessionmaker() as session:
-        rows = (await session.execute(select(PrincipalBlock.sub, PrincipalBlock.scope))).all()
-    return frozenset((str(sub), str(scope)) for sub, scope in rows)
+        rows: list[tuple[str | None, str]] = [
+            (sub, scope)
+            for sub, scope in (await session.execute(union(blocks, linked, seen))).all()
+        ]
+        scopes = (await session.execute(agent_scopes)).scalars().all()
+    return _Entries(
+        blocked=frozenset((str(sub), str(scope)) for sub, scope in rows),
+        agent_scopes=frozenset(str(scope) for scope in scopes),
+    )
 
 
-async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> frozenset[tuple[str, str]]:
+async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> _Entries:
     """Return the cached list, or read the table when it is older than *max_age*."""
     global _cache
     sessionmaker = get_sessionmaker()
@@ -205,47 +280,159 @@ async def _entries(max_age: float = BLOCK_CACHE_SECONDS) -> frozenset[tuple[str,
     return entries
 
 
-async def is_principal_blocked(
-    sub: str, tenant_id: uuid.UUID | None, *, max_age: float = BLOCK_CACHE_SECONDS
-) -> bool:
-    """True when *sub* is blocked everywhere or in *tenant_id*.
+def login_name(operator: Operator) -> str | None:
+    """The agent name of an agent's token (``agent:<name>``), or ``None``.
 
-    The list copy may be *max_age* seconds old at most (default
-    :data:`BLOCK_CACHE_SECONDS`).
+    It is the client id of the token when it starts with ``agent:``. A
+    person's token, and a machine token with another client id, give
+    ``None``: their client id is no agent name.
+    """
+    if is_human_principal(operator) or not is_agent_name(operator.client_id):
+        return None
+    return operator.client_id
+
+
+def may_be_agent(principal_kind: str | None) -> bool:
+    """True when a login of *principal_kind* is a machine login (``None`` = not recorded).
+
+    The same rule as the token check (:func:`login_name`): every login that
+    is not a person may carry an agent name. An agent token without the
+    ``principal_kind`` claim can be recorded as a service.
+    """
+    return principal_kind != PrincipalKind.USER.value
+
+
+async def _known_client_ids(sub: str, tenant_id: uuid.UUID | None) -> list[str]:
+    """The client ids MEHO keeps for the login id *sub* (``machine_login.client_id``)."""
+    query = select(MachineLogin.client_id).where(
+        MachineLogin.sub == sub, MachineLogin.client_id.is_not(None)
+    )
+    if tenant_id is not None:
+        query = query.where(MachineLogin.tenant_id == tenant_id)
+    try:
+        async with get_sessionmaker()() as session:
+            return [str(c) for c in (await session.execute(query)).scalars()]
+    except Exception as exc:
+        _log.warning("principal_block_read_failed", exc_info=True)
+        raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
+
+
+async def _unknown_machine_login_blocked(
+    entries: _Entries, sub: str, tenant_id: uuid.UUID | None, scopes: list[str]
+) -> bool:
+    """The check of a machine login by its login id alone, while an agent block is in scope.
+
+    MEHO reads the client id it keeps for *sub*. The login is refused when
+    there is none, and when one is an agent name that is blocked in the
+    same list copy *entries*.
+    """
+    client_ids = await _known_client_ids(sub, tenant_id)
+    if not client_ids:
+        return True
+    return any(
+        (name, scope) in entries.blocked
+        for name in client_ids
+        if is_agent_name(name)
+        for scope in scopes
+    )
+
+
+async def is_principal_blocked(
+    sub: str,
+    tenant_id: uuid.UUID | None,
+    *,
+    client_id: str | None = None,
+    maybe_agent: bool = False,
+    max_age: float = BLOCK_CACHE_SECONDS,
+) -> bool:
+    """True when *sub*, or the agent name *client_id*, is blocked everywhere or in *tenant_id*.
+
+    Pass :func:`login_name` as *client_id* when the token is at hand. A
+    *client_id* that does not start with ``agent:`` is not compared. Set
+    *maybe_agent* when the login is a machine login and its agent name is
+    not at hand (:func:`may_be_agent`): then, while a block of an agent
+    name is in scope, the login is refused unless MEHO keeps a client id
+    for *sub* that is not a blocked agent name
+    (:func:`_unknown_machine_login_blocked`). The list copy may be
+    *max_age* seconds old at most (default :data:`BLOCK_CACHE_SECONDS`).
 
     Raises :class:`PrincipalBlockUnavailableError` when the list cannot be read.
     """
     entries = await _entries(max_age)
-    if (sub, BLOCK_SCOPE_ALL) in entries:
+    scopes = [BLOCK_SCOPE_ALL] if tenant_id is None else [BLOCK_SCOPE_ALL, str(tenant_id)]
+    name = client_id if is_agent_name(client_id) else None
+    logins = [sub] if name is None else [sub, name]
+    if any((login, scope) in entries.blocked for login in logins for scope in scopes):
         return True
-    return tenant_id is not None and (sub, str(tenant_id)) in entries
+    if client_id is None and maybe_agent and entries.agent_scopes.intersection(scopes):
+        return await _unknown_machine_login_blocked(entries, sub, tenant_id, scopes)
+    return False
+
+
+async def keep_agent_link_if_refused_by_name(
+    operator: Operator, tenant_id: uuid.UUID | None
+) -> None:
+    """Keep the link of an agent token's login id to its agent name, once.
+
+    Called when the token check refused the token. When the login id alone
+    is not blocked yet, the block matched the agent name: MEHO then writes
+    the link (``machine_login.client_id``) and reads the list again, so
+    every later check by the login id alone finds the block.
+    """
+    if await is_principal_blocked(operator.sub, tenant_id):
+        return
+    await keep_refused_agent_link(operator)
+    reset_block_cache()
 
 
 #: The logins each step of the running multi-step operation checks, besides
 #: its own operator: ``(sub, tenant_id)`` pairs. Empty outside a multi-step
 #: operation and outside an approved run.
-_step_logins_var: ContextVar[tuple[tuple[str, uuid.UUID | None], ...]] = ContextVar(
+_step_logins_var: ContextVar[tuple[CheckedLogin, ...]] = ContextVar(
     "principal_block_step_logins", default=()
 )
 
 
 @contextmanager
-def checking_logins_for_steps(sub: str, tenant_id: uuid.UUID | None) -> Iterator[None]:
+def checking_logins_for_steps(
+    sub: str,
+    tenant_id: uuid.UUID | None,
+    *,
+    client_id: str | None = None,
+    maybe_agent: bool = False,
+) -> Iterator[None]:
     """Make every step and direct request in this block also check *sub*.
 
     Bound for the body of a multi-step operation with its operator, and for
-    an approved run with the person who asked, so a block made while the
+    an approved run with the login who asked, so a block made while the
     run goes on stops its next step, also when the approver runs it.
+    *client_id* and *maybe_agent* are as in :func:`is_principal_blocked`.
     """
-    token = _step_logins_var.set((*_step_logins_var.get(), (sub, tenant_id)))
+    login = CheckedLogin(sub, tenant_id, client_id, maybe_agent)
+    token = _step_logins_var.set((*_step_logins_var.get(), login))
     try:
         yield
     finally:
         _step_logins_var.reset(token)
 
 
+def checking_operator_for_steps(operator: Operator) -> AbstractContextManager[None]:
+    """:func:`checking_logins_for_steps` for *operator*, with its agent name."""
+    return checking_logins_for_steps(
+        operator.sub,
+        operator.tenant_id,
+        client_id=login_name(operator),
+        maybe_agent=operator.principal_kind is PrincipalKind.AGENT,
+    )
+
+
 async def first_blocked_step_login(
-    sub: str, tenant_id: uuid.UUID | None, *, only_in_steps: bool = False
+    sub: str,
+    tenant_id: uuid.UUID | None,
+    *,
+    only_in_steps: bool = False,
+    client_id: str | None = None,
+    maybe_agent: bool = False,
 ) -> str | None:
     """The first blocked login of a step: *sub*, then each bound login.
 
@@ -257,9 +444,11 @@ async def first_blocked_step_login(
     bound = _step_logins_var.get()
     if only_in_steps and not bound:
         return None
-    for login, login_tenant in ((sub, tenant_id), *bound):
-        if await is_principal_blocked(login, login_tenant):
-            return login
+    for login in (CheckedLogin(sub, tenant_id, client_id, maybe_agent), *bound):
+        if await is_principal_blocked(
+            login.sub, login.tenant_id, client_id=login.client_id, maybe_agent=login.maybe_agent
+        ):
+            return login.sub
     return None
 
 
@@ -276,16 +465,28 @@ async def refusal_of_step(
     been refused in that time. The refusal is noted for the running
     operation, so the whole operation stops with it.
     """
-    return await _refusal_for_login(operator.sub, operator.tenant_id, only_in_steps=only_in_steps)
+    login = CheckedLogin(
+        operator.sub,
+        operator.tenant_id,
+        login_name(operator),
+        operator.principal_kind is PrincipalKind.AGENT,
+    )
+    return await _refusal_for_login(login, only_in_steps=only_in_steps)
 
 
 async def _refusal_for_login(
-    sub: str, tenant_id: uuid.UUID | None, *, only_in_steps: bool
+    login: CheckedLogin, *, only_in_steps: bool
 ) -> PrincipalBlockedStepError | None:
     refusal = _earlier_refusal()
     if refusal is None:
         try:
-            blocked = await first_blocked_step_login(sub, tenant_id, only_in_steps=only_in_steps)
+            blocked = await first_blocked_step_login(
+                login.sub,
+                login.tenant_id,
+                only_in_steps=only_in_steps,
+                client_id=login.client_id,
+                maybe_agent=login.maybe_agent,
+            )
         except PrincipalBlockUnavailableError:
             refusal = PrincipalBlockedStepError(unavailable=True)
         else:
@@ -321,9 +522,9 @@ async def raise_if_send_refused() -> None:
     login = run_login()
     if login is None:
         return
-    refusal = await _refusal_for_login(login[0], login[1], only_in_steps=False)
+    refusal = await _refusal_for_login(login, only_in_steps=False)
     if refusal is not None:
-        _log.info("principal_block_send_refused", operator_sub=login[0])
+        _log.info("principal_block_send_refused", operator_sub=login.sub)
         raise refusal
 
 
@@ -333,14 +534,20 @@ def _scope_of(operator: Operator) -> str:
 
 
 async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedPerson:
-    """Block *sub*. The block row and its audit row commit together.
+    """Block *sub*: a login id or an agent name. The block row and its audit row commit together.
 
+    A text that starts with ``agent:`` names an agent; every other text is
+    a login id and is always stored. For an agent, the login id behind it
+    is read from Keycloak and stored with the block
+    (:func:`~meho_backplane.auth.principal_block_agents.agent_login_id`).
     Blocking a login that is already blocked in the same scope updates
     the reason. The row is written in one statement (insert, or update
     when the row is there). While an unblock of the login holds the row,
     the statement waits; when the unblock removed the row, the statement
-    writes a new one. So a block is always written. Raises
-    :class:`CannotBlockSelfError` for the admin's own login.
+    writes a new one. So a block is always written. A repeat block keeps
+    the stored login id when Keycloak cannot be read at that moment.
+    Raises :class:`CannotBlockSelfError` for the admin's own login, and
+    :class:`UnknownLoginError` for an agent name MEHO does not know.
     """
     if sub == operator.sub:
         raise CannotBlockSelfError
@@ -354,8 +561,17 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
         "blocked_by_sub": operator.sub,
         "blocked_at": now,
     }
-    changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
     async with get_sessionmaker()() as session:
+        agent_row = await agent_of_block_text(session, operator, sub)
+        login_sub = await agent_login_id(agent_row) if agent_row is not None else None
+        agent = sub if agent_row is not None else None
+        if agent is None:
+            agent = (await agent_names(session, operator, {sub})).get(sub)
+        values["login_sub"] = login_sub
+        changed = {k: v for k, v in values.items() if k not in ("sub", "scope")}
+        if login_sub is None:
+            # Keycloak could not be read now: keep the login id stored before.
+            del changed["login_sub"]
         conn = await session.connection()
         stmt: Insert
         if conn.dialect.name == "postgresql":
@@ -375,7 +591,7 @@ async def block_principal(operator: Operator, sub: str, reason: str) -> BlockedP
         )
         await session.commit()
     reset_block_cache()
-    return BlockedPerson(sub, scope, reason, operator.sub, now)
+    return BlockedPerson(sub, scope, reason, operator.sub, now, agent)
 
 
 def block_set_digest(blocks: Iterable[BlockedPerson]) -> str:
@@ -538,4 +754,8 @@ async def list_blocked(operator: Operator) -> list[BlockedPerson]:
         stmt = stmt.where(PrincipalBlock.scope == str(operator.tenant_id))
     async with get_sessionmaker()() as session:
         rows = (await session.execute(stmt)).scalars().all()
-    return [BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at) for r in rows]
+        agents = await agent_names(session, operator, {r.sub for r in rows})
+    return [
+        BlockedPerson(r.sub, r.scope, r.reason, r.blocked_by_sub, r.blocked_at, agents.get(r.sub))
+        for r in rows
+    ]

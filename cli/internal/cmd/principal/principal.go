@@ -56,10 +56,14 @@ func newBlockCmd() *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{
 		Use:   "block <sub> --reason <text>",
-		Short: "Block a person in MEHO (tenant_admin)",
-		Long: "block calls POST /api/v1/principals/blocked. <sub> is the login id " +
-			"of the person. The reason is kept in the audit log and in the " +
-			"block list. The person sees no reason.",
+		Short: "Block a login or an agent in MEHO (tenant_admin)",
+		Long: "block calls POST /api/v1/principals/blocked. A <sub> that starts with " +
+			"agent: names an agent: copy it from the agent list (agent:<name>). It " +
+			"stops every token of that agent. MEHO refuses an agent name that names " +
+			"no agent in your reach, and stores no block. Every other <sub> is a " +
+			"login id: MEHO stores its block. MEHO refuses the login or agent " +
+			"within a few seconds on every MEHO process. The reason is kept in the audit log and in the block " +
+			"list. The blocked login sees no reason.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -83,10 +87,11 @@ func newBlockCmd() *cobra.Command {
 				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON201)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "blocked %s (scope %s)\n", resp.JSON201.Sub, scopeText(resp.JSON201.Scope))
+			fmt.Fprintln(cmd.OutOrStdout(), resp.JSON201.Message)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "why the person is blocked (required)")
+	cmd.Flags().StringVar(&reason, "reason", "", "why the login is blocked (required)")
 	flags.add(cmd)
 	return cmd
 }
@@ -206,13 +211,17 @@ func printBlocked(w io.Writer, rows []api.BlockRead) {
 		fmt.Fprintln(w, "nobody is blocked")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-14s %-20s %s\n", "SUB", "SCOPE", "BLOCKED AT", "REASON")
+	fmt.Fprintf(w, "%-40s %-24s %-14s %-20s %s\n", "SUB", "AGENT", "SCOPE", "BLOCKED AT", "REASON")
 	for _, r := range rows {
 		scope := "all"
 		if r.Scope != "*" {
 			scope = "tenant"
 		}
-		fmt.Fprintf(w, "%-40s %-14s %-20s %s\n", r.Sub, scope,
+		agent := "-"
+		if r.Agent != nil && *r.Agent != "" {
+			agent = *r.Agent
+		}
+		fmt.Fprintf(w, "%-40s %-24s %-14s %-20s %s\n", r.Sub, agent, scope,
 			r.BlockedAt.UTC().Format("2006-01-02T15:04:05Z"), r.Reason)
 	}
 }
@@ -357,6 +366,21 @@ func decodeDetailString(body string) string {
 		var detail string
 		if err := json.Unmarshal(envelope.Detail, &detail); err == nil && detail != "" {
 			return detail
+		}
+		var errs []struct {
+			Type string `json:"type"`
+			Msg  string `json:"msg"`
+		}
+		if err := json.Unmarshal(envelope.Detail, &errs); err == nil && len(errs) > 0 {
+			parts := make([]string, 0, len(errs))
+			for _, e := range errs {
+				if e.Type != "" && e.Msg != "" {
+					parts = append(parts, e.Type+": "+e.Msg)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "; ")
+			}
 		}
 	}
 	return body

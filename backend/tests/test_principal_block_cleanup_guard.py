@@ -16,6 +16,9 @@ A run that has changed a target ends in step with the secret store:
 
 * Each helper is used in its known places, and nowhere else. A new place
   must be added to the list here, with its rule, so a reviewer sees it.
+* Only the known places pass ``script_removal_is_cleanup`` to the pfSense
+  playback, so the removal of a staged script runs with no block check only
+  there.
 * The modules that send Vault requests for a call never start a worker
   thread without the check (:func:`~meho_backplane.auth.send_check.to_thread_checked`).
 * Only the block check reads the mark.
@@ -38,6 +41,13 @@ _UNCHECKED_PLACES = {
     "connectors/vault/ops_token_store.py": "cleanup",
     "connectors/rke2/ops_write.py": "finish",
     "connectors/vault/userpass_password.py": "finish",
+}
+
+#: The places that pass ``script_removal_is_cleanup`` to the pfSense playback,
+#: and the rule of each.
+_SCRIPT_REMOVAL_CLEANUP_PLACES = {
+    # The removal of the script that a VPN user create staged on the firewall.
+    "connectors/pfsense/ops_openvpn_user.py": "cleanup",
 }
 
 _HELPER_OF_RULE = {
@@ -86,6 +96,26 @@ def test_only_the_known_places_skip_the_block_check_each_under_its_rule() -> Non
                 assert name not in found, f"{name} uses both helpers"
                 found[name] = rule
     assert found == _UNCHECKED_PLACES
+
+
+def _passes_script_removal_cleanup(path: Path) -> bool:
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                value = keyword.value
+                is_false = isinstance(value, ast.Constant) and value.value is False
+                if keyword.arg == "script_removal_is_cleanup" and not is_false:
+                    return True
+    return False
+
+
+def test_only_the_known_places_make_the_script_removal_a_cleanup() -> None:
+    found = {
+        str(path.relative_to(_SRC)): "cleanup"
+        for path in _modules()
+        if _passes_script_removal_cleanup(path)
+    }
+    assert found == _SCRIPT_REMOVAL_CLEANUP_PLACES
 
 
 def test_vault_senders_start_no_worker_thread_without_the_check() -> None:

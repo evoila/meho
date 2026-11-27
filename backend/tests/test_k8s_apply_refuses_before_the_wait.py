@@ -14,7 +14,10 @@ What these tests prove, through the real dispatch over a stand-in cluster
   approval they are applied in order;
 * an empty text and a list as the value of ``manifest`` are still refused
   by the params check;
-* a manifest that passes the check passes the parse step of the run.
+* a manifest that passes the check passes the parse step of the run;
+* a manifest that is not valid YAML or JSON is refused with the document
+  number, the line, the column and one fixed phrase, and no value of it is
+  in an answer, a preview answer, an audit row or a log.
 """
 
 from __future__ import annotations
@@ -94,7 +97,12 @@ _REFUSED: dict[str, tuple[str, str]] = {
     "only-separators": ("---\n---\n---\n", "the text has no documents"),
     "bad-yaml-in-the-middle": (
         _NAMESPACE + "---\na: [b\n---\n" + _SERVICE,
-        "document 2 is not valid YAML or JSON",
+        "document 2 is not valid YAML or JSON (a structure YAML refuses, line 7, column 1)",
+    ),
+    "tab-before-name-in-document-2": (
+        "apiVersion: v1\nkind: Namespace\nmetadata: {name: web}\n---\n"
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n\tname: web\n",
+        "document 2 is not valid YAML or JSON (a token YAML refuses, line 8, column 1)",
     ),
     "no-kind-in-the-middle": (
         _NAMESPACE + "---\nmetadata: {name: x}\n---\n" + _SERVICE,
@@ -134,7 +142,7 @@ _REFUSED: dict[str, tuple[str, str]] = {
     "date-that-does-not-exist-in-document-2": (
         _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\n"
         "data:\n  day: 2026-02-30\n",
-        "document 2 is not valid YAML or JSON",
+        "document 2 is not valid YAML or JSON (a value YAML cannot build)",
     ),
     "control-character-in-document-2": (
         _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: w" + chr(11) + "b}\n",
@@ -159,6 +167,10 @@ _REFUSED: dict[str, tuple[str, str]] = {
     "custom-resource-ending-in-list-with-items": (
         "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\nitems: [milk]\n",
         "document 1 (apiVersion example.com/v1, kind ShoppingList) is a list object",
+    ),
+    "custom-kind-named-list-with-items": (
+        "apiVersion: example.test/v1\nkind: List\nmetadata: {name: web}\nitems: [milk]\n",
+        "document 1 (apiVersion example.test/v1, kind List) is a list object",
     ),
     "custom-resource-with-items": (
         "apiVersion: example.com/v1\nkind: Cart\nmetadata: {name: web}\nitems: [milk]\n",
@@ -381,8 +393,9 @@ async def test_a_yaml_error_text_is_not_shown(cluster: AsyncMock) -> None:
     reason, preview_reason, audit, logs = await _refusal_seen_everywhere(
         _NAMESPACE + "---\na: [marker-yaml\n"
     )
-    assert (
-        reason == f"The manifest cannot be applied: document 2 is not valid YAML or JSON. {_FORM}"
+    assert reason == (
+        "The manifest cannot be applied: document 2 is not valid YAML or JSON "
+        f"(a structure YAML refuses, line 7, column 1). {_FORM}"
     )
     assert preview_reason == reason
     for text in (reason, audit, logs):
@@ -443,12 +456,74 @@ async def test_a_date_that_does_not_exist_is_not_shown(cluster: AsyncMock) -> No
         _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\n"
         "data:\n  day: 2026-02-30\n"
     )
-    assert (
-        reason == f"The manifest cannot be applied: document 2 is not valid YAML or JSON. {_FORM}"
+    assert reason == (
+        "The manifest cannot be applied: document 2 is not valid YAML or JSON "
+        f"(a value YAML cannot build). {_FORM}"
     )
     assert preview_reason == reason
     for text in (reason, audit, logs):
         assert "2026-02-30" not in text
+
+
+_MADE_UP = "qv7d3e9a0b41c2f58e6a1x"
+
+#: (the faulty line of document 2, with the made-up value; the fixed phrase and place)
+_YAML_KINDS: dict[str, tuple[str, str]] = {
+    "bad-token": (f"  note: {_MADE_UP}: x\n", "a token YAML refuses, line 10, column 31"),
+    "flow-mapping-not-closed": (
+        f"  note: {{a: {_MADE_UP}\n",
+        "a structure YAML refuses, line 11, column 1",
+    ),
+    "undefined-alias": (
+        f"  note: *{_MADE_UP}\n",
+        "an alias or anchor YAML refuses, line 10, column 9",
+    ),
+    "unknown-tag": (
+        f"  note: !{_MADE_UP} x\n",
+        "a tag or value YAML cannot build, line 10, column 9",
+    ),
+    "bool-tag-with-a-text": (f"  note: !!bool {_MADE_UP}\n", "a value YAML cannot build"),
+}
+
+
+@pytest.mark.parametrize("name", list(_YAML_KINDS))
+async def test_each_kind_of_yaml_error_has_its_phrase_and_shows_no_value(
+    name: str, cluster: AsyncMock
+) -> None:
+    line, why = _YAML_KINDS[name]
+    manifest = (
+        _NAMESPACE + "---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\ndata:\n" + line
+    )
+    reason, preview_reason, audit, logs = await _refusal_seen_everywhere(manifest)
+    assert reason == (
+        f"The manifest cannot be applied: document 2 is not valid YAML or JSON ({why}). {_FORM}"
+    )
+    assert preview_reason == reason
+    for text in (reason, audit, logs):
+        assert _MADE_UP not in text
+    cluster.assert_not_awaited()
+
+
+def test_the_largest_numbers_keep_the_refusal_within_256_characters() -> None:
+    from meho_backplane.connectors.kubernetes.ops_write_preview import _APPLY_FORM
+
+    error = ApplyManifestError(
+        "is not valid YAML or JSON",
+        number=999999,
+        reason="an alias or anchor YAML refuses",
+        position="line 99999999, column 999999",
+    )
+    tail = f". {_APPLY_FORM}"
+    text = error.text(tail=tail)
+    assert len(text) <= 256
+    assert text.endswith(tail)
+    # A longer tail leaves out the line and the column first, and stays whole.
+    longer = tail + " " + "x" * 20
+    shorter = error.text(tail=longer)
+    assert len(shorter) <= 256
+    assert shorter.endswith(longer)
+    assert "line" not in shorter.removesuffix(longer)
+    assert "(an alias or anchor YAML refuses)" in shorter
 
 
 @pytest.mark.parametrize("name", ["'2026-11-26'", '"2024"'], ids=["date", "year"])
@@ -469,6 +544,29 @@ async def test_a_custom_resource_with_items_under_spec_waits_once(cluster: Async
         "manifest": (
             "apiVersion: example.com/v1\nkind: ShoppingList\nmetadata: {name: web}\n"
             "spec:\n  items: [milk]\n"
+        )
+    }
+    result = await _call(params)
+    preview = await preview_dispatch(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP,
+        target=_TARGET,
+        params=params,
+    )
+    assert result.status == "awaiting_approval", result
+    assert await _count(ApprovalRequest) == 1
+    assert preview["status"] == "ok", preview
+
+
+async def test_a_custom_kind_named_list_without_items_waits_once(cluster: AsyncMock) -> None:
+    """Recorded from a real API server, Kubernetes 1.37.3, 27 November 2026:
+    it stores an object of a custom kind named `List`.
+    """
+    params = {
+        "manifest": (
+            "apiVersion: example.test/v1\nkind: List\nmetadata: {name: one, namespace: prod}\n"
+            "spec: {size: 2}\n"
         )
     }
     result = await _call(params)

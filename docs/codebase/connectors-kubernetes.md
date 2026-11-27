@@ -75,17 +75,10 @@ Kubernetes defines. MEHO reads the live object only when the login that
 asked has the role Operator or higher; for any other login the card says
 "not read". It changes no approval rule. When the dry run fails, the card
 of a person still shows the manifest and the subject line, and names the
-document the dry run stopped at. See `approvals.md`. When the manifest is
-not valid YAML or JSON, the error (`manifest_yaml.py`) is "manifest is not
-valid YAML/JSON", followed by what the parser found wrong (for example
-"expected ',' or ']', but got '<stream end>'") with the line and the
-column; for a refused character, the reason and its position; for a value
-that its tag cannot read, a fixed sentence with the line and the column;
-for an error with no explanation, nothing more. A quoted part that is not
-a word of the YAML grammar, or fixed text of the parser such as the `'.'`
-of "expected a digit or '.'", becomes `'…'`; a `%` escape in a tag that
-is not UTF-8 gives "a %-escape in a tag is not valid UTF-8", with no byte
-value. So the error never quotes text of the manifest. The run after approval answers with the same error.
+document the dry run stopped at. See `approvals.md`. A manifest that
+is not valid YAML or JSON is refused before the wait, with the document
+number, the line and the column, and one fixed phrase for the kind of
+problem (see "`k8s.apply` manifest form" below). So no card is made for it.
 The storage rule of a `k8s.apply` (`manifest_holds_credential` in
 `op_classes.py`) decides when the stored request keeps the manifest only
 in the encrypted one-time handoff of the run, as a credential write does.
@@ -847,8 +840,30 @@ that is plain text, a `kind` or `metadata.name` that is not a text, a
 text with no documents, and text that is not valid YAML. A
 `metadata.name` that YAML reads as a number, a date or true or false (for
 example `2026-11-26` or `2024` without quotes) is refused, and the refusal
-says to put the name in quotes. A document whose `kind` is `List`, or
-whose top-level `items` field is a list, is refused before the wait.
+says to put the name in quotes. Before the wait, a document is refused
+as a list object when its `apiVersion` is `v1` and its `kind` is `List`,
+or when its top-level `items` field is a list. Any other document passes
+this check to the wait.
+
+A manifest that is not valid YAML or JSON is refused before the wait with
+"document N is not valid YAML or JSON (KIND, line L, column C)". L and C
+are the line and the column where the YAML reader stopped, counted from
+the start of the whole text. KIND is one fixed phrase that MEHO picks by
+the class of the error:
+
+- "a token YAML refuses" (a scanner error, for example a tab before a key);
+- "a structure YAML refuses" (a parser error, for example a flow mapping
+  that is not closed);
+- "an alias or anchor YAML refuses" (a composer error, for example an
+  alias that is not defined);
+- "a tag or value YAML cannot build" (a constructor error, for example an
+  unknown tag);
+- "a value YAML cannot build" (any other error, for example a date that
+  is not in the calendar, or a `!!bool` tag with a text).
+
+An error with no line and column gives "document N is not valid YAML or
+JSON (KIND)". The refusal holds no text of the manifest and no text of the
+YAML reader, and neither does the audit row or a log.
 
 The refusal names the document by its number, counted from 1 (the first
 document is document 1; an empty document between two `---` lines counts
@@ -863,8 +878,9 @@ at most 63 characters (any case), and an `apiVersion` that is a DNS-1035
 version with an optional group that is a DNS-1123 subdomain of at most
 253 characters. Any other value shows as `(not shown)`, in the refusal, the audit row and the logs. The refusal
 shows no YAML error text and no other value of the manifest. It is at
-most 256 characters, and a long `apiVersion` or `kind` gives way to
-`(not shown)` so the sentence about the form is never cut.
+most 256 characters. When it would be longer, the line and the column
+are left out first, then a long `apiVersion` or `kind` gives way to
+`(not shown)`, so the sentence about the form is never cut.
 `preview_operation` gives the same refusal. The run's own parse error
 uses the same numbers. When the cluster refuses one document of the text,
 the documents before it stay applied.

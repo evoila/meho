@@ -12,7 +12,9 @@ The text of :class:`ApplyManifestError` names the document by its number,
 counted from 1, and shows the document's ``apiVersion`` and ``kind`` only
 when each has the shape Kubernetes allows for it. Any other value of the
 manifest, and any YAML error text, is never shown: an invalid value is
-the fixed mark :data:`NOT_SHOWN`.
+the fixed mark :data:`NOT_SHOWN`. A document that is not valid YAML or
+JSON is named with the line and the column where the YAML reader stopped,
+and one fixed phrase for the kind of problem (:func:`_yaml_problem`).
 """
 
 from __future__ import annotations
@@ -42,6 +44,18 @@ _GROUP_PART = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 _GROUP_MAX = 253
 
 _ARTICLE = {"apiVersion": "an", "kind": "a"}
+
+_NOT_VALID = "is not valid YAML or JSON"
+
+#: The fixed phrase for each class of YAML error, checked in this order.
+_YAML_PROBLEMS: tuple[tuple[type[BaseException], str], ...] = (
+    (yaml.scanner.ScannerError, "a token YAML refuses"),
+    (yaml.parser.ParserError, "a structure YAML refuses"),
+    (yaml.composer.ComposerError, "an alias or anchor YAML refuses"),
+    (yaml.constructor.ConstructorError, "a tag or value YAML cannot build"),
+)
+#: The phrase for an error of any other class (a date not in the calendar).
+_OTHER_PROBLEM = "a value YAML cannot build"
 
 
 def _safe_kind(value: object) -> str:
@@ -82,36 +96,44 @@ class ApplyManifestError(ValueError):
         number: int | None = None,
         api_version: object = None,
         kind: object = None,
+        reason: str | None = None,
+        position: str | None = None,
     ) -> None:
         self.problem = problem
         self.number = number
+        self.reason = reason
+        self.position = position
         self.api_version = None if api_version is None else _safe_api_version(api_version)
         self.kind = None if kind is None else _safe_kind(kind)
         super().__init__(self.text())
 
-    def _detail(self, api_version: str | None, kind: str | None) -> str:
+    def _detail(self, api_version: str | None, kind: str | None, position: str | None) -> str:
         if self.number is None:
             return self.problem
+        why = ", ".join(p for p in (self.reason, position) if p)
+        problem = f"{self.problem} ({why})" if why else self.problem
         parts = [f"apiVersion {api_version}" if api_version is not None else None]
         parts.append(f"kind {kind}" if kind is not None else None)
         shown = ", ".join(p for p in parts if p)
         where = f" ({shown})" if shown else ""
-        return f"document {self.number}{where} {self.problem}"
+        return f"document {self.number}{where} {problem}"
 
     def text(self, tail: str = "") -> str:
         """The refusal text, ending in *tail*, at most :data:`TEXT_LIMIT` long.
 
-        A long ``apiVersion`` or ``kind`` gives way to :data:`NOT_SHOWN`
-        first, so *tail* (the form the caller must send) is never cut.
+        A long place (the line and the column) is left out first, then a
+        long ``apiVersion`` or ``kind`` gives way to :data:`NOT_SHOWN`, so
+        *tail* (the form the caller must send) is never cut.
         """
         hidden_api = None if self.api_version is None else NOT_SHOWN
         hidden_kind = None if self.kind is None else NOT_SHOWN
-        for api_version, kind in (
-            (self.api_version, self.kind),
-            (hidden_api, self.kind),
-            (hidden_api, hidden_kind),
+        for api_version, kind, position in (
+            (self.api_version, self.kind, self.position),
+            (self.api_version, self.kind, None),
+            (hidden_api, self.kind, None),
+            (hidden_api, hidden_kind, None),
         ):
-            text = f"{_PREFIX}{self._detail(api_version, kind)}{tail}"
+            text = f"{_PREFIX}{self._detail(api_version, kind, position)}{tail}"
             if len(text) <= TEXT_LIMIT:
                 return text
         return text
@@ -137,7 +159,7 @@ def _check_document(number: int, doc: object) -> None:
             raise fail(f"is missing {field}")
         if not isinstance(value, str):
             raise fail(f"has {_ARTICLE[field]} {field} that is not a text")
-    if kind == "List" or isinstance(doc.get("items"), list):
+    if (api_version == "v1" and kind == "List") or isinstance(doc.get("items"), list):
         raise fail("is a list object")
     metadata = doc.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
@@ -149,6 +171,20 @@ def _check_document(number: int, doc: object) -> None:
         raise fail("has a metadata.name that is not a text (put it in quotes)")
 
 
+def _yaml_problem(exc: BaseException) -> tuple[str, str | None]:
+    """The fixed phrase for *exc*, and the line and column of its mark (or ``None``).
+
+    Only the class of the error and the numbers of its mark are used: its
+    text, and the line of the manifest that a mark carries, never are.
+    """
+    phrase = next((p for cls, p in _YAML_PROBLEMS if isinstance(exc, cls)), _OTHER_PROBLEM)
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    line, column = getattr(mark, "line", None), getattr(mark, "column", None)
+    if isinstance(line, int) and isinstance(column, int):
+        return phrase, f"line {line + 1}, column {column + 1}"
+    return phrase, None
+
+
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
 
@@ -158,9 +194,26 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     number in a refusal is the place of the document in the text. Each
     surviving doc must be a mapping with a ``metadata`` mapping, and
     ``apiVersion``, ``kind`` and ``metadata.name`` must be nonempty texts
-    -- SSA cannot address an object without them. A document whose
-    ``kind`` is ``List``, or whose top-level ``items`` field is a list, is
-    refused before the wait.
+    -- SSA cannot address an object without them.
+
+    Before the wait, a document is refused as a list object when its
+    ``apiVersion`` is ``v1`` and its ``kind`` is ``List``, or when its
+    top-level ``items`` field is a list. Any other document passes this
+    check to the wait.
+
+    A manifest that is not valid YAML or JSON is refused before the wait
+    with "document N is not valid YAML or JSON (KIND, line L, column C)".
+    L and C are where the YAML reader stopped, counted from the start of
+    the whole text. KIND is one fixed phrase, chosen by the class of the
+    error: "a token YAML refuses" (a scanner error), "a structure YAML
+    refuses" (a parser error), "an alias or anchor YAML refuses" (a
+    composer error), "a tag or value YAML cannot build" (a constructor
+    error), and "a value YAML cannot build" for any other class (a date
+    that is not in the calendar). An error with no mark gives no line and
+    column. The refusal holds no text of the manifest and no text of the
+    YAML reader. A character that the YAML reader refuses gives "the text
+    has a character that YAML does not allow, for example a control
+    character", with no document number.
     Raises :class:`ApplyManifestError` on any structural problem.
     """
     docs = iter(yaml.safe_load_all(manifest))
@@ -172,15 +225,18 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
             doc = next(docs)
         except StopIteration:
             break
-        except yaml.reader.ReaderError as exc:
+        except yaml.reader.ReaderError:
             # The reader checks the whole text before document 1, so no
             # document number would be right.
             raise ApplyManifestError(
                 "the text has a character that YAML does not allow, for example a control character"
-            ) from exc
-        except (yaml.YAMLError, ValueError) as exc:
-            # A value YAML cannot build (a date that does not exist) is a ValueError.
-            raise ApplyManifestError("is not valid YAML or JSON", number=number) from exc
+            ) from None
+        except Exception as exc:
+            # Any class: a value YAML cannot build may be a ValueError, a KeyError or more.
+            reason, position = _yaml_problem(exc)
+            raise ApplyManifestError(
+                _NOT_VALID, number=number, reason=reason, position=position
+            ) from None
         if doc is None:
             continue
         _check_document(number, doc)

@@ -616,7 +616,6 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "apply", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
-        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions=_APPLY_LLM,
     ),
@@ -681,7 +680,6 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "job", "credential", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
-        hard_to_undo="overwrites",
         llm_instructions=_JOB_CREATE_LLM,
     ),
 )

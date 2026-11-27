@@ -189,6 +189,7 @@ from meho_backplane.operations.approved_reveal import is_secret_reveal, is_write
 from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.people_behind import entries_of, people_behind_line
+from meho_backplane.operations.platform_admin_card import card_for_reader
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
@@ -776,8 +777,15 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
     a person (:func:`without_person_only_effect_keys`). No caller reads the
-    internal keys (:func:`without_internal_effect_keys`).
+    internal keys (:func:`without_internal_effect_keys`). The parts of a card
+    that only a platform admin reads stay out for every other caller
+    (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
     """
+    return card_for_reader(row.op_id, _effect_for_kind(operator, row), reader=operator)
+
+
+def _effect_for_kind(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:
+    """The ``proposed_effect`` of *row* for the kind of login *operator* is."""
     if _reads_whole_card(operator):
         return without_internal_effect_keys(row.proposed_effect)
     if row.op_id not in _PERSON_ONLY_REST_CARD_OPS:

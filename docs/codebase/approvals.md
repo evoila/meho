@@ -425,7 +425,9 @@ Two kinds of rows carry a keyed hash of a call's params:
     the encrypted one-time handoff (`approval_handoff`). The row keeps no
     plain copy, also not when the request is approved and never runs.
     Without a valid `APPROVAL_HANDOFF_ENCRYPTION_KEY` MEHO refuses such a
-    call instead of letting it wait.
+    call instead of letting it wait. A `k8s.apply` gets its own refusal
+    text, which says what to set (`declare_hidden_stored_param(...,
+    refusal=...)`).
   - For most operations they are stored in `approval_request.params`,
     in plain form only while the request waits. As soon as the run claim
     is won (`claim_resume`), or the request is rejected, withdrawn or
@@ -3544,6 +3546,23 @@ The per-op preview is opt-in via a builder registry in
   `credential_wait`, the line that says why a credential call waits), and
   for `linux.script.run` and `k8s.apply` it gives the same view as the MCP
   tools (`api/v1/approvals.py::_proposed_effect_for`).
+- `register_platform_admin_card_filter(op_id, filter)`
+  (`operations/platform_admin_card.py`, core only) names the parts of a
+  card that only a platform admin who is a person reads, in a call of
+  their own. Every view of a stored card passes it through
+  `card_for_reader`: the REST approvals API, the MCP tools
+  `meho_approvals_get` and `meho_approvals_list`, and the console pages.
+  Every other reader gets the card as the filter gives it back. So does
+  a call that runs with an acting agent (`actor_delegation`, for example
+  a hosted agent run a platform admin started), and a view that does not
+  say who reads. The stored card stays whole, so the run after an
+  approval is the same. The approval card of an install policy import
+  (`policy.apply`, `connectors/policy/apply_card_readers.py`) uses it.
+  Every reader gets the same keys as the stored card. For a reader who is
+  not a platform admin, `diff.routing_floor` and `diff.agents_above_limit`
+  are empty lists and the warnings that start with `Tenant <id>:` are left
+  out; every other key and value is as stored. A card with no tenant data
+  reads as stored for every reader.
 - `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
   every preview the builder of `op_id` returns, whatever module
   registered the builder and when. A step that raises makes the preview
@@ -3725,6 +3744,114 @@ each container runs" block under the warning that the preview failed
 (`approvals/_modal.html`). An agent never reads `run_commands`: its own
 preview has no such key, and the stored request it reads (MCP tools and
 the REST API) leaves it out (`PERSON_ONLY_EFFECT_KEYS`).
+
+For a person the `k8s.apply` preview also has `object_summary`: one short
+entry per object of the manifest, built by
+`connectors/kubernetes/ops_write_apply_summary.py`. It is information
+only. It changes no approval rule. Each entry has the API group (`core`
+for the old `v1` kinds), the kind, the namespace and the name, and:
+
+- `state`: `new` or `exists`, from one read of the live object. A read that
+  the cluster refuses or that fails gives `unknown` and a `state_note`; the
+  card says "not known if it exists", never "new". MEHO reads the live
+  object only when the login that asked has the role Operator or higher.
+  For any other login there is no read: `state` is `not_read`, the card
+  shows the badge "not read" and the line "The live object was not read:
+  the login that asked has a role below Operator."
+- `other_writers`: the managers in the live object's `managedFields`,
+  without `meho`. `null` when the live object was not read or could not be
+  read.
+- `risky_fields`: found in the object as the dry run returns it, so they
+  include what the workload already has and the manifest does not send.
+  MEHO reads only the places that Kubernetes defines, from one list
+  (`_PLACES` in `ops_write_apply_summary.py`): the pod spec of a Pod, a
+  PodTemplate, a ReplicationController, a Deployment, a ReplicaSet, a
+  StatefulSet, a DaemonSet, a Job and a CronJob; the `secrets` and
+  `imagePullSecrets` of a ServiceAccount; the volume source of a
+  PersistentVolume; the `spec` of a Service; the `spec.tls` of an Ingress;
+  and the `roleRef` of a RoleBinding and a ClusterRoleBinding. In a pod
+  spec these are the service account, the image pull Secrets, each volume
+  that names a Secret (also a CSI, projected or other volume with a
+  `secretRef`), each `secretKeyRef` and `secretRef` of a container, and
+  host access: `hostPath`, `hostNetwork`, `hostPID`, `hostIPC`, `hostPort`,
+  and "a container asks for full access to its host" (the flag of its
+  `securityContext` that gives it that access). A Service of type `NodePort` or `LoadBalancer`
+  or with external IPs is named too. No free-form field is read: not the
+  `data` or `binaryData` of a ConfigMap, not the `spec` of a kind outside
+  the Kubernetes groups, not the labels or annotations of a pod template.
+  A Secret object is named ("a Secret object (its values are not shown)")
+  and never read. `null` when the dry run returned no object.
+- `built_in`: `true` only for a kind that Kubernetes itself defines in that
+  API group. The group and the kind are always read together.
+  `cluster_wide`: `true` for a kind that is not in a namespace.
+
+The entries show names, and a name shows only when it passes its check;
+else the card shows "(name not shown)". A role name that starts with
+`system:` shows when each part between the colons passes the same check.
+The kind of a `roleRef` shows only as `Role` or `ClusterRole`. On purpose
+the summary also shows the path of a `hostPath` volume, a host port number
+and the manager names of the other writers of the live object, because the
+person needs them to decide. A manager name shows only when it has
+letters, digits, `.`, `-`, `_` and `/`, at most 63 characters, and its
+`operation` only as `Apply` or `Update` (else "(not shown)"). The summary
+never shows a Secret value, an `env` value or a command line, and it runs
+through the same redaction as the manifest echo. MEHO reads the whole live
+object once, with the target's login, and uses only its `managedFields`.
+Nothing else of it is kept or shown. The console card shows the list in a
+"What each object is" block (`approvals/_modal.html`), with the sentence
+"This is what the cluster held when the request was made. The run does not
+check it again." An agent never reads `object_summary`: its own preview
+has no such key and makes no extra read, and the stored request it reads
+leaves it out.
+
+When the dry run of a `k8s.apply` fails, the stored request has the
+`preview_unavailable` marker and no `object_summary`. For a person, it
+still has the `manifest` echo and the `subject` line, built from the
+manifest text with the same hiding as on a preview that worked
+(`PREVIEW_FAILURE_ECHO_KEYS` in `operations/_preview.py`). The `subject`
+line and `dry_run_stop` take the names from the documents after that
+hiding, in their own shape, so a redaction rule for a field path such as
+`manifest.*.metadata.name` hides the name in both too. The error of the
+dry run (`preview_error`, for a person and for agents) names each object
+the same way: MEHO writes each object label and name in it as the card
+shows it (`names_as_on_card` in `ops_write_preview.py`). Before anything is
+hidden or measured, each value that YAML does not read as text becomes
+plain text (`card_documents` in `ops_write_preview.py`): a date or time
+becomes its ISO text, `.nan` and `.inf` become that YAML text, and
+`!!binary` becomes its base64 text. A null character in a text (`"\0"` in
+YAML) becomes the two characters `\0`. So each filter hides such a value
+as text, and the stored request holds only values the database accepts. In
+a Secret, also one inside another object, the card hides each value of
+`data`, `stringData` and `binaryData`: the same fields that make the
+stored request keep the manifest only in the encrypted handoff. In any
+object, a number or a yes/no value under a secret name (`password:
+123456`) is hidden, and so is the argument after a secret flag on a
+command line (`--password 123456`), whatever type YAML gives it. The
+field `automountServiceAccountToken` keeps its yes/no value. For a
+manifest of more than one
+document, `dry_run_stop` names the document the dry run stopped at and
+says that the documents after it had no dry run. A caller that is not a
+person (the agent REST view and the MCP approvals tools) reads the
+`preview_unavailable` marker and the `preview_error` text, without these
+keys.
+The console card shows these in a "What the apply sends" block, and from
+the `preview_unavailable` mark the sentence "The summary of the objects
+could not be made, because the dry run failed." A key that cannot be built
+(for example from a manifest that is not valid YAML) is left out; the mark
+and that sentence stay.
+
+When MEHO cannot read the manifest text (it is not valid YAML or JSON),
+the call is refused before the wait: no approval request is stored and no
+card is made. The refusal is "document N is not valid YAML or JSON (KIND,
+line L, column C)", with one fixed phrase for KIND and no text of the
+manifest or of the YAML reader (see "`k8s.apply` manifest form" in
+`connectors-kubernetes.md`). The same text is in the answer of
+`preview_operation`, and the audit row and the logs quote no value of the
+manifest.
+
+In every `preview_error` (of any operation), a null character becomes
+the two characters `\0`, because PostgreSQL cannot store it in the row
+(`preview_failure_reason` in `operations/_preview.py`).
 
 ## Credential writes: what the approver sees (#4850)
 

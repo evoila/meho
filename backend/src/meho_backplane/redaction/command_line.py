@@ -36,12 +36,14 @@ from meho_backplane.broadcast.events import is_secret_param_name
 
 __all__ = [
     "HIDDEN",
+    "PASSWORD_P_PROGRAMS",
     "hide_command_text",
     "hide_flag_value",
     "hide_in_text",
     "hide_shell_script",
     "is_secret_shaped_name",
     "reads_shell_script",
+    "takes_password_after_p",
 ]
 
 #: Put in place of a value the approver must not see.
@@ -192,6 +194,7 @@ def hide_command_text(
     *,
     shell: bool,
     p_programs: re.Pattern[str] | None = None,
+    p_program_before: bool = False,
 ) -> tuple[str, str | None]:
     """One command-line string with its secret values hidden.
 
@@ -231,20 +234,24 @@ def hide_command_text(
     ``mysql``), and there a value glued to it (``-pVALUE``) is hidden too.
     So ``mkdir -p /tmp/x`` stays as it is. With *p_programs* a new line
     also ends a command, as a shell operator does.
+
+    *p_program_before* says that a word of *p_programs* came before the
+    text, in an earlier item of the same command line.
     """
     words = (_SHELL_TOKEN if shell else _ARGUMENT_TOKEN).findall(text)
     previous = ""
-    p_rule = _P_FLAG if p_programs is None else _P_NONE
+    p_start = _P_FLAG if p_programs is None else _P_NONE
+    p_rule = _P_GLUED if p_programs is not None and p_program_before else p_start
     for index, word in enumerate(words):
         if word.isspace() or (shell and _SHELL_SPACE_TOKEN.fullmatch(word)):
             if p_programs is not None and "\n" in word.replace("\\\n", ""):
                 pending = None
-                p_rule = _P_NONE
+                p_rule = p_start
             continue
         if shell and word[0] in _OPERATOR_CHARS:
             pending = None
             previous = ""
-            p_rule = _P_FLAG if p_programs is None else _P_NONE
+            p_rule = p_start
             continue
         if shell and not _QUOTED_STRING.fullmatch(word):
             # The shell removes a line continuation inside a word too: ``-u\\``
@@ -338,6 +345,19 @@ def _hide_glued_value(word: str, *, p_rule: str, script_mode: bool) -> str | Non
 _SCRIPT_P_PROGRAMS = re.compile(
     r"sshpass|mysql[A-Za-z0-9_-]*|mariadb[A-Za-z0-9_-]*|mongo[A-Za-z0-9_-]*|login"
 )
+
+
+#: The programs that take a password after ``-p`` (:data:`_SCRIPT_P_PROGRAMS`),
+#: for a caller that reads a command line item by item (``k8s.apply``).
+PASSWORD_P_PROGRAMS: Final[re.Pattern[str]] = _SCRIPT_P_PROGRAMS
+
+
+def takes_password_after_p(word: str) -> bool:
+    """Whether the program *word* (a path is read by its last part) takes a password after ``-p``.
+
+    The programs of :data:`_SCRIPT_P_PROGRAMS`: ``mysql``, ``/usr/bin/sshpass``.
+    """
+    return _SCRIPT_P_PROGRAMS.fullmatch(word.rsplit("/", 1)[-1]) is not None
 
 
 def hide_shell_script(script: str) -> str:

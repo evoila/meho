@@ -389,6 +389,10 @@ connector kit (kit 1.7 or higher).
   imported API spec leave both NULL.
 - No rule of MEHO reads the two fields. No call waits, runs or is refused
   because of them.
+- A delivery call of the Argo CD or Kubernetes connector (it deploys or
+  runs a workload) carries no `hard_to_undo` on the whole operation. Its
+  `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`
+  names these calls and checks their stored rows.
 
 ## Known limits
 

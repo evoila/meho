@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+import structlog.testing
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -990,6 +991,52 @@ async def test_unblock_answers_503_when_the_table_read_fails_with_the_list_cache
     monkeypatch.undo()
     assert len(await _rows(_PA)) == 1
     assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_block_or_unblock_logs_no_login_or_reason(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    private = "private reason of the admin"
+    assert (await _block(ac, _admin(key), reason=private)).status_code == 201
+    real_execute = AsyncSession.execute
+
+    async def _execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        writes = getattr(statement, "is_insert", False) or getattr(statement, "is_delete", False)
+        table = getattr(getattr(statement, "table", None), "name", None)
+        if writes and table == PrincipalBlock.__tablename__:
+            params = {"sub": _BLOCKED, "reason": private}
+            raise OperationalError(str(statement), params, Exception("gone"))
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _execute)
+    with structlog.testing.capture_logs() as logs:
+        block = await _block(ac, _admin(key), reason=private)
+        unblock = await _unblock(ac, _admin(key), _BLOCKED, reason=private)
+    monkeypatch.undo()
+
+    for response in (block, unblock):
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "principal_block_check_unavailable"
+    failed = [e for e in logs if str(e["event"]).endswith("_write_failed")]
+    assert failed == [
+        {
+            "event": "principal_block_write_failed",
+            "log_level": "warning",
+            "operation": "block",
+            "error_type": "OperationalError",
+        },
+        {
+            "event": "principal_unblock_write_failed",
+            "log_level": "warning",
+            "operation": "unblock",
+            "error_type": "OperationalError",
+        },
+    ]
+    assert private not in repr(logs)
+    assert [r.reason for r in await _rows(_BLOCKED)] == [private]
 
 
 # ---------------------------------------------------------------------------

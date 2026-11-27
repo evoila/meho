@@ -147,6 +147,8 @@
   "tests/test_approval_grant_to_self.py": 4.33,
   "tests/test_approval_group_rules.py": 4.96,
   "tests/test_approval_idempotent_park.py": 11.35,
+  "tests/test_approval_install_import_card_acting_agent.py": 1.65,
+  "tests/test_approval_install_import_card_readers.py": 47.64,
   "tests/test_approval_object_check.py": 4.78,
   "tests/test_approval_outcome_check.py": 4.0,
   "tests/test_approval_params_secret_fields.py": 3.73,

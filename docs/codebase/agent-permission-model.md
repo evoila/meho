@@ -513,11 +513,12 @@ Two fields of `Operator` feed it:
   when such a place has no kind. It also finds `Operator` under another
   import name and the `model_validate*` and `model_construct` class
   methods. `tests/test_caller_kind.py` builds every place the scan finds.
-- Five console steps check a person's token with the shared step and give
-  the login `in_code_kind="person"`, because the person is at the web
-  console and acts in that moment: the console sign-in, the approval
-  sign-in, the tenant choice, the reset of a session whose tenant is gone,
-  and the read of the approval sign-in that a console approve uses.
+  `in_code_kind` is also set by the five console steps that check a
+  person's token with the shared token check. They set `person`, because
+  the person is at the web console and acts in that moment: the console
+  sign-in, the approval sign-in, the tenant choice, the reset of a session
+  whose tenant is gone, and the read of the approval sign-in that a
+  console approve uses.
 - A runbook check step runs as a copy of the caller with no web console
   session (`runbooks/run_service.py::check_step_caller`). MEHO runs the
   step for the person, so a person's copy gets `personal_agent`.

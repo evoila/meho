@@ -509,9 +509,12 @@ class Operator(BaseModel):
     #: session, the scheduled agent run and every login that code builds
     #: keep it ``False``.
     token_checked: bool = False
-    #: The kind of caller of a login that MEHO's own code builds, with no
-    #: sign-in and no token check. Every such place sets it; a test scans
-    #: the source for them. ``None`` for a login from a token or a web session.
+    #: The kind of caller that a login carries from where it was built.
+    #: Every place that builds an ``Operator`` itself sets it (a test scans
+    #: the source for them). The five console steps that check a person's
+    #: token with the shared token check set ``person``: the console
+    #: sign-in, the approval sign-in, the tenant choice, the reset of a
+    #: session whose tenant is gone, and the read of the approval sign-in.
     in_code_kind: CallerKind | None = None
 
     @property

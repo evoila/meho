@@ -285,8 +285,7 @@ func buildExtrasChanges(cmd *cobra.Command, f *updateFlags) (map[string]any, *ou
 	for _, pair := range f.setExtras {
 		key, value, ok := strings.Cut(pair, "=")
 		if !ok || key == "" {
-			return nil, output.Unexpected(fmt.Sprintf(
-				"invalid --set-extra %q: expected key=value", pair))
+			return nil, output.Unexpected("invalid --set-extra: expected key=value")
 		}
 		if err := add(key, value); err != nil {
 			return nil, err
@@ -295,17 +294,17 @@ func buildExtrasChanges(cmd *cobra.Command, f *updateFlags) (map[string]any, *ou
 	for _, pair := range f.setExtrasJSON {
 		key, raw, ok := strings.Cut(pair, "=")
 		if !ok || key == "" {
-			return nil, output.Unexpected(fmt.Sprintf(
-				"invalid --set-extra-json %q: expected key=<json>", pair))
+			return nil, output.Unexpected("invalid --set-extra-json: expected key=<json>")
 		}
-		var value any
-		if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		value, ok := decodeJSONValue(raw)
+		if !ok {
+			// The value may be a secret, so the text names only the key.
 			return nil, output.Unexpected(fmt.Sprintf(
-				"invalid --set-extra-json %q: the value is not JSON (%v)", pair, err))
+				"invalid --set-extra-json for key %q: the value is not JSON", key))
 		}
 		if value == nil {
 			return nil, output.Unexpected(fmt.Sprintf(
-				"invalid --set-extra-json %q: null removes a key, use --unset-extra %s", pair, key))
+				"invalid --set-extra-json for key %q: null removes a key, use --unset-extra %s", key, key))
 		}
 		if err := add(key, value); err != nil {
 			return nil, err
@@ -320,6 +319,23 @@ func buildExtrasChanges(cmd *cobra.Command, f *updateFlags) (map[string]any, *ou
 		}
 	}
 	return changes, nil
+}
+
+// decodeJSONValue decodes one JSON value and keeps each number as the
+// digits typed (json.Number), also inside a list or a map, so a big number
+// is not rounded to a float64. ok is false when raw is not exactly one
+// JSON value.
+func decodeJSONValue(raw string) (any, bool) {
+	if !json.Valid([]byte(raw)) {
+		return nil, false
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 // clearValue returns the TargetUpdate key and the value `--clear name`

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -375,5 +376,79 @@ func TestUpdateExtraChangeFlagsLocalErrors(t *testing.T) {
 				t.Errorf("no request should be sent; got %s", f.method)
 			}
 		})
+	}
+}
+
+// TestUpdateSetExtraJSONKeepsEveryDigit pins that a JSON number goes out
+// with exactly the digits typed, also inside a list or a map. A float64
+// would round these numbers.
+func TestUpdateSetExtraJSONKeepsEveryDigit(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakePatchServer
+	url := f.start(t, http.StatusOK, updatedTargetJSON)
+	_, stderr, err := runUpdateCmd(t, url, "demo-vault",
+		"--set-extra-json", "big=12345678901234567890",
+		"--set-extra-json", "l=[9007199254740993]",
+		"--set-extra-json", `m={"n":9007199254740993,"f":1.50}`)
+	if err != nil {
+		t.Fatalf("update: %v\nstderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{
+		`"big":12345678901234567890`,
+		`"l":[9007199254740993]`,
+		`"m":{"f":1.50,"n":9007199254740993}`,
+	} {
+		if !strings.Contains(f.raw, want) {
+			t.Errorf("raw body should hold %s; got %s", want, f.raw)
+		}
+	}
+}
+
+// TestUpdateExtraChangeErrorsShowNoValue pins that an error of
+// --set-extra or --set-extra-json shows no part of the value, with and
+// without --json: the value may be a password.
+func TestUpdateExtraChangeErrorsShowNoValue(t *testing.T) {
+	made := fmt.Sprintf("madeup%x", time.Now().UnixNano())
+	cases := map[string]struct {
+		args    []string
+		wantKey bool
+	}{
+		"not json":           {[]string{"--set-extra-json", "pw={\"a\":" + made}, true},
+		"not json bare text": {[]string{"--set-extra-json", "pw=" + made}, true},
+		"set no equals":      {[]string{"--set-extra", made}, false},
+		"json no equals":     {[]string{"--set-extra-json", made}, false},
+	}
+	for name, tc := range cases {
+		for _, jsonMode := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%v", name, jsonMode), func(t *testing.T) {
+				var f fakePatchServer
+				url := f.start(t, http.StatusOK, updatedTargetJSON)
+				args := append([]string{"demo-vault"}, tc.args...)
+				if jsonMode {
+					args = append(args, "--json")
+				}
+				stdout, stderr, err := runUpdateCmd(t, url, args...)
+				if err == nil {
+					t.Fatalf("want an error")
+				}
+				for where, text := range map[string]string{
+					"stdout": stdout.String(), "stderr": stderr.String(), "error": err.Error(),
+				} {
+					if strings.Contains(text, made) || strings.Contains(text, made[4:]) {
+						t.Errorf("%s shows the value: %s", where, text)
+					}
+				}
+				shown := stderr.String() + stdout.String() + err.Error()
+				if tc.wantKey && !strings.Contains(shown, "pw") {
+					t.Errorf("the error should name the key: %s", shown)
+				}
+				if tc.wantKey && !strings.Contains(shown, "not JSON") {
+					t.Errorf("the error should say the value is not JSON: %s", shown)
+				}
+				if f.method != "" {
+					t.Errorf("no request should be sent; got %s", f.method)
+				}
+			})
+		}
 	}
 }

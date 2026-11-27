@@ -75,12 +75,8 @@ def _is_sqlite() -> bool:
 def upgrade() -> None:
     """Add the nullable column and its CHECK."""
     if _is_sqlite():
-        op.execute(
-            sa.text(
-                f"ALTER TABLE {_TABLE} ADD COLUMN {_COLUMN} TEXT "
-                f"CONSTRAINT {_CHECK} CHECK ({_CONDITION})"
-            )
-        )
+        check = sa.CheckConstraint(_CONDITION, name=_CHECK)
+        op.add_column(_TABLE, sa.Column(_COLUMN, sa.Text(), check, nullable=True))
         return
     op.add_column(_TABLE, sa.Column(_COLUMN, sa.Text(), nullable=True))
     op.create_check_constraint(_CHECK, _TABLE, _CONDITION, postgresql_not_valid=True)

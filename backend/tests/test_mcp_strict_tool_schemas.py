@@ -262,6 +262,42 @@ def test_a_schema_that_keeps_null_in_an_enum_is_found_by_the_check() -> None:
     assert _null_enum_paths(sent) == ["/not/enum"]
 
 
+def test_an_id_key_in_a_default_does_not_hide_a_later_id() -> None:
+    """``$id`` counts only as a schema keyword, so the one of ``choice`` keeps it all."""
+    schema = {
+        "properties": {
+            "a": {"default": {"$id": None}},
+            "choice": {
+                "$id": "urn:example:choice",
+                "$defs": {"e": {"enum": ["x", None]}},
+                "not": {"$ref": "#/$defs/e"},
+            },
+        }
+    }
+    sent = _without_null_enum_members(schema)
+    assert not _accepts(schema, {"choice": None})
+    assert not _accepts(sent, {"choice": None})
+    assert sent is schema
+
+
+_B = {"b": {"enum": ["x", None]}}
+
+
+@pytest.mark.parametrize(
+    "a",
+    [
+        {"not": {"const": {"$ref": "book"}}},
+        {"not": {"default": {"$ref": "book"}}},
+        {"not": {"properties": {"$ref": {"type": "string"}}}},
+    ],
+)
+def test_a_ref_key_that_is_data_or_a_name_is_not_followed(a: dict[str, Any]) -> None:
+    schema = {"properties": {"a": a, **_B}}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["a"] == a
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+
+
 def _sample(schema: dict[str, Any]) -> Any:
     """A valid value for *schema*, enough for the required inputs."""
     if "enum" in schema:

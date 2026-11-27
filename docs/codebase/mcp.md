@@ -2347,23 +2347,28 @@ of `call_operation`.
   goes, and an object among the members stays as it is. An `enum` of only
   `null` becomes `const: null`, so the sent schema does not accept more than
   the server does. When it sits next to a `const` that is not `null`, that
-  `const` stays and the `enum` becomes empty, so no value passes, as before.
-  An `enum` without `null`, also an empty one, stays. No registered tool has
-  these special forms.
-- Some parts stay as they are, because there a smaller `enum` could make the
-  sent schema accept a value that the server refuses: the schema under
-  `not`, `if` and `oneOf`, under `contains` next to `maxContains`, and each
-  schema these point to with `$ref` (also through another `$ref`). When such
-  a `$ref` is not a plain local path, or the schema has an `$id` below the
-  top, the whole schema stays as it is. The registry test then shows any
-  tool whose sent schema still has `null` in an `enum`.
+  `const` stays and the `enum` becomes empty, so no value passes, the same as
+  in the full schema. An `enum` without `null`, also an empty one, stays. No
+  registered tool has these special forms.
+- In an input schema some parts stay as they are, because there a smaller
+  `enum` could make the sent schema accept a value that the server refuses:
+  the schema under `not`, `if` and `oneOf`, under `contains` next to
+  `maxContains`, and each schema these point to with `$ref` (also through
+  another `$ref`). When such a `$ref` is not a plain local path, or a schema
+  object below the top has an `$id`, the whole schema stays as it is. Only
+  schema keywords count: a `$ref` or `$id` key inside the value of a
+  `default`, `const` or `enum`, or a property with that name, does not. The
+  registry test shows any tool whose sent schema still has `null` in an
+  `enum`.
 - `_wire_safe_output_schema` does the same walk for `outputSchema`, with one
   difference. MEHO answers `null` for `delivery`, and a client may check the
   answer against the sent schema (the MCP Python SDK does). So `null` is not
   just dropped. The rule `{"enum": [..., null]}` becomes
   `{"anyOf": [{"enum": [...]}, {"type": "null"}]}`, and the other keywords stay.
-  An `anyOf` that the schema already has stays inside an `allOf`. The full
-  `outputSchema` on the tool does not change.
+  An `anyOf` that the schema already has stays inside an `allOf`. This keeps
+  the meaning, so the walk also rewrites the `enum` under `not`, `if`,
+  `oneOf` and `contains`: the parts that stay as they are apply to the input
+  schema only. The full `outputSchema` on the tool does not change.
 - The server checks each call against `inputSchema`, not the wire copy. A
   call that sends `null` for such a field still passes, and the handler
   treats it like a missing field.

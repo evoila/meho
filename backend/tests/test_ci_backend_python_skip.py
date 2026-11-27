@@ -419,6 +419,9 @@ def _fan_in(
         "LINT_RESULT": lint,
         "SHARDS_RESULT": shards,
         "OUTSIDE_RESULT": outside,
+        # The second runner site is off (#7085), so its shard job skips.
+        "CHANGES_SECOND_SITE": "",
+        "SECOND_SITE_RESULT": "skipped",
     }
     return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values, **(env or {})})
 

@@ -9,6 +9,10 @@ new user again: the undo is a clean-up, so its SSH commands run with no block
 check. The answer is the block refusal. When the undo fails, the answer and
 the audit row name the user that stays.
 
+The same holds when the caller is blocked while the firewall runs the create
+command: the removal of the staged script is refused, and MEHO keeps the
+firewall's reply to the create, so it can remove the new user.
+
 The firewall is a scripted SSH connection under the real ``_run_command``
 and ``run_capped``; it keeps its users. Vault is the stand-in HTTP server
 with the real ``hvac`` client. All names and values are made up.
@@ -107,12 +111,23 @@ class _Firewall:
 
 
 class _ScriptedPfSense(PfSenseConnector):
-    def __init__(self, firewall: _Firewall) -> None:
+    def __init__(self, firewall: _Firewall, *, block_after_create: bool = False) -> None:
         super().__init__()
         self.firewall = firewall
+        self.block_after_create = block_after_create
 
     async def _connect(self, target: Any, operator: Operator | None = None) -> Any:
         return self.firewall
+
+    async def _run_command(self, target: Any, cmd: str, **kwargs: Any) -> Any:
+        answer = await super()._run_command(target, cmd, **kwargs)
+        if self.block_after_create and cmd.startswith(
+            "pfSsh.php playback meho_openvpn_user_create_"
+        ):
+            # The create ran on the firewall; the next SSH command is the
+            # removal of the staged script.
+            await block_the_caller(_caller())
+        return answer
 
 
 class _Target:
@@ -163,13 +178,13 @@ def _caller() -> Operator:
     )
 
 
-async def _connector(firewall: _Firewall) -> _ScriptedPfSense:
+async def _connector(firewall: _Firewall, *, block_after_create: bool = False) -> _ScriptedPfSense:
     if ("pfsense", "2.7", "pfsense-ssh") not in all_connectors_v2():
         register_connector_v2(
             product="pfsense", version="2.7", impl_id="pfsense-ssh", cls=PfSenseConnector
         )
     await PfSenseConnector.register_operations()
-    connector = _ScriptedPfSense(firewall)
+    connector = _ScriptedPfSense(firewall, block_after_create=block_after_create)
     _CONNECTOR_INSTANCE_CACHE[PfSenseConnector] = connector  # type: ignore[assignment]
     return connector
 
@@ -246,6 +261,50 @@ async def test_a_failed_undo_names_the_user_that_stays_in_the_answer_and_the_aud
     assert _is_block_refusal(result), (result.status, result.error)
     assert stays in (result.error or "")
     assert result.extras["not_removed"] == [stays]
+    assert firewall.played("meho_openvpn_user_undo_") == 1
+    assert firewall.users == {"guest-1": "2000"}
+    assert vault.sent("POST", "/v1/secret/data/") == 0
+    row = await _dispatch_row("pfsense.openvpn.user.create")
+    assert row.payload["error"]["not_removed"] == [stays]
+    assert _PASSWORD not in str(row.payload) and _PASSWORD not in (result.error or "")
+
+
+def _script_removals(firewall: _Firewall, kind: str) -> int:
+    return sum(1 for c in firewall.commands if c.startswith("rm -f ") and kind in c)
+
+
+async def test_new_user_is_removed_when_the_caller_is_blocked_while_the_create_runs(
+    vault: VaultStandIn,
+) -> None:
+    firewall = _Firewall()
+    await _connector(firewall, block_after_create=True)
+
+    result = await _run("pfsense.openvpn.user.create", _CREATE)
+
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert "not_removed" not in result.extras
+    assert firewall.played("meho_openvpn_user_create_") == 1
+    # The removal of the staged create script was refused; the undo ran.
+    assert _script_removals(firewall, "meho_openvpn_user_create_") == 0
+    assert firewall.played("meho_openvpn_user_undo_") == 1
+    assert _script_removals(firewall, "meho_openvpn_user_undo_") == 1
+    assert firewall.users == {}
+    assert vault.sent("POST", "/v1/secret/data/") == 0
+    assert _PASSWORD not in (result.error or "")
+
+
+async def test_a_failed_undo_after_a_block_during_the_create_names_the_user(
+    vault: VaultStandIn,
+) -> None:
+    firewall = _Firewall(undo_fails=True)
+    await _connector(firewall, block_after_create=True)
+
+    result = await _run("pfsense.openvpn.user.create", _CREATE)
+
+    stays = "the new VPN user guest-1 (uid 2000) was not removed"
+    assert _is_block_refusal(result), (result.status, result.error)
+    assert result.extras["not_removed"] == [stays]
+    assert stays in (result.error or "")
     assert firewall.played("meho_openvpn_user_undo_") == 1
     assert firewall.users == {"guest-1": "2000"}
     assert vault.sent("POST", "/v1/secret/data/") == 0

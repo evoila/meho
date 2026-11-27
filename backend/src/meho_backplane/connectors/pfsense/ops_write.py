@@ -96,6 +96,7 @@ from typing import TYPE_CHECKING, Any, Concatenate
 
 from defusedxml.ElementTree import ParseError, fromstring
 
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
@@ -415,6 +416,7 @@ async def _apply_playback(
     script_name: str,
     script_body: str,
     operator: Operator | None,
+    keep_reply_when_refused: bool = False,
 ) -> str:
     """Stage, play back, and clean up a pfSsh.php playback fragment.
 
@@ -422,6 +424,11 @@ async def _apply_playback(
     Raises :exc:`RuntimeError` when staging or playback exits non-zero. The
     staged script is removed in a ``finally`` so a failed playback never
     leaves the fragment behind.
+
+    With *keep_reply_when_refused*, a removal of the staged script that the
+    block check refuses after the playback ran does not discard the
+    playback's reply: the caller still gets it, and the refusal stays noted
+    for the run, so the operation ends with it.
     """
     path = f"{_PHPSHELLSESSIONS_DIR}/{script_name}"
     staged = await self._run_command(
@@ -435,8 +442,14 @@ async def _apply_playback(
         played = await self._run_command(
             target, f"pfSsh.php playback {script_name}", operator=operator
         )
-    finally:
+    except BaseException:
         await self._run_command(target, f"rm -f {path}", operator=operator)
+        raise
+    try:
+        await self._run_command(target, f"rm -f {path}", operator=operator)
+    except PrincipalBlockedStepError:
+        if not keep_reply_when_refused:
+            raise
     if played.exit_status != 0:
         raise RuntimeError(f"pfSsh.php playback {script_name!r} failed: exit {played.exit_status}")
     played_out = played.stdout if hasattr(played, "stdout") else ""

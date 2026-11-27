@@ -752,7 +752,11 @@ async def _refuse_unchecked_release(
 async def _play_create(
     self: PfSenseConnector, target: Any, name: str, descr: str, operator: Operator
 ) -> str:
-    """Run the create fragment; on a failure or a cancel, say that the user may exist."""
+    """Run the create fragment; on a failure or a cancel, say that the user may exist.
+
+    The firewall's reply is kept also when the block check refuses the
+    removal of the staged script, so the handler can remove the new user.
+    """
     try:
         return await _apply_playback(
             self,
@@ -760,6 +764,7 @@ async def _play_create(
             script_name=f"meho_openvpn_user_create_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
             script_body=build_user_create_playback(name, descr),
             operator=operator,
+            keep_reply_when_refused=True,
         )
     except asyncio.CancelledError as exc:
         raise asyncio.CancelledError(

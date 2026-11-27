@@ -28,13 +28,16 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select
 
+from meho_backplane.auth import send_check
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import reset_block_cache
+from meho_backplane.auth.principal_block_run import in_cleanup
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     clear_registry,
@@ -310,7 +313,7 @@ async def test_password_set_finishes_when_the_caller_is_blocked_during_the_store
     assert payload["credential_generated"] is True
     stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
     assert stored != "made-up-old"
-    assert vault_ops.user_writes == [(f"{_USER_PATH}/password", {"password": stored})]
+    assert vault_ops.user_writes == [(_USER_PATH, {"password": stored})]
     assert vault_ops.users["svc-a"]["password"] == stored
     assert vault_ops.users["svc-a"]["token_policies"] == ["app"]
     (row,) = await _dispatch_rows(_USERPASS)
@@ -330,7 +333,7 @@ async def test_a_blocked_rotation_sets_only_the_stored_password_and_keeps_the_po
     stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
     assert stored != "made-up-old"
     # Only the password set reaches Vault; the policy request is not sent.
-    assert vault_ops.user_writes == [(f"{_USER_PATH}/password", {"password": stored})]
+    assert vault_ops.user_writes == [(_USER_PATH, {"password": stored})]
     assert vault_ops.users["svc-a"]["password"] == stored
     assert vault_ops.users["svc-a"]["token_policies"] == ["app"]
     (row,) = await _dispatch_rows(_USERPASS)
@@ -361,11 +364,38 @@ async def test_an_unblocked_rotation_sets_the_password_and_the_policies(
     assert result.status == "ok", (result.status, result.error)
     stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
     assert vault_ops.user_writes == [
-        (f"{_USER_PATH}/password", {"password": stored}),
+        (_USER_PATH, {"password": stored}),
         (_USER_PATH, {"token_policies": ["new-rights"]}),
     ]
     assert vault_ops.users["svc-a"]["password"] == stored
     assert vault_ops.users["svc-a"]["token_policies"] == ["new-rights"]
+
+
+async def test_the_password_set_with_no_block_check_uses_the_login_path_and_sends_only_the_password(
+    vault_ops: VaultStandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unchecked: list[tuple[str, str, dict[str, Any]]] = []
+    real_send = send_check._CheckedAdapter.send
+
+    def _record(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+        if in_cleanup():
+            body = json.loads(request.body) if request.body else {}
+            unchecked.append((request.method, urlsplit(request.url).path, body))
+        return real_send(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(send_check._CheckedAdapter, "send", _record)
+    params = {**_prepare(vault_ops, rotate=True), "token_policies": ["new-rights"]}
+
+    result = await _write_login(params)
+
+    assert result.status == "ok", (result.status, result.error)
+    stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
+    # The end of MEHO's own Vault login is the other request with no check.
+    assert unchecked == [
+        ("POST", _USER_PATH, {"password": stored}),
+        ("POST", "/v1/auth/token/revoke-self", {}),
+    ]
+    assert vault_ops.sent("POST", f"{_USER_PATH}/password") == 0
 
 
 @pytest.mark.parametrize("rotate", _CASES)

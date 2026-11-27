@@ -2217,6 +2217,107 @@ async def test_userpass_generated_password_is_only_in_kv_and_works_once(
     assert again["data"]["data"]["password"] == stored
 
 
+def _token_policies(addr: str, username: str) -> list[str]:
+    data = _root_client(addr).auth.userpass.read_user(username=username, mount_point="userpass")
+    return sorted(data["data"]["token_policies"])
+
+
+@pytest.mark.asyncio
+async def test_userpass_rotated_password_keeps_the_login_policies(
+    vault_e2e: tuple[_VaultTarget, str],
+) -> None:
+    """A rotation sets only the new password: Vault keeps the login's policies."""
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    root.auth.userpass.create_or_update_user(
+        username="rot-keep",
+        password="made-up-start",
+        token_policies=["default", "e2e-rot-a", "e2e-rot-b"],
+        mount_point="userpass",
+    )
+    before = _token_policies(addr, "rot-keep")
+    assert before == ["default", "e2e-rot-a", "e2e-rot-b"]
+
+    result = await _dispatch_approved(
+        target,
+        "vault.auth.userpass.write",
+        {"username": "rot-keep", "generate_password": {"path": "labs/rot-keep"}, "rotate": True},
+        "op-rot-keep",
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["credential_generated"] is True
+    assert _token_policies(addr, "rot-keep") == before
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/rot-keep", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]["password"]
+    login = _root_client(addr).auth.userpass.login(
+        username="rot-keep", password=stored, mount_point="userpass"
+    )
+    assert sorted(login["auth"]["token_policies"]) == before
+
+
+@pytest.mark.asyncio
+async def test_userpass_rotation_needs_only_the_login_path_and_the_kv_path(
+    vault_e2e: tuple[_VaultTarget, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A role with create, update and read on the login path and the KV path can rotate."""
+    target, addr = vault_e2e
+    root = _root_client(addr)
+    root.auth.userpass.create_or_update_user(
+        username="rot-narrow",
+        password="made-up-start",
+        token_policies=["default"],
+        mount_point="userpass",
+    )
+    root.sys.create_or_update_policy(
+        name="e2e-rotate-narrow",
+        policy=(
+            'path "auth/userpass/users/rot-narrow" '
+            '{ capabilities = ["create", "update", "read"] }\n'
+            f'path "{_KV_MOUNT}/data/labs/rot-narrow" '
+            '{ capabilities = ["create", "update", "read"] }\n'
+        ),
+    )
+
+    @asynccontextmanager
+    async def _narrow_login(
+        _operator: Any, *, role: str | None = None, mount_path: str | None = None
+    ) -> AsyncIterator[hvac.Client]:
+        login = _root_client(addr).auth.token.create(
+            policies=["e2e-rotate-narrow"], no_default_policy=True, ttl="10m"
+        )
+        token = login["auth"]["client_token"]
+        try:
+            yield hvac.Client(url=addr, token=token)
+        finally:
+            _root_client(addr).auth.token.revoke(token)
+
+    monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _narrow_login)
+
+    result = await _dispatch_approved(
+        target,
+        "vault.auth.userpass.write",
+        {
+            "username": "rot-narrow",
+            "generate_password": {"path": "labs/rot-narrow"},
+            "rotate": True,
+        },
+        "op-rot-narrow",
+    )
+
+    assert result.status == "ok", result.error
+    stored = root.secrets.kv.v2.read_secret_version(
+        path="labs/rot-narrow", mount_point=_KV_MOUNT, raise_on_deleted_version=True
+    )["data"]["data"]["password"]
+    login = _root_client(addr).auth.userpass.login(
+        username="rot-narrow", password=stored, mount_point="userpass"
+    )
+    assert login["auth"]["client_token"]
+    assert _token_policies(addr, "rot-narrow") == ["default"]
+
+
 @pytest.mark.asyncio
 async def test_kv_generate_stores_a_value_that_meets_the_rules_and_shows_it_nowhere(
     vault_e2e: tuple[_VaultTarget, str],

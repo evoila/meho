@@ -20,8 +20,9 @@ The KV write comes first on purpose: a run that stops after it leaves the
 password in KV, never a login whose password nobody knows. The KV write uses
 ``cas`` (the secret version), so a second writer cannot be overwritten. Once
 the new password is stored for a login that exists, setting only that password
-on the login runs with no block check, so the login gets the stored password
-also when an admin blocked the caller during the store. A change of the
+on the login (on ``auth/<mount>/users/<name>``, the path of every set) runs
+with no block check, so the login gets the stored password also when an
+admin blocked the caller during the store. A change of the
 login's policies, and the create of a login that does not exist, keep the
 block check.
 """
@@ -279,12 +280,12 @@ def _apply_sync(
         return {"changed": True, "credential_generated": True}
     # The new password is stored for a login that exists, so setting only that
     # password runs to its end with no block check: the login and the stored
-    # password stay in step. A change of the policies is its own request and
-    # keeps the check.
+    # password stay in step. It uses the same path as every other set
+    # (``auth/<mount>/users/<name>``), with the password as the only field, so
+    # Vault keeps the login's policies and the role needs no other right. A
+    # change of the policies is its own request and keeps the check.
     with finish_without_block_check():
-        client.auth.userpass.update_password_on_user(
-            username=username, password=password, mount_point=mount
-        )
+        _set_user(client, username=username, mount=mount, password=password, token_policies=None)
     if token_policies is not None and sorted(token_policies) != sorted(current_policies):
         _set_user(
             client, username=username, mount=mount, password=None, token_policies=token_policies

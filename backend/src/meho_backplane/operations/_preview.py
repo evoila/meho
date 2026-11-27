@@ -122,6 +122,7 @@ __all__ = [
     "has_preview_builder",
     "preview_failure_reason",
     "preview_reads_target",
+    "preview_target_read_audit_fields",
     "proposed_effect_for_agent",
     "register_agent_preview_filter",
     "register_card_warnings",
@@ -503,6 +504,9 @@ _PREVIEW_BUILDER_SWITCHES: dict[str, Callable[[], bool]] = {}
 #: caller's own preview (:func:`register_preview_target_read`).
 _PREVIEW_TARGET_READ_SWITCHES: dict[str, Callable[[], bool]] = {}
 
+#: ``op_id`` -> what the audit row of such a read adds, from the params.
+_PREVIEW_TARGET_READ_AUDIT: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
 #: ``op_id`` -> the switch, and the keys its builder adds to the preview for
 #: the person only. Off, a caller reads the stored preview without them.
 _PERSON_ONLY_PREVIEW_KEYS: dict[str, tuple[Callable[[], bool], frozenset[str]]] = {}
@@ -554,14 +558,29 @@ def register_preview_builder_switch(op_id: str, enabled: Callable[[], bool]) -> 
     _PREVIEW_BUILDER_SWITCHES[op_id] = enabled
 
 
-def register_preview_target_read(op_id: str, enabled: Callable[[], bool]) -> None:
+def register_preview_target_read(
+    op_id: str,
+    enabled: Callable[[], bool],
+    *,
+    audit_fields: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> None:
     """Let the builder of *op_id* read the target for the caller's preview while ``enabled()``.
 
     Off, ``preview_operation`` builds the plan with no connector, so it never
     contacts the target. On, it gives the builder the target's connector
-    (``operations._composite_preview``). The builder must send no change.
+    (``operations._composite_preview``), and records the read in one audit
+    row. *audit_fields* adds fields from the params to that row. The builder
+    must send no change.
     """
     _PREVIEW_TARGET_READ_SWITCHES[op_id] = enabled
+    if audit_fields is not None:
+        _PREVIEW_TARGET_READ_AUDIT[op_id] = audit_fields
+
+
+def preview_target_read_audit_fields(op_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    """What the audit row of the preview's read of the target adds for *op_id*."""
+    fields = _PREVIEW_TARGET_READ_AUDIT.get(op_id)
+    return {} if fields is None else fields(params)
 
 
 def preview_reads_target(op_id: str) -> bool:

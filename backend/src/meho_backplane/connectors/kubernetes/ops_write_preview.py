@@ -879,13 +879,27 @@ def _apply_preview_dry_run_on() -> bool:
     return get_settings().k8s_apply_preview_dry_run
 
 
+def _apply_preview_audit_fields(params: dict[str, Any]) -> dict[str, Any]:
+    """What the audit row of the preview's dry run adds: the number of documents.
+
+    ``None`` when the manifest cannot be read.
+    """
+    try:
+        documents: int | None = len(_parse_manifest(params["manifest"]))
+    except Exception:
+        documents = None
+    return {"documents": documents}
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
     register_park_check("k8s.apply", _apply_park_check)
-    register_preview_target_read("k8s.apply", _apply_preview_dry_run_on)
+    register_preview_target_read(
+        "k8s.apply", _apply_preview_dry_run_on, audit_fields=_apply_preview_audit_fields
+    )
     register_person_only_preview_keys(
         "k8s.apply",
         _run_commands_shown_to_agents,

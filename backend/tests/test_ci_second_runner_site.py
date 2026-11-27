@@ -57,8 +57,9 @@ _HEAVY = "meho-runners-ci-heavy"
 _NEW_JOB = "python-unit-shard-second-site"
 _REPO = "example-org/example-repo"
 
-# The steps of python-unit-shard that read a secret, and their counterparts
-# in the new job. Every other step must be the same in both jobs.
+# The steps of python-unit-shard that read a secret or save a cache, and the
+# steps that differ in the new job. Every other step must be the same in both
+# jobs.
 _SECRET_STEPS = {
     "Read the CI repository secrets",
     "List the required spec-shelf files",
@@ -68,10 +69,22 @@ _SECRET_STEPS = {
     "Docker Hub login (for testcontainers pulls)",
     "Embedding-model drift guard (evoila/meho#574)",
 }
+# These save a cache: the new job restores caches and never saves one.
+_CACHE_SAVING_STEPS = {
+    "Install uv",
+    "Cache fastembed model (drift-guard + slow-lane)",
+    "Restore the spaCy model from the cache",
+    "Save the PHP package files to the cache",
+    "Save the GBK locale package files to the cache",
+}
+_NORMAL_ONLY_STEPS = _SECRET_STEPS | _CACHE_SAVING_STEPS
 _SECOND_SITE_ONLY_STEPS = {
     "Check that this runner is on the second site",
     "Use the public test images",
     "Embedding-model drift guard (evoila/meho#574)",
+    "Install uv",
+    "Restore the fastembed model from the cache",
+    "Restore the spaCy model from the cache",
 }
 
 pytestmark = pytest.mark.skipif(
@@ -84,8 +97,9 @@ def _workflow(name: str) -> dict[Any, Any]:
     return cast("dict[Any, Any]", yaml.safe_load((_WORKFLOWS / name).read_text()))
 
 
-def _ci_jobs() -> dict[str, Any]:
-    return cast("dict[str, Any]", _workflow("ci.yml")["jobs"])
+def _ci_jobs(text: str | None = None) -> dict[str, Any]:
+    workflow = yaml.safe_load(text) if text is not None else _workflow("ci.yml")
+    return cast("dict[str, Any]", workflow["jobs"])
 
 
 def _job_text(name: str) -> str:
@@ -278,6 +292,47 @@ def test_new_job_names_no_secret_environment_or_id_token() -> None:
     _assert_no_secret_environment_or_id_token(yaml.safe_dump(job))
     assert "environment" not in job
     assert job["permissions"] == {"contents": "read"}
+    # GitHub gives the workflow-level parts of ci.yml to this job too.
+    _assert_ci_outside_jobs_names_no_secret(_CI.read_text())
+
+
+def _assert_ci_outside_jobs_names_no_secret(text: str) -> None:
+    """GitHub gives the workflow-level parts (such as ``env:``) to every job."""
+    workflow = yaml.safe_load(text)
+    outside = {key: value for key, value in workflow.items() if key != "jobs"}
+    assert _SECRETS_CONTEXT.search(yaml.safe_dump(outside)) is None, outside
+    # The raw lines of every top-level part that is not `jobs:`, as written.
+    raw: list[str] = []
+    in_jobs = False
+    for line in _without_comments(text).splitlines():
+        if line and not line[0].isspace():
+            in_jobs = line.startswith("jobs:")
+        if not in_jobs:
+            raw.append(line)
+    found = _SECRETS_CONTEXT.search("\n".join(raw))
+    assert found is None, found
+
+
+def test_ci_outside_the_jobs_names_no_secret() -> None:
+    _assert_ci_outside_jobs_names_no_secret(_CI.read_text())
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "env:\n  HF_TOKEN: ${{ secrets.HF_TOKEN }}\n",
+        "env:\n  ALL: ${{ toJSON(secrets) }}\n",
+        "env:\n  T: ${{ secrets['HF_TOKEN'] }}\n",
+        "defaults:\n  run:\n    shell: bash\nenv:\n  T: ${{ secrets.X }}\n",
+    ],
+)
+def test_ci_outside_the_jobs_check_finds_a_secret(entry: str) -> None:
+    text = _CI.read_text().replace("\njobs:\n", f"\n{entry}jobs:\n", 1)
+    with pytest.raises(AssertionError):
+        _assert_ci_outside_jobs_names_no_secret(text)
+    # Also when the part comes after `jobs:`.
+    with pytest.raises(AssertionError):
+        _assert_ci_outside_jobs_names_no_secret(_CI.read_text() + entry)
 
 
 def test_smoke_workflow_names_no_secret_environment_or_id_token() -> None:
@@ -433,7 +488,7 @@ def _step(job: str, name: str) -> dict[str, Any]:
 
 def test_shared_test_steps_are_the_same_in_both_shard_jobs() -> None:
     jobs = _ci_jobs()
-    normal = [s for s in jobs["python-unit-shard"]["steps"] if s["name"] not in _SECRET_STEPS]
+    normal = [s for s in jobs["python-unit-shard"]["steps"] if s["name"] not in _NORMAL_ONLY_STEPS]
     new = [s for s in jobs[_NEW_JOB]["steps"] if s["name"] not in _SECOND_SITE_ONLY_STEPS]
     assert [s["name"] for s in normal] == [s["name"] for s in new]
     assert normal == new
@@ -459,8 +514,138 @@ def test_the_steps_that_differ_are_in_the_same_order() -> None:
     ]
     normal = [s["name"] for s in _ci_jobs()["python-unit-shard"]["steps"]]
     guard = "Embedding-model drift guard (evoila/meho#574)"
-    assert names[names.index(guard) - 1] == normal[normal.index(guard) - 1]
+    assert names[names.index(guard) - 1] == "Restore the fastembed model from the cache"
+    assert normal[normal.index(guard) - 1] == "Cache fastembed model (drift-guard + slow-lane)"
     assert names[names.index(guard) + 1] == normal[normal.index(guard) + 1]
+    for name in ("Install uv", "Restore the spaCy model from the cache"):
+        assert names[names.index(name) + 1] == normal[normal.index(name) + 1]
+
+
+# --- The second-site job restores caches and never saves one ---------------------
+
+# A setup action with a cache option: (the option that turns the cache on, its
+# default, the option that turns saving off, or None when it has none).
+_SETUP_CACHES: dict[str, tuple[str, str, str | None]] = {
+    "astral-sh/setup-uv@": ("enable-cache", "auto", "save-cache"),
+    "actions/setup-python@": ("cache", "", None),
+    "actions/setup-node@": ("cache", "", None),
+    "actions/setup-go@": ("cache", "true", None),
+    "actions/setup-java@": ("cache", "", None),
+}
+
+
+def _cache_saving_steps(steps: list[dict[str, Any]]) -> list[str]:
+    found: list[str] = []
+    for step in steps:
+        uses = str(step.get("uses", ""))
+        options = step.get("with") or {}
+        name = str(step.get("name", uses))
+        if uses.startswith(("actions/cache/save@", "actions/cache@")):
+            found.append(name)
+            continue
+        for action, (switch, default, save) in _SETUP_CACHES.items():
+            if not uses.startswith(action):
+                continue
+            cache_on = str(options.get(switch, default)).lower() not in ("false", "")
+            save_off = save is not None and str(options.get(save, "")).lower() == "false"
+            if cache_on and not save_off:
+                found.append(name)
+    return found
+
+
+def _second_site_saving_steps(text: str) -> list[str]:
+    # yaml fills in every alias, so a save step in a shared step counts too.
+    return _cache_saving_steps(_ci_jobs(text)[_NEW_JOB]["steps"])
+
+
+def test_second_site_job_restores_caches_and_never_saves_one() -> None:
+    assert _second_site_saving_steps(_CI.read_text()) == []
+    uses = [str(s.get("uses", "")) for s in _ci_jobs()[_NEW_JOB]["steps"]]
+    assert sum(u.startswith("actions/cache/restore@") for u in uses) == 4
+
+
+def test_normal_shard_job_still_saves_its_caches() -> None:
+    assert _cache_saving_steps(_ci_jobs()["python-unit-shard"]["steps"]) == [
+        "Install uv",
+        "Cache fastembed model (drift-guard + slow-lane)",
+        "Restore the spaCy model from the cache",
+        "Save the PHP package files to the cache",
+        "Save the GBK locale package files to the cache",
+    ]
+
+
+_SAVE_STEP = (
+    "      - name: Save something to the cache\n"
+    "        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0\n"
+    "        with:\n"
+    "          path: ~/.cache/x\n"
+    "          key: x\n"
+)
+
+
+def _with_step_after(text: str, marker: str, step: str) -> str:
+    assert text.count(marker) == 1, marker
+    return text.replace(marker, marker + step, 1)
+
+
+def test_save_check_finds_a_save_step_in_the_job() -> None:
+    text = _with_step_after(_CI.read_text(), "      - *unit-sync\n", _SAVE_STEP)
+    assert _second_site_saving_steps(text) == ["Save something to the cache"]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("uses: actions/cache/restore@", "uses: actions/cache/save@"),
+        ("uses: actions/cache/restore@", "uses: actions/cache@"),
+    ],
+)
+def test_save_check_finds_a_save_step_in_a_shared_anchored_step(old: str, new: str) -> None:
+    text = _CI.read_text()
+    anchor = "      - &unit-php-restore\n"
+    start = text.index(anchor)
+    end = text.index("\n      - ", start + len(anchor))
+    step = text[start:end]
+    assert old in step
+    text = text[:start] + step.replace(old, new) + text[end:]
+    assert _second_site_saving_steps(text) == ["Restore the PHP package files from the cache"]
+
+
+def test_save_check_finds_an_anchored_save_step_used_by_alias() -> None:
+    text = _CI.read_text()
+    shared = _SAVE_STEP.replace("      - name:", "      - &unit-extra-save\n        name:")
+    text = text.replace("      - &unit-spacy\n", shared + "\n      - &unit-spacy\n", 1)
+    text = text.replace(
+        "      - *unit-spacy\n", "      - *unit-extra-save\n      - *unit-spacy\n", 1
+    )
+    assert _second_site_saving_steps(text) == ["Save something to the cache"]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"enable-cache": True},
+        {"enable-cache": True, "save-cache": "auto"},
+        {},
+    ],
+)
+def test_save_check_finds_a_setup_action_that_saves_its_cache(options: dict[str, Any]) -> None:
+    step = {"name": "Install uv", "uses": "astral-sh/setup-uv@abc", "with": options}
+    assert _cache_saving_steps([step]) == ["Install uv"]
+
+
+def test_save_check_allows_a_setup_action_with_its_cache_off_or_its_save_off() -> None:
+    steps = [
+        {"name": "a", "uses": "astral-sh/setup-uv@abc", "with": {"enable-cache": False}},
+        {
+            "name": "b",
+            "uses": "astral-sh/setup-uv@abc",
+            "with": {"enable-cache": True, "save-cache": False},
+        },
+        {"name": "c", "uses": "actions/setup-python@abc", "with": {"python-version": "3.13"}},
+        {"name": "d", "uses": "actions/cache/restore@abc", "with": {"path": "x", "key": "x"}},
+    ]
+    assert _cache_saving_steps(steps) == []
 
 
 def test_drift_guard_is_the_same_command_without_the_token() -> None:

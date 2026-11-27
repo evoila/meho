@@ -950,8 +950,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - &unit-uv
-        name: Install uv
+      - name: Install uv
         # uv is the project's canonical Python toolchain (pyproject.toml
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
@@ -973,8 +972,7 @@ jobs:
         # declared in [dependency-groups.dev].
         run: uv sync --locked --all-groups
 
-      - &unit-fastembed-cache
-        name: Cache fastembed model (drift-guard + slow-lane)
+      - name: Cache fastembed model (drift-guard + slow-lane)
         # The drift-guard below downloads the ~67 MB default ONNX model
         # from HuggingFace. Without this cache every run re-fetches it
         # unauthenticated over the cluster's shared NAT egress (HF
@@ -1013,8 +1011,7 @@ jobs:
         run: &unit-warm-run |
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
 
-      - &unit-spacy-cache
-        name: Restore the spaCy model from the cache
+      - name: Restore the spaCy model from the cache
         # install_spacy_model.sh uses the model when it is installed at the
         # pinned version, then this cache, and downloads (three tries) last.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -1174,8 +1171,7 @@ jobs:
           fi
           php --version | head -1
 
-      - &unit-php-save
-        name: Save the PHP package files to the cache
+      - name: Save the PHP package files to the cache
         # Only after a download into an empty cache. A cache entry cannot
         # be changed, so a bad one needs a new key (see "Name the PHP
         # package cache").
@@ -1279,8 +1275,7 @@ jobs:
           echo "::error::SETUP FAILURE, not a test failure: the locales package did not install after 2 tries (package mirror problem on the runner)"
           exit 1
 
-      - &unit-locale-save
-        name: Save the GBK locale package files to the cache
+      - name: Save the GBK locale package files to the cache
         # Only after a download into an empty cache. A cache entry cannot
         # be changed, so a bad one needs a new key (see "Name the GBK
         # locale package cache").
@@ -1566,7 +1561,8 @@ jobs:
     # (repository variable MEHO_CI_SECOND_SITE), and its smoke check
     # (second-site-smoke.yml) passed in the last 45 minutes. Then
     # python-unit-shard runs only shards 1-3. In every other case this job
-    # is skipped and python-unit-shard runs all six shards, as before.
+    # is skipped and python-unit-shard runs all six shards, with its own
+    # runner, secrets and steps.
     #
     # The second site is run by another team, on other machines. So:
     # - The text of this job names no secret. GitHub may send a job every
@@ -1579,7 +1575,8 @@ jobs:
     #
     # The test steps are YAML aliases (`*unit-...`) of the steps of
     # python-unit-shard, so the two jobs run the same steps. Only the steps
-    # that read a secret differ. A test checks that too.
+    # that read a secret and the cache steps differ: this job restores
+    # caches and never saves one. Tests check both.
     #
     # Never on a fork pull request, the merge queue, the nightly run or any
     # other event: the `if:` below, and the pick rules in
@@ -1642,9 +1639,26 @@ jobs:
           IMAGES
 
       - *unit-memory-start
-      - *unit-uv
+
+      - name: Install uv
+        # The same as in python-unit-shard, but it never saves the uv cache.
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          save-cache: false
+          add-problem-matchers: false
+
       - *unit-sync
-      - *unit-fastembed-cache
+
+      - name: Restore the fastembed model from the cache
+        # The same cache as in python-unit-shard, restore only.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
 
       - name: Embedding-model drift guard (evoila/meho#574)
         # The same command as in python-unit-shard, with no HF_TOKEN: the
@@ -1653,17 +1667,21 @@ jobs:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
         run: *unit-warm-run
 
-      - *unit-spacy-cache
+      - name: Restore the spaCy model from the cache
+        # The same cache as in python-unit-shard, restore only.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
       - *unit-spacy
       - *unit-helm
       - *unit-php-name
       - *unit-php-restore
       - *unit-php-install
-      - *unit-php-save
       - *unit-locale-name
       - *unit-locale-restore
       - *unit-locale-install
-      - *unit-locale-save
       - *unit-download-picked
       - *unit-pytest
       - *unit-upload-times
@@ -2097,8 +2115,8 @@ jobs:
     #  5. Second runner site (#7085). When `second_site` is `on`, shards 1-3
     #     run in python-unit-shard and shards 4-6 in
     #     python-unit-shard-second-site, and both must succeed. When it is
-    #     empty, the second-site job must be skipped and the rest works as
-    #     before.
+    #     empty, the second-site job must be skipped, and python-unit-shard
+    #     alone stands for the shards.
     needs: [changes, python-lint, python-unit-shard, python-unit-shard-second-site, python-outside-backend]
     if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the

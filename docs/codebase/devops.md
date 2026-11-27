@@ -2620,10 +2620,12 @@ is down must not hold up CI.
 **Which jobs may use it.** Only the job `python-unit-shard-second-site` in
 `ci.yml` (shards 4-6 of a pull request) and the smoke check
 `second-site-smoke.yml`. Only these two name the label
-`meho-runners-ci-heavy-site2`. Never on the site: the merge queue, the
-nightly run, `workflow_dispatch`, coverage, integration, migrations, image
-build, signing and release workflows, `pr-smoke.yml`, and any job with a
-registry or release secret.
+`meho-runners-ci-heavy-site2`. No workflow other than the smoke check, and
+no job other than `python-unit-shard-second-site`, runs on the site. So the
+merge queue, the nightly run, coverage, integration, migrations, image
+build, signing and release workflows, `pr-smoke.yml`, and every job with a
+registry or release secret never run there. The smoke check runs there on
+its schedule, and when a person starts it by hand.
 
 **When shards 4-6 go there.** The step "Pick the runner site for unit
 shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
@@ -2647,7 +2649,7 @@ Every doubt (an API error, an odd answer, no smoke run) gives empty, which
 means today's pool. The step never fails the job. Its notice says why.
 
 **What changes when it is on.** `python-unit-shard` runs shards 1-3, with
-its runner, secrets and steps as before. `python-unit-shard-second-site`
+its own runner, secrets and steps. `python-unit-shard-second-site`
 runs shards 4-6, under the same check names `Python unit shard N/6`:
 
 - its text names no secret, no `environment` and no `id-token`, and its
@@ -2661,7 +2663,11 @@ runs shards 4-6, under the same check names `Python unit shard N/6`:
   `MEHO_CI_SITE=site2`;
 - its test steps are YAML aliases (`*unit-...`) of the steps of
   `python-unit-shard`, so the two jobs cannot drift apart. Only the steps
-  that read a secret differ.
+  that read a secret and the cache steps differ;
+- it restores caches and never saves one: its cache steps use
+  `actions/cache/restore`, its `astral-sh/setup-uv` step has
+  `save-cache: false`, and it has no step that saves the PHP or the GBK
+  locale package files.
 
 The fan-in `Python (ruff + mypy + pytest)` needs both jobs to succeed when
 the site is on. When it is off, the second-site job must be skipped.
@@ -2694,8 +2700,8 @@ that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to
 `on`.
 
 **Switch off.** Set `MEHO_CI_SECOND_SITE` to any other value, or delete it.
-The next run uses today's pool for all six shards, and the schedule of the
-smoke check stops.
+The next run uses today's pool for all six shards. A scheduled smoke run
+then starts no job on the second site.
 
 **A re-run.** A re-run (attempt 2 or later) never uses the site. "Re-run all
 jobs" picks again, and the pick says today's pool. "Re-run failed jobs"

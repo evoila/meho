@@ -278,6 +278,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 # it in :mod:`tests.test_db_sensor`; ``db.models`` never re-declares the
 # enum. The import is safe against a cycle: the ``checks`` package is
 # dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
+from meho_backplane.caller_kinds import CALLER_KINDS
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.sandbox_mode import sandbox_mode_active
 
@@ -710,7 +711,7 @@ class AuditLog(Base):
     policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
     # The kind of caller of the row: one of
-    # :data:`meho_backplane.auth.caller_kind.CALLER_KINDS`, DB-enforced by the
+    # :data:`meho_backplane.caller_kinds.CALLER_KINDS`, DB-enforced by the
     # CHECK below. Nothing writes it yet, so every row is NULL, also every
     # row from before migration ``0191``.
     caller_kind: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
@@ -720,13 +721,12 @@ class AuditLog(Base):
             _ck_event_class_in(AUDIT_EVENT_CLASSES),
             name="ck_audit_log_event_class",
         ),
-        # The five kinds of ``CALLER_KINDS``, written out: this module cannot
-        # import ``meho_backplane.auth``, because that package imports this
-        # module. ``tests/migrations/test_migration_0191_add_audit_log_caller_kind.py``
-        # fails when the two lists differ.
+        # Built from :data:`meho_backplane.caller_kinds.CALLER_KINDS`, the one
+        # list of kinds. Migration ``0191`` writes the five kinds out, and
+        # ``tests/migrations/test_migration_0191_add_audit_log_caller_kind.py``
+        # fails when its text differs from this one.
         sa.CheckConstraint(
-            "caller_kind IN ('person', 'personal_agent', 'service_agent', 'runner', 'system') "
-            "OR caller_kind IS NULL",
+            f"caller_kind IN ({', '.join(f"'{v}'" for v in CALLER_KINDS)}) OR caller_kind IS NULL",
             name="ck_audit_log_caller_kind",
         ),
         # Verdict vocabulary is the closed ``PermissionVerdict`` set. The

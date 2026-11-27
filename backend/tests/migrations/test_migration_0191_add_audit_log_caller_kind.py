@@ -28,6 +28,8 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine as sa_create_engine
 from sqlalchemy import text
 
+from meho_backplane import caller_kinds
+from meho_backplane.auth import caller_kind
 from meho_backplane.auth.caller_kind import CALLER_KINDS
 from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
@@ -161,7 +163,12 @@ def test_downgrade_drops_the_column_and_round_trips(
 
 
 def test_migration_and_model_name_the_kinds_of_caller_kinds() -> None:
-    """The kinds are written out twice; both copies must match ``CALLER_KINDS``."""
+    """The migration writes the kinds out; the model builds them from ``CALLER_KINDS``.
+
+    ``auth/caller_kind.py`` gives the tuple of ``meho_backplane.caller_kinds``,
+    so the application code has one list.
+    """
+    assert caller_kind.CALLER_KINDS is caller_kinds.CALLER_KINDS
     script = ScriptDirectory.from_config(alembic_config())
     migration = script.get_revision(_REVISION)
     assert migration is not None

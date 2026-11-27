@@ -566,7 +566,7 @@ backplane Python base image already follows).
 </html>
 ```
 
-### The top bar (#1436)
+### The top bar
 
 Every page that extends `base.html` starts with the MEHO family's shared
 top bar: the `top_bar` macro from `meho_ui.shell` (meho-ui 0.10.0, its
@@ -586,7 +586,7 @@ Knowledge use. It shows, at every screen width:
 
 The bar renders what `base.html` hands it and reads nothing itself. No
 app list is passed, so it shows no app switcher: how people move between
-the apps is decided later (#1430). Its menus are native popovers, so the
+the apps is decided later. Its menus are native popovers, so the
 bar adds no script.
 
 Its look is `meho-topbar.css`, plain CSS on the `--evoila-*` tokens,
@@ -1723,7 +1723,7 @@ the colour policy stays one auditable map.
 | `broadcast/_filter_bar.html` | The principal / target controls. Both server filters `hx-get` to `/ui/broadcast/feed`. No operation filter since #3762. |
 | `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
 | `broadcast/_event_row.html` | Server-authored announcement row (time · agent · announcement text bound via `x-text` · phase · targets · claim details). No operation row and no drawer since #3762. |
-| `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
+| `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the top bar / sidebar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
 | `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html`. No kind switch since #3762. |
 | `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, `visibleEvents` (announcements only), the timestamp / phase / targets / claim helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
@@ -1840,7 +1840,7 @@ audit-side).
 `GET /ui/broadcast?wall=1` selects `broadcast/wall.html` instead of
 `broadcast/feed.html`. The wall view is a **standalone document** (not
 `{% extends "base.html" %}`) so it drops the DaisyUI drawer shell —
-no sidebar, no top navbar, no filter bar — and maximises the feed for a
+no top bar, no sidebar, no filter bar — and maximises the feed for a
 full-screen team-room monitor. It is opened in a new tab from the
 in-chrome view's "Wall mode" button so the monitor can be cast
 independently of the operator's working session.

@@ -404,13 +404,17 @@ a.meho-card:hover,
 }
 
 /*
- * The shared top bar (#1436). Its look is meho-ui's `meho-topbar.css`;
+ * The shared MEHO top bar. Its look is meho-ui's `meho-topbar.css`;
  * these rules only place it in the console's layout. Unlayered, like the
  * bar's own stylesheet, so they win over DaisyUI's layered `drawer` rules
  * and beat `.meho-topbar__start { display: flex }` on specificity.
  *
  * - The bar stays at the top of the window while the page scrolls. Under
  *   the side menu's overlay (z-40) on a phone, so the open menu covers it.
+ * - A page with the bar keeps that much room at the top when something
+ *   scrolls into view (`scrollIntoView`, a `#anchor` link), so the bar
+ *   never covers it. Pages without the bar (the wall, the tenant
+ *   picker) do not match `:has()` and keep the browser default.
  * - The `start` slot holds only the hamburger, which is `lg:hidden`; from
  *   lg up the empty slot is hidden too, or its gap would push the logo
  *   right.
@@ -422,6 +426,10 @@ a.meho-card:hover,
   position: sticky;
   top: 0;
   z-index: 30;
+}
+
+html:has(.meho-console-topbar) {
+  scroll-padding-top: var(--meho-topbar-height);
 }
 
 @media (min-width: 64rem) {

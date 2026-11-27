@@ -1656,7 +1656,7 @@ def test_app_shell_renders_bell_with_polled_badges() -> None:
     # No Broadcast SSE subscription: the bell polls the badge endpoint.
     assert "/ui/broadcast/stream" not in body
     assert "sse-before-message" not in body
-    # The one badge, in the shared top bar's notification slot (#1436),
+    # The one badge, in the shared top bar's notification slot,
     # re-fetches on the one body event the shell timer dispatches, with no
     # inline htmx filter expression.
     assert 'id="topbar-approvals-badge"' in body

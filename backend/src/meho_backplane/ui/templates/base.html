@@ -11,7 +11,7 @@
       Zero inline script -- a forthcoming nonce-based CSP would
       otherwise have to special-case inline.
     * <body> -- the shared MEHO top bar (``meho_ui.shell``'s
-      ``top_bar``, #1436) across the full width at every screen size:
+      ``top_bar``) across the full width at every screen size:
       the MEHO logo and "Operator Console", the approvals bell in its
       notification slot, and the user menu (Account, Sign out). On <lg
       the hamburger that opens the side menu sits in the bar's ``start``
@@ -70,7 +70,7 @@
 ] %}
 {% if policy_menu | default(false) %}{% set nav_surfaces = nav_surfaces + [("policy", "/ui/policy", "shield-check", "Policy")] %}{% endif %}
 {#- Notifications bell macro (G10.7-T3 #1778). Rendered once, in the top
-    bar's notification slot (#1436), at every screen size; ``id_prefix``
+    bar's notification slot, at every screen size; ``id_prefix``
     names the badge swap target (``topbar-approvals-badge``), and
     ``approvals-bell.js`` finds it by its ``-approvals-badge`` ending. The
     badge span ``hx-get``s ``/ui/approvals/badge`` on ``load`` (authoritative
@@ -211,7 +211,7 @@
 {% block body_attrs %}{% if session_tenant is not none %} data-meho-tenant="{{ session_tenant.id }}"{% endif %}{% endblock %}
 
 {% block main %}
-    {# ---------- The shared top bar (#1436) ----------
+    {# ---------- The shared MEHO top bar ----------
        meho_ui.shell's ``top_bar``, on every console page at every width.
        It renders what it is handed and reads nothing itself: the product
        name, the person's name (``session_display_name``; "Account" when
@@ -225,8 +225,8 @@
            five-second ``meho:approval-badge-poll`` and
            ``meho:approval-bump``.
        No app list is passed, so the bar shows no app switcher: the
-       switcher waits for the planning session on moving between apps
-       (#1430). The menus are native popovers, so the bar adds no
+       switcher waits until the team decides how people move between
+       the apps. The menus are native popovers, so the bar adds no
        script. ``meho-console-topbar`` keeps it at the top of the window
        while the page scrolls (``styles.css``). #}
     {% set topbar_menu_button %}
@@ -296,7 +296,7 @@
       </div>
 
       {# ---------- Side menu: meho's own navigation ----------
-         The logo, the user menu and the bell are in the top bar (#1436);
+         The logo, the user menu and the bell are in the top bar;
          the side menu keeps the surface nav, the tenant box and the
          version line. From lg up it sits under the bar
          (``.meho-console-drawer`` in ``styles.css``); below lg it opens

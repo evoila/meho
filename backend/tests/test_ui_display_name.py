@@ -13,7 +13,7 @@ This suite pins:
 
 * the name is stored encrypted and comes back on every way a session is
   loaded, including after a token refresh;
-* the user menu (in the shared top bar since #1436), the dashboard
+* the user menu (in the shared top bar), the dashboard
   greeting, the account page and the "My recent activity" panel show the
   name;
 * **with no name** -- the path that regresses quietly -- those places show
@@ -150,7 +150,7 @@ def _get(path: str, session_id: uuid.UUID) -> Any:
 def _user_chip(body: str) -> tuple[str, str | None, str]:
     """Return the top bar user menu's ``(avatar inner HTML, button title, label)``.
 
-    The menu is meho-ui's ``top_bar`` (#1436). Its button carries a
+    The menu is meho-ui's ``top_bar``. Its button carries a
     ``title`` only when there is a name, so the title is ``None`` without
     one.
     """

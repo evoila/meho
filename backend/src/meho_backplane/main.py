@@ -1595,7 +1595,7 @@ app.include_router(mcp_router)
 #   stylesheet it ships resolves against this mount with no rewriting.
 #
 #   The shell mount serves the shared top bar's precompiled stylesheet
-#   (``meho-topbar.css``, #1436) out of the same package.
+#   (``meho-topbar.css``) out of the same package.
 #
 #   Mounted BEFORE the two routers for the same reason as ``/ui/static``:
 #   the session middleware exempts the ``/ui/static/`` prefix, so an

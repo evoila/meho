@@ -9,7 +9,7 @@ assert the Jinja2 ``Environment`` constructed by
 ``base.html`` and produce HTML that contains the chassis-required
 shape:
 
-* The shared MEHO top bar (meho-ui's ``top_bar``, #1436) over the
+* The shared MEHO top bar (meho-ui's ``top_bar``) over the
   DaisyUI ``drawer`` chrome, with the approvals bell in its notification
   slot.
 * Sidebar links to every one of the five G10.x surfaces.
@@ -163,7 +163,7 @@ def test_base_template_version_label_degrades_to_unknown(
 
 
 def test_base_template_renders_top_bar_and_drawer(ui_env: Environment) -> None:
-    """One shared top bar, then the DaisyUI drawer (#1436).
+    """One shared top bar, then the DaisyUI drawer.
 
     Asserting the markers directly is brittler than a
     visual-regression test but cheaper than spinning up a headless
@@ -714,7 +714,7 @@ def test_forms_with_find_disabled_elt_disinherit_it() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The shared top bar (#1436)
+# The shared MEHO top bar
 #
 # meho renders meho-ui's ``top_bar`` on every page that extends
 # ``base.html``. The approvals count moved from the side menu's account row
@@ -801,7 +801,7 @@ def test_top_bar_user_menu_links(ui_env: Environment) -> None:
     assert 'href="/ui/auth/logout"' in bar
     assert 'href="/ui/"' in bar  # the logo goes home
     assert "Operator Console" in bar
-    # No app list is passed in this iteration, so no switcher (#1430).
+    # No app list is passed yet, so no app switcher.
     assert "meho-topbar__switcher" not in bar
 
 
@@ -817,6 +817,19 @@ def test_side_menu_keeps_nav_tenant_and_version_but_not_the_bar_duplicates(
     assert "/ui/auth/logout" not in side
     assert "approvals-badge" not in side
     assert 'aria-haspopup="menu"' not in html
+
+
+def test_pages_with_the_top_bar_keep_room_for_it_when_scrolling() -> None:
+    """``scrollIntoView`` and ``#anchor`` links must not hide content under the bar.
+
+    The bar stays at the top of the window, so a page with the bar keeps
+    ``--meho-topbar-height`` free at the top when something scrolls into
+    view (the topology node drawer does).
+    """
+    css = (static_src_dir() / "styles.css").read_text(encoding="utf-8")
+    m = re.search(r"html:has\(\.meho-console-topbar\)\s*\{([^}]*)\}", css)
+    assert m is not None, "no scroll room rule for pages with the top bar"
+    assert "scroll-padding-top: var(--meho-topbar-height)" in m.group(1)
 
 
 def test_base_template_links_the_top_bar_stylesheet_after_the_tokens(

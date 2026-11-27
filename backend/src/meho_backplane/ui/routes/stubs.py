@@ -9,7 +9,7 @@ shell renders end-to-end before the per-surface Initiatives
 (G10.1-G10.5) replace them with the real views. Each stub returns
 200 with a minimal HTML page that:
 
-* Extends ``base.html`` so the chrome (navbar, sidebar, footer) is
+* Extends ``base.html`` so the chrome (top bar, sidebar, footer) is
   identical to every other surface.
 * Displays a "Coming soon -- this surface ships with G10.x" panel
   pointing at the relevant Initiative number.

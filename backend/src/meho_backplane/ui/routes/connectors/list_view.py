@@ -8,7 +8,7 @@ item #1. The route serves two response shapes from one handler:
 
 * **Full page** (normal browser navigation) -- returns the
   ``connectors/list.html`` page extending ``base.html``. The chrome
-  (navbar, sidebar, footer) matches the rest of the operator console.
+  (top bar, sidebar, footer) matches the rest of the operator console.
 
 * **HTMX fragment** (``HX-Request: true`` header set, sent by the
   HTMX 2 ``sse`` / ``hx-get`` directives) -- returns the

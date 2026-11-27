@@ -148,7 +148,7 @@ def shell_css_dir() -> Path:
     """Return the directory of page-chrome stylesheets inside ``meho-ui``.
 
     Holds ``meho-topbar.css``, the shared top bar's own precompiled
-    stylesheet (#1436). Served at ``/ui/static/shell`` straight out of the
+    stylesheet. Served at ``/ui/static/shell`` straight out of the
     package, for the same reason as :func:`brand_css_dir`: one copy of
     the file, bumped with the package.
     """

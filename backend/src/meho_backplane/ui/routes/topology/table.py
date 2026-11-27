@@ -11,7 +11,7 @@ Three response shapes share one handler:
 
 * **Tabular full page** (``?view=table`` or unset) -- a normal browser
   navigation returns the full ``topology/table.html`` page (extends
-  ``base.html``; navbar, sidebar, filter bar, sort headers, table
+  ``base.html``; top bar, sidebar, filter bar, sort headers, table
   body, and the empty ``#node-drawer`` slot the per-node drawer
   swaps into).
 

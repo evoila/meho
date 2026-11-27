@@ -221,7 +221,7 @@ class TestWallMode:
         assert response.status_code == 200, response.text
         body = response.text
         # The wall page is a standalone document, not the base.html shell:
-        # no DaisyUI drawer chrome, no shared top bar (#1436), no sidebar
+        # no DaisyUI drawer chrome, no shared top bar, no sidebar
         # "Surfaces" nav, no filter bar.
         assert "drawer-toggle" not in body
         assert "data-meho-topbar" not in body

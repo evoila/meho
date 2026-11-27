@@ -17,7 +17,7 @@
 //   dispatches on <body>, and on ``meho:approval-bump`` (after a decision).
 //   The count is always the server's tenant-scoped pending total; this file
 //   never counts anything itself. The badge sits in the shared top bar's
-//   notification slot (#1436), the one bell on the page. The timer uses
+//   notification slot, the one bell on the page. The timer uses
 //   its own event so only the badge re-fetches: the approvals history list
 //   listens to ``meho:approval-bump`` and must not reload (and lose its
 //   "Load more" pages) every few seconds.

@@ -224,7 +224,7 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
       and falls back to a neutral "Sign in" link otherwise.
     * ``session_display_name`` -- the signed-in person's name from the
       login token, or ``None``. The shared top bar takes its avatar
-      initials from it (#1436). There is no ``sub`` variable: the pages
+      initials from it. There is no ``sub`` variable: the pages
       that name the signed-in person show a neutral label when the name
       is missing, never the identifier.
     * ``ready`` -- the live backplane readiness verdict that colours

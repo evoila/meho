@@ -219,13 +219,6 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 _require_approvals_access = Depends(require_approvals_access)
 
 
-#: Human-only governance gate. Rejects a non-human
-#: ``principal_kind`` (agent / service / runner) before the endpoint runs —
-#: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
-#: approval **decision** verbs (approve / reject / decide) are human-only on
-#: every transport. Attached only to the decision routes; the read routes
-#: (list / show / result) keep ``require_approvals_access`` alone so a
-#: service principal's approval bridge can still list the queue.
 def _require_human_approver(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
     """Refuse a machine login on a decision route; the answer names the fixed rule."""
     ensure_human_principal(
@@ -235,6 +228,13 @@ def _require_human_approver(operator: Operator = Depends(verify_jwt_and_bind)) -
     return operator
 
 
+#: Human-only governance gate. Rejects a non-human
+#: ``principal_kind`` (agent / service / runner) before the endpoint runs —
+#: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
+#: approval **decision** verbs (approve / reject / decide) are human-only on
+#: every transport. Attached only to the decision routes; the read routes
+#: (list / show / result) keep ``require_approvals_access`` alone so a
+#: service principal's approval bridge can still list the queue.
 _require_human = Depends(_require_human_approver)
 
 #: Approve-only proof that a person is present (#3979, #5515): the token must

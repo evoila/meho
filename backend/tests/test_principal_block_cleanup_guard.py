@@ -6,7 +6,8 @@
 A run that has changed a target ends in step with the secret store:
 
 * clean-up: the removal of an account, user or token that the same run just
-  made on a target and could not store, and the end of MEHO's own Vault
+  made on a target and could not store, the removal of the script that a
+  VPN user create staged on the firewall, and the end of MEHO's own Vault
   login. It runs through
   :func:`~meho_backplane.auth.principal_block_run.cleanup_without_block_check`.
 * finish: after a change that the run cannot undo, the step that brings the
@@ -32,6 +33,8 @@ _UNCHECKED_PLACES = {
     "auth/vault.py": "cleanup",
     "connectors/harbor/ops_robot_vault.py": "cleanup",
     "connectors/pfsense/ops_openvpn_user.py": "cleanup",
+    # The removal of the staged script of a VPN user create.
+    "connectors/pfsense/ops_write.py": "cleanup",
     "connectors/vault/ops_token_store.py": "cleanup",
     "connectors/rke2/ops_write.py": "finish",
     "connectors/vault/userpass_password.py": "finish",

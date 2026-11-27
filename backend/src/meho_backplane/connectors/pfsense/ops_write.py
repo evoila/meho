@@ -94,9 +94,10 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Concatenate
 
+import structlog
 from defusedxml.ElementTree import ParseError, fromstring
 
-from meho_backplane.auth.principal_block import PrincipalBlockedStepError
+from meho_backplane.auth.principal_block_run import cleanup_without_block_check
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
 from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
@@ -104,6 +105,8 @@ from meho_backplane.connectors.pfsense.refusal import PfSenseRefusedError
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.pfsense.connector import PfSenseConnector
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "WRITE_OPS",
@@ -416,7 +419,7 @@ async def _apply_playback(
     script_name: str,
     script_body: str,
     operator: Operator | None,
-    keep_reply_when_refused: bool = False,
+    script_removal_is_cleanup: bool = False,
 ) -> str:
     """Stage, play back, and clean up a pfSsh.php playback fragment.
 
@@ -425,10 +428,11 @@ async def _apply_playback(
     staged script is removed in a ``finally`` so a failed playback never
     leaves the fragment behind.
 
-    With *keep_reply_when_refused*, a removal of the staged script that the
-    block check refuses after the playback ran does not discard the
-    playback's reply: the caller still gets it, and the refusal stays noted
-    for the run, so the operation ends with it.
+    With *script_removal_is_cleanup*, the removal of the staged script is a
+    clean-up: it runs with no block check
+    (:func:`~meho_backplane.auth.principal_block_run.cleanup_without_block_check`),
+    and when it fails after the playback ran (for example the SSH connection
+    is lost), the caller still gets the playback's reply.
     """
     path = f"{_PHPSHELLSESSIONS_DIR}/{script_name}"
     staged = await self._run_command(
@@ -443,17 +447,30 @@ async def _apply_playback(
             target, f"pfSsh.php playback {script_name}", operator=operator
         )
     except BaseException:
-        await self._run_command(target, f"rm -f {path}", operator=operator)
+        await _remove_staged_script(self, target, path, operator, script_removal_is_cleanup)
         raise
     try:
-        await self._run_command(target, f"rm -f {path}", operator=operator)
-    except PrincipalBlockedStepError:
-        if not keep_reply_when_refused:
+        await _remove_staged_script(self, target, path, operator, script_removal_is_cleanup)
+    except Exception:
+        if not script_removal_is_cleanup:
             raise
+        _log.warning("pfsense_staged_script_not_removed", script=path)
     if played.exit_status != 0:
         raise RuntimeError(f"pfSsh.php playback {script_name!r} failed: exit {played.exit_status}")
     played_out = played.stdout if hasattr(played, "stdout") else ""
     return played_out if isinstance(played_out, str) else ""
+
+
+async def _remove_staged_script(
+    self: PfSenseConnector,
+    target: Any,
+    path: str,
+    operator: Operator | None,
+    as_cleanup: bool,
+) -> None:
+    """Remove the staged playback script; as a clean-up with no block check when asked."""
+    with cleanup_without_block_check() if as_cleanup else contextlib.nullcontext():
+        await self._run_command(target, f"rm -f {path}", operator=operator)
 
 
 # ---------------------------------------------------------------------------

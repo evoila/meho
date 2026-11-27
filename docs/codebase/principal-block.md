@@ -135,8 +135,9 @@ before the write when the caller was blocked during the read. The HTTP client th
 instance's store does the same. Outside an operation the check does nothing.
 
 Clean-up calls run with no block check: the end of MEHO's own Vault login,
-and the removal of an account, user or token that the same run just made on
-a target and could not store. When such a clean-up fails, the answer and the
+the removal of an account, user or token that the same run just made on
+a target and could not store, and the removal of the script that a VPN user
+create staged on the firewall. When such a clean-up fails, the answer and the
 audit row name what stays. One helper marks a clean-up
 (`cleanup_without_block_check` in `auth/principal_block_run.py`), and a test
 pins the places that use it (`tests/test_principal_block_cleanup_guard.py`).
@@ -148,13 +149,16 @@ the operation has a clean-up that undoes its change, the clean-up runs. Where
 it cannot undo its change, the step that brings the target and the secret
 store in step runs to its end with no block check: the store of a token that
 the run rotated, and the setting of a password that the run stored for a
-login. Every other request of the run keeps the check. A second helper marks
+login that exists. That request sets only the password. A change of the
+login's policies, and the create of a login that does not exist, keep the
+check. Every other request of the run keeps the check. A second helper marks
 such a step (`finish_without_block_check`), and the same test names each
 place with its rule (clean-up or finish).
 
-When a call needs approval, the op's own check before the wait, its preview
-and its permission check run with the same check, and the block is checked
-once more before the request is saved. A caller who is blocked before one of
+When a call needs approval, the op's own check before the wait, its preview,
+its permission check and, for a `destructive` call, the preview that the call
+binds to run with the same check. The block is checked once more right
+before the request is saved. A caller who is blocked before one of
 their Vault requests gets the block refusal, and no approval request is made.
 The answer says `uncertain` when a request of the preparation was sent, and
 `not_started` when none was sent. When the list cannot be read, the audit row

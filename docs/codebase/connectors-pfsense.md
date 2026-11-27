@@ -1269,9 +1269,11 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   raised again. The undo prints `MEHO_VPN_REMOVED` when it removed the user;
   without it the error says the user was not removed. When the caller is
   blocked while the call runs, the answer is the block refusal. It names the
-  user when the user was not removed. A block while the firewall runs the
-  create refuses the removal of the staged script; MEHO keeps the firewall's
-  answer to the create and removes the new user in the same way. The Vault write runs
+  user when the user was not removed. The removal of the staged create script
+  is a clean-up with no block check. MEHO keeps the firewall's answer to the
+  create also when that removal fails (for example the SSH connection is
+  lost), so it stores the password, or removes the new user when the caller
+  is blocked. The Vault write runs
   in a thread and can still finish after a cancel: the password may then be
   stored at the path although the user was removed, and a new create at
   this path stops with `vault_field_exists`. The error of the cancel says so.

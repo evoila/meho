@@ -574,6 +574,11 @@ as MEHO's system identity, which cannot read the secret, so it reports
   the API sends) or a real `true`.
 - The cache lives in one MEHO process. Each process logs in on its own.
 
+## What a target needs
+
+Default port 443. Extra settings: `subscription_id` (required, a GUID), `tenant_id` (optional, must match the secret), `cloud` (choice, default `AzureCloud`). Login (one way, `client_secret`): `tenant_id`, `client_id`, `client_secret`. Test read: `azure.about`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - OAuth 2.0 client credentials flow on the Microsoft identity platform:

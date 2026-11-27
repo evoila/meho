@@ -85,6 +85,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 __all__ = [
     "PrometheusConnector",
@@ -204,6 +205,53 @@ class PrometheusConnector(PrometheusReadOps, HttpConnector):
     impl_id = "prometheus-api"
     supported_version_range = None
     priority = 1
+    target_fields = (
+        TargetField(
+            key="scheme",
+            label="Scheme",
+            help="How MEHO reaches the API.",
+            kind="choice",
+            choices=(
+                "http",
+                "https",
+            ),
+            default="https",
+        ),
+        TargetField(
+            key="path_prefix",
+            label="Path prefix",
+            help="Where the API is mounted, for example /prometheus for Mimir.",
+        ),
+        TargetField(
+            key="flavour",
+            label="Flavour",
+            help="Which backend the target is. The same class serves all three.",
+            kind="choice",
+            choices=(
+                "prometheus",
+                "thanos",
+                "mimir",
+            ),
+            default="prometheus",
+        ),
+    )
+    # Both ways are optional: a target with no stored secret is called without a login.
+    credential_ways = (
+        CredentialWay(
+            key="token",
+            label="Bearer token",
+            fields=(CredentialField(name="token", label="Token", help="A bearer token."),),
+        ),
+        CredentialWay(
+            key="basic",
+            label="User name and password",
+            fields=(
+                CredentialField(name="username", label="User name", hidden=False),
+                CredentialField(name="password", label="Password"),
+            ),
+        ),
+    )
+    test_operation = "prometheus.labels"
 
     def __init__(self, *, secret_loader: PrometheusSecretLoader | None = None) -> None:
         super().__init__()

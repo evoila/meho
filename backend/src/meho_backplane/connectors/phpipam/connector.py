@@ -69,6 +69,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 __all__ = ["PhpipamConnector"]
 
@@ -121,6 +122,41 @@ class PhpipamConnector(HttpConnector):
         "The phpIPAM API reports no version. The connector is built from the 1.8.2 API reference."
     )
     priority = 1
+    target_fields = (
+        TargetField(
+            key="app_id",
+            label="API app ID",
+            help="The ID of the API app in phpIPAM (Administration, API).",
+            required=True,
+        ),
+        TargetField(
+            key="base_path",
+            label="Base path",
+            help="The sub-path phpIPAM runs under, for example /phpipam.",
+        ),
+    )
+    credential_ways = (
+        CredentialWay(
+            key="app_code",
+            label="API app code",
+            fields=(
+                CredentialField(
+                    name="token",
+                    label="App code",
+                    help="The app code of an API app with the security SSL with App code token.",
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="user",
+            label="phpIPAM user",
+            fields=(
+                CredentialField(name="username", label="User name", hidden=False),
+                CredentialField(name="password", label="Password"),
+            ),
+        ),
+    )
+    test_operation = "phpipam.subnet.list"
 
     def __init__(self, *, credentials_loader: PhpipamCredentialsLoader | None = None) -> None:
         super().__init__()

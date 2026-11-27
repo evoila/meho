@@ -45,6 +45,11 @@ Source: `backend/src/meho_backplane/connectors/tempo/`.
   so the operator gets an actionable "pass a tenant" message rather than a bare
   401 passthrough.
 
+## What a target needs
+
+Default port 3200. Extra settings: `scheme` (choice `http` or `https`, default `http`). Two ways to log in, both optional because a target with no secret is called without a login: `token` (`token`) and `basic` (`username`, `password`). Test read: `tempo.search_tags`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration (two-phase, mirrors loki/prometheus)

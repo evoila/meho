@@ -73,6 +73,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 # The family mixin classes. Each family imports its mixin on the line under its
 # own comment: from meho_backplane.connectors.azure.<family> import <Family>Ops
@@ -223,6 +224,58 @@ class AzureConnector(
         "Azure has no product version. Each call names the API version of its resource type."
     )
     priority = 1
+    default_port = 443
+    target_fields = (
+        TargetField(
+            key="subscription_id",
+            label="Subscription ID",
+            help="The Azure subscription ID, a GUID. One target is one subscription.",
+            required=True,
+        ),
+        TargetField(
+            key="tenant_id",
+            label="Tenant ID",
+            help="The tenant (directory) ID, a GUID. When set, it must match the secret.",
+        ),
+        TargetField(
+            key="cloud",
+            label="Cloud",
+            help="The Azure cloud. Only AzureCloud is proven on a live tenant.",
+            kind="choice",
+            choices=(
+                "AzureCloud",
+                "AzureUSGovernment",
+                "AzureChinaCloud",
+            ),
+            default="AzureCloud",
+        ),
+    )
+    credential_ways = (
+        CredentialWay(
+            key="client_secret",
+            label="App registration with a client secret",
+            fields=(
+                CredentialField(
+                    name="tenant_id",
+                    label="Tenant ID",
+                    help="The tenant (directory) ID, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_id",
+                    label="Client ID",
+                    help="The application (client) ID of the app registration, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_secret",
+                    label="Client secret",
+                    help="A client secret of the app registration.",
+                ),
+            ),
+        ),
+    )
+    test_operation = "azure.about"
     #: No redirect is followed: every subscription shares one host, so even a
     #: redirect on the same host could carry the token elsewhere.
     _client_class = NoRedirectClient

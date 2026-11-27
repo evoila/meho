@@ -68,6 +68,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import credential_ways_from_auth
 from meho_backplane.operations.ingest.exceptions import UncoveredVersionLabel
 
 if TYPE_CHECKING:
@@ -124,6 +125,9 @@ class GenericRestConnector(HttpConnector):
 
     # The shim exists only to carry the operations of an ingested catalog.
     accepts_ingested_operations: bool = True
+
+    # Target form declarations stay "not declared": a bare shim has no profile, so it
+    # knows no login fields and cannot sign in. Only a profiled class declares them.
 
     #: Default base URL the auto-shim uses when the target carries
     #: no explicit base URL of its own. Set by the class factory
@@ -394,6 +398,7 @@ def synthesise_profiled_class(
             "supported_version_range": supported_range,
             "priority": 0,
             "profile": profile,
+            "credential_ways": credential_ways_from_auth(profile.auth),
             "__module__": __name__,
             "__doc__": (
                 f"Synthesised :class:`ProfiledRestConnector` for "

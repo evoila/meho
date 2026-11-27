@@ -147,6 +147,16 @@ class MyConnector(Connector):
 Use field names that the connector really reads from its secret. Pick a test
 read that needs the login, so it proves the login works.
 
+## Profiled generic connectors
+
+A connector made from a profile (`ProfiledRestConnector`) has no class file. The
+class is made at start by `synthesise_profiled_class`, and it gets one way to log
+in from the profile: `credential_ways_from_auth` in `connectors/target_form.py`
+turns `auth.secret_fields` into the fields of that way, with the auth scheme as
+the way key. It declares no test read: the start check accepts only a read that a
+registrar of the connector writes, and an imported API read is not one. A bare
+generic connector (`GenericRestConnector`) stays not declared.
+
 ## References
 
 - `backend/tests/test_connector_target_form.py`

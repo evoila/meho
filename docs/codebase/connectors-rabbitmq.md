@@ -37,6 +37,11 @@ It lives at `backend/src/meho_backplane/connectors/rabbitmq/`:
 - **`RabbitMqOp`** — frozen dataclass mirroring the
   `register_typed_operation` kwargs (same shape as `ArgoCdOp`).
 
+## What a target needs
+
+Extra settings: none. Login (one way, `basic`): `username` and `password`. Test read: `rabbitmq.overview`. The port is not declared: the code defaults to 443, and the Management API is on 15672 (http) or 15671 (https), so the person sets it.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration (two-phase)

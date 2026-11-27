@@ -76,6 +76,11 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
   literal in a handler dodges the reconcile and fails the lane's
   pinned-manifest guard in review.
 
+## What a target needs
+
+Default port 443. Extra settings: none. Login (one way, `token`): `token`, an ArgoCD account or project token. Test read: `argocd.app.list`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration

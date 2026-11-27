@@ -81,6 +81,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 __all__ = ["EntraConnector"]
 
@@ -152,6 +153,83 @@ class EntraConnector(HttpConnector):
         "Entra ID has no product version. The connector calls Microsoft Graph v1.0."
     )
     priority = 1
+    default_port = 443
+    target_fields = (
+        TargetField(
+            key="tenant_id",
+            label="Tenant ID",
+            help="The tenant (directory) ID, a GUID. When set, it must match the secret.",
+        ),
+        TargetField(
+            key="cloud",
+            label="Cloud",
+            help="The cloud of the tenant. Only AzureCloud is planned for the first live proof.",
+            kind="choice",
+            choices=(
+                "AzureCloud",
+                "AzureUSGovernment",
+                "AzureChinaCloud",
+            ),
+            default="AzureCloud",
+        ),
+    )
+    credential_ways = (
+        CredentialWay(
+            key="client_secret",
+            label="App registration with a client secret",
+            fields=(
+                CredentialField(
+                    name="tenant_id",
+                    label="Tenant ID",
+                    help="The tenant (directory) ID, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_id",
+                    label="Client ID",
+                    help="The application (client) ID of the app registration, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_secret",
+                    label="Client secret",
+                    help="A client secret of the app registration.",
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="certificate",
+            label="App registration with a certificate",
+            fields=(
+                CredentialField(
+                    name="tenant_id",
+                    label="Tenant ID",
+                    help="The tenant (directory) ID, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_id",
+                    label="Client ID",
+                    help="The application (client) ID of the app registration, a GUID.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="private_key",
+                    label="Private key",
+                    help="The private key, as PEM text.",
+                    multiline=True,
+                ),
+                CredentialField(
+                    name="certificate",
+                    label="Certificate",
+                    help="The public certificate that is uploaded to the app, as PEM text.",
+                    hidden=False,
+                    multiline=True,
+                ),
+            ),
+        ),
+    )
+    test_operation = "entra.about"
     #: No redirect is followed: every tenant shares one Graph host.
     _client_class = NoRedirectClient
 

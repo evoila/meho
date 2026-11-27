@@ -116,6 +116,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["ArgoCdConnector"]
 
@@ -225,6 +226,19 @@ class ArgoCdConnector(HttpConnector):
     impl_id = "argocd-api"
     supported_version_range = ">=3.0,<4.0"
     priority = 1
+    default_port = 443
+    credential_ways = (
+        CredentialWay(
+            key="token",
+            label="API token",
+            fields=(
+                CredentialField(
+                    name="token", label="API token", help="An ArgoCD account or project token."
+                ),
+            ),
+        ),
+    )
+    test_operation = "argocd.app.list"
     # This class serves the operations of its ingested catalog.
     accepts_ingested_operations = True
 

@@ -79,6 +79,7 @@ import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
+from meho_backplane.connectors.target_form import TargetField
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.schemas import Target
 
@@ -142,6 +143,21 @@ class VaultConnector(Connector):
     impl_id = "vault"
     supported_version_range = ">=1.18,<2.0"
     strict_version_range = True
+    target_fields = (
+        TargetField(
+            key="vault_role",
+            label="Login role",
+            help="The JWT role MEHO logs in under for this target. Empty: the server's role.",
+        ),
+        TargetField(
+            key="vault_mount",
+            label="Login mount",
+            help="The mount of the JWT auth method with the role. Empty: the server's mount.",
+        ),
+    )
+    # No secret is stored: MEHO forwards the caller's own login to Vault.
+    credential_ways = ()
+    test_operation: str | None = "vault.sys.mounts.list"
 
     async def fingerprint(
         self,
@@ -385,3 +401,6 @@ class OpenBaoConnector(VaultConnector):
     impl_id = "vault-openbao"
     supported_version_range = ">=2.0,<3.0"
     fingerprint_products = frozenset({"openbao"})
+    # The test read is written under the Vault line (vault-1.x). This class has no
+    # operation rows of its own, so it declares none.
+    test_operation = None

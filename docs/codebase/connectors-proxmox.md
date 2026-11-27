@@ -38,6 +38,11 @@ shape — no per-endpoint DSL.
 - `ProxmoxPathError` / `ProxmoxMethodError` (`ops.py`) — handler-layer
   allowlist rejections (both `ValueError` subclasses → `connector_error`).
 
+## What a target needs
+
+Default port 8006. Extra settings: none. Two ways to log in: `token` (`token_id`, `token_secret`, preferred) and `ticket` (`username`, `password`, and an optional `realm`, `pam` when empty). Test read: `proxmox.about`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Auth (token preferred over ticket)

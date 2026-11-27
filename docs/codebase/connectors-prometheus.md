@@ -236,6 +236,11 @@ dumb, honest hint over a smart-but-wrong sniffer.
   future G3.x write-surface initiative would add any mutating ops behind
   the approval gate.
 
+## What a target needs
+
+Extra settings: `scheme` (choice, default `https`), `path_prefix` (for example `/prometheus` for Mimir) and `flavour` (choice `prometheus`, `thanos` or `mimir`). Two ways to log in, both optional because a target with no secret is called without a login: `token` (`token`) and `basic` (`username`, `password`). Test read: `prometheus.labels`.
+See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Prometheus HTTP API: <https://prometheus.io/docs/prometheus/latest/querying/api/>

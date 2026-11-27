@@ -118,6 +118,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import TargetField
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -292,6 +293,24 @@ class GcloudConnector(
         "Google Cloud has no product version. Each call uses the versioned path of its API."
     )
     priority = 1
+    target_fields = (
+        TargetField(
+            key="gcp_project",
+            label="Project ID",
+            help="The Google Cloud project ID.",
+            required=True,
+        ),
+        TargetField(
+            key="gcp_impersonate_sa",
+            label="Service account to impersonate",
+            help="The email of the service account MEHO impersonates.",
+            required=True,
+        ),
+    )
+    # No secret is stored: the login comes from the server's own Google identity
+    # and the impersonated service account. A secret with key file fields is refused.
+    credential_ways = ()
+    test_operation = "gcloud.about"
 
     def __init__(
         self,

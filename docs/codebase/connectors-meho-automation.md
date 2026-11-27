@@ -388,6 +388,11 @@ At boot the shipped row + profile clear, in order (`main.py` lifespan):
   `ProfiledRestConnector_mehoauto_0_1_0` under the `(mehoauto, 0.1.0,
   mehoauto-rest)` v2 key, resolvable for a target of that fingerprint.
 
+## What a target needs
+
+The connector has no hand-coded class. Its class is made from the shipped profile at start, and it gets its one way to log in from the profile: the fields are `auth.secret_fields` of the profile, in the same order. No test read is declared: its operations come from an imported API file, which cannot be declared.
+See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Catalog / profile mechanism: `docs/codebase/connector-auth-coverage.md`

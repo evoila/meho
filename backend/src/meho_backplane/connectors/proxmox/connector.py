@@ -83,6 +83,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["ProxmoxConnector"]
 
@@ -133,6 +134,45 @@ class ProxmoxConnector(HttpConnector):
     impl_id = "proxmox-api"
     supported_version_range = ">=7.0,<9.0"
     priority = 1
+    default_port = 8006
+    credential_ways = (
+        CredentialWay(
+            key="token",
+            label="API token",
+            fields=(
+                CredentialField(
+                    name="token_id",
+                    label="Token ID",
+                    help="The full token ID, for example user@realm!name.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="token_secret", label="Token secret", help="The secret of the API token."
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="ticket",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user name, with or without @realm.",
+                    hidden=False,
+                ),
+                CredentialField(name="password", label="Password"),
+                CredentialField(
+                    name="realm",
+                    label="Realm",
+                    help="The login realm. pam when empty.",
+                    required=False,
+                    hidden=False,
+                ),
+            ),
+        ),
+    )
+    test_operation = "proxmox.about"
 
     def __init__(
         self,

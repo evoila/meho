@@ -511,6 +511,11 @@ write to another repository is refused with no call to GitHub.
   (`github_app_not_installed`, `github_jwt_mint_failed`,
   `github_installation_token_mint_failed`, `github_rate_limited`).
 
+## What a target needs
+
+Two ways to log in: `app` (`app_id`, `private_key`, `installation_id`) and `token` (`token`, a fine-grained personal access token). MEHO picks the way by the fields in the secret. No test read is declared: every safe read of this connector needs an owner or a repo.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration (import time)

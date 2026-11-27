@@ -193,6 +193,11 @@ distinct from the Robot portal login user. Operators must create the Webservice
 user in the Robot portal and store its credentials at the target's `secret_ref`
 Vault path as `{"username": ..., "password": ...}`.
 
+## What a target needs
+
+Default port 443. Extra settings: none. Login (one way, `basic`): `username` and `password` of the Robot web service user. No test read is declared: the connector has no built-in read; its operations come from an imported API file, which cannot be declared.
+See [connector-target-form.md](connector-target-form.md).
+
 ## Control flow
 
 ### Registration

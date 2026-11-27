@@ -134,6 +134,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 
 __all__ = ["KeycloakAdminTokenError", "KeycloakConnector", "KeycloakWriteResult"]
 
@@ -360,6 +361,46 @@ class KeycloakConnector(HttpConnector):
     impl_id = "keycloak-admin"
     supported_version_range = ">=26.0,<27.0"
     priority = 1
+    target_fields = (
+        TargetField(
+            key="managed_realm",
+            label="Managed realm",
+            help="The realm this target manages. MEHO has no default.",
+            required=True,
+        ),
+        TargetField(
+            key="admin_realm",
+            label="Admin realm",
+            help="The realm the admin login is made in.",
+            default="master",
+        ),
+    )
+    credential_ways = (
+        CredentialWay(
+            key="client",
+            label="Service account client",
+            fields=(
+                CredentialField(
+                    name="client_id",
+                    label="Client ID",
+                    help="A confidential client with a service account.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="client_secret", label="Client secret", help="The secret of that client."
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="password",
+            label="Admin user and password",
+            fields=(
+                CredentialField(name="username", label="User name", hidden=False),
+                CredentialField(name="password", label="Password"),
+            ),
+        ),
+    )
+    test_operation = "keycloak.realm.get"
 
     def __init__(
         self,

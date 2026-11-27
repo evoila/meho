@@ -149,7 +149,7 @@ routing:
   has no `limits` section; a file that equals the stored policy apart from
   that part is "No change."; an approved import keeps the stored part as
   it is; `personal_agent_limit` answers `safe`. Classification reads the
-  stored policy key by key, so it works as before.
+  stored policy key by key, so a stored `limits` part does not change it.
 - `install_personal_agent_limit(session, custom_policy=...)` in
   `policy/limits.py` reads the install's stored policy (`tenant_id IS
   NULL`) and answers with `personal_agent_limit`. A stored value that
@@ -493,6 +493,13 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
+- The approval card of an import records whether `CUSTOM_POLICY` was on
+  when it was planned (`planned_with_custom_policy`), because the switch
+  decides whether the `limits` part of the install's file is read. After the
+  approval, a run of a `scope: install` import reads the switch again.
+  When it is not the same as on the card (or the card has no record), the
+  run writes nothing and gives the same sentence. An admin's own run in
+  the web console has no card and plans with the switch as it is.
 - A run without an approval, or a run by the login that asked for it (for
   example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
   writes only for an admin in the web console. Any other such run writes
@@ -579,4 +586,7 @@ warning exactly when the step check makes the step wait, in both scopes),
 `CUSTOM_POLICY` on: import, export and import again, who may ask and
 approve, the audit rows, a wrong part, a stored value MEHO cannot read,
 the approval table with no part, the switch turned off again),
+`backend/tests/test_api_v1_policy_install_limits_card.py` (the `limits`
+part on the approval card of an install import, and a run with the switch
+not the same as on the card),
 `cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

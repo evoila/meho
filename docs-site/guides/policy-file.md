@@ -345,8 +345,8 @@ limits:
 - If MEHO cannot read a stored limit, it uses `safe`, the strictest
   limit, and logs one warning that names the place. Import the install's
   file again to fix it.
-- No call decision reads the limit yet: every call gets the same answer
-  as without it.
+- No call decision reads the limit: every call gets the same answer as
+  without it.
 
 !!! note "Off by default"
 

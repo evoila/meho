@@ -4187,3 +4187,89 @@ def test_approve_whose_outcome_is_unknown_shows_an_uncertain_card() -> None:
     assert "Approved, but the run failed" not in body
     assert "did not succeed" not in body
     assert "Request approved" not in body
+
+
+# ---------------------------------------------------------------------------
+# New requests appear without a reload (#6932)
+# ---------------------------------------------------------------------------
+
+
+def _new_notice_baseline(body: str) -> int | None:
+    """The ``data-baseline`` of the list's new-requests line, or None without one."""
+    match = re.search(r"<div hidden data-approvals-new-notice[^>]*>", body)
+    assert match is not None, "the list has no new-requests line"
+    baseline = re.search(r'data-baseline="(\d+)"', match.group(0))
+    return int(baseline.group(1)) if baseline else None
+
+
+def _badge_count_of(body: str) -> int:
+    match = re.search(r'data-pending-count="(\d+)"', body)
+    assert match is not None
+    return int(match.group(1))
+
+
+@pytest.mark.parametrize(
+    ("routing", "tabs"),
+    [(False, ("pending",)), (True, ("pending", "for_you"))],
+    ids=["routing-off", "routing-on"],
+)
+def test_list_baseline_is_the_bell_count_for_the_same_session(
+    monkeypatch: pytest.MonkeyPatch, routing: bool, tabs: tuple[str, ...]
+) -> None:
+    """The Pending and For you lists carry the bell's count as ``data-baseline``.
+
+    With routing on, the bell counts only what this person may approve, so
+    the own request below is left out of both numbers.
+    """
+    monkeypatch.setenv("POLICY_APPROVER_ROUTING", "true" if routing else "false")
+    get_settings.cache_clear()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.one")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.two")
+    _seed_request(tenant_id=_TENANT_A, op_id="own.request", principal_sub=_REVIEWER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with (
+        respx.mock(assert_all_called=False),
+        patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+    ):
+        client = _authenticated_client(session_id)
+        badge = _badge_count_of(client.get("/ui/approvals/badge", headers=_HX_HEADERS).text)
+        bodies = [
+            client.get(f"/ui/approvals/list?tab={tab}", headers=_HX_HEADERS).text for tab in tabs
+        ]
+        bodies.append(client.get(f"/ui/approvals?tab={tabs[-1]}").text)
+
+    assert badge == (2 if routing else 3)
+    for body in bodies:
+        assert _new_notice_baseline(body) == badge
+        # "Show" fetches the same list a tab does; nothing is polled for it.
+        assert body.count('hx-trigger="meho:approval-bump from:body, meho:approval-decided') == 1
+
+
+def test_other_views_have_no_new_requests_line() -> None:
+    """Decided tabs, and the "Load more" rows get no new-requests line."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="pending.op")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        approved = client.get("/ui/approvals/list?tab=approved", headers=_HX_HEADERS)
+        rows = client.get("/ui/approvals/list?tab=pending&partial=rows", headers=_HX_HEADERS)
+
+    assert "data-approvals-new-notice" not in approved.text
+    assert "data-approvals-new-notice" not in rows.text
+
+
+def test_bell_script_shows_the_line_from_the_polled_count_only() -> None:
+    """The script reads the badge swap; it adds no timer, no request and no count."""
+    script = (static_root_dir() / "src" / "app" / "approvals-bell.js").read_text(encoding="utf-8")
+    assert script.count("setInterval(") == 1
+    assert "htmx:afterSwap" in script
+    assert "data-approvals-new-notice" in script
+    # The starting count comes from the server; the script never sets one.
+    assert re.search(r"dataset\.baseline\s*=[^=]", script) is None
+    for request_marker in ("fetch(", "XMLHttpRequest", "htmx.ajax", "hx-get"):
+        assert request_marker not in script.split("// Show the new-requests line", 1)[1]

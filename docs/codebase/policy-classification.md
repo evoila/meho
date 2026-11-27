@@ -387,6 +387,10 @@ connector kit (kit 1.7 or higher).
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
   Each start writes the values from the code again. Operations from an
   imported API spec leave both NULL.
+- `backend/tests/test_operation_marks_stored.py` checks that each start
+  stores the values of the code for every built-in operation, also on an
+  upgraded database. It reads the values from the definitions in code, so
+  it fails when a connector's register call does not pass the two fields on.
 - With the switch `CUSTOM_POLICY` on, an operation with `hard_to_undo` has
   a delete sign, the same as a `DELETE` call. So a standing grant of a
   service login and a run approval do not cover a direct call of it: the

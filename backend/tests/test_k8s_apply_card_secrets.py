@@ -7,11 +7,10 @@ Each call goes through ``dispatch`` to the stored approval request, over the
 stand-in Kubernetes API server of ``test_k8s_apply_card_through_dispatch``.
 Each value is made up, with no word a hide rule knows.
 
-* A manifest MEHO cannot read: the error names the kind of problem and its
-  place, and quotes no text of the manifest. That holds in the stored
-  request, the console card, the REST and MCP views, the agent's own
-  preview, the audit rows, the logs and the answer of the run after a
-  second person approves. The call still waits for approval.
+* A manifest MEHO cannot read is refused before the wait: the refusal names
+  the document, one fixed phrase for the kind of problem and its place, and
+  quotes no text of the manifest. That holds in the answer, the agent's own
+  preview, the audit rows and the logs. No approval request is stored.
 * A value under a secret name is hidden whatever type YAML gives it, on a
   card whose dry run worked and on a failed one. A value under an ordinary
   name still shows.
@@ -49,6 +48,7 @@ from tests.test_k8s_apply_card_through_dispatch import (
     _kubernetes_registry,
     _login,
     _park,
+    _refuse,
     _setup,
     _StandInServer,
     _Target,
@@ -136,17 +136,23 @@ def _everything_shown(row: ApprovalRequest) -> str:
 # A manifest MEHO cannot read
 # ---------------------------------------------------------------------------
 
-#: Each form puts the value V in a place where the parser names it.
+_AT_THE_VALUE = "line 5, column 13"
+
+#: Each form puts the value V in a place where the parser names it, with the
+#: fixed phrase and the place the refusal gives for it.
 _UNREADABLE_FORMS = {
-    "undefined alias": "*{v}",
-    "unknown tag with a value": "!{v} x",
-    "unknown tag alone": "!{v}",
-    "verbatim tag": "!<tag:{v}> y",
-    "undefined tag handle": "!{v}!x y",
-    "python name tag": "!!python/name:{v} ''",
-    "int tag": "!!int {v}",
-    "float tag": "!!float {v}",
-    "bool tag": "!!bool {v}",
+    "undefined alias": ("*{v}", f"an alias or anchor YAML refuses, {_AT_THE_VALUE}"),
+    "unknown tag with a value": ("!{v} x", f"a tag or value YAML cannot build, {_AT_THE_VALUE}"),
+    "unknown tag alone": ("!{v}", f"a tag or value YAML cannot build, {_AT_THE_VALUE}"),
+    "verbatim tag": ("!<tag:{v}> y", f"a tag or value YAML cannot build, {_AT_THE_VALUE}"),
+    "undefined tag handle": ("!{v}!x y", f"a structure YAML refuses, {_AT_THE_VALUE}"),
+    "python name tag": (
+        "!!python/name:{v} ''",
+        f"a tag or value YAML cannot build, {_AT_THE_VALUE}",
+    ),
+    "int tag": ("!!int {v}", "a value YAML cannot build"),
+    "float tag": ("!!float {v}", "a value YAML cannot build"),
+    "bool tag": ("!!bool {v}", "a value YAML cannot build"),
 }
 
 
@@ -160,38 +166,30 @@ def _secret_with(value: str) -> str:
 def _assert_unreadable_manifest_hidden(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, manifest: str, value: str
 ) -> str:
-    """Park, preview and run *manifest*; check *value* is nowhere. Return the stored error."""
+    """Call and preview *manifest*: it is refused and *value* is nowhere. Return the reason."""
     server = _StandInServer()
     _setup(monkeypatch, server)
     caplog.set_level(logging.DEBUG)
 
     with structlog.testing.capture_logs() as logs:
-        row = _park(_login("person-token"), manifest)
+        result = _refuse(_login("person-token"), manifest)
         preview = _agent_preview(manifest)
-        run = _approve_and_run(monkeypatch, row)
 
-    effect = row.proposed_effect
-    assert effect["preview_unavailable"] is True
-    error = effect["preview_error"]
-    assert error.startswith("ApplyManifestError: manifest is not valid YAML/JSON")
-    for name, view in _views(row).items():
-        assert view["preview_error"] == error, name
+    reason = result.extras["reason"]
+    assert reason.startswith("The manifest cannot be applied: ")
+    assert preview["extras"]["reason"] == reason
     assert server.requests == []
-    assert preview["status"] == "ok"
-    assert preview["requires_approval"] is True
     shown = {
-        "stored request and views": _everything_shown(row),
-        # The agent's own manifest comes back to it in ``redacted_body``.
+        "answer": json.dumps(result.model_dump(mode="json"), default=str),
+        # The agent's own manifest may come back to it in ``redacted_body``.
         "agent preview": json.dumps({**preview, "redacted_body": None}, default=str),
         "audit rows": _audit_text(),
         "structlog": json.dumps(logs, default=str),
         "stdlib log": caplog.text,
-        "run answer": json.dumps(run.model_dump(mode="json"), default=str),
     }
     for place, text in shown.items():
         assert value not in text, place
-    assert "manifest is not valid YAML/JSON" in shown["run answer"]
-    return str(error)
+    return str(reason)
 
 
 @pytest.mark.parametrize("form", sorted(_UNREADABLE_FORMS))
@@ -199,11 +197,14 @@ def test_a_parser_error_quotes_no_value_anywhere(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, form: str
 ) -> None:
     value = _made_up()
-    manifest = _secret_with(_UNREADABLE_FORMS[form].format(v=value))
+    shape, why = _UNREADABLE_FORMS[form]
+    manifest = _secret_with(shape.format(v=value))
 
-    error = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
 
-    assert "(line 5, column 13)" in error
+    assert reason.startswith(
+        f"The manifest cannot be applied: document 1 is not valid YAML or JSON ({why}). "
+    )
 
 
 def test_a_duplicate_tag_handle_quotes_no_value_anywhere(
@@ -212,23 +213,25 @@ def test_a_duplicate_tag_handle_quotes_no_value_anywhere(
     value = _made_up()
     manifest = f"%TAG !{value}! tag:a,2000:\n%TAG !{value}! tag:b,2000:\n---\n" + _secret_with("x")
 
-    error = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
 
-    assert "duplicate tag handle '…' (line 2, column 1)" in error
+    assert reason.startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(a structure YAML refuses, line 2, column 1). "
+    )
 
 
-def test_a_control_character_tells_the_agent_the_reason_and_the_position(
+def test_a_control_character_is_refused_with_the_fixed_reason(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     value = _made_up()
     manifest = _secret_with(f"{value}\x07")
 
-    error = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
 
-    position = manifest.index("\x07")
-    assert error == (
-        "ApplyManifestError: manifest is not valid YAML/JSON: unacceptable character: "
-        f"special characters are not allowed (position {position})"
+    assert reason.startswith(
+        "The manifest cannot be applied: the text has a character that YAML does not allow, "
+        "for example a control character. "
     )
 
 

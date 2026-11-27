@@ -80,9 +80,9 @@ from meho_backplane.connectors._shared.vault_creds import (
     strip_credential_value,
 )
 from meho_backplane.connectors.base import ConnectorUpstreamError
-from meho_backplane.connectors.kubernetes.manifest_yaml import (
-    ManifestYamlError,
-    load_manifest_documents,
+from meho_backplane.connectors.kubernetes._apply_manifest import (
+    ApplyManifestError,
+    _parse_manifest,
 )
 from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
     apply_summaries_var,
@@ -130,16 +130,6 @@ DELETABLE_KINDS: dict[str, dict[str, str]] = {
     "job": {"api": "BatchV1Api", "delete": "delete_namespaced_job"},
     "replicaset": {"api": "AppsV1Api", "delete": "delete_namespaced_replica_set"},
 }
-
-
-class ApplyManifestError(ValueError):
-    """The apply manifest could not be parsed or is missing required fields.
-
-    Subclasses :class:`ValueError` so the dispatcher's
-    ``connector_error`` envelope tags
-    ``extras.exception_class="ApplyManifestError"`` and the operator
-    sees the parse/validation reason rather than an opaque YAML error.
-    """
 
 
 class ApplyNotPersistedError(ValueError):
@@ -199,43 +189,6 @@ def error_subject(doc: dict[str, Any]) -> str:
     namespace = metadata.get("namespace")
     place = f"{namespace}/" if namespace else ""
     return f"{doc.get('apiVersion')}/{doc.get('kind')} {place}{metadata.get('name')}"
-
-
-def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
-    """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
-
-    The safe YAML loader (:func:`~.manifest_yaml.load_manifest_documents`)
-    reads both JSON (a subset of YAML) and multi-doc YAML separated by
-    ``---``; its error quotes no text of the manifest. Empty documents (a trailing
-    ``---`` or blank stanza) are dropped. Each surviving doc must be a
-    mapping carrying ``apiVersion`` + ``kind`` + ``metadata.name`` --
-    SSA cannot address an object without them. Raises
-    :class:`ApplyManifestError` on any structural problem.
-    """
-    try:
-        docs = load_manifest_documents(manifest)
-    except ManifestYamlError as exc:
-        raise ApplyManifestError(str(exc)) from None
-
-    parsed: list[dict[str, Any]] = []
-    for idx, doc in enumerate(docs):
-        if doc is None:
-            continue
-        if not isinstance(doc, dict):
-            raise ApplyManifestError(f"manifest document {idx} is not a mapping")
-        api_version = doc.get("apiVersion")
-        kind = doc.get("kind")
-        name = (doc.get("metadata") or {}).get("name")
-        if not api_version or not kind:
-            raise ApplyManifestError(f"manifest document {idx} is missing apiVersion/kind")
-        if not name:
-            raise ApplyManifestError(
-                f"manifest document {idx} ({api_version}/{kind}) is missing metadata.name"
-            )
-        parsed.append(doc)
-    if not parsed:
-        raise ApplyManifestError("manifest contains no applyable documents")
-    return parsed
 
 
 def _status_message(body: str) -> str | None:

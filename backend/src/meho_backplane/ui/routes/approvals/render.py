@@ -14,13 +14,12 @@ under the chassis ~600-line cap.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
-from meho_backplane.operations._preview import card_as_read
 from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
@@ -45,9 +44,13 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.grant_approval import is_rights_change, platform_admin_reason
 from meho_backplane.operations.people_behind import entries_of, people_behind_line
+from meho_backplane.operations.platform_admin_card import card_for_reader
 from meho_backplane.policy.routing import routing_enabled, who_can_approve
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
 from meho_backplane.ui.references import subject_ref
+
+if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
 
 __all__ = [
     "RESULT_STATE_PILL",
@@ -168,6 +171,8 @@ def project_request_to_view(
     delegation: Delegation | None = None,
     chain: ChainPosition | None = None,
     target_name: str | None = None,
+    *,
+    reader: Operator | None = None,
 ) -> dict[str, Any]:
     """Project an :class:`ApprovalRequest` ORM row into a template dict.
 
@@ -227,6 +232,9 @@ def project_request_to_view(
     ``target_id``, ``target_name`` and ``run_started_at`` (#5026): see
     :func:`_project_target_and_run_start`. ``outcome_unknown`` and
     ``outcome_check`` (#5026): see :func:`_project_outcome_check`.
+
+    ``proposed_effect``: the card as *reader* reads it (:func:`card_for_reader`,
+    without the platform admin parts when *reader* is ``None``).
     """
     result_state = approval_result_state(row)
     return {
@@ -238,10 +246,8 @@ def project_request_to_view(
         "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         **_project_people_behind(row),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
-        "proposed_effect": (
-            card_as_read(row.op_id, row.proposed_effect, whole=True)
-            if isinstance(row.proposed_effect, dict)
-            else row.proposed_effect
+        "proposed_effect": card_for_reader(
+            row.op_id, row.proposed_effect, reader=reader, whole=True
         ),
         "reveal_secret": bool(row.reveal_secret),
         "status": row.status,

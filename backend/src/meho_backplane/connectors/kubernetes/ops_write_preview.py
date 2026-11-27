@@ -110,13 +110,18 @@ from typing import Any
 from kubernetes_asyncio import client
 
 from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
+from meho_backplane.connectors.kubernetes._apply_manifest import (
+    ApplyManifestError,
+    _parse_manifest,
+)
 from meho_backplane.connectors.kubernetes.op_classes import (
     PLAIN_SETTINGS,
     SECRET_VALUE_FIELDS,
     hide_command_secrets,
 )
 from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
-from meho_backplane.connectors.kubernetes.ops_write_dangerous import _parse_manifest, error_subject
+from meho_backplane.connectors.kubernetes.ops_write_dangerous import error_subject
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
@@ -839,11 +844,40 @@ def _run_commands_shown_to_agents() -> bool:
     return False
 
 
+_APPLY_FORM = (
+    "Send one text with the documents split by `---`. "
+    "Each document has `apiVersion`, `kind` and `metadata.name`"
+)
+
+
+async def _apply_park_check(ctx: PreviewContext) -> str | None:
+    """Refuse a ``k8s.apply`` manifest that the run cannot parse, before the wait.
+
+    Runs the same :func:`_parse_manifest` the run uses, on the text only:
+    nothing goes to the cluster. A manifest that passes here passes the
+    parse step of the run. The reason names the document by its number,
+    counted from 1, and shows only an ``apiVersion`` and ``kind`` of the
+    shape Kubernetes allows; it never repeats another value of the
+    manifest or a YAML error text. The form the caller must send always
+    fits in the reason. A param that is not a text is left to the params
+    check.
+    """
+    manifest = ctx.params.get("manifest")
+    if not isinstance(manifest, str):
+        return None
+    try:
+        _parse_manifest(manifest)
+    except ApplyManifestError as exc:
+        return exc.text(tail=f". {_APPLY_FORM}")
+    return None
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
+    register_park_check("k8s.apply", _apply_park_check)
     register_person_only_preview_keys(
         "k8s.apply",
         _run_commands_shown_to_agents,

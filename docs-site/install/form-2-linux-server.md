@@ -31,8 +31,8 @@ Not sure this is your form? See
 | Disk | 120 GB, on SSD | 80 GB free under `/var/lib` |
 
 The install refuses a machine below the minimum. Processors means the
-logical processors that Linux sees (`nproc`), for example the vCPUs of a
-virtual machine.
+logical processors that Linux sees, for example the vCPUs of a virtual
+machine. The install counts them with `getconf _NPROCESSORS_ONLN`.
 
 The machine also needs:
 
@@ -135,8 +135,18 @@ Both commands must succeed. cosign checks that the release workflow of
 evoila/meho signed the checksum file for this tag. `sha256sum` prints
 `OK` for the download.
 
-Windows has no `sha256sum`. In PowerShell, these two lines must show the
-same value:
+On Windows, use PowerShell. The signature check is the same command with
+PowerShell syntax. Go on only when it succeeds:
+
+```powershell
+$Tag = "v0.48.0"
+cosign verify-blob `
+  --certificate-identity "https://github.com/evoila/meho/.github/workflows/linux-download.yml@refs/tags/$Tag" `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+  --bundle SHA256SUMS-linux.cosign.bundle SHA256SUMS-linux
+```
+
+Windows has no `sha256sum`. These two lines must show the same value:
 
 ```powershell
 (Get-FileHash -Algorithm SHA256 meho-linux-0.48.0-amd64.tar).Hash.ToLower()

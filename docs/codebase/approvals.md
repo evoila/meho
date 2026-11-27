@@ -3546,6 +3546,23 @@ The per-op preview is opt-in via a builder registry in
   `credential_wait`, the line that says why a credential call waits), and
   for `linux.script.run` and `k8s.apply` it gives the same view as the MCP
   tools (`api/v1/approvals.py::_proposed_effect_for`).
+- `register_platform_admin_card_filter(op_id, filter)`
+  (`operations/platform_admin_card.py`, core only) names the parts of a
+  card that only a platform admin who is a person reads, in a call of
+  their own. Every view of a stored card passes it through
+  `card_for_reader`: the REST approvals API, the MCP tools
+  `meho_approvals_get` and `meho_approvals_list`, and the console pages.
+  Every other reader gets the card as the filter gives it back. So does
+  a call that runs with an acting agent (`actor_delegation`, for example
+  a hosted agent run a platform admin started), and a view that does not
+  say who reads. The stored card stays whole, so the run after an
+  approval is the same. The approval card of an install policy import
+  (`policy.apply`, `connectors/policy/apply_card_readers.py`) uses it.
+  Every reader gets the same keys as the stored card. For a reader who is
+  not a platform admin, `diff.routing_floor` and `diff.agents_above_limit`
+  are empty lists and the warnings that start with `Tenant <id>:` are left
+  out; every other key and value is as stored. A card with no tenant data
+  reads as stored for every reader.
 - `register_preview_last_step(op_id, step)` runs `step(ctx, preview)` on
   every preview the builder of `op_id` returns, whatever module
   registered the builder and when. A step that raises makes the preview

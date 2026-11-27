@@ -363,8 +363,9 @@ async def carry_over(
     """Every saved "always wait" of *scope*, and what changes if MEHO reads it as ``destructive``.
 
     An agent login gets 403, also one with the platform admin mark. Every
-    other caller gets the export's answer. Writes only its audit row and
-    reads no switch.
+    other caller gets the export's answer. Writes only its audit row. The
+    list reads no switch; only the first field, ``custom_policy_on``, says
+    whether ``CUSTOM_POLICY`` is on at that moment.
     """
     _bind_audit("policy.carry_over.dry_run", "read")
     if operator.principal_kind is PrincipalKind.AGENT:

@@ -88,6 +88,11 @@ func getCarryOver(ctx context.Context, backplaneURL, scope string) (*rawResponse
 }
 
 func printCarryOver(w io.Writer, answer api.CarryOverDryRun) {
+	if answer.CustomPolicyOn {
+		fmt.Fprintln(w, "`CUSTOM_POLICY` is on.")
+	} else {
+		fmt.Fprintln(w, "`CUSTOM_POLICY` is off: the list shows what waits once it is on.")
+	}
 	if answer.SandboxMode {
 		fmt.Fprintln(w, "This install is in sandbox mode.")
 	}

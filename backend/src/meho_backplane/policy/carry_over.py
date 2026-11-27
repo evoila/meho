@@ -15,8 +15,10 @@ approval on every call. Two places hold it:
 The carry-over reads such a setting as a raise to ``destructive``.
 :func:`carry_over_dry_run` lists every saved setting of one scope and
 shows what changes for each setting if MEHO reads it as ``destructive``.
-It only reads: it changes no row and no answer of the gate, so it reads
-no switch. It names a connector with no version by its product
+It only reads: it changes no row and no answer of the gate. The list
+reads no switch, and only the first field of the answer,
+``custom_policy_on``, says the state of ``CUSTOM_POLICY``: the list shows
+what waits once ``CUSTOM_POLICY`` is on. It names a connector with no version by its product
 (``product_form=True`` of :func:`~meho_backplane.policy.store.connector_id_of`)
 and lists each operation under every entry that makes it wait, in the
 form with the dash or by the product.
@@ -78,7 +80,9 @@ from meho_backplane.policy.store import (
     coordinates_of,
     load_step_groups,
 )
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.sandbox_mode import sandbox_mode_active
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "DRY_RUN_MESSAGE",
@@ -150,10 +154,15 @@ class CarryOverSetting(BaseModel):
 
 
 class CarryOverDryRun(BaseModel):
-    """The answer of the dry run: every saved "always wait" of ``scope``. Nothing is changed."""
+    """The answer of the dry run: every saved "always wait" of ``scope``. Nothing is changed.
+
+    ``custom_policy_on`` says whether ``CUSTOM_POLICY`` is on at that
+    moment; the list is the same in every switch state.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    custom_policy_on: bool
     scope: Scope
     sandbox_mode: bool
     settings: list[CarryOverSetting]
@@ -457,4 +466,9 @@ async def carry_over_dry_run(
         *await _override_settings(session, scope, tenant_id, steps, sandbox=sandbox),
         *await _file_settings(session, scope, tenant_id, steps, step_rows, sandbox=sandbox),
     ]
-    return CarryOverDryRun(scope=scope, sandbox_mode=sandbox, settings=settings)
+    return CarryOverDryRun(
+        custom_policy_on=custom_policy_on(get_settings()),
+        scope=scope,
+        sandbox_mode=sandbox,
+        settings=settings,
+    )

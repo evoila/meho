@@ -174,7 +174,8 @@ PRODUCT_DRY_RUN: dict[str, Any] = {
     "message": "Dry run: nothing was changed.",
 }
 
-#: (case, switches on, the call of ``cowx``)
+#: (case, switches on, the call of ``cowx``). ``custom_policy_on`` is true
+#: exactly when ``CUSTOM_POLICY`` is on.
 _DRY_RUN_SWITCHES: list[tuple[str, tuple[str, ...], str]] = [
     ("10a", (), "ok"),
     ("10b", ("POLICY_CLASSIFICATION",), "ok"),
@@ -197,7 +198,10 @@ async def test_case_10_the_dry_run_answers_for_the_product_with_every_switch_sta
         call = _post(client, key, "/api/v1/operations/call", "cowx")
 
         assert resp.status_code == 200, (case, resp.text)
-        assert resp.json() == PRODUCT_DRY_RUN, case
+        answer = resp.json()
+        assert next(iter(answer)) == "custom_policy_on", (case, answer)
+        assert answer.pop("custom_policy_on") is ("CUSTOM_POLICY" in on), (case, answer)
+        assert answer == PRODUCT_DRY_RUN, case
         assert call["status"] == status, (case, call)
 
 

@@ -98,12 +98,15 @@ classifications:
 - A connector is matched by its id, for example `harbor-rest-2.x`. A
   connector with no version has the id `-` in the policy.
 - With `CUSTOM_POLICY` on, a connector with no version is also matched by
-  its product name, the id a call uses, for example `vault`. MEHO checks
+  its product name, the id a call uses, for example `acmedb`. MEHO checks
   its operations twice, once by `-` and once by the product, and the
   stricter result counts. So an entry that matches only by the product can
   add a wait or raise the risk level. It never takes a wait away, lowers a
-  level, or changes the category or the labels. With `CUSTOM_POLICY` off,
-  the id stays `-` in every answer, as before.
+  level, or changes the category or the labels. A tenant entry that ends
+  an install wait or lowers an install level is refused, whichever of the
+  two forms each entry matches.
+- With `CUSTOM_POLICY` off, a connector with no version has the id `-` in
+  every answer except the carry-over dry run.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
@@ -559,8 +562,8 @@ For each setting it shows:
   package that is not installed, or whose code is not in this MEHO. An
   entry that matches only such operations says that it matches none.
   When the operation is turned on again, the entry counts for it again.
-  With `CUSTOM_POLICY` on, a connector with no version is listed by its
-  product name, one line per product, under every entry that makes it wait
+  A connector with no version is listed by its product name, with every
+  switch state, one line per product, under every entry that makes it wait
   by `-` or by the product. A policy file entry makes an
   operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
   the dry run lists its matches with every switch;

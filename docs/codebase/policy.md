@@ -360,7 +360,8 @@ that counted at the click (`approver_floor`).
 One rule names the connector of an operation in every policy answer:
 `connector_id_of` and `coordinates_of` in `policy/store.py`. With
 `CUSTOM_POLICY` off, a connector with no version has the id `-` in every
-answer, as before. With `CUSTOM_POLICY` on, it is named by its product.
+answer except the carry-over dry run, which names it by its product with
+every switch state. With `CUSTOM_POLICY` on, it is named by its product.
 An entry that matches it only by the product can then add a wait or raise
 a level. It never takes a wait away, lowers a level or changes the
 category or the labels. The details are in
@@ -611,10 +612,13 @@ query for the groups of all steps),
 `CUSTOM_POLICY` on, a connector with no version is named by its product in
 every answer; no reader builds the id itself),
 `backend/tests/test_policy_connector_product_form.py` (with `CUSTOM_POLICY`
-on, the product form can only add a wait or raise a level, in both scopes),
+on, the product form can only add a wait or raise a level, in both scopes;
+the import check sees an install entry of either form; explain and the
+approval card name the entry that decided),
 `backend/tests/test_policy_connector_without_version_switch_off.py` (with
-`CUSTOM_POLICY` off, the answers are the ones recorded before the product
-form),
+`CUSTOM_POLICY` off, the overrides report, a call, the preview and the
+approval card name a connector with no version `-`; the dry run names it
+by its product with every switch state),
 `backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
 `CUSTOM_POLICY` on: import, export and import again, who may ask and
 approve, the audit rows, a wrong part, a stored value MEHO cannot read,

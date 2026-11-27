@@ -4,9 +4,13 @@
 package policy
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 const carryOverAnswer = `{"scope":"tenant","sandbox_mode":true,"message":"Dry run: nothing was changed.",
@@ -78,17 +82,33 @@ func TestCarryOverEmptyList(t *testing.T) {
 }
 
 func TestCarryOverNeedsDryRun(t *testing.T) {
+	const sentence = "carry-over only lists; add --dry-run"
 	var got seen
 	srv := server(t, 200, carryOverAnswer, &got)
+
 	_, stderr, err := run(t, "carry-over", "--backplane", srv.URL)
-	if err == nil {
-		t.Fatal("expected an error without --dry-run")
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) || coded.ExitCode() != output.ExitUsage {
+		t.Fatalf("want a usage error (exit %d); got %v", output.ExitUsage, err)
+	}
+	if want := "meho: " + output.ErrCodeUsage + ": " + sentence + "\n"; stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+
+	_, stderr, _ = run(t, "carry-over", "--json", "--backplane", srv.URL)
+	var answer struct {
+		Error    string `json:"error"`
+		Detail   string `json:"detail"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(stderr), &answer); err != nil {
+		t.Fatalf("stderr is not one JSON document: %v\n%s", err, stderr)
+	}
+	if answer.Error != output.ErrCodeUsage || answer.Detail != sentence || answer.ExitCode != output.ExitUsage {
+		t.Errorf("JSON error = %+v", answer)
 	}
 	if got.path != "" {
-		t.Errorf("no call expected; got %s", got.path)
-	}
-	if !strings.Contains(stderr, "add --dry-run") {
-		t.Errorf("stderr: %s", stderr)
+		t.Errorf("no request expected; got %s", got.path)
 	}
 }
 

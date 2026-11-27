@@ -25,10 +25,10 @@ Nothing here runs while the ``POLICY_CLASSIFICATION`` switch is off
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, or_, select, text
@@ -65,13 +65,17 @@ __all__ = [
     "ClassificationEdit",
     "EditPlan",
     "InvalidStoredPolicyError",
+    "StepGroups",
     "classification_enabled",
     "classify_rows",
     "classify_step",
     "connector_id_of",
+    "coordinates_of",
     "load_classification",
+    "load_step_groups",
     "plan_edit",
     "set_classification",
+    "step_group_key",
 ]
 
 _MAX_LABELS = 32
@@ -95,9 +99,51 @@ def classification_enabled() -> bool:
     return classification_on(get_settings())
 
 
-def connector_id_of(row: EndpointDescriptor) -> str:
-    """The wire connector id of *row*: ``<impl_id>-<version>``."""
+class ConnectorRow(Protocol):
+    """A row that names a connector: an operation row or an override row."""
+
+    @property
+    def product(self) -> str: ...
+    @property
+    def version(self) -> str: ...
+    @property
+    def impl_id(self) -> str: ...
+
+
+class OperationRow(ConnectorRow, Protocol):
+    """A row that names one operation of a connector."""
+
+    @property
+    def op_id(self) -> str: ...
+
+
+def _dashed_id(row: ConnectorRow) -> str:
     return f"{row.impl_id}-{row.version}"
+
+
+def connector_id_of(row: ConnectorRow) -> str:
+    """The connector id of *row*, the id a call uses.
+
+    ``<impl_id>-<version>``, or ``<product>`` for a connector with no
+    implementation id or no version, the same rule as dispatch
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). Every
+    reader of the policy names a connector with this function.
+    """
+    return _dashed_id(row) if row.impl_id and row.version else row.product
+
+
+def coordinates_of(row: OperationRow, group_key: str | None) -> OpCoordinates:
+    """What a policy entry matches for the operation of *row*, in group *group_key*.
+
+    For a connector with no version, an entry also matches the form
+    ``<impl_id>-<version>`` of its id, so an entry written for that form
+    keeps matching (:class:`~meho_backplane.policy.classification.OpCoordinates`).
+    """
+    connector_id = connector_id_of(row)
+    dashed = _dashed_id(row)
+    return OpCoordinates(
+        connector_id, group_key, row.op_id, dashed if dashed != connector_id else None
+    )
 
 
 async def _documents(
@@ -213,37 +259,96 @@ async def classify_rows(
     keys = await _group_keys(session, rows, group_keys or {})
     results: list[Classification] = []
     for row, row_overrides in zip(rows, overrides, strict=True):
-        connector_id = connector_id_of(row)
-        coords = OpCoordinates(connector_id, keys.get(row.id), row.op_id)
-        all_entries = [*entries, *_override_entries(row_overrides, connector_id)]
+        coords = coordinates_of(row, keys.get(row.id))
+        all_entries = [*entries, *_override_entries(row_overrides, coords.connector_id)]
         results.append(classify(coords, all_entries, taxonomy))
     return results
 
 
-async def _stored_group_key(
-    session: AsyncSession, tenant_id: UUID | None, step: EndpointDescriptor
-) -> str | None:
-    """The group key of *step*'s stored row, or ``None`` when it has none.
+_StepKey = tuple[str, str, str, str]
 
-    The tenant's own row comes before a built-in one.
+
+def _step_key(step: OperationRow) -> _StepKey:
+    return (step.product, step.version, step.impl_id, step.op_id)
+
+
+@dataclass(frozen=True)
+class StepGroups:
+    """The stored groups of steps of multi-step operations, read in one query.
+
+    ``rows`` maps a step (product, version, implementation id, op id) to
+    the group key of each stored row of it, by tenant (``None``: the
+    built-in row). A row in no group has ``None``. Read it with
+    :func:`load_step_groups`.
     """
-    visible: ColumnElement[bool] = EndpointDescriptor.tenant_id.is_(None)
-    if tenant_id is not None:
-        visible = or_(visible, EndpointDescriptor.tenant_id == tenant_id)
+
+    rows: Mapping[_StepKey, Mapping[UUID | None, str | None]]
+
+    def group_of(self, step: OperationRow, tenant_id: UUID | None) -> str | None:
+        """The group of *step* for a run of *tenant_id*.
+
+        The group of the tenant's own row of the step first, then the
+        group of the built-in row, and no group without a row. The step
+        gate, the step preview and the carry-over dry run all use this.
+        """
+        by_tenant = self.rows.get(_step_key(step), {})
+        own = by_tenant.get(tenant_id) if tenant_id is not None else None
+        return own if own is not None else by_tenant.get(None)
+
+    def tenants_with_own_row(self, step: OperationRow) -> list[UUID]:
+        """Every tenant with its own stored row of *step*, sorted."""
+        by_tenant = self.rows.get(_step_key(step), {})
+        return sorted(t for t in by_tenant if t is not None)
+
+
+async def load_step_groups(
+    session: AsyncSession,
+    steps: Iterable[OperationRow],
+    *,
+    tenant_id: UUID | None = None,
+    every_tenant: bool = False,
+) -> StepGroups:
+    """Read the stored groups of *steps* in one query.
+
+    It reads the built-in rows and the rows of *tenant_id*, or the rows of
+    every tenant when *every_tenant* is true.
+    """
+    wanted = {_step_key(step) for step in steps}
+    if not wanted:
+        return StepGroups({})
     stmt = (
-        select(OperationGroup.group_key)
-        .join(EndpointDescriptor, EndpointDescriptor.group_id == OperationGroup.id)
-        .where(
-            visible,
-            EndpointDescriptor.product == step.product,
-            EndpointDescriptor.version == step.version,
-            EndpointDescriptor.impl_id == step.impl_id,
-            EndpointDescriptor.op_id == step.op_id,
+        select(
+            EndpointDescriptor.tenant_id,
+            EndpointDescriptor.product,
+            EndpointDescriptor.version,
+            EndpointDescriptor.impl_id,
+            EndpointDescriptor.op_id,
+            OperationGroup.group_key,
         )
-        .order_by(EndpointDescriptor.tenant_id.is_(None))
-        .limit(1)
+        .outerjoin(OperationGroup, EndpointDescriptor.group_id == OperationGroup.id)
+        .where(EndpointDescriptor.op_id.in_({key[3] for key in wanted}))
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
+    if not every_tenant:
+        visible: ColumnElement[bool] = EndpointDescriptor.tenant_id.is_(None)
+        if tenant_id is not None:
+            visible = or_(visible, EndpointDescriptor.tenant_id == tenant_id)
+        stmt = stmt.where(visible)
+    rows: dict[_StepKey, dict[UUID | None, str | None]] = {}
+    for row_tenant, product, version, impl_id, op_id, group_key in (
+        await session.execute(stmt)
+    ).tuples():
+        key = (product, version, impl_id, op_id)
+        if key in wanted:
+            rows.setdefault(key, {})[row_tenant] = group_key
+    return StepGroups(rows)
+
+
+async def step_group_key(
+    session: AsyncSession, tenant_id: UUID | None, step: OperationRow
+) -> str | None:
+    """The group of *step* for a run of *tenant_id* (:meth:`StepGroups.group_of`)."""
+    groups = await load_step_groups(session, [step], tenant_id=tenant_id)
+    return groups.group_of(step, tenant_id)
 
 
 async def classify_step(
@@ -264,10 +369,10 @@ async def classify_step(
     direct call (:func:`classify_rows`).
     """
     taxonomy, entries = await load_classification(session, tenant_id)
-    group_key = await _stored_group_key(session, tenant_id, step)
-    connector_id = connector_id_of(step)
-    coords = OpCoordinates(connector_id, group_key, step.op_id)
-    return classify(coords, [*entries, *_override_entries(overrides, connector_id)], taxonomy)
+    coords = coordinates_of(step, await step_group_key(session, tenant_id, step))
+    return classify(
+        coords, [*entries, *_override_entries(overrides, coords.connector_id)], taxonomy
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -366,10 +471,11 @@ async def _visible_coords(session: AsyncSession, tenant_id: UUID) -> list[OpCoor
     group = aliased(OperationGroup)
     stmt = (
         select(
-            EndpointDescriptor.impl_id,
+            EndpointDescriptor.product,
             EndpointDescriptor.version,
-            group.group_key,
+            EndpointDescriptor.impl_id,
             EndpointDescriptor.op_id,
+            group.group_key,
         )
         .outerjoin(group, EndpointDescriptor.group_id == group.id)
         .where(
@@ -379,10 +485,7 @@ async def _visible_coords(session: AsyncSession, tenant_id: UUID) -> list[OpCoor
             )
         )
     )
-    return [
-        OpCoordinates(f"{impl_id}-{version}", group_key, op_id)
-        for impl_id, version, group_key, op_id in (await session.execute(stmt)).tuples()
-    ]
+    return [coordinates_of(row, row.group_key) for row in (await session.execute(stmt)).all()]
 
 
 async def _override_entries_for(
@@ -401,7 +504,7 @@ async def _override_entries_for(
     )
     entries: list[ClassificationEntry] = []
     for override in (await session.execute(stmt)).scalars():
-        entries.extend(_override_entries([override], f"{override.impl_id}-{override.version}"))
+        entries.extend(_override_entries([override], connector_id_of(override)))
     return entries
 
 

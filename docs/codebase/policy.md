@@ -359,7 +359,13 @@ that counted at the click (`approver_floor`).
 
 A step of a multi-step operation gets the same categories as a direct
 call of the same operation: the step gate reads the classification
-entries and the override rows of the operation (`classify_step`). So a
+entries and the override rows of the operation (`classify_step`). The
+group of a step comes from one shared rule, `StepGroups.group_of` in
+`policy/store.py`: the group of the tenant's own row of the step first,
+then the group of the built-in row, and no group without a row. The step
+gate and the step preview (through `classify_step`) and the carry-over
+dry run all use it. `load_step_groups` reads the groups of many steps in
+one query; the dry run calls it once. So a
 step and a direct call wait for the same people. So a tenant entry stored
 before this rule, or an install file that changed later, never widens
 anything: where a tenant entry is wider, its extra groups do not count.
@@ -498,9 +504,11 @@ it.
   switch decides whether the `limits` part of the install's file is read.
   Every other card (a tenant import, or an import planned with the switch
   off) has only the keys it had before the switch existed, also in
-  `meho_approvals_get` and `meho_approvals_list`. A card without the field
-  counts as planned with the switch off; so does a card that waited during
-  an upgrade. After the approval, a run of a `scope: install` import reads
+  `meho_approvals_get` and `meho_approvals_list`. A request made under
+  another release does not run after an update of MEHO: the release check
+  refuses it, with `CUSTOM_POLICY` off or on. A card without
+  `planned_with_custom_policy` counts as planned with the switch off.
+  After the approval, a run of a `scope: install` import reads
   the switch again. When it is not the same as on the card, the run writes
   nothing and gives the same sentence. An admin's own run in the web
   console has no card and plans with the switch as it is.
@@ -586,6 +594,13 @@ of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
 (who may run it, every table the same, an override keeps waiting),
 `backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
 warning exactly when the step check makes the step wait, in both scopes),
+`backend/tests/test_policy_carry_over_step_grid.py` (a grid of 396
+cases: the dry run names a multi-step operation exactly when the step
+gate makes the step wait; the three follow the shared group rule; one
+query for the groups of all steps),
+`backend/tests/test_policy_connector_without_version.py` (a connector with
+no version is named by its product in every answer; no reader builds the
+id itself),
 `backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
 `CUSTOM_POLICY` on: import, export and import again, who may ask and
 approve, the audit rows, a wrong part, a stored value MEHO cannot read,

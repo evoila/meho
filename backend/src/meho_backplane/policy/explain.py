@@ -99,7 +99,7 @@ from meho_backplane.policy.store import (
     _override_entries,
     _stored_entries,
     classification_enabled,
-    connector_id_of,
+    coordinates_of,
 )
 from meho_backplane.policy.who_approves import (
     RIGHTS_CHANGE_RULE,
@@ -224,7 +224,7 @@ async def _policy_view(
 
 async def _coords(session: AsyncSession, row: EndpointDescriptor) -> OpCoordinates:
     keys = await _group_keys(session, [row], {})
-    return OpCoordinates(connector_id_of(row), keys.get(row.id), row.op_id)
+    return coordinates_of(row, keys.get(row.id))
 
 
 async def _apply_file(

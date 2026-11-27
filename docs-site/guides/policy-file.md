@@ -95,6 +95,10 @@ classifications:
 
 - `match` says what the entry is for: a connector, an operation group, an
   operation, or a mix. `*` is any text, `?` is one character.
+- A connector is matched by the id a call uses, for example `harbor-rest-2.x`.
+  A connector with no version is matched by its product name, for example
+  `vault`. An entry written for the old form of its id, `-`, still matches
+  it too.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
@@ -533,6 +537,11 @@ meho policy carry-over --dry-run                   # your tenant's settings
 meho policy carry-over --dry-run --scope install   # the install's (platform admin)
 ```
 
+The install's "always wait" settings count for the calls and steps of
+every tenant. A tenant admin's dry run lists only the tenant's own
+settings. A platform admin who is a person sees the install's settings
+with `--scope install`.
+
 For each setting it shows:
 
 - where it comes from: `override` or `policy_file`, the scope, and the
@@ -540,7 +549,12 @@ For each setting it shows:
 - the operations it matches. A policy file entry is matched against the
   operations a call of the tenant can use, and against every step of a
   multi-step operation, with the group the step check finds for it, also
-  a step with no row a call can use. A policy file entry makes an
+  a step with no row a call can use. An operation that a call of the
+  tenant cannot use is not listed as a call: one that is turned off, of a
+  package that is not installed, or whose code is not in this MEHO. An
+  entry that matches only such operations says that it matches none.
+  When the operation is turned on again, the entry counts for it again.
+  A connector with no version is listed by its product name. A policy file entry makes an
   operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
   the dry run lists its matches with every switch;
 - a warning when the setting makes a step of a multi-step operation

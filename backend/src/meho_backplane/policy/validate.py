@@ -68,6 +68,7 @@ from meho_backplane.policy.document import read_kind
 from meho_backplane.policy.limits import limits_mistakes
 from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 from meho_backplane.policy.routing_floor import tenant_floor_mistakes
+from meho_backplane.policy.store import coordinates_of
 
 __all__ = ["MAX_MISTAKES", "KnownOp", "check_document", "load_known_ops"]
 
@@ -97,10 +98,11 @@ async def load_known_ops(
     """
     group = aliased(OperationGroup)
     stmt = select(
-        EndpointDescriptor.impl_id,
+        EndpointDescriptor.product,
         EndpointDescriptor.version,
-        group.group_key,
+        EndpointDescriptor.impl_id,
         EndpointDescriptor.op_id,
+        group.group_key,
         EndpointDescriptor.safety_level,
         EndpointDescriptor.parameter_schema,
     ).outerjoin(group, EndpointDescriptor.group_id == group.id)
@@ -111,14 +113,12 @@ async def load_known_ops(
         stmt = stmt.where(visible)
     return [
         KnownOp(
-            coords=OpCoordinates(f"{impl_id}-{version}", group_key, op_id),
-            safety_level=str(safety_level),
-            shows_secret=has_credential_read_floor(op_id),
-            caller_address=has_caller_address(parameter_schema),
+            coords=coordinates_of(row, row.group_key),
+            safety_level=str(row.safety_level),
+            shows_secret=has_credential_read_floor(row.op_id),
+            caller_address=has_caller_address(row.parameter_schema),
         )
-        for impl_id, version, group_key, op_id, safety_level, parameter_schema in (
-            await session.execute(stmt)
-        ).tuples()
+        for row in (await session.execute(stmt)).all()
     ]
 
 

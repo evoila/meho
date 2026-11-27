@@ -126,11 +126,18 @@ def _label_key_ok(key: str) -> bool:
 
 @dataclass(frozen=True)
 class OpCoordinates:
-    """What an entry can match on: the connector id, the group key, the op id."""
+    """What an entry can match on: the connector id, the group key, the op id.
+
+    ``dashed_connector_id`` is set only for a connector with no version,
+    whose id is its product: it holds the form ``<impl_id>-<version>``
+    (for example ``-``). An entry's connector pattern matches either form.
+    Build coordinates with :func:`~meho_backplane.policy.store.coordinates_of`.
+    """
 
     connector_id: str
     group_key: str | None
     op_id: str
+    dashed_connector_id: str | None = None
 
 
 class ClassificationConflictError(ValueError):
@@ -150,6 +157,15 @@ def _literal_prefix(pattern: str | None) -> int:
         if char in _GLOB_METACHARS:
             return index
     return len(pattern)
+
+
+def _connector_matches(coords: OpCoordinates, pattern: str) -> bool:
+    """True when *pattern* matches the connector id or its form with the dash."""
+    if fnmatchcase(coords.connector_id, pattern):
+        return True
+    return coords.dashed_connector_id is not None and fnmatchcase(
+        coords.dashed_connector_id, pattern
+    )
 
 
 @dataclass(frozen=True)
@@ -188,7 +204,7 @@ class ClassificationEntry:
 
     def matches(self, coords: OpCoordinates) -> bool:
         """True when every pattern the entry gives matches *coords*."""
-        if self.connector is not None and not fnmatchcase(coords.connector_id, self.connector):
+        if self.connector is not None and not _connector_matches(coords, self.connector):
             return False
         if self.group is not None and (
             coords.group_key is None or not fnmatchcase(coords.group_key, self.group)

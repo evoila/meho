@@ -26,6 +26,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     OperationOverrideRow,
 )
 from meho_backplane.operations.op_policy import list_overrides
+from meho_backplane.policy.store import connector_id_of
 
 __all__ = ["load_override_rows", "router"]
 
@@ -38,11 +39,6 @@ _reduced_approval_query = Query(
 )
 
 
-def _connector_id(impl_id: str, version: str) -> str:
-    """Return the ``<impl_id>-<version>`` id, or ``impl_id`` alone without a version."""
-    return f"{impl_id}-{version}" if version else impl_id
-
-
 async def load_override_rows(
     operator: Operator, *, reduced_approval: bool
 ) -> list[OperationOverrideRow]:
@@ -53,7 +49,7 @@ async def load_override_rows(
         )
     return [
         OperationOverrideRow(
-            connector_id=_connector_id(row.impl_id, row.version),
+            connector_id=connector_id_of(row),
             op_id=row.op_id,
             scope="install" if row.tenant_id is None else "tenant",
             tenant_id=row.tenant_id,

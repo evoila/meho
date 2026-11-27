@@ -61,10 +61,20 @@ classifications:
     risk: dangerous
 ```
 
-- `match` holds `connector` (the connector id `<impl_id>-<version>`),
-  `group` (the group key) and `op` (the operation id). Each is a pattern:
+- `match` holds `connector` (the connector id a call uses:
+  `<impl_id>-<version>`, or the product for a connector with no
+  implementation id or no version), `group` (the group key) and `op` (the
+  operation id). Each is a pattern:
   `*` is any text, `?` is one character, no wildcard is an exact match.
   Upper and lower case count. Every field given must match.
+- **One rule for the connector id.** Every reader names a connector with
+  `connector_id_of` and builds what an entry matches with `coordinates_of`
+  (`policy/store.py`): the gate, explain, the bulk edit, the import check,
+  the carry-over dry run and the overrides report. For a connector with no
+  version, an entry's connector pattern matches the product and also the
+  old form with the dash (`-`), so an entry written for the old form keeps
+  matching (`OpCoordinates.dashed_connector_id`). A test fails when a reader
+  builds the id itself (`test_policy_connector_without_version.py`).
 - **Taxonomy.** One category list per install. Without an install
   document MEHO uses its built-in list (`DEFAULT_TAXONOMY` in
   `policy/classification.py`). A tenant's document can add categories

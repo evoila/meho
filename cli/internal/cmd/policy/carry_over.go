@@ -37,7 +37,7 @@ func newCarryOverCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !dryRun {
-				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+				return output.RenderError(cmd.ErrOrStderr(), output.Usage(
 					"carry-over only lists; add --dry-run"), opts.JSONOut)
 			}
 			return runCarryOver(cmd, opts)

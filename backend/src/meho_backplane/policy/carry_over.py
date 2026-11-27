@@ -68,7 +68,13 @@ from meho_backplane.policy.classification import (
     Scope,
     entries_from_document,
 )
-from meho_backplane.policy.store import InvalidStoredPolicyError, _stored_group_key
+from meho_backplane.policy.store import (
+    InvalidStoredPolicyError,
+    StepGroups,
+    connector_id_of,
+    coordinates_of,
+    load_step_groups,
+)
 from meho_backplane.sandbox_mode import sandbox_mode_active
 
 __all__ = [
@@ -208,7 +214,7 @@ async def _operations(session: AsyncSession, scope: Scope, tenant_id: UUID) -> l
         )
         if scope == "tenant" and await row_code_missing(session, tenant_id=tenant_id, row=row):
             continue
-        found.add(OpCoordinates(f"{impl_id}-{version}", group_key, op_id))
+        found.add(coordinates_of(row, group_key))
     return sorted(found, key=lambda c: (c.connector_id, c.op_id, c.group_key or ""))
 
 
@@ -235,16 +241,14 @@ def _steps_by_op() -> tuple[dict[_StepKey, list[str]], dict[_StepKey, EndpointDe
             if surface is None:
                 continue
             product, version, impl_id = parse_connector_id(surface.connector_id)
-            connector_id = f"{impl_id}-{version}"
             for step in surface.sub_op_ids:
+                row = EndpointDescriptor(
+                    product=product, version=version, impl_id=impl_id, op_id=step
+                )
+                key = (connector_id_of(row), step)
                 if step != composite:
-                    runs.setdefault((connector_id, step), set()).add(composite)
-                    rows.setdefault(
-                        (connector_id, step),
-                        EndpointDescriptor(
-                            product=product, version=version, impl_id=impl_id, op_id=step
-                        ),
-                    )
+                    runs.setdefault(key, set()).add(composite)
+                    rows.setdefault(key, row)
                 if step not in seen:
                     seen.add(step)
                     pending.append(step)
@@ -305,8 +309,8 @@ async def _override_settings(
     )
     settings: list[CarryOverSetting] = []
     for row in (await session.execute(stmt)).scalars():
-        connector_id = f"{row.impl_id}-{row.version}"
-        operation = _operation(OpCoordinates(connector_id, None, row.op_id), steps)
+        connector_id = connector_id_of(row)
+        operation = _operation(coordinates_of(row, None), steps)
         settings.append(
             CarryOverSetting(
                 source="override",
@@ -335,34 +339,21 @@ async def _stored_entries(
         ) from exc
 
 
-async def _step_coordinates(
-    session: AsyncSession, scope: Scope, tenant_id: UUID, key: _StepKey, row: EndpointDescriptor
+def _step_coordinates(
+    scope: Scope, tenant_id: UUID, row: EndpointDescriptor, groups: StepGroups
 ) -> list[OpCoordinates]:
     """A declared step once per group the step gate can find for it.
 
-    The step gate takes the group of the tenant's own row of the step
-    first, then the one of the built-in row, and none without a row
-    (:func:`~meho_backplane.policy.store._stored_group_key`). A tenant's
-    settings count for the runs of that tenant. The install's settings
-    count for every run: the one of a tenant without its own row (the
-    built-in group) and the one of each tenant with its own row.
+    The group of a run is the step gate's (:meth:`StepGroups.group_of`).
+    A tenant's settings count for the runs of that tenant. The install's
+    settings count for every run: the one of a tenant without its own row
+    of the step and the one of each tenant with its own row.
     """
     runs: list[UUID | None] = [tenant_id]
     if scope == "install":
-        own = (
-            select(EndpointDescriptor.tenant_id)
-            .distinct()
-            .where(
-                EndpointDescriptor.tenant_id.is_not(None),
-                EndpointDescriptor.product == row.product,
-                EndpointDescriptor.version == row.version,
-                EndpointDescriptor.impl_id == row.impl_id,
-                EndpointDescriptor.op_id == row.op_id,
-            )
-        )
-        runs = [None, *(await session.execute(own)).scalars()]
-    groups = {await _stored_group_key(session, run, row) for run in runs}
-    return [OpCoordinates(key[0], group, key[1]) for group in sorted(groups, key=lambda g: g or "")]
+        runs = [None, *groups.tenants_with_own_row(row)]
+    found = {groups.group_of(row, run) for run in runs}
+    return [coordinates_of(row, group) for group in sorted(found, key=lambda g: g or "")]
 
 
 async def _file_settings(
@@ -379,8 +370,11 @@ async def _file_settings(
     if not waits:
         return []
     stored = await _operations(session, scope, tenant_id)
+    groups = await load_step_groups(
+        session, step_rows.values(), tenant_id=tenant_id, every_tenant=scope == "install"
+    )
     as_steps = {
-        key: await _step_coordinates(session, scope, tenant_id, key, row)
+        key: _step_coordinates(scope, tenant_id, row, groups)
         for key, row in sorted(step_rows.items())
     }
     # The entries that make a step wait for at least one run: only they

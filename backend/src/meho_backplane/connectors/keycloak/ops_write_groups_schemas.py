@@ -154,6 +154,7 @@ GROUP_WRITE_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "group", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_use": WHEN_TO_USE_GROUP_WRITE,

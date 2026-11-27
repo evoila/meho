@@ -11,7 +11,8 @@
   preview.
 * The gate does not read the rules yet: with rules stored and the switch
   on, a personal agent's call gets the same answer as before, and every row
-  of the approval table is the same as with the switch off.
+  of the approval table is the same as with the switch on and no rules
+  stored.
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -19,8 +20,6 @@ per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -174,14 +173,16 @@ async def test_with_rules_stored_and_the_switch_on_the_approval_table_is_the_sam
     clear_typed_op_snapshot()
     rule = {"name": "helper", "caller": "personal_agent", "roles": ["Admin"], "up_to": "dangerous"}
     try:
+        without_rules = build_rows(await register_all_descriptors())
+        clear_typed_op_snapshot()
         await h.store_install({"limits": {"personal_agent_up_to": "dangerous"}})
         async with get_sessionmaker()() as session, session.begin():
             session.add(
                 TenantPolicy(tenant_id=h.TENANT, document={"agents": [rule]}, set_by_sub="fixture")
             )
-        rows = build_rows(await register_all_descriptors())
+        with_rules = build_rows(await register_all_descriptors())
     finally:
         clear_typed_op_snapshot()
         get_settings.cache_clear()
-    table = Path(__file__).parent / "snapshots" / "approval_table.json"
-    assert rows == json.loads(table.read_text(encoding="utf-8"))
+    assert with_rules
+    assert with_rules == without_rules

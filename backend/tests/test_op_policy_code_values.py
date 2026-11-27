@@ -17,8 +17,8 @@ What these tests prove:
   from the operations MEHO registers at start-up.
 * Each part of the delete sign counts on its own: the HTTP verb ``DELETE``,
   and the code's own ``destructive`` level (an admin's raise to
-  ``destructive`` does not count). The built-in delete names count also
-  when the install sets its own names.
+  ``destructive`` does not count). The delete names come from the one
+  setting ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``.
 * A caller-address field that a switch hides still counts: the check reads
   the stored schema, as the approval floor does.
 """
@@ -289,18 +289,13 @@ async def test_an_admin_raise_to_destructive_is_not_a_delete_sign() -> None:
     assert has_plain_mark(row) is True
 
 
-def test_the_built_in_delete_names_count_also_with_the_install_names(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    row = _in_memory("fixturepets.pet.delete")
-    assert has_plain_mark(row) is False
-
-    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "fixturepets.other.*")
+def test_the_delete_names_come_from_the_one_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", "fc.example.*")
     get_settings.cache_clear()
-    assert get_settings().service_grant_delete_shaped_patterns == ("fixturepets.other.*",)
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    assert "fc.example.*" in patterns
 
-    assert has_plain_mark(row) is False
-    assert has_plain_mark(_in_memory("fixturepets.other.walk")) is False
+    assert has_plain_mark(_in_memory("fc.example.walk")) is False
     assert has_plain_mark(_in_memory("fixturepets.pet.walk")) is True
 
 

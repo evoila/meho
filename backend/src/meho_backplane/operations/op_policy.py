@@ -107,7 +107,7 @@ from meho_backplane.policy.store import (
     classify_rows,
     classify_step,
 )
-from meho_backplane.settings import BUILT_IN_DELETE_NAMES, get_settings
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CLASSIFICATION_FIELDS",
@@ -290,9 +290,9 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     ``code_safety_level``, ``code_parameter_schema``), so an admin's edit
     or a switch that hides a field never looks like the code's mark.
 
-    The built-in delete names always count; the install's own delete names
-    (``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``) only add to them. No
-    database; it reads that one setting.
+    It reads the delete names from the one setting
+    ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``, as every other reader of
+    that setting does. No database.
     """
     from meho_backplane.operations.service_grants import (
         delete_grant_reason,
@@ -307,8 +307,7 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     if schema is None:
         schema = descriptor.parameter_schema
     op_id = descriptor.op_id
-    install_names = get_settings().service_grant_delete_shaped_patterns
-    patterns = tuple(dict.fromkeys((*BUILT_IN_DELETE_NAMES, *install_names)))
+    patterns = get_settings().service_grant_delete_shaped_patterns
     delete_sign = (
         code_safety == "destructive"
         or (descriptor.method or "").upper() == "DELETE"

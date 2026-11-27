@@ -347,6 +347,8 @@ OPS: tuple[AzureTypedOp, ...] = (
         tags=("azure", "storage", "write", "blob", "file", "sas", "link"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=_LINK_CREATE_GUIDANCE,
     ),
     AzureTypedOp(

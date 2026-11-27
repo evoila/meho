@@ -662,6 +662,7 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "secret", "credential", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_SECRET_CREATE_LLM,
     ),
     KubernetesOp(

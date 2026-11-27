@@ -1135,6 +1135,7 @@ _RKE2_CONFIG_UPDATE_OP = Rke2Op(
     safety_level="dangerous",
     requires_approval=True,
     hard_to_undo="overwrites",
+    changes_rights=True,
     llm_instructions={
         "when_to_use": _WHEN_TO_USE_NODE_WRITE,
         "parameter_hints": {

@@ -434,6 +434,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "appproject"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APPPROJECT_WRITE,
@@ -478,6 +479,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "appproject"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
         changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APPPROJECT_WRITE,

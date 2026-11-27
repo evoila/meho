@@ -200,6 +200,7 @@ _POOL_CREATE_OP = GcloudOp(
     tags=(*_TAGS, "create", "workload-identity"),
     safety_level="caution",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call as the first step when an outside workload (for example a pod in a "

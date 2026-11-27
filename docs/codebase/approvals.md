@@ -942,26 +942,47 @@ Each rule and its sentence:
 ### Steps of an approved multi-step operation, with `CUSTOM_POLICY` on
 
 When a person approves a whole multi-step operation, its other steps go
-ahead under that one approval. With the switch `CUSTOM_POLICY` on, each
-step first asks the fixed rules (`operations/run_step_rules.py`,
-`step_keeps_own_approval`; called by `composite._covered_by_approved_run`
-and by the dispatcher's rule for a child call):
+ahead under that one approval, unless a step keeps its own approval. The
+rule is `step_keeps_own_approval` in `operations/run_step_rules.py`. Two
+places ask it: the step gate (`composite._gate_subop`, through
+`_covered_by_approved_run`) and the dispatcher's rule for a child call.
 
-- A step whose operation has only the plain "always ask" mark
-  (`op_policy.has_plain_mark`) no longer waits on its own. It goes ahead
-  under the run's approval. The owner decided this on 25 Nov 2026. When
-  an override row of the operation sets the approval flag too, the step
-  still waits.
-- A step that a fixed rule covers (`fixed_rule_for`) waits for its own
-  approval: a credential call, a change of rights or of the policy, a call
-  to an address the caller gives, a `destructive` step and a delete.
-- A step that no run approval covers (`never_covered_reason`, plus the root
-  shell mark) waits too, and so does a step that an override, a param or
-  "always wait" made wait.
+With the switch `CUSTOM_POLICY` off, a step keeps its own approval when it
+is `destructive`, marked `requires_approval`, "always wait" or a credential
+call. Nothing else is read.
 
-With the switch off, a step keeps its own approval when it is
-`destructive`, marked `requires_approval`, "always wait" or a credential
-call, as before. Tests: `backend/tests/test_custom_policy_run_steps.py`.
+With the switch on, a step keeps its own approval when one of these holds:
+
+- It is `destructive`, "always wait" or a credential call.
+- It is marked `requires_approval` for another reason than the plain
+  "always ask" mark (`op_policy.has_plain_mark`): for example an override
+  or a param made it wait. An override row of the operation, install-wide
+  or of the caller's tenant, that sets the approval flag counts too. A step
+  whose operation has only the plain mark goes ahead under the run's
+  approval.
+- A fixed rule covers it (`fixed_rule_for`): a credential call, a change of
+  rights or of the policy, a call to an address the caller gives, a
+  `destructive` step and a delete. A step of a run is never a person's own
+  click in the web console. So a change of rights or of the policy keeps
+  its own approval whoever approved the run and wherever, also an Admin in
+  the web console after a fresh sign-in.
+- No run approval covers it (`never_covered_reason`, plus the root shell
+  mark).
+
+The step gate asks these rules with the stored facts of the step's
+operation, when a row is stored (`step_rule_row`): its parameter schema,
+HTTP verb, tags, class and `hard_to_undo`. They go only into a copy of the
+step's row. The gate, the card and the approval request use the step's
+declared values.
+
+In a run that goes on after a person's approval, these rules hold also
+when a step's policy answer lets it run at once
+(`step_waits_after_approval`): the step or child call then waits for its
+own approval. A `deny` stays a deny. Outside such a run nothing changes.
+
+Tests: `backend/tests/test_custom_policy_run_steps.py`,
+`backend/tests/test_custom_policy_run_steps_routes.py` and
+`backend/tests/test_custom_policy_run_steps_console_rights.py`.
 
 ## A credential call always waits for a person
 
@@ -5649,13 +5670,16 @@ the run, so its remaining internal steps go ahead under that approval
 while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
-`NEEDS_APPROVAL` goes ahead, unless the step is `destructive`, marked
-`requires_approval`, or reads, writes or makes a credential
-(`service_grants.credential_call_waits`). A `DENY` stays a deny. The same
-holds for a child operation the composite runs through `dispatch_child`:
-the child's own `dispatch()` reads `approved_run_var` right after its
-policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
-exceptions. A credential step or child waits for its own approval, also
+`NEEDS_APPROVAL` goes ahead, unless it keeps its own approval: the step is
+`destructive`, "always wait", reads, writes or makes a credential
+(`service_grants.credential_call_waits`), or `step_keeps_own_approval`
+holds for it. With `CUSTOM_POLICY` off that is a step marked
+`requires_approval`; with it on, the rules in
+[Steps of an approved multi-step operation, with `CUSTOM_POLICY` on](#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
+A `DENY` stays a deny. The same holds for a child operation the composite
+runs through `dispatch_child`: the child's own `dispatch()` reads
+`approved_run_var` right after its policy gate and goes ahead on
+`NEEDS_APPROVAL` under the same rules. A credential step or child waits for its own approval, also
 when the rights of the person who approved the run would let it run: the
 step's gate and the child's `dispatch()` turn an `AUTO_EXECUTE` into a wait
 (`credential_step_waits_after_approval`). This holds whoever runs the
@@ -5666,10 +5690,11 @@ again. So a multi-step composite (e.g. `vm.create` with
 `power_on_after_create=True`, which parks at create then powers on)
 completes in a **single** resume, each step running exactly once. The
 invariant is explicit: **every governed sub-op of a composite that must
-finish in one resume is not `destructive` and not `requires_approval`**.
+finish in one resume is a step that does not keep its own approval** (the
+rules above, with the switch off and with it on).
 
-A later step that is `destructive` or marked `requires_approval` waits for
-its own approval, also during a resume. The steps the run already did are
+A later step that keeps its own approval waits for it, also during a
+resume. The steps the run already did are
 stored with that new request, so its resume sends none of them again. See
 the next section. A child call that waits is its own request: its approval
 runs only the child, and the multi-step run does not go on.

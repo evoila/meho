@@ -53,7 +53,6 @@ from meho_backplane.operations import _composite_preview, dispatch
 from meho_backplane.operations._preview import _k8s_apply_redactor
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
-from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.settings import get_settings
 from tests.test_k8s_apply_card_through_dispatch import (
     _CONNECTOR_ID,
@@ -534,7 +533,9 @@ def test_a_long_list_of_documents_comes_back_as_a_handle(
     async def _read_all() -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         while True:
-            window = await read_result_window(operator, handle_id, offset=len(rows), limit=100)
+            window = await result_query_core.read_result_window(
+                operator, handle_id, offset=len(rows), limit=100
+            )
             rows.extend(window["rows"])
             if not window["rows"]:
                 return rows

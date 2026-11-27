@@ -103,18 +103,24 @@ class ConnectorRow(Protocol):
     """A row that names a connector: an operation row or an override row."""
 
     @property
-    def product(self) -> str: ...
+    def product(self) -> str:
+        """The product, for example ``vault``."""
+
     @property
-    def version(self) -> str: ...
+    def version(self) -> str:
+        """The version; empty for a connector with no version."""
+
     @property
-    def impl_id(self) -> str: ...
+    def impl_id(self) -> str:
+        """The implementation id; empty for a connector with no version."""
 
 
 class OperationRow(ConnectorRow, Protocol):
     """A row that names one operation of a connector."""
 
     @property
-    def op_id(self) -> str: ...
+    def op_id(self) -> str:
+        """The operation id."""
 
 
 def _dashed_id(row: ConnectorRow) -> str:

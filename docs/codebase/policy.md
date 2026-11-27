@@ -200,7 +200,9 @@ of `docs-site/guides/policy-file.md`.
   wait" or a classification conflict, `never_covered_reason` (credential,
   per-call approval, caller address, delete sign), a MEHO change of rights
   or of the policy, a root shell, `hard_to_undo`, a multi-step operation,
-  or `requires_approval` that is not the plain mark. An operation with the
+  or `requires_approval` that is not the plain mark. An operation is not
+  listed for a role below its role floor (`role_floor_for`), because a
+  person of that role cannot call it at all. An operation with the
   plain mark (`has_plain_mark`) counts as `dangerous`. An install plan
   gets `agents_above_limit` (each tenant with a stored rule above the
   file's limit, one warning each) only when there is such a tenant.

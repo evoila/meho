@@ -342,5 +342,24 @@ def test_the_list_names_for_each_role_the_operations_that_start_to_run_at_once()
     assert listed["Operator"] == [
         {"connector_id": "c-1", "op_id": "x.restart", "risk": "caution", "rule": "tenant_rule:all"}
     ]
+    admin_only = RuleOp("c-1", "x.register", "caution", False, False, lowest_role="Admin")
+    only = runs_at_once_by_role(rules, limit="dangerous", ops=[admin_only])
+    assert {role: len(items) for role, items in only.items()} == {
+        "Reader": 0,
+        "Operator": 0,
+        "Admin": 1,
+    }
     capped = runs_at_once_by_role(rules, limit="safe", ops=ops)
     assert capped == {"Reader": [], "Operator": [], "Admin": []}
+
+
+def test_the_plan_reads_the_role_floor_of_an_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.operations import role_floors
+    from meho_backplane.policy.agent_rules_plan import _lowest_role
+
+    monkeypatch.setitem(role_floors._FLOORS, "example.register", TenantRole.TENANT_ADMIN)
+    monkeypatch.setitem(role_floors._FLOORS, "example.restart", TenantRole.OPERATOR)
+    assert _lowest_role("example.register") == "Admin"
+    assert _lowest_role("example.restart") == "Operator"
+    assert _lowest_role("example.list") == "Reader"

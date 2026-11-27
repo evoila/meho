@@ -26,12 +26,15 @@ from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantPolicy
 from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.op_policy import has_plain_mark
+from meho_backplane.operations.role_floors import role_floor_for
 from meho_backplane.operations.service_grants import never_covered_reason
 from meho_backplane.policy.agent_rules import (
+    RULE_ROLES,
     RuleOp,
     agents_diff,
     rules_above_limit,
@@ -51,6 +54,13 @@ from meho_backplane.policy.limits import personal_agent_limit
 from meho_backplane.policy.store import connector_id_of
 
 __all__ = ["agents_plan"]
+
+#: The rule role of each tenant role.
+_RULE_ROLE: dict[TenantRole, str] = {
+    TenantRole.READ_ONLY: "Reader",
+    TenantRole.OPERATOR: "Operator",
+    TenantRole.TENANT_ADMIN: "Admin",
+}
 
 
 def _keeps_waiting(row: EndpointDescriptor, classified: Classification) -> bool:
@@ -74,6 +84,12 @@ def _level(row: EndpointDescriptor, classified: Classification) -> str:
     if row.requires_approval and has_plain_mark(row):
         levels.append("dangerous")
     return max((lvl for lvl in levels if lvl in RISK_LEVELS), key=RISK_LEVELS.index, default="safe")
+
+
+def _lowest_role(op_id: str) -> str:
+    """The lowest rule role that may call *op_id* (its role floor, or ``Reader``)."""
+    floor = role_floor_for(op_id)
+    return RULE_ROLES[0] if floor is None else _RULE_ROLE.get(floor, RULE_ROLES[-1])
 
 
 async def _rule_ops(
@@ -103,6 +119,7 @@ async def _rule_ops(
                 level=_level(row, classified),
                 changes_rights=bool(row.changes_rights),
                 keeps_waiting=_keeps_waiting(row, classified),
+                lowest_role=_lowest_role(row.op_id),
             )
         )
     return ops

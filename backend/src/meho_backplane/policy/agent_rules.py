@@ -343,7 +343,8 @@ class RuleOp:
     the plain "always ask" mark. ``keeps_waiting`` is true when a check
     that no rule lowers makes every call wait (a fixed rule, a per-call
     approval, "always wait", a root shell, an operation that is hard to
-    undo, a multi-step operation).
+    undo, a multi-step operation). ``lowest_role`` is the lowest role
+    (of :data:`RULE_ROLES`) that may call the operation at all.
     """
 
     connector_id: str
@@ -351,11 +352,14 @@ class RuleOp:
     level: str
     changes_rights: bool
     keeps_waiting: bool
+    lowest_role: str = RULE_ROLES[0]
 
 
 def rule_lets_run(rule: AgentRule, role: str, limit: str, op: RuleOp) -> bool:
     """True when *rule* lets a personal agent of *role* run *op* at once."""
     if op.keeps_waiting or op.level not in LIMIT_LEVELS:
+        return False
+    if RULE_ROLES.index(role) < RULE_ROLES.index(op.lowest_role):
         return False
     if op.changes_rights and not (rule.rights_changes and op.connector_id in rule.connectors):
         return False

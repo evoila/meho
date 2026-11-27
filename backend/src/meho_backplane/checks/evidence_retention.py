@@ -70,7 +70,12 @@ import structlog
 from sqlalchemy import delete
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditEventClass, RunnerCheckResult, SensorResult
+from meho_backplane.db.models import (
+    AuditEventClass,
+    RunnerCheckResult,
+    RunnerRefusedResult,
+    SensorResult,
+)
 from meho_backplane.loop_schedule import FIRST_RUN_DELAY_SECONDS, wait_until_first_run
 from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
@@ -132,11 +137,17 @@ async def _delete_sensor_results_older_than(cutoff: datetime) -> int:
 
 
 async def _delete_runner_results_older_than(cutoff: datetime) -> int:
-    """Delete raw runner result rows received before *cutoff*; return the count."""
+    """Delete raw runner result rows received before *cutoff*; return the count.
+
+    The marks of refused results counted before *cutoff* go too.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
             delete(RunnerCheckResult).where(RunnerCheckResult.received_at < cutoff)
+        )
+        await session.execute(
+            delete(RunnerRefusedResult).where(RunnerRefusedResult.refused_at < cutoff)
         )
         await session.commit()
         dropped: int = result.rowcount or 0  # type: ignore[attr-defined]

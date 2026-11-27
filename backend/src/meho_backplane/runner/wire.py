@@ -63,6 +63,8 @@ from pydantic import (
     Field,
     ModelWrapValidatorHandler,
     PrivateAttr,
+    Strict,
+    ValidationError,
     model_validator,
 )
 
@@ -388,9 +390,25 @@ class SetAsideNotice(BaseModel):
 
     check_ref: str
     result_uid: str
-    status: int
+    #: Only a JSON number: a text such as ``"400"`` makes the notice invalid.
+    status: Annotated[int, Strict()]
     code: str | None = None
     produced_at: datetime | None = None
+
+
+def _valid_notices(entries: list[Any]) -> tuple[list[SetAsideNotice], int]:
+    """The entries of *entries* that are valid notices, and how many are not.
+
+    An entry that is not an object, misses a field or has a field of another
+    type is not a valid notice.
+    """
+    valid: list[SetAsideNotice] = []
+    for entry in entries:
+        try:
+            valid.append(SetAsideNotice.model_validate(entry))
+        except ValidationError:
+            continue
+    return valid, len(entries) - len(valid)
 
 
 class RunnerResultBatch(BaseModel):
@@ -399,12 +417,17 @@ class RunnerResultBatch(BaseModel):
     ``set_aside`` names the results of batches the runner set aside since its
     last notice. ``set_aside_total`` and ``set_aside_last_at`` say how many
     batches are in the runner's set-aside folder and when the newest one was
-    set aside. All three stay empty on a batch without a notice. MEHO reads at
+    set aside. All three stay empty on a batch without a notice, with one
+    exception: after a start, the runner's first notice post sets
+    ``set_aside_total`` and ``set_aside_last_at`` also when it carries no
+    notice, so MEHO has the count of the folder again. MEHO reads at
     most the first 1,000 entries of ``set_aside`` and skips the rest before it
-    checks any entry. It keeps a ``set_aside_total`` that is a whole number from
-    0 to 2147483647 and a ``set_aside_last_at`` that is a date-time text with a
-    time zone; it drops any other value of these two (also ``true`` or a
-    number) and still takes the batch.
+    checks any entry. Then it checks the entries one by one and skips each
+    entry that is not a valid notice; the other entries are kept. It keeps a
+    ``set_aside_total`` that is a whole number from 0 to 2147483647 and a
+    ``set_aside_last_at`` that is a date-time text with a time zone; it drops
+    any other value of these two (also ``true`` or a number) and still takes
+    the batch.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -421,17 +444,19 @@ class RunnerResultBatch(BaseModel):
     def _read_first_notices(
         cls, data: Any, read: ModelWrapValidatorHandler[RunnerResultBatch]
     ) -> RunnerResultBatch:
-        """Keep the first 1,000 entries of ``set_aside`` before any entry is checked."""
+        """Keep the first 1,000 entries of ``set_aside``, then the valid notices among them."""
         notices = data.get("set_aside") if isinstance(data, dict) else None
         skipped = 0
-        if isinstance(notices, list) and len(notices) > SET_ASIDE_NOTICES_MAX:
-            skipped = len(notices) - SET_ASIDE_NOTICES_MAX
-            data = {**data, "set_aside": notices[:SET_ASIDE_NOTICES_MAX]}
+        if isinstance(notices, list):
+            skipped = max(0, len(notices) - SET_ASIDE_NOTICES_MAX)
+            valid, invalid = _valid_notices(notices[:SET_ASIDE_NOTICES_MAX])
+            skipped += invalid
+            data = {**data, "set_aside": valid}
         batch = read(data)
         batch._set_aside_skipped = skipped
         return batch
 
     @property
     def set_aside_skipped(self) -> int:
-        """How many entries of ``set_aside`` came after the first 1,000 and were skipped."""
+        """How many entries of ``set_aside`` were skipped: after the first 1,000, or not valid."""
         return self._set_aside_skipped

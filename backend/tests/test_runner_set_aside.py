@@ -54,6 +54,12 @@ from .test_gateway_assignment_api import (
 from .test_runner_checks_count import _KEY, _seed_sensor, _sensor
 
 
+@pytest.fixture(autouse=True)
+def _no_minimum_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set a batch aside after three quick refusals; the minimum time has its own tests."""
+    monkeypatch.setattr(runner_loop, "SET_ASIDE_MIN_SPAN", timedelta(0))
+
+
 def _result(uid: str, check_ref: str = "chk") -> wire.RunnerResult:
     return wire.RunnerResult(
         result_uid=uid,
@@ -274,7 +280,9 @@ async def test_a_notice_that_could_not_be_sent_goes_out_on_the_next_tick(
     _execute_with_clock_ahead(monkeypatch, timedelta(minutes=5))
     central = _RefusesResults(notice_answers=[503])
     spool = ResultSpool(tmp_path, max_files=50)
-    state = RunnerState(assignment=_every_tick_assignment("chk"), assignment_version="v1")
+    state = RunnerState(
+        assignment=_every_tick_assignment("chk"), assignment_version="v1", summary_sent=True
+    )
 
     await _ticks(central, spool, state, SET_ASIDE_AFTER_TRIES)
     assert [n.result_uid for n in state.notices] == ["r01"]

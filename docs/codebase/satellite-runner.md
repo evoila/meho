@@ -763,6 +763,10 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   and the investigator also start when every check of the Dashboard runs on
   that runner. A Sensor that is resumed while its runner is marked stale
   (`checks/sensor_pause.py`) reads `unknown` with the reason `runner_stale`.
+  Every read of the check in that step filters by tenant. When that
+  `unknown` reading fails, the resume still answers with the saved state and
+  its audit values, and the warning `sensor_resume_stale_mark_failed` names
+  the check.
   A reader sees the state in `meho sensor get`, REST, MCP and the Dashboard;
   the evidence holds the reason. With the switch off none of this runs.
 - **Schedule.** A Sensor item carries `interval_seconds`, or `cron_expr` with
@@ -830,8 +834,17 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   difference of two clocks that are set by network time. When every result of
   a batch is refused, the answer is a 422 with `detail.code`
   `results_refused` and the same list. The counter rises for a refused result
-  after the rest of the batch is stored. A refused result is counted once in
-  each MEHO process, however often its batch is sent. A result
+  after the rest of the batch is stored. MEHO counts a refused result once,
+  whatever MEHO process takes its batch and however often the batch is sent:
+  in one transaction it adds a row (tenant, runner, result id) to
+  `runner_refused_results` (migration `0190`) and counts only the rows it
+  added, after the commit. Only a result id of 1 to 64 lowercase letters,
+  digits and underscores (the form the runner makes, the same form as in a
+  set-aside notice) gets a row and is counted. A refused result with another
+  id gets no row and is not counted; the answer is the same as for any
+  refused result. The clean-up job of the runner results removes
+  these rows after `RUNNER_CHECK_RESULTS_RETENTION_DAYS`, like the stored
+  results. A result
   without `produced_at` is stored and not counted (`no_time`): without it
   MEHO cannot tell a new result from a replay. A result at or before
   `runner_produced_at` is dropped (`old`), also after the clean-up job
@@ -863,12 +876,15 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   failure that can pass (no connection, a time-out, a 5xx answer, a rate
   limit 429, a login to renew 401 or 403) leaves the batch in its place. A
   client error that is none of these counts as a refusal. After
-  `SET_ASIDE_AFTER_TRIES` (3) refusals of the same batch, the runner moves
+  `SET_ASIDE_AFTER_TRIES` (3) refusals of the same batch that span at least
+  `SET_ASIDE_MIN_SPAN` (5 minutes, so a short deploy that answers a client
+  error for a few quick ticks sets nothing aside), the runner moves
   it to the `set-aside` folder inside its spool folder
   (`runner/spool.py::ResultSpool.set_aside`), together with the HTTP status,
-  the short code of the answer and the time (never the free text of the
-  answer), and goes on with the next batch. Nothing sends a set-aside batch
-  again. The `set-aside` folder keeps at most `spool_max_files` batches:
+  the short code of the answer, the time (never the free text of the
+  answer) and the mark `notice_done` (false until MEHO saved the notice of
+  the batch), and goes on with the next batch. Nothing sends a set-aside
+  batch again. The `set-aside` folder keeps at most `spool_max_files` batches:
   before one more is set aside past the limit, the runner removes the oldest
   set-aside batch and logs `runner_set_aside_overflow_drop` with its file
   name, status and code. In the same tick, also while other batches wait in the retry folder,
@@ -876,7 +892,29 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   `set_aside` (one `SetAsideNotice` for each result), `set_aside_total` and
   `set_aside_last_at`. One post holds at most 1,000 notices
   (`wire.SET_ASIDE_NOTICES_MAX`); the rest go out on the next tick. When that
-  post fails, the next tick sends it again.
+  post fails, the next tick sends it again. When MEHO answers it
+  `NOTICE_DROP_AFTER_TRIES` (3) times in a row with a client error that a
+  retry does not change, and those refusals span at least
+  `SET_ASIDE_MIN_SPAN` (5 minutes, the same minimum time as for a batch),
+  the runner drops those notices and logs one
+  `runner_set_aside_notices_dropped` warning with the status, the code and
+  the number; the count still goes with the next notice. A 5xx answer (also
+  the 503 `set_aside_not_saved`), no connection, a time-out, a rate limit and
+  a login to renew keep the notices, and so does a refusal that comes before
+  the minimum time. A saved or dropped notice gets
+  `notice_done` true in its set-aside file. When the runner cannot write
+  that mark (a full disk, a folder that cannot be written), it logs one
+  `runner_set_aside_mark_failed` warning with the file name and goes on
+  with its tick: it fetches the assignment and runs its due checks. The
+  notice may then go out again on a later tick; MEHO writes nothing twice
+  for it. At the start of a tick without
+  waiting notices, the runner reads the files without that mark
+  (`ResultSpool.waiting_notices`), so it sends the notices of batches it set
+  aside before a restart, and never sends a saved notice again. After a
+  start, the runner sends `set_aside_total` and `set_aside_last_at` in its
+  first notice post, also without a notice. That post goes out in the first
+  tick, after any saved batches of the spool. So the stored count is right
+  again after a restart or after an operator emptied the folder.
   `runner_checks.record_set_aside` shows each such check
   as `unknown` with the reason `result_refused`, the status and the code,
   and stores the count and the time on the runner's assignment row
@@ -885,10 +923,13 @@ On, a Sensor with `runner_name = <runner>` is a check of that runner:
   and underscores (the runner keeps a code in the same form), and a status
   must be 400 to 499. A notice with another `result_uid` is skipped, another
   code is stored as no code, another status as 0, and the post still answers
-  200. MEHO reads the first 1,000 notices of a post and skips the rest
-  before it checks any notice, so a bad entry after them never changes the
-  answer; it logs `runner_set_aside_notices_skipped` with the runner and the
-  number. It keeps `set_aside_total` only as a whole number from 0 to
+  200. MEHO reads the first 1,000 entries of `set_aside` and skips the rest
+  before it checks any entry. Then it checks the entries one by one: an
+  entry that is not a valid notice (not an object, a field missing, or a
+  field of another type, also a `status` sent as text) is skipped, the other
+  entries are recorded, and the post answers 200. One log line
+  `runner_set_aside_notices_skipped` names the runner and the number of
+  skipped entries of both kinds. It keeps `set_aside_total` only as a whole number from 0 to
   2147483647 and `set_aside_last_at` only as a date-time text with a time
   zone; another value (also `true` or a number) leaves the stored one as it
   is, and the post still answers 200. A notice without `produced_at` never replaces a

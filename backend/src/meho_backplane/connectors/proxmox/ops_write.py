@@ -139,6 +139,8 @@ PROXMOX_WRITE_OPS: tuple[ProxmoxOp, ...] = (
         tags=("write", "proxmox", "passthrough"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_API_WRITE,
             "parameter_hints": {

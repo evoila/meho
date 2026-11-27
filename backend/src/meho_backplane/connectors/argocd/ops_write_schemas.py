@@ -167,6 +167,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "sync"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APP_WRITE,
             "parameter_hints": {
@@ -228,6 +229,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "rollback"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APP_WRITE,
             "parameter_hints": {
@@ -281,6 +283,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APP_WRITE,
             "parameter_hints": {
@@ -383,6 +386,7 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "delete"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APP_WRITE,
             "parameter_hints": {
@@ -430,6 +434,8 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "appproject"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APPPROJECT_WRITE,
             "parameter_hints": {
@@ -473,6 +479,8 @@ ARGOCD_WRITE_OPS: tuple[ArgoCdOp, ...] = (
         tags=("write", "argocd", "gitops", "appproject"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_APPPROJECT_WRITE,
             "parameter_hints": {

@@ -102,6 +102,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response={"entry": entry_schema("The new user, with FreeIPA's default attributes.")},
         tags=("user",),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to add a new user to the IPA domain, for example a service account or a "
@@ -137,6 +138,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response={"entry": entry_schema("The user after the change, with FreeIPA's attributes.")},
         tags=("user", "expiry"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to change when a user's password runs out, for example to give a service "
@@ -170,6 +172,8 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("user",),
         safety_level="caution",
+        hard_to_undo="stops",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to stop a user from logging in without deleting the user, for example when "
@@ -202,6 +206,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response={"entry": entry_schema("The new group, with FreeIPA's default attributes.")},
         tags=("group",),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": "Call to add a new, empty user group to the IPA domain.",
             "preconditions": (
@@ -246,6 +251,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("group", "user", "membership"),
         safety_level="caution",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to put existing users or user groups into a user group. Members get the "
@@ -294,6 +300,7 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         },
         tags=("role", "membership", "rights"),
         safety_level="dangerous",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to give users, user groups, hosts or host groups the rights of a role. "
@@ -326,6 +333,8 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response=_DELETE_RESPONSE,
         tags=("user", "delete"),
         safety_level="dangerous",
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to remove a user from the IPA domain for good. To only stop a login, call "
@@ -354,6 +363,8 @@ IDENTITY_WRITE_OPS: tuple[FreeipaTypedOp, ...] = (
         response=_DELETE_RESPONSE,
         tags=("role", "delete"),
         safety_level="dangerous",
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions={
             "when_to_call": "Call to remove a role from the IPA domain.",
             "preconditions": (

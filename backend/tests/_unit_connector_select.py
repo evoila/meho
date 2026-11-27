@@ -124,6 +124,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_gateway_mint_callers_name_the_approval.py",
     # Every guide and codebase docs page.
     "tests/test_people_behind_docs.py",
+    # Every login that the package's own code builds, also in connector folders.
+    "tests/test_in_code_logins_have_a_kind.py",
     # Direct reads of the policy switches, read from every module in the package.
     "tests/test_custom_policy_switch.py",
 )

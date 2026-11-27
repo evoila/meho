@@ -115,6 +115,7 @@ PASSKEY_CODE_SKIP_OPS: tuple[KeycloakOp, ...] = (
         tags=("login-flow", "passkey", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE,
             "when_to_call": (

@@ -88,7 +88,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.op_classes import is_credential_capable
+from meho_backplane.op_classes import is_credential_capable, needs_per_call_approval
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -107,6 +107,7 @@ from meho_backplane.policy.store import (
     classify_rows,
     classify_step,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CLASSIFICATION_FIELDS",
@@ -122,6 +123,7 @@ __all__ = [
     "approval_classification",
     "effective_policy",
     "effective_policy_map",
+    "has_plain_mark",
     "hidden_classification_fields",
     "list_overrides",
     "load_overrides",
@@ -274,6 +276,54 @@ def effective_policy(
     safety = _max_level([code_safety, *(o.safety_level for o in present if o.safety_level)])
     approval = _approval(code_approval, present) or safety == "destructive"
     return EffectivePolicy(safety_level=safety, requires_approval=approval)
+
+
+def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when *descriptor* waits only because of the code's plain approval mark.
+
+    Plain means: the code (or the import) turns ``requires_approval`` on,
+    and the operation has none of these reasons to wait: a credential
+    call, a field with an address the caller gives, a change of rights,
+    "approve each call", or a delete sign (the ``destructive`` level of
+    the code, the HTTP verb ``DELETE``, the ``destructive`` tag, a delete
+    name). It reads the code's own values (``code_requires_approval``,
+    ``code_safety_level``, ``code_parameter_schema``), so an admin's edit
+    or a switch that hides a field never looks like the code's mark.
+
+    It reads the delete names from the one setting
+    ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``, as every other reader of
+    that setting does. No database.
+
+    ``has_plain_mark`` is read only where ``CUSTOM_POLICY`` is on; a
+    reader with the switch off is a fault.
+    """
+    from meho_backplane.operations.service_grants import (
+        delete_grant_reason,
+        descriptor_credential_reason,
+    )
+
+    code_approval = descriptor.code_requires_approval
+    if code_approval is None:
+        code_approval = descriptor.requires_approval
+    code_safety = descriptor.code_safety_level or descriptor.safety_level
+    schema = descriptor.code_parameter_schema
+    if schema is None:
+        schema = descriptor.parameter_schema
+    op_id = descriptor.op_id
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    delete_sign = (
+        code_safety == "destructive"
+        or (descriptor.method or "").upper() == "DELETE"
+        or "destructive" in (descriptor.tags or [])
+        or delete_grant_reason(op_id, patterns) is not None
+    )
+    return bool(code_approval) and not (
+        delete_sign
+        or descriptor_credential_reason(descriptor) is not None
+        or has_caller_address(schema)
+        or is_rights_change_op(op_id)
+        or needs_per_call_approval(op_id)
+    )
 
 
 def _visible_scope(tenant_id: UUID | None) -> Any:
@@ -481,6 +531,7 @@ async def apply_effective_policy(
     )
     policy = policies[OpKey.of(row)]
     session.expunge(row)
+    _keep_code_values(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
     row.parameter_check_schema = checked_parameter_schema(row.parameter_schema)
@@ -531,10 +582,18 @@ async def apply_step_policy(
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
+    _keep_code_values(step)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
     _set_classification(step, policy)
     return step
+
+
+def _keep_code_values(row: EndpointDescriptor) -> None:
+    """Keep the code's own risk level, approval flag and stored schema before they change."""
+    row.code_safety_level = row.safety_level
+    row.code_requires_approval = row.requires_approval
+    row.code_parameter_schema = row.parameter_schema
 
 
 def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> None:

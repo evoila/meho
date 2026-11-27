@@ -59,6 +59,8 @@ class PhpipamTypedOp:
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any]
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None
+    changes_rights: bool = False
 
 
 PHPIPAM_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
@@ -192,6 +194,7 @@ PHPIPAM_TYPED_OPS: Final[tuple[PhpipamTypedOp, ...]] = (
         tags=(*_TAGS, "write", "release"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions={
             "when_to_call": (
                 "Call to free an address that a host no longer uses, for example after the "
@@ -247,6 +250,8 @@ async def register_phpipam_typed_operations(
             tags=list(op.tags),
             safety_level=op.safety_level,
             requires_approval=op.requires_approval,
+            hard_to_undo=op.hard_to_undo,
+            changes_rights=op.changes_rights,
             llm_instructions=op.llm_instructions,
             embedding_service=embedding_service,
         )

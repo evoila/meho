@@ -137,6 +137,7 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_people_behind_docs.py",
     "tests/test_policy_routing.py",
     "tests/test_policy_routing_old_kinds.py",
+    "tests/test_policy_rule_sources_doc.py",
     "tests/test_policy_small_team_parity.py",
     "tests/test_policy_switch_texts.py",
     "tests/test_proxy_headers.py",

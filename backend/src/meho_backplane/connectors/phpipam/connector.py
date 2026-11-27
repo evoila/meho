@@ -435,6 +435,7 @@ class PhpipamConnector(HttpConnector):
             raw_jwt="",
             tenant_id=UUID(int=0),
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
         return await dispatch(
             operator=operator,

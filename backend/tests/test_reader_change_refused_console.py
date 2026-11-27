@@ -30,17 +30,22 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.role_floors import READER_CHANGE_CODE, READER_CHANGE_SENTENCE
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.middleware import require_ui_operator, require_ui_operator_for_call
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from tests import _composite_wait_audit_helpers as h
 from tests._route_tree_helpers import iter_routes
 from tests.test_ui_operations import (
     _TENANT_A,
     _bff_env,
     _build_app,
+    _client_with_role_and_csrf,
     _csrf_headers,
     _make_keypair_and_jwks,
     _mint_token,
@@ -60,6 +65,18 @@ _BODY = {"detail": READER_CHANGE_CODE, "message": READER_CHANGE_SENTENCE}
 _SAFE_READ = "vault.reader.console_read"
 _CAUTION_WRITE = "vault.reader.console_write"
 _UNKNOWN_OP = "vault.reader.no_such_operation"
+
+#: kind -> (op_id, risk level, approval flag) of each stand-in that asks
+#: for a change. The multi-step operation is a composite.
+_CHANGE_KINDS: dict[str, tuple[str, str, bool]] = {
+    "write_safe": ("vault.reader.console_write_safe", "safe", False),
+    "write_caution": (_CAUTION_WRITE, "caution", False),
+    "write_dangerous": ("vault.reader.console_write_dangerous", "dangerous", False),
+    "delete": ("vault.reader.console_delete", "destructive", True),
+    "rights_change": ("vault.reader.console_rights_change", "safe", False),
+    "credential_write": ("vault.reader.console_credential_write", "safe", False),
+    "multi_step": ("vault.reader.console_multi_step", "caution", False),
+}
 _PLAIN = {"detail": "operator_required"}
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -97,7 +114,14 @@ def _approval_requests() -> int:
 
 
 def _seed_stand_ins() -> None:
-    for op_id, level in ((_SAFE_READ, "safe"), (_CAUTION_WRITE, "caution")):
+    declare_op_classes(
+        credential_write=[_CHANGE_KINDS["credential_write"][0]],
+        write=[_CHANGE_KINDS["write_safe"][0]],
+    )
+    register_rights_change_op(_CHANGE_KINDS["rights_change"][0])
+    typed = [(_SAFE_READ, "safe", False)]
+    typed += [spec for kind, spec in _CHANGE_KINDS.items() if kind != "multi_step"]
+    for op_id, level, needs_approval in typed:
         _seed_group_and_op(
             tenant_id=None,
             product="vault",
@@ -107,7 +131,21 @@ def _seed_stand_ins() -> None:
             group_name=f"Group {op_id}",
             op_id=op_id,
             safety_level=level,
+            requires_approval=needs_approval,
         )
+
+    async def _composite() -> None:
+        op_id, level, _ = _CHANGE_KINDS["multi_step"]
+        async with get_sessionmaker()() as session:
+            await h.register_composite(
+                session,
+                op_id,
+                "multi_step_composite",
+                safety_level=level,
+                module="tests.test_reader_change_controls",
+            )
+
+    asyncio.run(_composite())
 
 
 def _call_form(op_id: str) -> dict[str, str]:
@@ -121,18 +159,91 @@ def test_a_reader_console_run_of_each_kind_gets_the_code_and_the_sentence(
     client, csrf = reader
     received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
     _seed_stand_ins()
-    cases: list[tuple[dict[str, str], dict[str, str]]] = [
-        (_call_form(_CAUTION_WRITE), _BODY),
-        (_call_form(_SAFE_READ), _PLAIN),
-        (_call_form(_UNKNOWN_OP), _PLAIN),
-        ({}, _PLAIN),
+    cases: list[tuple[str, dict[str, str], dict[str, str]]] = [
+        (kind, _call_form(op_id), _BODY) for kind, (op_id, _level, _flag) in _CHANGE_KINDS.items()
+    ]
+    cases += [
+        ("safe_read", _call_form(_SAFE_READ), _PLAIN),
+        ("unknown_op", _call_form(_UNKNOWN_OP), _PLAIN),
+        ("empty_form", {}, _PLAIN),
     ]
 
-    for form, body in cases:
+    for name, form, body in cases:
         response = client.post("/ui/operations/call", headers=_csrf_headers(csrf), data=form)
-        assert response.status_code == 403, (form, response.text)
-        assert response.json() == body, form
+        assert (response.status_code, response.json()) == (403, body), (name, response.text)
+        assert _approval_requests() == 0, name
+        assert received == [], name
+    assert len(cases) == 10
 
+
+def _nested(levels: int) -> str:
+    return "[" * levels + "]" * levels
+
+
+#: ``params`` of the call form that the role check cannot read, or that are
+#: controls next to them: (``params``, Reader answer, Operator answer). An
+#: answer is (status, ``detail`` or the first error type, or ``None``).
+_NESTED_PARAMS: dict[str, tuple[str, tuple[int, str | None], tuple[int, str | None]]] = {
+    "160,000 levels": (_nested(160_000), (403, "operator_required"), (422, "string_too_long")),
+    "100,000 levels": (_nested(100_000), (403, "operator_required"), (422, "string_too_long")),
+    "50,000 levels": (_nested(50_000), (403, "operator_required"), (422, "string_too_long")),
+    "2,000 levels": (_nested(2_000), (403, "operator_required"), (400, None)),
+    "200,000 levels, over the form limit": (
+        _nested(200_000),
+        (400, "Field exceeded maximum size of 1024KB."),
+        (400, "Field exceeded maximum size of 1024KB."),
+    ),
+}
+
+
+def _answer(response: Any) -> tuple[int, str | None]:
+    if "json" not in response.headers.get("content-type", ""):
+        return response.status_code, None
+    detail = response.json().get("detail")
+    if isinstance(detail, list):
+        return response.status_code, str(detail[0]["type"])
+    return response.status_code, detail
+
+
+def _nested_form(params: str) -> dict[str, str]:
+    return {"connector_id": "vault-1.x", "op_id": "made-up.op", "target": "", "params": params}
+
+
+@pytest.mark.parametrize("case", list(_NESTED_PARAMS))
+def test_a_reader_console_call_form_the_role_check_cannot_read_gets_the_plain_answer(
+    monkeypatch: pytest.MonkeyPatch, reader: tuple[TestClient, str], case: str
+) -> None:
+    client, csrf = reader
+    received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
+    params, expected, _ = _NESTED_PARAMS[case]
+
+    response = client.post(
+        "/ui/operations/call", headers=_csrf_headers(csrf), data=_nested_form(params)
+    )
+
+    assert _answer(response) == expected, response.text[:300]
+    assert received == []
+    assert _approval_requests() == 0
+
+
+@pytest.mark.parametrize("case", list(_NESTED_PARAMS))
+@pytest.mark.usefixtures("_wait_for_the_answer")
+def test_an_operator_console_call_form_with_the_same_params_keeps_its_answer(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _seed_tenant(_TENANT_A, "tenant-a")
+    received = _patch_call_operation(monkeypatch, {"status": "ok", "result": {}, "extras": {}})
+    params, _, expected = _NESTED_PARAMS[case]
+    client, mock, csrf = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub="operator-person", role=TenantRole.OPERATOR
+    )
+
+    with mock:
+        response = client.post(
+            "/ui/operations/call", headers=_csrf_headers(csrf), data=_nested_form(params)
+        )
+
+    assert _answer(response) == expected, response.text[:300]
     assert received == []
     assert _approval_requests() == 0
 

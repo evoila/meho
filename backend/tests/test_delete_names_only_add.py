@@ -5,10 +5,16 @@
 
 * The setting ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` never removes a
   built-in delete name with the switch on, also when it is empty.
+* Each part of MEHO that reads the setting sees the delete sign of an
+  operation with a built-in delete name: with the switch on and a setting
+  that leaves the name out, and with no setting at all.
 * A service login calls an operation with a built-in delete name over MCP,
   under a standing grant, with a setting that lists other names: with the
-  switch on the call waits for a person, and the audit row says so.
-* With the switch off, a set value is the whole list.
+  switch on the call waits for a person, the handler never runs, and the
+  grant is not used. The same call of an operation with no delete sign
+  runs at once.
+* With the switch off, a setting with at least one name replaces the
+  built-in names; an empty or blank one keeps them.
 """
 
 from __future__ import annotations
@@ -25,11 +31,34 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, AuditLog, ServicePrincipalGrant, Tenant
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    AuditLog,
+    EndpointDescriptor,
+    ServicePrincipalGrant,
+    Tenant,
+)
 from meho_backplane.delete_names import DELETE_SHAPED_OP_ID_PATTERNS
+from meho_backplane.flight_recorder.capture import _op_context_from
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations.governed_subops import classify_subop_grantability
+from meho_backplane.operations.run_approval_schemas import RunApprovalCreate, RunApprovalEntry
+from meho_backplane.operations.run_approvals import (
+    RunApprovalService,
+    RunApprovalValidationError,
+)
+from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
+from meho_backplane.operations.service_grants import (
+    GrantValidationError,
+    ServicePrincipalGrantService,
+    never_covered_reason,
+)
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.fixed_rules import DELETE_WAITS, fixed_rule_for
+from meho_backplane.policy.shadow import asked_of
+from meho_backplane.redaction.flight_recorder.families import classify_body_exclusion
 from meho_backplane.settings import _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS, get_settings
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -42,16 +71,34 @@ _FIX = {"product": "dnfix", "version": "1.x", "impl_id": "dnfix"}
 _CONNECTOR = "dnfix-1.x"
 #: A ``caution`` operation whose only delete sign is the built-in ``*.delete``.
 _DELETE_OP = "dnfix.vm.delete"
+#: A ``caution`` operation with no delete sign.
+_REBOOT_OP = "dnfix.vm.reboot"
 _SERVICE_SUB = "svc:delete-names"
 
 
-def _env(monkeypatch: pytest.MonkeyPatch, *, switch_on: bool, names: str) -> None:
+def _env(monkeypatch: pytest.MonkeyPatch, *, switch_on: bool, names: str | None) -> None:
+    """Set the switch and the setting; ``names=None`` leaves the setting unset."""
     if switch_on:
         monkeypatch.setenv("CUSTOM_POLICY", "true")
     else:
         monkeypatch.delenv("CUSTOM_POLICY", raising=False)
-    monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", names)
+    if names is None:
+        monkeypatch.delenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", raising=False)
+    else:
+        monkeypatch.setenv("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", names)
     get_settings.cache_clear()
+
+
+def _service_operator() -> Operator:
+    return Operator(
+        sub=_SERVICE_SUB,
+        name="Delete names",
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.SERVICE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +152,23 @@ def test_switch_off_an_empty_setting_keeps_the_built_in_names(
 
 
 # ---------------------------------------------------------------------------
-# A whole call: a service login over MCP, under a standing grant
+# Each reader of the setting
 # ---------------------------------------------------------------------------
+
+#: ``(switch on, setting, the reader sees the delete sign)``. ``None`` is no
+#: setting at all. The last case is the control: with the switch off the
+#: setting replaced ``*.delete``, so a reader that ignored the setting fails it.
+_CASES = pytest.mark.parametrize(
+    ("switch_on", "names", "sees_delete"),
+    [
+        (True, _OTHER_NAMES, True),
+        (True, "", True),
+        (True, None, True),
+        (False, None, True),
+        (False, _OTHER_NAMES, False),
+    ],
+    ids=["on-other", "on-empty", "on-unset", "off-unset", "off-other"],
+)
 
 
 @pytest.fixture
@@ -118,59 +180,202 @@ def embedding() -> AsyncMock:
     return service
 
 
-async def _handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
-    return {"deleted": True}
+#: The op id of each handler run. A typed handler must be a module-level
+#: function, so the runs go to a module-level list that each test clears.
+_HANDLER_RUNS: list[str] = []
+
+
+async def _delete_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _HANDLER_RUNS.append(_DELETE_OP)
+    return {"done": True}
+
+
+async def _reboot_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    _HANDLER_RUNS.append(_REBOOT_OP)
+    return {"done": True}
+
+
+@pytest.fixture
+def handler_runs() -> Iterator[list[str]]:
+    """The op id of each handler run in this test."""
+    _HANDLER_RUNS.clear()
+    yield _HANDLER_RUNS
+    _HANDLER_RUNS.clear()
 
 
 @pytest_asyncio.fixture
-async def _granted_delete_op(embedding: AsyncMock) -> AsyncIterator[None]:
-    """The ``caution`` delete operation, and a standing grant on it for the service login.
-
-    The grant row is stored directly: the grant route refuses a delete, so
-    the row stands for a grant made before the install changed its list.
-    """
-    await register_typed_operation(
-        **_FIX,
-        op_id=_DELETE_OP,
-        handler=_handler,
-        summary="Fixture delete.",
-        description="Fixture delete.",
-        parameter_schema={"type": "object", "properties": {}},
-        group_key="vm",
-        when_to_use="Fixture group.",
-        safety_level="caution",
-        embedding_service=embedding,
-    )
+async def _registered_ops(embedding: AsyncMock, handler_runs: list[str]) -> AsyncIterator[None]:
+    """The two ``caution`` operations, and the tenant of the service login."""
+    for op_id, handler in ((_DELETE_OP, _delete_handler), (_REBOOT_OP, _reboot_handler)):
+        await register_typed_operation(
+            **_FIX,
+            op_id=op_id,
+            handler=handler,
+            summary="Fixture op.",
+            description="Fixture op.",
+            parameter_schema={"type": "object", "properties": {}},
+            group_key="vm",
+            when_to_use="Fixture group.",
+            safety_level="caution",
+            embedding_service=embedding,
+        )
     async with get_sessionmaker()() as session, session.begin():
         session.add(Tenant(id=OPERATOR_TENANT_ID, slug="dn-tenant", name="Delete Names Tenant"))
-        await session.flush()
-        session.add(
-            ServicePrincipalGrant(
-                id=uuid.uuid4(),
-                tenant_id=OPERATOR_TENANT_ID,
-                principal_sub=_SERVICE_SUB,
-                op_id=_DELETE_OP,
-                connector_id=_CONNECTOR,
-                target_id=None,
-                reason="fixture: standing grant",
-                created_by_sub="fixture-admin",
-            )
-        )
     yield
+
+
+async def _delete_descriptor() -> EndpointDescriptor:
+    descriptor = await lookup_descriptor(tenant_id=OPERATOR_TENANT_ID, op_id=_DELETE_OP, **_FIX)
+    assert descriptor is not None
+    return descriptor
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_never_covered_reason_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    """The one rule of the standing grant and the run approval at call time."""
+    descriptor = await _delete_descriptor()
+    _env(monkeypatch, switch_on=switch_on, names=names)
+
+    never = never_covered_reason(descriptor)
+
+    assert (never is not None and never[0] == "delete_shaped") is sees_delete, never
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_fixed_rule_for_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    descriptor = await _delete_descriptor()
+    _env(monkeypatch, switch_on=switch_on, names=names)
+
+    rule = fixed_rule_for(descriptor, _service_operator())
+
+    assert rule == (DELETE_WAITS if sees_delete else None)
+
+
+@_CASES
+def test_a_step_of_a_multi_step_operation_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    _env(monkeypatch, switch_on=switch_on, names=names)
+
+    step = classify_subop_grantability(_DELETE_OP)
+
+    assert step.grantable is not sees_delete, step
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_grant_create_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    _env(monkeypatch, switch_on=switch_on, names=names)
+    payload = ServiceGrantCreate(
+        principal_sub=_SERVICE_SUB,
+        op_id=_DELETE_OP,
+        connector_id=_CONNECTOR,
+        target_id=None,
+        reason="fixture: standing grant",
+        expires_at=None,
+    )
+    create = ServicePrincipalGrantService().create(OPERATOR_TENANT_ID, "fixture-admin", payload)
+
+    if sees_delete:
+        with pytest.raises(GrantValidationError, match="delete-shaped"):
+            await create
+    else:
+        assert (await create).op_id == _DELETE_OP
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_run_approval_list_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    _env(monkeypatch, switch_on=switch_on, names=names)
+    payload = RunApprovalCreate(
+        work_ref="run-delete-names",
+        entries=[RunApprovalEntry(connector_id=_CONNECTOR, op_id=_DELETE_OP)],
+        reason="fixture run",
+    )
+    request = RunApprovalService().request(_service_operator(), payload)
+
+    if sees_delete:
+        with pytest.raises(RunApprovalValidationError, match="delete-shaped"):
+            await request
+    else:
+        assert (await request).entries[0].op_id == _DELETE_OP
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_shadow_marks_see_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    descriptor = await _delete_descriptor()
+    _env(monkeypatch, switch_on=switch_on, names=names)
+
+    asked = asked_of(descriptor, connector_id=_CONNECTOR, target=None)
+
+    assert ("delete_shaped" in asked.op_class) is sees_delete, asked.op_class
+
+
+@_CASES
+@pytest.mark.usefixtures("_registered_ops")
+async def test_flight_recorder_sees_the_delete_name(
+    monkeypatch: pytest.MonkeyPatch, switch_on: bool, names: str | None, sees_delete: bool
+) -> None:
+    """Both reads: the call's context, and the default of ``classify_body_exclusion``."""
+    descriptor = await _delete_descriptor()
+    _env(monkeypatch, switch_on=switch_on, names=names)
+    context = _op_context_from(descriptor, _CONNECTOR)
+
+    for patterns in (context.delete_shaped_patterns, None):
+        exclusion = classify_body_exclusion(_DELETE_OP, delete_shaped_patterns=patterns)
+        assert exclusion.excluded is sees_delete, (patterns, exclusion)
+        if sees_delete:
+            assert exclusion.family == "destructive"
+
+
+# ---------------------------------------------------------------------------
+# A whole call: a service login over MCP, under a standing grant
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def _grants(_registered_ops: None) -> AsyncIterator[dict[str, uuid.UUID]]:
+    """A standing grant of the service login on each of the two operations.
+
+    The rows are stored directly: the grant route refuses a delete, so the
+    row of the delete stands for a grant made before the install changed
+    its list.
+    """
+    grants = {op_id: uuid.uuid4() for op_id in (_DELETE_OP, _REBOOT_OP)}
+    async with get_sessionmaker()() as session, session.begin():
+        for op_id, grant_id in grants.items():
+            session.add(
+                ServicePrincipalGrant(
+                    id=grant_id,
+                    tenant_id=OPERATOR_TENANT_ID,
+                    principal_sub=_SERVICE_SUB,
+                    op_id=op_id,
+                    connector_id=_CONNECTOR,
+                    target_id=None,
+                    reason="fixture: standing grant",
+                    created_by_sub="fixture-admin",
+                )
+            )
+    yield grants
 
 
 @pytest.fixture
 def _service_client() -> Iterator[TestClient]:
     async def _fake_verify() -> Operator:
-        return Operator(
-            sub=_SERVICE_SUB,
-            name="Delete names",
-            email=None,
-            raw_jwt="fixture-jwt-not-real",
-            tenant_id=OPERATOR_TENANT_ID,
-            tenant_role=TenantRole.OPERATOR,
-            principal_kind=PrincipalKind.SERVICE,
-        )
+        return _service_operator()
 
     app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
     try:
@@ -180,7 +385,7 @@ def _service_client() -> Iterator[TestClient]:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
 
 
-def _call(client: TestClient) -> dict[str, Any]:
+def _call(client: TestClient, op_id: str) -> dict[str, Any]:
     body = client.post(
         "/mcp",
         json={
@@ -189,7 +394,7 @@ def _call(client: TestClient) -> dict[str, Any]:
             "method": "tools/call",
             "params": {
                 "name": "call_operation",
-                "arguments": {"connector_id": _CONNECTOR, "op_id": _DELETE_OP, "params": {}},
+                "arguments": {"connector_id": _CONNECTOR, "op_id": op_id, "params": {}},
             },
         },
     ).json()
@@ -202,37 +407,68 @@ async def _waiting_ops() -> list[str]:
         return list(await session.scalars(select(ApprovalRequest.op_id)))
 
 
-async def _audit_rows() -> list[AuditLog]:
+async def _audit_rows(op_id: str) -> list[AuditLog]:
     async with get_sessionmaker()() as session:
         rows = await session.scalars(select(AuditLog).order_by(AuditLog.occurred_at))
-        return [row for row in rows if row.payload.get("op_id") == _DELETE_OP]
+        return [row for row in rows if row.payload.get("op_id") == op_id]
 
 
-@pytest.mark.usefixtures("_granted_delete_op")
+async def _grant_use_rows(grant_id: uuid.UUID) -> list[AuditLog]:
+    async with get_sessionmaker()() as session:
+        rows = await session.scalars(select(AuditLog))
+        return [row for row in rows if row.payload.get("grant_id") == str(grant_id)]
+
+
 async def test_switch_on_a_built_in_delete_name_waits_despite_a_grant(
-    monkeypatch: pytest.MonkeyPatch, _service_client: TestClient
+    monkeypatch: pytest.MonkeyPatch,
+    _grants: dict[str, uuid.UUID],
+    _service_client: TestClient,
+    handler_runs: list[str],
 ) -> None:
+    op_id = _DELETE_OP
     _env(monkeypatch, switch_on=True, names=_OTHER_NAMES)
 
-    content = _call(_service_client)
+    content = _call(_service_client, op_id)
 
     assert content["status"] == "awaiting_approval", content
-    assert await _waiting_ops() == [_DELETE_OP]
-    rows = await _audit_rows()
+    assert await _waiting_ops() == [op_id]
+    assert handler_runs == []
+    assert await _grant_use_rows(_grants[op_id]) == []
+    rows = await _audit_rows(op_id)
     assert [(row.path, row.status_code) for row in rows] == [("approval.request", 202)]
     assert rows[0].payload["principal_sub"] == _SERVICE_SUB
 
 
-@pytest.mark.usefixtures("_granted_delete_op")
+async def test_switch_on_an_op_without_a_delete_sign_runs_under_the_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    _grants: dict[str, uuid.UUID],
+    _service_client: TestClient,
+    handler_runs: list[str],
+) -> None:
+    """The control case: the same call of an op with no delete sign runs at once."""
+    op_id = _REBOOT_OP
+    _env(monkeypatch, switch_on=True, names=_OTHER_NAMES)
+
+    content = _call(_service_client, op_id)
+
+    assert content["status"] == "ok", content
+    assert await _waiting_ops() == []
+    assert handler_runs == [op_id]
+    assert len(await _grant_use_rows(_grants[op_id])) == 1
+
+
 async def test_switch_off_the_same_grant_lets_the_call_run(
-    monkeypatch: pytest.MonkeyPatch, _service_client: TestClient
+    monkeypatch: pytest.MonkeyPatch,
+    _grants: dict[str, uuid.UUID],
+    _service_client: TestClient,
+    handler_runs: list[str],
 ) -> None:
     """The control case: with the switch off the setting replaced ``*.delete``."""
     _env(monkeypatch, switch_on=False, names=_OTHER_NAMES)
 
-    content = _call(_service_client)
+    content = _call(_service_client, _DELETE_OP)
 
     assert content["status"] == "ok", content
     assert await _waiting_ops() == []
-    rows = await _audit_rows()
-    assert any(row.path == "approval.decision" for row in rows)
+    assert handler_runs == [_DELETE_OP]
+    assert len(await _grant_use_rows(_grants[_DELETE_OP])) == 1

@@ -375,7 +375,3 @@ class FragmentNavigationMiddleware:
             await send({"type": "http.response.body", "body": b"", "more_body": False})
 
         await self.app(scope, receive, guarded_send)
-
-
-#: Kept so in-module callers and tests that used the private name still work.
-_is_document_navigation = is_document_navigation

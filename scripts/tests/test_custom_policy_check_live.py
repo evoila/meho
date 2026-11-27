@@ -21,8 +21,11 @@ from typing import Any, ClassVar
 
 from custom_policy_check_fixture import (
     BACKPLANE,
+    C1_START,
     FAR_FUTURE,
     OPS,
+    PROBE_KEYS,
+    REMOVAL_NOT_CONFIRMED,
     WORK_REF,
     LiveRun,
     good_answers,
@@ -40,7 +43,7 @@ MAKERS = {
     "req-2": "CPC_PERSON_TOKEN", "req-3": "CPC_PERSON_TOKEN", "req-4": "CPC_SERVICE_TOKEN",
     "req-5": "CPC_SERVICE_TOKEN", "req-harmless": "CPC_PERSON_TOKEN",
     "req-c6-cred-read": "CPC_AGENT_TOKEN", "req-c6-cred-write": "CPC_PERSON_TOKEN",
-    "req-c6-rights": "CPC_PERSON_TOKEN", "req-c6-policy": "CPC_PERSON_TOKEN",
+    "req-c6-rights": "CPC_PERSON_TOKEN", "req-c6-policy": "CPC_ADMIN_TOKEN",
     "req-c6-destructive": "CPC_SERVICE_TOKEN", "req-c6-root": "CPC_SERVICE_TOKEN", "req-c6-delete-person": "CPC_PERSON_TOKEN",
     "req-c6-delete-agent": "CPC_AGENT_TOKEN", "req-c6-delete-service": "CPC_SERVICE_TOKEN",
     "req-c6-delete-lowered": "CPC_PERSON_TOKEN", "req-c6-address": "CPC_PERSON_TOKEN",
@@ -91,8 +94,9 @@ class FullLiveRunTest(LiveTestCase):
         result = self.full_run
         self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
         self.assertNotIn("[FAIL]", result.stdout)
-        self.assertNotIn("[left]", result.stdout)
-        self.assertIn("passed, 0 failed, 4 not run, 0 not taken back", result.stdout)
+        left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
+        self.assertEqual(left, REMOVAL_NOT_CONFIRMED)
+        self.assertIn("passed, 0 failed, 4 not run, 2 not taken back", result.stdout)
 
     def test_every_call_goes_to_the_checked_install(self) -> None:
         self.assertTrue(self.full_calls)
@@ -185,6 +189,22 @@ class FullLiveRunTest(LiveTestCase):
         for step in ("c2-call", "c6-delete-person", "c6-delete-agent", "c6-cred-write", "c10-cli"):
             self.assertIn(f"{run}-{step}", refs, step)
 
+    def test_the_policy_change_waits_for_the_admins_token_and_refuses_the_operators(self) -> None:
+        tokens = {"c6-policy": "CPC_ADMIN_TOKEN", "c6-policy-operator": "CPC_PERSON_TOKEN"}
+        for step, token in tokens.items():
+            calls = self.by_step(step)
+            self.assertTrue(calls, step)
+            self.assertEqual(calls[-1]["auth"], token_hash(self.full_tokens[token]), step)
+        probe = PROBE_KEYS.index("6 ADMIN_TOKEN POLICY_CHANGE token") + 1
+        self.assertEqual(
+            self.by_step(f"c7-{probe}")[-1]["auth"],
+            token_hash(self.full_tokens["CPC_ADMIN_TOKEN"]),
+        )
+
+    def test_check_1_searches_from_the_servers_time_of_the_person_step(self) -> None:
+        for step in ("c1-edits", "c1-row"):
+            self.assertEqual(self.body(step)["since"], C1_START, step)
+
     def test_withdraws_each_waiting_request_with_the_login_that_made_it(self) -> None:
         withdrawn = {}
         for entry in self.full_calls:
@@ -237,6 +257,18 @@ class NoTerminalTest(LiveTestCase):
             if (c.get("url") or "").endswith("/withdraw")
         }
         self.assertTrue({"req-3", "req-c6-cred-read", "req-c6-cred-write"} <= withdrawn, withdrawn)
+
+    def test_a_stop_during_the_clean_up_names_each_request_not_handled_yet(self) -> None:
+        result = self.live.run(good_answers(), CPC_STUB_STOP_AT="withdraw-req-c6-rights-status")
+        self.assertEqual(result.returncode, STOPPED, result.stdout + result.stderr)
+        left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
+        not_handled = ["req-c6-rights", "req-c6-policy", "req-c6-address", "req-harmless",
+                       "req-c10-web", "req-c10-cli"]  # fmt: skip
+        self.assertEqual(
+            left,
+            [f"[left] request {req} (sent with {MAKERS[req].removeprefix('CPC_')}): not "
+             "withdrawn, the run was stopped" for req in not_handled],
+        )  # fmt: skip
 
     def test_a_stopped_call_is_found_in_the_queue_and_withdrawn(self) -> None:
         answers = good_answers()

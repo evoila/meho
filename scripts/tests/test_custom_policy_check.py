@@ -21,11 +21,14 @@ from typing import Any
 
 from custom_policy_check_fixture import (
     ALWAYS_SKIPPED,
+    C1_EDIT_AT,
+    C1_START,
     FAR_FUTURE,
     OPS,
     PARAMS,
-    POLICY_FILE,
     PROBE_KEYS,
+    REMOVAL_NOT_CONFIRMED,
+    ROOT,
     SCRIPT,
     SENSOR_ID,
     WORK_REF,
@@ -33,6 +36,7 @@ from custom_policy_check_fixture import (
     base_env,
     baseline_text,
     call,
+    check_9_rows,
     edit_row,
     good_answers,
     post_row,
@@ -42,6 +46,7 @@ from custom_policy_check_fixture import (
     result_lines,
     row,
     rows,
+    run_row,
     write_answers,
 )
 
@@ -105,7 +110,7 @@ class FullRunTest(DryRunTestCase):
         for line in lines:
             if line.startswith("[ok]") and "risk level" not in line:
                 self.assertRegex(line, r"rows? [0-9a-f-]{36}", line)
-        self.assertIn("passed, 0 failed, 4 not run, 0 not taken back", result.stdout)
+        self.assertIn("passed, 0 failed, 4 not run, 2 not taken back", result.stdout)
 
     def test_runs_the_checks_in_order_and_ends_with_the_switch_off(self) -> None:
         result = self.run_script()
@@ -378,7 +383,7 @@ class Check7Test(DryRunTestCase):
             "2 PERSON_TOKEN RELEVELLED token": "check 2 (an Operator's token, a personal agent, REST)",
             "6 PERSON_TOKEN CREDENTIAL_WRITE token": "check 6 credential write (the Operator's meho login",
             "6 AGENT_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an agent login",
-            "6 PERSON_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an Operator's AI tool",
+            "6 ADMIN_TOKEN POLICY_CHANGE token": "check 6 change of the policy (an Admin's AI tool",
             "6 DELETE_GRANT_TOKEN DELETE token": "check 6 delete (a service login with a delete grant",
             "10 PERSON_TOKEN OWN_AGENT token": "check 10 (the Operator's AI tool, a personal agent, MCP)",
         }  # fmt: skip
@@ -611,9 +616,7 @@ class RiskLevelTest(DryRunTestCase):
                 self.assert_one_fail(self.run_script(), "check 1", "no override of this run")
 
     def test_check_1_needs_a_rule_of_the_source_override(self) -> None:
-        self.answers["c1-row"] = rows(
-            row("c1", "default:person.web.caution", "person", "ok")["body"]
-        )
+        self.answers["c1-row"] = rows(run_row("c1", "default:person.web.caution", "person"))
         self.assert_one_fail(self.run_script(), "check 1", "expected a rule of the source override")
 
     def test_check_2_reads_the_level_dangerous_first(self) -> None:
@@ -760,7 +763,7 @@ class Check11Test(DryRunTestCase):
 
     def test_the_web_console_reader_needs_the_kind_person(self) -> None:
         self.assertIn("[ok]   check 11 (the web console reader", self.run_script().stdout)
-        self.answers["c1-row"] = rows(row("c1", "override:ov-1", "system", "ok")["body"])
+        self.answers["c1-row"] = rows(run_row("c1", "override:ov-1", "system"))
         result = self.run_script()
         self.assertRegex(
             result.stdout, r"\[FAIL\] check 11 \(the web console reader.*caller kind system"
@@ -814,7 +817,6 @@ class TakeBackTest(DryRunTestCase):
     def test_what_could_not_be_taken_back_is_named(self) -> None:
         self.answers["withdraw-req-3"] = {"code": 403, "body": {"detail": "not_request_sender"}}
         self.answers["takeback-overrides"] = self.answers["c1-overrides"]
-        self.answers["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE + "routing: []\n"}
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
         left = self.left_lines(result)
@@ -831,10 +833,11 @@ class TakeBackTest(DryRunTestCase):
         self.assertEqual(
             self.left_lines(result),
             [
-                "[left] request req-4 (sent with SERVICE_TOKEN): its state could not be read, HTTP 500"
+                "[left] request req-4 (sent with SERVICE_TOKEN): its state could not be read, HTTP 500",
+                *REMOVAL_NOT_CONFIRMED,
             ],
         )
-        self.assertIn("1 not taken back", result.stdout)
+        self.assertIn("3 not taken back", result.stdout)
 
     def test_asks_only_for_the_person_steps_that_were_done(self) -> None:
         for step in ("p1", "p5-role", "p6-lower", "p8", "p9"):
@@ -864,9 +867,10 @@ class TakeBackTest(DryRunTestCase):
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the override of k8s.annotate (check 9): not as before the run: tenant "
-             "override: added (risk level dangerous, approval not set, category not set, "
-             "labels none, always wait not set)"],
+            [*REMOVAL_NOT_CONFIRMED,
+             "[left] the override of k8s.annotate (check 9): not as before the run: tenant "
+             "override: added (risk level dangerous, category not set, labels none, always wait "
+             "not set)"],
         )  # fmt: skip
 
     def test_an_override_from_before_the_run_is_set_back_not_removed(self) -> None:
@@ -880,11 +884,16 @@ class TakeBackTest(DryRunTestCase):
         result = self.run_script()
         self.assertIn(
             "set the overrides of k8s.scale back to how they were before the run "
-            "(tenant override: risk level dangerous, approval true, category write, "
-            "labels area=apps team=web, always wait true)",
+            '(tenant override: risk level dangerous, category write, labels {"area":"apps",'
+            '"team":"web"}, always wait true; category, labels and the "always wait" mark are '
+            "the values that apply to the operation, which may come from the policy file)",
             result.stdout,
         )
-        self.assertEqual(self.left_lines(result), [])
+        self.assertEqual(
+            self.left_lines(result),
+            ["[left] the lowering of k8s.scale (check 1): approval setting not confirmed",
+             *REMOVAL_NOT_CONFIRMED],
+        )  # fmt: skip
 
     def lost_setting(self, field: str, value: Any) -> list[str]:
         """An override from before the run that has lost one stored setting at the end."""
@@ -898,13 +907,19 @@ class TakeBackTest(DryRunTestCase):
         self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
         result = self.run_script()
         self.assertEqual(result.returncode, NOT_COMPLETE)
-        return self.left_lines(result)
+        left = self.left_lines(result)
+        self.assertEqual(
+            left[-3:],
+            ["[left] the lowering of k8s.scale (check 1): approval setting not confirmed",
+             *REMOVAL_NOT_CONFIRMED],
+        )  # fmt: skip
+        return left[:-3]
 
     def test_an_override_from_before_the_run_that_lost_its_labels_is_named(self) -> None:
         self.assertEqual(
             self.lost_setting("labels", {}),
             ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
-             "override: labels is none, before the run team=web"],
+             'override: labels is none, before the run {"team":"web"}'],
         )  # fmt: skip
 
     def test_an_override_from_before_the_run_that_lost_its_category_is_named(self) -> None:
@@ -936,7 +951,11 @@ class TakeBackTest(DryRunTestCase):
         )
         self.assertNotIn("[person] Check 9.", result.stdout)
         self.assertNotIn("(check 9)", result.stdout)
-        self.assertEqual(self.left_lines(result), [])
+        self.assertEqual(
+            self.left_lines(result),
+            [*REMOVAL_NOT_CONFIRMED,
+             "[left] an override of k8s.annotate (check 8): approval setting not confirmed"],
+        )  # fmt: skip
 
     def test_a_tenant_lowering_left_next_to_an_install_override_is_named(self) -> None:
         install = {
@@ -950,25 +969,29 @@ class TakeBackTest(DryRunTestCase):
         self.assertEqual(
             self.left_lines(result),
             ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
-             "override: added (risk level caution, approval not set, category not set, "
-             "labels none, always wait not set)"],
+             "override: added (risk level caution, category not set, labels none, always wait "
+             "not set)",
+             "[left] the lowering of k8s.scale (check 1): approval setting not confirmed",
+             *REMOVAL_NOT_CONFIRMED],
         )  # fmt: skip
-        self.assertIn("1 not taken back", result.stdout)
+        self.assertIn("4 not taken back", result.stdout)
 
     def test_an_approval_setting_left_changed_is_named(self) -> None:
+        """The list shows the approval that applies, so the stored one is never confirmed."""
         before = {
             "connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
             "safety_level": "dangerous", "requires_approval": True,
         }  # fmt: skip
         self.answers["before-overrides"] = {"code": 200, "body": {"overrides": [before]}}
-        after = dict(before, requires_approval=False)
-        self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
-        result = self.run_script()
-        self.assertEqual(
-            self.left_lines(result),
-            ["[left] the lowering of k8s.scale (check 1): not as before the run: tenant "
-             "override: approval is false, before the run true"],
-        )  # fmt: skip
+        for after in (dict(before, requires_approval=False), before):
+            with self.subTest(after=after):
+                self.answers["takeback-overrides"] = {"code": 200, "body": {"overrides": [after]}}
+                result = self.run_script()
+                self.assertEqual(
+                    self.left_lines(result),
+                    ["[left] the lowering of k8s.scale (check 1): approval setting not confirmed",
+                     *REMOVAL_NOT_CONFIRMED],
+                )  # fmt: skip
 
     def test_an_override_read_that_fails_at_the_start_skips_the_four_edit_steps(self) -> None:
         self.answers["before-overrides"] = {"code": 500, "body": {"detail": "boom"}}
@@ -991,32 +1014,26 @@ class TakeBackTest(DryRunTestCase):
         self.assertNotIn("override", question)
         for op in ("k8s.scale", "k8s.pod.delete", "k8s.annotate"):
             self.assertNotIn(op, question)
-        self.assertEqual(self.left_lines(result), [])
+        self.assertEqual(self.left_lines(result), REMOVAL_NOT_CONFIRMED)
 
     def test_a_rule_left_in_the_policy_file_is_named_although_explain_is_the_same(self) -> None:
         del self.answers["p5-role"]
-        rule = "agents:\n  - match: {connector: k8s, op: k8s.cordon}\n    run: now\n"
-        self.answers["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE + rule}
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the personal agent rule of check 4: removal not confirmed: the tenant's "
-             "policy file is not as it was before the run"],
-        )  # fmt: skip
+            ["[left] the personal agent rule of check 4: removal not confirmed"],
+        )
         self.assertEqual(result.returncode, NOT_COMPLETE)
 
     def test_a_role_that_cannot_be_read_is_not_confirmed_as_removed(self) -> None:
         del self.answers["p4"]
-        self.answers["takeback-policy-file"] = {"code": 500, "body": {"detail": "boom"}}
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the custom role Approvers-VMW of check 5: removal not confirmed: the "
-             "tenant's policy file could not be read"],
-        )  # fmt: skip
+            ["[left] the custom role Approvers-VMW of check 5: removal not confirmed"],
+        )
 
     def test_a_policy_file_that_cannot_be_read_at_the_start_is_not_confirmed(self) -> None:
-        self.answers["before-policy-file"] = {"code": 403, "body": {"detail": "no"}}
         result = self.run_script()
         left = self.left_lines(result)
         self.assertEqual(len(left), 2, left)
@@ -1038,8 +1055,9 @@ class TakeBackTest(DryRunTestCase):
         result = self.run_script()
         self.assertEqual(
             self.left_lines(result),
-            ["[left] request req-cut (sent with SERVICE_TOKEN): not withdrawn, HTTP 403"],
-        )
+            ["[left] request req-cut (sent with SERVICE_TOKEN): not withdrawn, HTTP 403",
+             *REMOVAL_NOT_CONFIRMED],
+        )  # fmt: skip
 
     def test_a_request_of_its_logins_without_this_runs_work_reference_stays(self) -> None:
         self.answers["withdraw-queue"] = {
@@ -1057,7 +1075,7 @@ class TakeBackTest(DryRunTestCase):
             result.stdout,
         )
         self.assertIn("[note] request req-ticket of PERSON_TOKEN waits", result.stdout)
-        self.assertEqual(self.left_lines(result), [])
+        self.assertEqual(self.left_lines(result), REMOVAL_NOT_CONFIRMED)
 
     def test_a_request_of_another_run_of_the_script_stays(self) -> None:
         other = "custom-policy-check-0123456789abcdef-c6-rights"
@@ -1075,7 +1093,7 @@ class TakeBackTest(DryRunTestCase):
                       f"this run's work reference (it has {other}); it stays", result.stdout)  # fmt: skip
         self.assertIn("[note] request req-prefix of PERSON_TOKEN waits", result.stdout)
         self.assertNotIn("withdraw-req-run", result.stdout)
-        self.assertEqual(self.left_lines(result), [])
+        self.assertEqual(self.left_lines(result), REMOVAL_NOT_CONFIRMED)
 
     def test_a_queue_answer_that_is_not_a_list_is_never_read_as_empty(self) -> None:
         for body in ({"items": []}, "<html>busy</html>", None, [1, 2]):
@@ -1084,14 +1102,14 @@ class TakeBackTest(DryRunTestCase):
                 result = self.run_script()
                 self.assertEqual(result.returncode, NOT_COMPLETE, result.stdout + result.stderr)
                 left = self.left_lines(result)
-                self.assertEqual(len(left), 1, left)
+                self.assertEqual(left[1:], REMOVAL_NOT_CONFIRMED)
                 self.assertTrue(
                     left[0].startswith(
                         "[left] the waiting requests of this run: could not read the queue (HTTP 200"
                     ),
                     left[0],
                 )
-                self.assertIn("1 not taken back", result.stdout)
+                self.assertIn("3 not taken back", result.stdout)
 
     def test_a_queue_that_does_not_answer_200_is_named(self) -> None:
         self.answers["withdraw-queue"] = {"code": 502, "body": {"detail": "bad gateway"}}
@@ -1099,8 +1117,348 @@ class TakeBackTest(DryRunTestCase):
         self.assertEqual(result.returncode, NOT_COMPLETE)
         self.assertEqual(
             self.left_lines(result),
-            ["[left] the waiting requests of this run: could not read the queue (HTTP 502)"],
+            ["[left] the waiting requests of this run: could not read the queue (HTTP 502)",
+             *REMOVAL_NOT_CONFIRMED],
+        )  # fmt: skip
+
+
+class RemovalReadBackTest(DryRunTestCase):
+    """The agent rule and the custom role are read back only from where MEHO keeps them."""
+
+    def test_an_unchanged_policy_file_is_no_proof_that_they_are_gone(self) -> None:
+        self.answers["before-policy-file"] = {"code": 200, "body": "policy: v1\n"}
+        self.answers["takeback-policy-file"] = {"code": 200, "body": "policy: v1\n"}
+        result = self.run_script()
+        left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
+        self.assertEqual(left, REMOVAL_NOT_CONFIRMED)
+        self.assertNotIn("policy/export", SCRIPT.read_text())
+
+
+class RefusedClickTest(DryRunTestCase):
+    """A person who may not approve first looks at the Approve button."""
+
+    CASES = (("p2-operator", "c2-operator", "req-2", "check 2 (a second Operator, a person, web console)"),
+             ("p5-without", "c5-without", "req-5", "check 5 (a person without the role, web console)"))  # fmt: skip
+    CLICKS = {"p2-operator": "Check 2. As a second Operator (not the one of CPC_PERSON_TOKEN), in "
+              "the web console, click Approve", "p5-without": "Check 5. As the person WITHOUT the "
+              "custom role, in the web console, click Approve"}  # fmt: skip
+
+    def test_a_button_that_is_off_passes_without_a_click_row(self) -> None:
+        for person, step, req, check in self.CASES:
+            with self.subTest(step=step):
+                self.answers = good_answers()
+                self.answers[f"{person}-button"] = {"code": 0, "body": "n"}
+                self.answers[f"{step}-off"] = {"code": 0, "body": "y"}
+                self.answers[f"{step}-rows"] = rows()
+                self.answers[f"{step}-request"] = request("pending")
+                result = self.run_script()
+                self.assertEqual(self.fails(result), [])
+                self.assertIn(
+                    f"[ok]   {check}: the Approve button is off, request {req} is pending",
+                    result.stdout,
+                )
+                self.assertNotIn(self.CLICKS[person], result.stdout)
+                self.assertIn(self.CLICKS[person], self.run_script_with_button_on(person))
+
+    def run_script_with_button_on(self, person: str) -> str:
+        self.answers[f"{person}-button"] = {"code": 0, "body": "y"}
+        return self.run_script().stdout
+
+    def test_a_button_that_is_off_needs_the_reason_and_a_request_that_waits(self) -> None:
+        for person, step, _req, check in self.CASES:
+            for name, off, status in (("no reason", "n", "pending"), ("approved", "y", "approved")):
+                with self.subTest(step=step, case=name):
+                    self.answers = good_answers()
+                    self.answers[f"{person}-button"] = {"code": 0, "body": "n"}
+                    self.answers[f"{step}-off"] = {"code": 0, "body": off}
+                    self.answers[f"{step}-request"] = request(status)
+                    self.assert_one_fail(self.run_script(), check)
+
+    def test_the_questions_name_the_sign_in_again_banner_as_a_no(self) -> None:
+        result = self.run_script()
+        self.assertIn('A "Sign in again" banner, a sign-in page or an error is a no.', result.stdout)
+        self.answers["p2-operator-button"] = {"code": 0, "body": "n"}
+        self.assertIn('A "Sign in again" banner is a no.', self.run_script().stdout)
+
+
+class Check8ConsoleRowTest(DryRunTestCase):
+    """Check 8 in the console counts only the Admin's refused edit of the named write."""
+
+    def test_counts_only_a_400_row_of_the_admin_of_the_token(self) -> None:
+        path = "/ui/connectors/registry/k8s/operations/k8s.annotate"
+        cases = {
+            "another Admin": post_row("c8-console", path, "admin-1", 400, "PATCH"),
+            "not found": post_row("c8-console", path, "admin-0", 404, "PATCH"),
+            "a login refusal": post_row("c8-console", path, "admin-0", 403, "PATCH"),
+        }
+        for name, entry in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c8-console-rows"] = rows(entry)
+                self.assert_one_fail(
+                    self.run_script(), "check 8 (an Admin, a person, web console)", "HTTP 400"
+                )
+
+    def test_needs_the_refusal_of_the_write_rule(self) -> None:
+        self.answers["c8-refusal"] = {"code": 0, "body": "n"}
+        self.assert_one_fail(
+            self.run_script(),
+            "check 8 (an Admin, a person, web console)",
+            "a write stays at least caution",
         )
+
+
+class Check9EditRowsTest(DryRunTestCase):
+    """Check 9 counts a raise to dangerous by the Admin, then the removal."""
+
+    def test_needs_the_admins_raise_to_dangerous_then_its_removal(self) -> None:
+        remove, raise_ = check_9_rows()
+        cases = {
+            "another Admin": rows(*check_9_rows(sub="admin-1")),
+            "a raise to caution": rows(remove, edit_row("c9-raise", "k8s.annotate", "admin-0",
+                                                        level="caution", ts=raise_["ts"])),
+            "the removal first": rows(dict(remove, ts="2026-01-01T00:00:31.000000Z"), raise_),
+            "another connector": rows(*(dict(r, payload=dict(r["payload"], connector_id="k9s"))
+                                        for r in (remove, raise_))),
+        }  # fmt: skip
+        for name, answer in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c9-rows"] = answer
+                self.assert_one_fail(self.run_script(), "check 9 (an Admin")
+
+
+class Check6PolicyChangeTest(DryRunTestCase):
+    """An Operator's policy.apply is refused; the Admin's token waits."""
+
+    def test_the_operator_is_refused_and_the_admin_waits(self) -> None:
+        result = self.run_script()
+        self.assertRegex(
+            result.stdout,
+            r"\[ok\]\s+check 6 change of the policy \(an Operator's AI tool, a personal agent, "
+            r"MCP\): refused",
+        )
+        self.assertRegex(
+            result.stdout,
+            r"\[ok\]\s+check 6 change of the policy \(an Admin's AI tool, a personal agent, "
+            r"MCP\): waits",
+        )
+
+    def test_an_operators_policy_change_that_waits_fails(self) -> None:
+        self.answers["c6-policy-operator"] = call("c6-po", "awaiting_approval", request="req-po")
+        self.answers["c6-policy-operator-row"] = row("c6-po", "floor:policy_change_waits", "personal_agent")
+        self.answers["withdraw-req-po-status"] = request("pending")
+        self.answers["withdraw-req-po"] = {"code": 200, "body": {"status": "withdrawn"}}
+        self.assert_one_fail(
+            self.run_script(),
+            "check 6 change of the policy (an Operator's AI tool",
+            "expected refused",
+            'expected the reason "needs the tenant_admin role"',
+        )
+
+
+class PreviewErrorProbeTest(DryRunTestCase):
+    """A preview that answers status error is no probe answer."""
+
+    def error_preview(self) -> dict[str, Any]:
+        return {
+            "code": 200,
+            "body": {
+                "status": "error",
+                "policy_verdict": "needs-approval",
+                "extras": {"error_code": "invalid_params"},
+            },
+        }
+
+    def test_no_baseline_is_saved_and_the_earlier_file_stays(self) -> None:
+        self.answers["ready"] = ready(False)
+        i = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
+        self.answers[f"baseline-{i}-preview"] = self.error_preview()
+        out = self.dir / "kept-baseline.tsv"
+        out.write_text("the earlier baseline\n")
+        result = self.run_script("--record-baseline", str(out))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("status error (invalid_params)", result.stdout)
+        self.assertEqual(out.read_text(), "the earlier baseline\n")
+
+    def test_check_7_fails_on_it(self) -> None:
+        i = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
+        self.answers[f"c7-{i}-preview"] = self.error_preview()
+        self.assert_one_fail(
+            self.run_script(), "check 7 (as check 6: PERSON_TOKEN CREDENTIAL_WRITE", "status error"
+        )
+
+
+class Check1RunRowTest(DryRunTestCase):
+    """Check 1 takes only the Operator's run of the operation after the Admin's edit."""
+
+    def test_takes_only_the_run_of_the_operator_on_the_target_after_the_edit(self) -> None:
+        cases = {
+            "another login": run_row("c1", "override:ov-1", "person", sub="operator-2"),
+            "another target": run_row("c1", "override:ov-1", "person", target="web-b"),
+            "another connector": run_row("c1", "override:ov-1", "person", impl="k9s"),
+            "before the edit": run_row("c1", "override:ov-1", "person", ts=C1_START),
+        }
+        for name, entry in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c1-row"] = rows(entry)
+                result = self.run_script()
+                self.assertRegex(
+                    result.stdout, r"\[FAIL\] check 1 \(the Operator.*no run row of the Operator"
+                )
+
+    def test_fails_without_the_servers_time_and_asks_nobody(self) -> None:
+        self.answers["c1-start-row"] = rows()
+        result = self.run_script()
+        self.assertIn(
+            "[FAIL] check 1 (an Admin and an Operator, persons, web console): could not read "
+            "the server's time at the step start; nobody was asked",
+            result.stdout,
+        )
+        self.assertNotIn("[person] Check 1.", result.stdout)
+
+
+class Check11TimeTest(DryRunTestCase):
+    """Check 11 compares full timestamps and needs a fresh result of the named sensor."""
+
+    def sensor_row(self, ts: str) -> dict[str, Any]:
+        body = row("c11", "default:system", "system", "ok")["body"]
+        body.update(target_name="web-a", principal_sub="__sensor__", ts=ts)
+        return rows(body)
+
+    def test_a_row_in_the_same_second_before_the_run_call_does_not_count(self) -> None:
+        self.answers["c11-row"] = self.sensor_row("2026-01-01T00:00:05.000001Z")
+        self.assert_one_fail(self.run_script(), "check 11 (the check runner", "no audit row")
+        self.answers["c11-row"] = self.sensor_row("2026-01-01T00:00:05.123456+00:00")
+        self.assertIn("[ok]   check 11 (the check runner", self.run_script().stdout)
+
+    def test_needs_a_fresh_result_of_the_named_sensor(self) -> None:
+        old = {"sensor_id": SENSOR_ID, "evaluated_at": "2026-01-01T00:00:05.1Z", "state": "ok"}
+        other = {"sensor_id": "x", "evaluated_at": "2026-01-01T00:00:09Z", "state": "ok"}
+        for items in ([], [old], [other]):
+            with self.subTest(items=items):
+                self.answers["c11-results"] = {"code": 200, "body": {"items": items}}
+                self.assert_one_fail(
+                    self.run_script(), "check 11 (the check runner", "no fresh result"
+                )
+
+    def test_follows_the_offset_of_the_sensor_list(self) -> None:
+        sensor = self.answers["c11-sensors"]["body"]["items"][1]
+        page = [{"id": f"00000000-0000-4000-8000-{n:012d}", "op_id": "k8s.list"} for n in range(500)]
+        self.answers["c11-sensors"] = {"code": 200, "body": {"items": page, "next_cursor": None}}
+        self.answers["c11-sensors-500"] = {"code": 200, "body": {"items": [sensor]}}
+        self.assertIn("[ok]   check 11 (the check runner", self.run_script().stdout)
+
+
+class SameRunRequestTest(DryRunTestCase):
+    """A request MEHO gives back from this run's own list is this run's."""
+
+    def test_it_is_not_reported_as_waiting_before_the_run(self) -> None:
+        self.answers["c6-delete-agent"] = call(
+            "c6-delete-agent", "awaiting_approval", request="req-c6-delete-person", reused=True
+        )
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        self.assertNotIn("waited before this run", result.stdout)
+
+    def test_the_second_call_of_check_10_waits_for_the_first_request(self) -> None:
+        self.answers["c10-first-request"] = request("pending")
+        result = self.run_script()
+        for line in (
+            "[skip] check 10 (the Operator's AI tool, a personal agent, MCP): not run: the "
+            "first request req-c10-web still waits",
+            "[skip] check 10 (the Operator, a person, command line): not run: the first "
+            "request req-c10-web still waits",
+        ):
+            self.assertIn(line, result.stdout)
+        self.assertNotIn("req-c10-cli", result.stdout)
+
+
+class Check10DecideRowTest(DryRunTestCase):
+    def test_an_approve_row_is_not_the_route_meho_approvals_approve_calls(self) -> None:
+        self.answers["c10-cli-rows"] = rows(
+            post_row("c10-cli-approve", "/api/v1/approvals/req-c10-cli/approve", "operator-1", 403)
+        )
+        self.assert_one_fail(
+            self.run_script(), "check 10 (the Operator, a person, command line)", "decide"
+        )
+
+
+class OverrideReadBackTest(DryRunTestCase):
+    """The override read-back compares what the list shows, as stored values."""
+
+    def override(self, **extra: Any) -> dict[str, Any]:
+        entry = {"connector_id": "k8s", "op_id": "k8s.scale", "scope": "tenant",
+                 "safety_level": "dangerous", "requires_approval": True}  # fmt: skip
+        entry.update(extra)
+        return {"code": 200, "body": {"overrides": [entry]}}
+
+    def test_labels_compare_as_key_and_value_pairs(self) -> None:
+        self.answers["before-overrides"] = self.override(labels={"a": "b c=d"})
+        self.answers["takeback-overrides"] = self.override(labels={"a": "b", "c": "d"})
+        left = [x for x in self.run_script().stdout.splitlines() if x.startswith("[left]")]
+        self.assertIn(
+            "[left] the lowering of k8s.scale (check 1): not as before the run: tenant override: "
+            'labels is {"a":"b","c":"d"}, before the run {"a":"b c=d"}',
+            left,
+        )
+
+    def test_the_person_is_not_asked_to_set_an_approval_back(self) -> None:
+        self.answers["before-overrides"] = self.override()
+        self.answers["takeback-overrides"] = self.override()
+        result = self.run_script()
+        question = next(x for x in result.stdout.splitlines() if x.startswith("[person] Take back."))
+        self.assertNotIn("approval", question)
+        self.assertIn(
+            "[left] the lowering of k8s.scale (check 1): approval setting not confirmed",
+            result.stdout,
+        )
+
+
+class UnknownSenderTest(DryRunTestCase):
+    def test_the_queue_is_read_also_when_no_login_was_read(self) -> None:
+        self.answers["login-rows"] = rows()
+        self.answers["withdraw-queue"] = {
+            "code": 200,
+            "body": [{"id": "req-cut", "principal_sub": "operator-1",
+                      "created_at": FAR_FUTURE, "work_ref": f"{WORK_REF}-c6-rights"}],
+        }  # fmt: skip
+        result = self.run_script()
+        self.assertIn(
+            "[left] request req-cut (work reference of this run): not withdrawn, its sender is "
+            "not known",
+            result.stdout,
+        )
+
+
+class RuleIdTest(unittest.TestCase):
+    def test_each_expected_floor_rule_is_named_by_the_rule_table_or_floors_py(self) -> None:
+        table = (ROOT / "docs/codebase/policy-evaluator.md").read_text()
+        floors = (ROOT / "backend/src/meho_backplane/policy/floors.py").read_text()
+        named = set(re.findall(r"^\| `([a-z_]+)` \|", table, re.M))
+        named |= set(re.findall(r'"([a-z_]+)"', floors))
+        expected = set(re.findall(r'"floor:([a-z_]+)"', SCRIPT.read_text()))
+        self.assertTrue(expected)
+        self.assertEqual(expected - named, set())
+
+
+class DocsPageTest(unittest.TestCase):
+    """The docs page says what the run ends with."""
+
+    def test_the_docs_page_names_the_exit_codes_and_the_work_references(self) -> None:
+        text = " ".join((ROOT / "docs/acceptance/custom-policy-check.md").read_text().split())
+        for sentence in (
+            "Exit code 0 needs the three open parts of check 11",
+            "#7073",
+            "the token part of check 8 (#6966)",
+            "exit code 3, or 1 when a check also failed",
+            "When a check failed and something was not taken back, the run ends with exit code 1",
+            "Each request of a run has its own work reference.",
+            "it makes no request",
+            "APPROVAL_SAME_CALL_REUSE",
+        ):
+            self.assertIn(sentence, text)
 
 
 class NoSecretsInTheScriptTest(unittest.TestCase):
@@ -1114,7 +1472,7 @@ class NoSecretsInTheScriptTest(unittest.TestCase):
 
     def test_the_script_never_decides_a_request(self) -> None:
         text = SCRIPT.read_text()
-        self.assertNotIn("/decide", text)
+        self.assertNotRegex(text, r"rest [\w-]+ POST \"/api/v1/approvals/[^\"]*/decide\"")
         self.assertNotRegex(text, r"meho_cli\s+\S+\s+approvals")
         self.assertNotRegex(text, r"(?m)^\s*meho\s+approvals")
         self.assertEqual(

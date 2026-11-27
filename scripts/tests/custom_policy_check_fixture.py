@@ -58,7 +58,7 @@ PROBE_KEYS = [
     "6 PERSON_TOKEN CREDENTIAL_WRITE token",
     "6 PERSON_TOKEN RIGHTS_CHANGE token",
     "6 AGENT_TOKEN POLICY_CHANGE token",
-    "6 PERSON_TOKEN POLICY_CHANGE token",
+    "6 ADMIN_TOKEN POLICY_CHANGE token",
     "6 SERVICE_TOKEN DESTRUCTIVE token",
     "6 SERVICE_TOKEN ROOT_SHELL token",
     "6 PERSON_TOKEN DELETE token",
@@ -73,10 +73,19 @@ PROBE_KEYS = [
 ]
 
 PERSON_STEPS = [
-    "p1", "p2-operator", "p2-admin", "p4", "p5-role", "p5-without",
-    "p5-with", "p6-delete", "p6-lower", "p8", "p9", "c9-fresh",
-    "p10-web", "p10-cli", "p10-cli-refusal", "p-takeback", "p7",
+    "p1", "p2-operator-button", "p2-operator", "p2-admin", "p4", "p5-role",
+    "p5-without-button", "p5-without", "p5-with", "p6-delete", "p6-lower", "p8",
+    "c8-refusal", "p9", "c9-fresh", "p10-web", "p10-cli", "p10-cli-refusal",
+    "p-takeback", "p7",
 ]  # fmt: skip
+
+#: The [left] lines of every run where the person did steps 4 and 5: MEHO has
+#: no route yet that reads a personal agent rule or a custom role, so their
+#: removal is never confirmed.
+REMOVAL_NOT_CONFIRMED = [
+    "[left] the personal agent rule of check 4: removal not confirmed",
+    "[left] the custom role Approvers-VMW of check 5: removal not confirmed",
+]
 
 #: The [skip] lines of a run where every check passes: they never count as passed.
 ALWAYS_SKIPPED = [
@@ -109,8 +118,11 @@ FAR_FUTURE = "2999-01-01T00:00:00Z"
 #: its step ("@work-ref-c6-rights"). The stand-in curl puts the run's part of
 #: the reference that a live run sent in its place.
 WORK_REF = "@work-ref"
-#: The tenant's policy file before and after a run.
-POLICY_FILE = "policy: v1\nclassifications: []\n"
+#: The server's time at the start of the person step of check 1, and the
+#: times of the Admin's edit and of the Operator's run after it.
+C1_START = "2026-01-01T00:00:00.500000+00:00"
+C1_EDIT_AT = "2026-01-01T00:00:10.250000+00:00"
+C1_RUN_AT = "2026-01-01T00:00:20.750000+00:00"
 WRITE_FLOOR_MISTAKE = (
     "`classifications[0]`: `k8s.annotate` changes something, so it stays at least caution."
 )
@@ -163,19 +175,52 @@ def post_row(
     }
 
 
-def edit_row(step: str, op: str, sub: str = "admin-1", *, removed: bool = False) -> dict[str, Any]:
-    """The audit row of an Admin's edit of one operation's risk level."""
-    payload: dict[str, Any] = {"op_id": op}
+def edit_row(
+    step: str,
+    op: str,
+    sub: str = "admin-1",
+    *,
+    removed: bool = False,
+    level: str | None = None,
+    ts: str = C1_EDIT_AT,
+    connector: str = "k8s",
+) -> dict[str, Any]:
+    """The audit row of an Admin's edit of one operation's risk level, or of its removal."""
+    payload: dict[str, Any] = {"connector_id": connector, "op_id": op, "changes": {}}
+    if level is not None:
+        payload["changes"]["safety_level"] = {"old": "caution", "new": level}
     if removed:
         payload["override_removed"] = True
     return {
         "id": audit_id(step),
+        "ts": ts,
         "method": "SERVICE",
         "path": "meho_connector_edit_op",
         "principal_sub": sub,
         "status_code": 200,
         "payload": payload,
     }
+
+
+def run_row(
+    step: str,
+    rule: str,
+    kind: str,
+    *,
+    sub: str = "operator-1",
+    target: str | None = "web-a",
+    ts: str = C1_RUN_AT,
+    impl: str = "k8s",
+) -> dict[str, Any]:
+    """The audit row of a call that ran: its login, connector, target and time."""
+    body = row(step, rule, kind, "ok")["body"]
+    body.update(
+        ts=ts,
+        principal_sub=sub,
+        target_name=target,
+        payload={"connector_product": impl, "connector_version": "", "connector_impl_id": impl},
+    )
+    return body
 
 
 def request(status: str, sub: str = PERSON_SUB, reviewer: str | None = None) -> dict[str, Any]:
@@ -253,6 +298,19 @@ def _calls(a: dict[str, dict[str, Any]]) -> None:
         },
     }
     a["c6-policy-agent-row"] = row("c6-policy-agent", "", "service_agent", "denied")
+    a["c6-policy-operator"] = {
+        "code": 200,
+        "body": {
+            "status": "denied",
+            "audit_id": audit_id("c6-policy-operator"),
+            "extras": {
+                "error_code": "denied",
+                "reason_code": "role_insufficient",
+                "reason": "policy.apply needs the tenant_admin role; your role is operator",
+            },
+        },
+    }
+    a["c6-policy-operator-row"] = row("c6-policy-operator", "", "personal_agent", "denied")
     a["c6-harmless"] = call("c6-harmless", "awaiting_approval", request="req-harmless")
 
 
@@ -260,7 +318,11 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     """The person steps, the clicks in the web console and their audit rows."""
     for step in PERSON_STEPS:
         a[step] = {"code": 0, "body": "y"}
-    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale"))
+    a["c1-start"] = {"code": 200, "body": []}
+    a["c1-start-row"] = rows(
+        {"id": audit_id("c1-start"), "request_id": "@request-id:c1-start", "ts": C1_START}
+    )
+    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale", level="caution"))
     a["c1-overrides"] = {
         "code": 200,
         "body": {
@@ -278,7 +340,7 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
             ]
         },
     }
-    a["c1-row"] = rows(row("c1", "override:ov-1", "person", "ok")["body"])
+    a["c1-row"] = rows(run_row("c1", "override:ov-1", "person"))
     # step: (request, its state, its sender, who decided, who clicked)
     clicks = {
         "c2-operator": ("req-2", "pending", PERSON_SUB, None, "operator-2"),
@@ -302,7 +364,7 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     )
     a["c8-console-rows"] = rows(
         post_row(
-            "c8-console", "/ui/connectors/registry/k8s/operations/k8s.annotate", "admin-1", 400,
+            "c8-console", "/ui/connectors/registry/k8s/operations/k8s.annotate", "admin-0", 400,
             "PATCH",
         )
     )  # fmt: skip
@@ -313,13 +375,20 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
         "body": {"preview": True, "ok": False, "mistakes": [WRITE_FLOOR_MISTAKE], "diff": None},
     }
     a["c8-token-rows"] = rows(post_row("c8-token", "/api/v1/policy/import"))
-    a["c9-rows"] = rows(
-        edit_row("c9-raise", "k8s.annotate"), edit_row("c9-remove", "k8s.annotate", removed=True)
-    )
+    a["c9-rows"] = rows(*check_9_rows())
+    a["c10-first-request"] = request("approved", PERSON_SUB, PERSON_SUB)
     a["c10-cli-request"] = request("pending")
     a["c10-cli-rows"] = rows(
-        post_row("c10-cli-approve", "/api/v1/approvals/req-c10-cli/approve", PERSON_SUB, 403)
+        post_row("c10-cli-decide", "/api/v1/approvals/req-c10-cli/decide", PERSON_SUB, 403)
     )
+
+
+def check_9_rows(sub: str = "admin-0", op: str = "k8s.annotate") -> list[dict[str, Any]]:
+    """The Admin's edit rows of check 9: the raise to dangerous, then the removal."""
+    return [
+        edit_row("c9-remove", op, sub, removed=True, ts="2026-01-01T00:00:31.000002Z"),
+        edit_row("c9-raise", op, sub, level="dangerous", ts="2026-01-01T00:00:31.000001Z"),
+    ]
 
 
 def _end(a: dict[str, dict[str, Any]]) -> None:
@@ -340,6 +409,15 @@ def _end(a: dict[str, dict[str, Any]]) -> None:
         },
     }
     a["c11-run"] = {"code": 202, "body": {"sensor_id": SENSOR_ID, "next_fire_at": SENSOR_DUE}}
+    a["c11-results"] = {
+        "code": 200,
+        "body": {
+            "items": [
+                {"sensor_id": SENSOR_ID, "evaluated_at": "2026-01-01T00:00:05.500000Z", "state": "ok"}
+            ],
+            "next_cursor": None,
+        },
+    }
     sensor_row = row("c11", "default:system", "system", "ok")["body"]
     sensor_row.update(target_name="web-a", principal_sub="__sensor__", ts="2026-01-01T00:00:06Z")
     a["c11-row"] = rows(sensor_row)
@@ -355,9 +433,7 @@ def _end(a: dict[str, dict[str, Any]]) -> None:
           for n, s in SUBS.items())
     )  # fmt: skip
     a["before-overrides"] = {"code": 200, "body": {"overrides": []}}
-    a["before-policy-file"] = {"code": 200, "body": POLICY_FILE}
     a["takeback-overrides"] = {"code": 200, "body": {"overrides": []}}
-    a["takeback-policy-file"] = {"code": 200, "body": POLICY_FILE}
     a["c7-ready"] = ready(False)
     with_params = PROBE_KEYS.index("6 PERSON_TOKEN CREDENTIAL_WRITE token") + 1
     for i in range(1, len(PROBE_KEYS) + 1):

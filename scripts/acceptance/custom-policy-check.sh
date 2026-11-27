@@ -67,9 +67,11 @@ What it does:
   with the baseline. The install ends with the switch off.
 
   The script never approves or decides a request. Its one approve call is
-  the agent's attempt in check 6, which MEHO must refuse. When MEHO answers
-  a call with a request that waited before the run
-  (extras.approval_request_reused), the check fails, and the script never
+  the agent's attempt in check 6, which MEHO must refuse. MEHO gives back a
+  request that already waits (extras.approval_request_reused) in one case:
+  a second identical call while APPROVAL_SAME_CALL_REUSE is on. A request
+  given back that is on this run's list is this run's. One that is not on
+  the list waited before this run: the check fails, and the script never
   asks anyone to approve that request and never withdraws it.
 
   Each call sends a work reference of its own: the run's reference and the
@@ -77,14 +79,18 @@ What it does:
   Meho-Work-Ref header, and --work-ref for meho). So each request of the run
   has its own work reference, and an approve of one work reference in the
   web console or on the command line covers one request of the run at most.
+  A read the script repeats (for example the audit read of check 11) may
+  send the same reference again; a read makes no request.
   It takes back only what this run made: each request whose work reference
   starts with the run's reference, and each person step that was done. A
   waiting request of its logins without that reference stays, with a [note]
-  line. A queue that cannot be read prints a [left] line.
+  line. A queue that cannot be read prints a [left] line, and so does a
+  waiting request of this run whose sender is none of the logins it knows.
   A request whose state cannot be read, or that cannot be withdrawn, prints
-  a [left] line with its id and its login. So does an override, the agent
-  rule or the role whose removal it cannot confirm. When the overrides
-  cannot be read at the start, the person steps that edit one do not run.
+  a [left] line with its id and its login. So does each request of the list
+  that a stop during the clean-up leaves. So do an override, the agent rule
+  and the role whose removal it cannot confirm. When the overrides cannot
+  be read at the start, the person steps that edit one do not run.
 
   A step that needs a person in the web console prints what to do and asks
   "Is it done?". With no terminal, or when the person answers no, it prints
@@ -101,6 +107,8 @@ Exit codes:
   2  wrong use, a missing setting, or an install the script may not use
   3  not complete: no check failed, but at least one step did not run
      (a [skip] line), or something the run made could not be taken back
+     (a [left] line). When a check failed too, the exit code is 1, and the
+     [left] lines are still printed.
 
 Checks:
    1  a lowered level: a person in the console runs the operation at once
@@ -119,7 +127,8 @@ Checks:
 
 Check 6, a change of the policy: an agent login asks for policy.apply over
 MCP, and MEHO refuses it before anything waits ("Only a person can ask for
-a policy import"). The same call with the Operator's token waits.
+a policy import"). An Operator's token is refused too ("needs the
+tenant_admin role"). The same call with the Admin's token waits.
 
 Environment (live run). Each CPC_OP_* value is "<connector_id> <op_id> [<target>]";
 without a target the call has no target. A CPC_PARAMS_<name> value (for
@@ -127,7 +136,8 @@ example CPC_PARAMS_DELETE) is the JSON object of the call's params; the
 default is {}.
 
   MEHO_BACKPLANE          The install's address.
-  CPC_ADMIN_TOKEN         A tenant Admin's token. Reads audit rows, requests and overrides.
+  CPC_ADMIN_TOKEN         A tenant Admin's token. Reads audit rows, requests and overrides,
+                          and asks for the change of the policy of check 6.
   CPC_PERSON_TOKEN        An Operator's own token (a personal agent over REST and MCP).
                           The meho command line must be signed in as the same Operator.
   CPC_SERVICE_TOKEN       A service login with no standing grant.
@@ -284,7 +294,6 @@ trap 'exit 143' TERM
 
 REPLY_CODE=""
 REPLY_BODY=""
-REPLY_TEXT=""  # the body as text, for an answer that is not JSON (rest only)
 REST_HEADER=""
 
 # with_request_id STEP: the next rest call sends an X-Request-Id, so its own
@@ -311,11 +320,9 @@ recorded() {
     if [[ -f "$file" ]]; then
         REPLY_CODE="$(jq -r '.code // 0' "$file")"
         REPLY_BODY="$(jq -c '.body' "$file")"
-        REPLY_TEXT="$(jq -r 'if (.body | type) == "string" then .body else (.body | tojson) end' "$file")"
     else
         REPLY_CODE=0
         REPLY_BODY=null
-        REPLY_TEXT=""
     fi
 }
 
@@ -342,7 +349,6 @@ rest() {
     REPLY_CODE="$(curl "${args[@]}" -H @<(auth_header "$token_name") "$BACKPLANE$path" 2>/dev/null)" \
         || REPLY_CODE=000
     read_out "$out"
-    REPLY_TEXT="$(cat "$out" 2>/dev/null || true)"
 }
 
 # get_open STEP PATH [TOKEN_NAME]: a GET of a route that needs no login.
@@ -396,6 +402,37 @@ now_iso() { # now, less 30 seconds for a server clock that is a little behind
 now_exact() { # now, without the 30 seconds
     if [[ -n "$DRY_DIR" ]]; then echo "2026-01-01T00:00:00"; return; fi
     jq -nr 'now | strftime("%Y-%m-%dT%H:%M:%S")'
+}
+
+# JQ_TIME: the jq function at, which turns a timestamp of MEHO
+# ("2026-01-01T00:00:05.123456+00:00", with or without the fraction and the
+# zone) into [seconds, nanoseconds], so two timestamps compare in full, with
+# the fractions of a second. A value that is not such a timestamp is null,
+# and null is lower than every time.
+# shellcheck disable=SC2016  # jq text
+JQ_TIME='def at: if type != "string" then null else
+    (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?$")
+     | (.z // "Z") as $z
+     | (if $z == "Z" then 0 else
+          ($z[1:3] | tonumber) * 3600 + ($z[3:] | ltrimstr(":") | tonumber) * 60
+          | if $z[0:1] == "-" then -. else . end end) as $off
+     | [((.d + "Z") | fromdateiso8601) - $off,
+        ((.f // "") | ltrimstr(".") | . + "000000000" | .[0:9] | tonumber)])
+    // null end;
+  def after($t): (at) as $x | ($t | at) as $y | $x != null and $y != null and $x > $y;
+  def not_before($t): (at) as $x | ($t | at) as $y | $x != null and $y != null and $x >= $y;'
+
+# server_time STEP: the server's time now, read from the audit row of one
+# GET with its own request id. Sets SERVER_TIME; empty when it cannot be read.
+SERVER_TIME=""
+server_time() {
+    local since
+    since="$(now_iso)"
+    with_request_id "$1"
+    rest "$1" GET "/api/v1/approvals?status=pending&limit=1" CPC_ADMIN_TOKEN
+    REST_HEADER=""
+    audit_rows "$1-row" "$(since_filter "$since")"
+    SERVER_TIME="$(row_of_request "$ROWS" "$LAST_REQUEST_ID" | jq -r '.ts // ""')"
 }
 
 # --- Person steps -----------------------------------------------------------
@@ -479,11 +516,22 @@ meho_cli() {
 # REQUESTS (set at the start): every request this run made that may still
 # wait, with the login that made it ("<request id> <token name>").
 
+# on_list REQUEST: true when the request is on this run's list.
+on_list() {
+    local entry
+    for entry in ${REQUESTS[@]+"${REQUESTS[@]}"}; do
+        [[ "${entry%% *}" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 # call_op STEP PATH TOKEN_NAME OP_VAR [PREVIEW_HASH]
 # PATH is rest, mcp or cli. Sets CALL_STATUS, CALL_CODE, CALL_REASON, CALL_AUDIT,
-# CALL_REQUEST and CALL_REUSED. A request that MEHO gave back from before
-# (extras.approval_request_reused) is not this run's: CALL_REUSED names it,
-# CALL_REQUEST stays empty, and the script never withdraws it.
+# CALL_REQUEST and CALL_REUSED. MEHO gives back a request that already waits
+# (extras.approval_request_reused) for a second identical call while
+# APPROVAL_SAME_CALL_REUSE is on. A request given back that is on this run's
+# list is this run's. Any other one waited before this run: CALL_REUSED names
+# it, CALL_REQUEST stays empty, and the script never withdraws it.
 CALL_STATUS=""; CALL_CODE=""; CALL_REASON=""; CALL_AUDIT=""; CALL_REQUEST=""; CALL_REUSED=""
 call_op() {
     local step="$1" path="$2" token_name="$3" op_var="$4" preview_hash="${5:-}"
@@ -507,6 +555,9 @@ call_op() {
     CALL_AUDIT="$(jq -r '.audit_id // ""' <<<"$REPLY_BODY" 2>/dev/null || true)"
     CALL_REQUEST="$(jq -r '.extras.approval_request_id // ""' <<<"$REPLY_BODY" 2>/dev/null || true)"
     CALL_REUSED=""
+    if [[ -n "$CALL_REQUEST" ]] && on_list "$CALL_REQUEST"; then
+        return 0
+    fi
     if [[ -n "$CALL_REQUEST" ]] \
         && jq -e '.extras.approval_request_reused == true' <<<"$REPLY_BODY" >/dev/null 2>&1; then
         CALL_REUSED="$CALL_REQUEST"
@@ -699,7 +750,7 @@ expect_click() {
         refused)
             [[ "$REQUEST_STATUS" == pending ]] || problems+=("expected a request that still waits")
             [[ -n "$others" ]] || problems+=("expected the audit row of a click by another person than the sender")
-            ask "$step-refusal" "Did MEHO show the refusal \"$refusal\" at the click (and not a sign-in page or an error)?"
+            ask "$step-refusal" "Did MEHO show the refusal \"$refusal\" at the click? A \"Sign in again\" banner, a sign-in page or an error is a no."
             [[ "$ANSWER" == yes ]] || problems+=("expected the refusal \"$refusal\"") ;;
         approved)
             [[ "$REQUEST_STATUS" == approved ]] || problems+=("expected approved")
@@ -731,6 +782,36 @@ click_step() {
     fi
 }
 
+# refused_click_step CHECK WHO REQUEST STEP TEXT REFUSAL: a person who may not
+# approve the request first looks at it on the Approvals page. An active
+# Approve button: the person clicks it, and click_step needs the refused
+# click row. No active button: a correct install writes no click row, so the
+# person says whether the button was off and which reason the page named,
+# and the request must still wait.
+refused_click_step() {
+    local check="$1" who="$2" request="$3" step="$4" text="$5" refusal="$6"
+    local line problems=()
+    if [[ -z "$request" ]]; then
+        check_skip "check $check ($who, web console): not run: no request of this run"
+        return
+    fi
+    ask "$step-button" "Check $check. As $who, in the web console, open request $request on the Approvals page. Is its Approve button active (not greyed out)?"
+    case "$ANSWER" in
+        yes) click_step "$check" "$who" "$request" refused "$step" "$text" "$refusal"; return ;;
+        none) needs_person "check $check ($who, web console)"; return ;;
+    esac
+    ask "c${step#p}-off" "Was the Approve button off, and did the page name the reason \"$refusal\"? A \"Sign in again\" banner is a no."
+    if [[ "$ANSWER" == none ]]; then
+        needs_person "check $check ($who, web console)"
+        return
+    fi
+    request_status "c${step#p}-request" "$request"
+    line="check $check ($who, web console): the Approve button is off, request $request is $REQUEST_STATUS"
+    [[ "$ANSWER" == yes ]] || problems+=("expected the Approve button off with the reason \"$refusal\"")
+    [[ "$REQUEST_STATUS" == pending ]] || problems+=("expected a request that still waits")
+    report "$line" ${problems[@]+"${problems[@]}"}
+}
+
 # --- Check 7 probes: the answers that must be the same with the switch off --
 #
 # Each probe asks POST /api/v1/policy/explain as the caller of the check it
@@ -754,7 +835,7 @@ PROBES=(
     "6 CPC_PERSON_TOKEN CPC_OP_CREDENTIAL_WRITE token"
     "6 CPC_PERSON_TOKEN CPC_OP_RIGHTS_CHANGE token"
     "6 CPC_AGENT_TOKEN CPC_OP_POLICY_CHANGE token"
-    "6 CPC_PERSON_TOKEN CPC_OP_POLICY_CHANGE token"
+    "6 CPC_ADMIN_TOKEN CPC_OP_POLICY_CHANGE token"
     "6 CPC_SERVICE_TOKEN CPC_OP_DESTRUCTIVE token"
     "6 CPC_SERVICE_TOKEN CPC_OP_ROOT_SHELL token"
     "6 CPC_PERSON_TOKEN CPC_OP_DELETE token"
@@ -795,7 +876,7 @@ explain() {
 PROBE_ANSWER=""; PROBE_ROW=""; PROBE_PROBLEM=""; PROBE_SINCE=""; PROBE_VALUE=""
 probe() {
     local step="$1" token_name="$2" op_var="$3" via="$4" code approvers verdict="-"
-    local explain_id preview_id="" preview_code=200 problems=()
+    local explain_id preview_id="" preview_code=200 preview_error="" problems=()
     explain "$step" "$token_name" "$op_var" "$via"
     code="$REPLY_CODE"; explain_id="$LAST_REQUEST_ID"
     PROBE_ANSWER="$(jq -r '.answer // "no answer"' <<<"$REPLY_BODY" 2>/dev/null || echo "no answer")"
@@ -811,6 +892,10 @@ probe() {
         verdict="$(jq -r '.policy_verdict // "no answer"' <<<"$REPLY_BODY" 2>/dev/null || echo "no answer")"
         if [[ "$op_var" == CPC_OP_POLICY_CHANGE && "$(error_code_of "$REPLY_BODY")" == unknown_connector ]]; then
             verdict=unknown_connector
+        elif jq -e '.status == "error"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
+            # A preview that failed (for example invalid_params) is no answer.
+            preview_error="$(error_code_of "$REPLY_BODY")"
+            preview_error="${preview_error:-no error code}"
         fi
     fi
     PROBE_VALUE="$(printf '%s\t%s\t%s' "$PROBE_ANSWER" "$approvers" "$verdict")"
@@ -821,6 +906,7 @@ probe() {
     [[ -n "$PROBE_ROW" ]] || problems+=("no audit row")
     if [[ -n "$preview_id" ]]; then
         [[ "$preview_code" == 200 ]] || problems+=("preview HTTP $preview_code")
+        [[ -z "$preview_error" ]] || problems+=("the preview with the params answered status error ($preview_error)")
         [[ "$verdict" =~ ^(auto-execute|needs-approval|deny|unknown_connector)$ ]] \
             || problems+=("no policy_verdict of the preview with the params")
         [[ -n "$(row_of_request "$ROWS" "$preview_id")" ]] || problems+=("no audit row of the preview")
@@ -920,11 +1006,27 @@ overrides_known() {
     return 1
 }
 
+# JQ_CONNECTOR: the jq function connector, the connector id of an audit row
+# of a call: "<impl_id>-<version>", or the impl_id (or the product) alone
+# without a version, as the override list names it.
+# shellcheck disable=SC2016  # jq text
+JQ_CONNECTOR='def connector: (.payload // {}) as $p
+    | ($p.connector_impl_id // "") as $i | ($p.connector_version // "") as $v
+    | if $i == "" then ($p.connector_product // "") elif $v == "" then $i else "\($i)-\($v)" end;'
+
 check_1() {
-    local since op connector
+    local since op connector target person_sub
     overrides_known "check 1 (an Admin and an Operator, persons, web console)" || return 0
-    since="$(now_iso)"
+    # The search starts at the person step itself, at the server's time.
+    server_time c1-start
+    since="$SERVER_TIME"
+    if [[ -z "$since" ]]; then
+        check_fail "check 1 (an Admin and an Operator, persons, web console): could not read the server's time at the step start; nobody was asked"
+        return
+    fi
     op="$(op_part CPC_OP_LOWERED 2)"; connector="$(op_part CPC_OP_LOWERED 1)"
+    target="$(op_part CPC_OP_LOWERED 3)"
+    person_sub="$(sub_of_token CPC_PERSON_TOKEN || true)"
     if ! person p1 "Check 1. As an Admin, in the web console, lower $(op_label CPC_OP_LOWERED) from dangerous to caution. Give a reason and sign in again when MEHO asks. Then, as the Operator of CPC_PERSON_TOKEN, in the web console, run $(op_label CPC_OP_LOWERED)."; then
         needs_person "check 1 (an Admin and an Operator, persons, web console)"
         return
@@ -935,20 +1037,32 @@ check_1() {
     # rule_ref of an override names the classification entry, not the override.
     edit_rows c1-edits "$since" CPC_OP_LOWERED
     rest c1-overrides GET /api/v1/connectors/operation-overrides CPC_ADMIN_TOKEN
-    local editors override
+    local editors override edit_ts
     editors="$(jq -c '[.[] | .principal_sub]' <<<"$EDITS")"
     override="$(jq -c --arg o "$op" --arg c "$connector" --arg s "$since" --argjson e "$editors" \
-        '[.overrides[]? | select(.op_id == $o and .connector_id == $c and .safety_level == "caution"
-          and ((.set_at // "") >= $s) and (.set_by_sub as $b | any($e[]; . == $b)))][0] // empty' \
+        "$JQ_TIME"'[.overrides[]? | select(.op_id == $o and .connector_id == $c and .safety_level == "caution"
+          and ((.set_at // "") | not_before($s)) and (.set_by_sub as $b | any($e[]; . == $b)))][0] // empty' \
         <<<"$REPLY_BODY" 2>/dev/null || true)"
-    # The console run of the operation: the newest row of the op since then
-    # that is not an edit row.
+    # The edit row of that override: the newest edit of its Admin (of any
+    # Admin when no override of this run was found).
+    edit_ts="$(jq -r --arg b "$(jq -r '.set_by_sub // ""' <<<"${override:-null}")" \
+        "$JQ_TIME"'[.[] | select($b == "" or .principal_sub == $b) | .ts // empty] | sort_by(at) | last // ""' \
+        <<<"$EDITS" 2>/dev/null || true)"
+    # The console run of the operation: a row of the Operator of
+    # CPC_PERSON_TOKEN, of the connector and target of CPC_OP_LOWERED, after
+    # the edit row. It is not an edit row.
     audit_rows c1-row "$(jq -nc --arg o "$op" --arg s "$since" '{op_id:$o, since:$s, limit:1000}')"
-    C1_ROW="$(jq -c '[.[] | select((.path // "") != "meho_connector_edit_op")][0] // {}' <<<"$ROWS")"
+    C1_ROW="$(jq -c --arg u "$person_sub" --arg c "$connector" --arg t "$target" --arg e "$edit_ts" \
+        "$JQ_TIME$JQ_CONNECTOR"'[.[] | select((.path // "") != "meho_connector_edit_op"
+          and $u != "" and .principal_sub == $u and connector == $c
+          and (.target_name // "") == $t and ((.ts // "") | after($e)))][0] // {}' \
+        <<<"$ROWS" 2>/dev/null || echo '{}')"
     clear_row
     read_row_body "$C1_ROW"
     local problems=() set_by
     set_by="$(jq -r '.set_by_sub // ""' <<<"${override:-null}")"
+    [[ -n "$person_sub" ]] || problems+=("the login of PERSON_TOKEN could not be read at the start")
+    [[ -n "$ROW_ID" ]] || problems+=("no run row of the Operator of PERSON_TOKEN on $connector ${target:-without a target} after the edit row")
     [[ "$ROW_STATUS" == ok ]] || problems+=("expected runs")
     [[ -n "$override" ]] || problems+=("no override of this run, set by the Admin of its edit row, lowers it to caution")
     # Table row: an Admin's edit of the operation; the rule's source is "override".
@@ -974,7 +1088,7 @@ check_2() {
     request="$CALL_REQUEST"
     # Table row: "floor", a token call runs only safe operations.
     expect c2-call-row 2 "an Operator's token, a personal agent" REST waits "floor:token_runs_only_safe" personal_agent
-    click_step 2 "a second Operator, a person" "$request" refused p2-operator \
+    refused_click_step 2 "a second Operator, a person" "$request" p2-operator \
         "Check 2. As a second Operator (not the one of CPC_PERSON_TOKEN), in the web console, click Approve on request ${request:-<none>}. MEHO must refuse it." \
         "$REFUSAL_HIGH_RISK"
     click_step 2 "an Admin, a person" "$request" approved p2-admin \
@@ -1025,7 +1139,7 @@ check_5() {
     request="$CALL_REQUEST"
     # Table row: "default", a service login's dangerous call waits.
     expect c5-call-row 5 "a service login, a service agent" REST waits "default:service.dangerous" service_agent
-    click_step 5 "a person without the role" "$request" refused p5-without \
+    refused_click_step 5 "a person without the role" "$request" p5-without \
         "Check 5. As the person WITHOUT the custom role, in the web console, click Approve on request ${request:-<none>}. MEHO must refuse it at the click." \
         "$REFUSAL_NOT_APPROVER"
     click_step 5 "a person with the custom role" "$request" approved p5-with \
@@ -1138,12 +1252,16 @@ check_6() {
     expect c6-rights-row "6 change of rights" "an Operator's token, a personal agent" REST waits "floor:rights_change_waits" personal_agent
 
     # An agent never asks for a policy change: MEHO refuses it before anything
-    # waits (policy_apply_requester_refusal). A person's token waits.
+    # waits (policy_apply_requester_refusal). policy.apply needs the
+    # tenant_admin role, so an Operator is refused too (its role floor). An
+    # Admin's token waits.
     call_op c6-policy-agent mcp CPC_AGENT_TOKEN CPC_OP_POLICY_CHANGE
     expect c6-policy-agent-row "6 change of the policy" "an agent login, a service agent" MCP refused "" service_agent "Only a person can ask for a policy import"
-    call_op c6-policy mcp CPC_PERSON_TOKEN CPC_OP_POLICY_CHANGE
+    call_op c6-policy-operator mcp CPC_PERSON_TOKEN CPC_OP_POLICY_CHANGE
+    expect c6-policy-operator-row "6 change of the policy" "an Operator's AI tool, a personal agent" MCP refused "" personal_agent "needs the tenant_admin role"
+    call_op c6-policy mcp CPC_ADMIN_TOKEN CPC_OP_POLICY_CHANGE
     # Table row: "floor", a change of the policy waits.
-    expect c6-policy-row "6 change of the policy" "an Operator's AI tool, a personal agent" MCP waits "floor:policy_change_waits" personal_agent
+    expect c6-policy-row "6 change of the policy" "an Admin's AI tool, a personal agent" MCP waits "floor:policy_change_waits" personal_agent
 
     check_6_guarded
 
@@ -1180,14 +1298,21 @@ check_8_console() {
         return
     fi
     took_back_later override "an override of $(op_label CPC_OP_WRITE) (check 8)" CPC_OP_WRITE
-    # The refused edit: a row of the edit's own path with a refusal (4xx, not
-    # the 401 of a sign-in), and no edit row of the operation.
+    # The refused edit: a row of the Admin of CPC_ADMIN_TOKEN on the edit's own
+    # path with HTTP 400, the answer of the "Edit rejected" panel of a refused
+    # value (a 404, or a 403 or 401 for a login, is another reason), and no
+    # edit row of the operation. The row does not hold the text of the
+    # refusal, so the person says which reason the panel named.
     console_edit_rows c8-console-rows "$since" CPC_OP_WRITE
     edit_rows c8-edits "$since" CPC_OP_WRITE
     preview c8-level rest CPC_ADMIN_TOKEN CPC_OP_WRITE
-    local refused problems=()
-    refused="$(jq -r '[.[] | select((.status_code // 0) >= 400 and (.status_code // 0) < 500 and .status_code != 401) | .id] | join(",")' <<<"$CONSOLE_EDITS")"
-    [[ -n "$refused" ]] || problems+=("expected the audit row of the refused edit of $(op_label CPC_OP_WRITE)")
+    ask c8-refusal "Did MEHO show \"Edit rejected\" with the reason that a write stays at least caution? \"Not found\", a sign-in page, and the reason that the level is lower than the classification are a no."
+    local refused admin_sub problems=()
+    admin_sub="$(sub_of_token CPC_ADMIN_TOKEN || true)"
+    refused="$(jq -r --arg u "$admin_sub" '[.[] | select($u != "" and .principal_sub == $u and .status_code == 400) | .id] | join(",")' <<<"$CONSOLE_EDITS")"
+    [[ -n "$admin_sub" ]] || problems+=("the login of ADMIN_TOKEN could not be read at the start")
+    [[ -n "$refused" ]] || problems+=("expected the audit row of the Admin's refused edit of $(op_label CPC_OP_WRITE) with HTTP 400")
+    [[ "$ANSWER" == yes ]] || problems+=("expected the refusal that a write stays at least caution")
     [[ "$EDITS" == "[]" ]] || problems+=("expected no edit of $(op_label CPC_OP_WRITE)")
     [[ "$(level_rank "$PREVIEW_LEVEL")" -ge 1 ]] || problems+=("expected the risk level to stay at least caution")
     report "check 8 (an Admin, a person, web console): risk level after the try ${PREVIEW_LEVEL:-none}, refused edit rows ${refused:-none}" ${problems[@]+"${problems[@]}"}
@@ -1237,26 +1362,37 @@ check_9() {
         return 0
     fi
     since="$(now_iso)"
-    if ! person p9 "Check 9. As an Admin whose sign-in is older than the fresh sign-in time, in the web console: raise $(op_label CPC_OP_WRITE) to dangerous, then remove that override again."; then
+    if ! person p9 "Check 9. As the Admin of CPC_ADMIN_TOKEN, with a sign-in older than the fresh sign-in time, in the web console: raise $(op_label CPC_OP_WRITE) to dangerous, then remove that override again."; then
         needs_person "check 9 (an Admin, a person, web console)"
         return
     fi
     took_back_later override "the override of $(op_label CPC_OP_WRITE) (check 9)" CPC_OP_WRITE
     ask c9-fresh "Did MEHO ask for a fresh sign-in before the raise AND before the removal?"
-    # The rows of the edits of this operation: the raise, then the removal.
+    # The edit rows of the Admin of CPC_ADMIN_TOKEN for the connector and the
+    # operation: a raise that sets the level dangerous, then a later row that
+    # removes that override.
     edit_rows c9-rows "$since" CPC_OP_WRITE
-    local raised removed
-    raised="$(jq -r '[.[] | select((.payload.override_removed // false) != true) | .id] | join(",")' <<<"$EDITS")"
-    removed="$(jq -r '[.[] | select(.payload.override_removed == true) | .id] | join(",")' <<<"$EDITS")"
+    local raised removed admin_sub mine
+    admin_sub="$(sub_of_token CPC_ADMIN_TOKEN || true)"
+    mine="$(jq -c --arg u "$admin_sub" --arg c "$(op_part CPC_OP_WRITE 1)" \
+        '[.[] | select($u != "" and .principal_sub == $u and (.payload.connector_id // "") == $c)]' <<<"$EDITS")"
+    raised="$(jq -r '[.[] | select((.payload.override_removed // false) != true
+        and .payload.changes.safety_level.new? == "dangerous") | .id] | join(",")' <<<"$mine")"
+    removed="$(jq -r "$JQ_TIME"'. as $all | [.[] | select(.payload.override_removed == true)
+        | select((.ts // "") as $t | any($all[]; (.payload.override_removed // false) != true
+            and .payload.changes.safety_level.new? == "dangerous"
+            and ((.ts // "") as $r | $t | after($r))))
+        | .id] | join(",")' <<<"$mine")"
     local line="check 9 (an Admin, a person, web console): fresh sign-in asked each time: $ANSWER, raise rows ${raised:-none}, removal rows ${removed:-none}"
     if [[ "$ANSWER" == none ]]; then
         needs_person "check 9 (an Admin, a person, web console)"
         return
     fi
     local problems=()
+    [[ -n "$admin_sub" ]] || problems+=("the login of ADMIN_TOKEN could not be read at the start")
     [[ "$ANSWER" == yes ]] || problems+=("expected a fresh sign-in each time")
-    [[ -n "$raised" ]] || problems+=("expected the edit row of the raise of $(op_label CPC_OP_WRITE)")
-    [[ -n "$removed" ]] || problems+=("expected the edit row of the removal of $(op_label CPC_OP_WRITE)")
+    [[ -n "$raised" ]] || problems+=("expected the Admin's edit row of the raise of $(op_label CPC_OP_WRITE) to dangerous")
+    [[ -n "$removed" ]] || problems+=("expected the Admin's edit row of the removal of $(op_label CPC_OP_WRITE) after the raise")
     report "$line" ${problems[@]+"${problems[@]}"}
 }
 
@@ -1269,10 +1405,21 @@ check_10() {
     click_step 10 "the Operator, a person" "$request_web" own p10-web \
         "Check 10. As the Operator of CPC_PERSON_TOKEN, in the web console, approve your own request ${request_web:-<none>}."
 
+    local who="check 10 (the Operator, a person, command line)"
+    # The second call is the same call. While the first request still waits,
+    # MEHO may give that request back (APPROVAL_SAME_CALL_REUSE), so the
+    # second call does not run.
+    if [[ -n "$request_web" ]]; then
+        request_status c10-first-request "$request_web"
+        if [[ "$REQUEST_STATUS" == pending ]]; then
+            check_skip "check 10 (the Operator's AI tool, a personal agent, MCP): not run: the first request $request_web still waits"
+            check_skip "$who: not run: the first request $request_web still waits"
+            return
+        fi
+    fi
     call_op c10-cli mcp CPC_PERSON_TOKEN CPC_OP_OWN_AGENT
     request_cli="$CALL_REQUEST"
     expect c10-cli-row 10 "the Operator's AI tool, a personal agent" MCP waits "floor:token_runs_only_safe" personal_agent
-    local who="check 10 (the Operator, a person, command line)"
     if [[ -z "$request_cli" ]]; then
         check_skip "$who: not run: no request of this run"
         return
@@ -1286,10 +1433,11 @@ check_10() {
     request_status c10-cli-request "$request_cli"
     audit_rows c10-cli-rows "$(since_filter "$since")"
     local rows refused problems=()
-    rows="$(jq -c --arg p "/api/v1/approvals/$request_cli/approve" --arg s "$REQUEST_SUB" \
+    # `meho approvals approve` calls POST /api/v1/approvals/{id}/decide.
+    rows="$(jq -c --arg p "/api/v1/approvals/$request_cli/decide" --arg s "$REQUEST_SUB" \
         '[.[] | select((.method // "") == "POST" and .path == $p and .principal_sub == $s)]' <<<"$ROWS")"
     refused="$(jq -r '[.[] | select(.status_code == 403) | .id] | join(",")' <<<"$rows")"
-    [[ -n "$refused" ]] || problems+=("expected the audit row of the Operator's approve with HTTP 403")
+    [[ -n "$refused" ]] || problems+=("expected the audit row of the Operator's decide with HTTP 403")
     [[ "$REQUEST_STATUS" == pending ]] || problems+=("expected a request that still waits")
     [[ "$ANSWER" == yes ]] || problems+=("expected the refusal \"$REFUSAL_OWN_TOKEN\"")
     report "$who: request $request_cli is $REQUEST_STATUS, refused rows ${refused:-none}" ${problems[@]+"${problems[@]}"}
@@ -1297,15 +1445,34 @@ check_10() {
 
 # Check 11: each login of MEHO's own code, with the caller kind it writes.
 # The sensor comes from the list GET /api/v1/sensors (MEHO has no GET of one
-# sensor). The row taken is one of a run after the run call: its time is at
-# or after the sensor's next_fire_at of the run answer (the server's time),
-# with the sensor's operation, target and login.
+# sensor), page by page with offset. The row taken is one of a run after the
+# run call: its time is at or after the sensor's next_fire_at of the run
+# answer (the server's time, compared in full, with the fractions of a
+# second), with the sensor's operation, target and login. It counts only
+# with a fresh result of the named sensor: one evaluated at or after
+# next_fire_at (GET /api/v1/sensors/{id}/results).
+SENSOR_PAGE=500
+SENSOR=""
+find_sensor() { # find_sensor: sets SENSOR from the sensor list, and REPLY_CODE of its last page
+    local offset=0 step=c11-sensors count
+    SENSOR=""
+    while :; do
+        rest "$step" GET "/api/v1/sensors?limit=$SENSOR_PAGE&offset=$offset" CPC_ADMIN_TOKEN
+        [[ "$REPLY_CODE" == 200 ]] || return 0
+        SENSOR="$(jq -c --arg i "${CPC_SENSOR_ID:-}" '[.items[]? | select(.id == $i)][0] // empty' \
+            <<<"$REPLY_BODY" 2>/dev/null || true)"
+        count="$(jq -r '[.items[]?] | length' <<<"$REPLY_BODY" 2>/dev/null || echo 0)"
+        [[ -z "$SENSOR" && "$count" -ge "$SENSOR_PAGE" && $offset -lt 100000 ]] || return 0
+        offset=$((offset + SENSOR_PAGE))
+        step="c11-sensors-$offset"
+    done
+}
+
 check_11_runner() {
-    local tries=0 sensor op target identity code due="" line
+    local tries=0 sensor op target identity code due="" line fresh=""
     line="check 11 (the check runner, a sensor run started over REST)"
-    rest c11-sensors GET "/api/v1/sensors?limit=500" CPC_ADMIN_TOKEN
-    sensor="$(jq -c --arg i "${CPC_SENSOR_ID:-}" '[.items[]? | select(.id == $i)][0] // empty' \
-        <<<"$REPLY_BODY" 2>/dev/null || true)"
+    find_sensor
+    sensor="$SENSOR"
     op="$(jq -r '.op_id // ""' <<<"${sensor:-null}")"
     target="$(jq -r '.target.name // ""' <<<"${sensor:-null}")"
     identity="$(jq -r '.identity_sub // ""' <<<"${sensor:-null}")"
@@ -1315,33 +1482,42 @@ check_11_runner() {
     fi
     rest c11-run POST "/api/v1/sensors/${CPC_SENSOR_ID}/run" CPC_ADMIN_TOKEN '{}'
     code="$REPLY_CODE"
-    due="$(jq -r '.next_fire_at // "" | .[0:19]' <<<"$REPLY_BODY" 2>/dev/null || true)"
+    due="$(jq -r '.next_fire_at // ""' <<<"$REPLY_BODY" 2>/dev/null || true)"
     if [[ ! "$code" =~ ^2 || -z "$due" ]]; then
         check_fail "$line: the sensor run did not start: HTTP $code"
         return 0
     fi
-    local filter found
-    filter="$(jq -nc --arg o "$op" --arg s "${due}Z" '{op_id:$o, since:$s, limit:1000}')"
+    local filter found from
+    filter="$(jq -nc --arg o "$op" --arg s "$due" '{op_id:$o, since:$s, limit:1000}')"
+    from="$(jq -rn --arg d "$due" '$d | @uri')"
     clear_row
     while :; do
+        # A fresh result of the named sensor: evaluated at or after the run call.
+        if [[ -z "$fresh" ]]; then
+            rest c11-results GET "/api/v1/sensors/${CPC_SENSOR_ID}/results?from=$from&limit=500" CPC_ADMIN_TOKEN
+            fresh="$(jq -r --arg i "${CPC_SENSOR_ID:-}" --arg d "$due" "$JQ_TIME"'[.items[]?
+                | select(.sensor_id == $i and ((.evaluated_at // "") | not_before($d)))][0].evaluated_at // ""' \
+                <<<"$REPLY_BODY" 2>/dev/null || true)"
+        fi
         audit_rows c11-row "$filter"
         # The row of this sensor's run: after the run call, its operation, its target and its login.
         found="$(jq -c --arg t "$target" --arg i "$identity" --arg d "$due" \
-            '[.[] | select((.target_name // "") == $t and .principal_sub == $i
-              and ((.ts // "") | .[0:19]) >= $d)][0] // empty' <<<"$ROWS")"
+            "$JQ_TIME"'[.[] | select((.target_name // "") == $t and .principal_sub == $i
+              and ((.ts // "") | not_before($d)))][0] // empty' <<<"$ROWS" 2>/dev/null || true)"
         if [[ -n "$found" ]]; then read_row_body "$found"; fi
-        [[ -n "$ROW_ID" || -n "$DRY_DIR" || $tries -ge 24 ]] && break
+        [[ ( -n "$ROW_ID" && -n "$fresh" ) || -n "$DRY_DIR" || $tries -ge 24 ]] && break
         tries=$((tries + 1))
         sleep 5
     done
-    if [[ -n "$ROW_ID" && -z "$ROW_HAS_KIND" ]]; then
+    if [[ -n "$ROW_ID" && -n "$fresh" && -z "$ROW_HAS_KIND" ]]; then
         check_skip "check 11: not run: waits for #7073"
         return 1
     fi
     local problems=()
+    [[ -n "$fresh" ]] || problems+=("no fresh result of sensor ${CPC_SENSOR_ID:-none} after the run call")
     [[ -n "$ROW_ID" ]] || problems+=("no audit row of the sensor's run")
     [[ "$ROW_KIND" == system ]] || problems+=("expected caller kind system")
-    report "$line: HTTP $code, caller kind ${ROW_KIND:-none}, rule ${ROW_RULE:-none}, audit row ${ROW_ID:-none}" ${problems[@]+"${problems[@]}"}
+    report "$line: HTTP $code, result at ${fresh:-none}, caller kind ${ROW_KIND:-none}, rule ${ROW_RULE:-none}, audit row ${ROW_ID:-none}" ${problems[@]+"${problems[@]}"}
 }
 
 check_11() {
@@ -1402,6 +1578,14 @@ token_of_sub() { # token_of_sub SUB: the token name of one of the script's login
     return 1
 }
 
+sub_of_token() { # sub_of_token TOKEN_NAME: the login of one of the script's tokens
+    local entry
+    for entry in ${LOGINS[@]+"${LOGINS[@]}"}; do
+        [[ "${entry#* }" == "$1" ]] && { printf '%s' "${entry%% *}"; return 0; }
+    done
+    return 1
+}
+
 # withdraw_one REQUEST TOKEN_NAME: withdraw one request of this run that still
 # waits. A state that cannot be read, or a withdraw that does not answer 200,
 # prints a [left] line.
@@ -1420,23 +1604,51 @@ withdraw_one() {
     fi
 }
 
-# Withdraw each request of this run that still waits, with the login that
-# made it. Then read the queue: a waiting request whose work reference starts
-# with this run's reference is this run's too (a call that a stop cut off);
-# it is withdrawn as well. A waiting request of one of the script's logins,
-# made since the run started, without this run's reference is another
-# session's: it stays, with one [note] line. Only an answer HTTP 200 whose
-# body is a list counts as the queue; any other answer prints a [left] line.
-withdraw_requests() {
-    TAKEN_BACK=yes
-    local entry request token_name _rest done_ids=" "
+# left_unhandled: a stop during the clean-up. One [left] line for each
+# request of the list that was not handled yet.
+# shellcheck disable=SC2317,SC2329  # called by a trap
+left_unhandled() {
+    local entry request token_name _rest
     for entry in ${REQUESTS[@]+"${REQUESTS[@]}"}; do
         read -r request token_name _rest <<<"$entry"
-        done_ids+="$request "
-        withdraw_one "$request" "$token_name"
+        left "request $request (sent with ${token_name#CPC_}): not withdrawn, the run was stopped"
     done
     REQUESTS=()
-    [[ ${#LOGINS[@]} -gt 0 ]] || return 0
+}
+
+# shellcheck disable=SC2317,SC2329  # called by a trap
+stopped_in_clean_up() { left_unhandled; rm -rf "$WORK"; exit "$1"; }
+
+# Withdraw each request of this run that still waits, with the login that
+# made it. A request leaves the list only once it is handled, so a stop
+# during the clean-up names each one that is left. Then read the queue: a
+# waiting request whose work reference starts with this run's reference is
+# this run's too (a call that a stop cut off); it is withdrawn as well, and
+# one whose sender is none of the known logins prints a [left] line. A
+# waiting request of one of the script's logins, made since the run started,
+# without this run's reference is another session's: it stays, with one
+# [note] line. Only an answer HTTP 200 whose body is a list counts as the
+# queue; any other answer prints a [left] line.
+withdraw_requests() {
+    TAKEN_BACK=yes
+    trap 'stopped_in_clean_up 130' INT
+    trap 'stopped_in_clean_up 143' TERM
+    local request token_name _rest done_ids=" "
+    while [[ ${#REQUESTS[@]} -gt 0 ]]; do
+        read -r request token_name _rest <<<"${REQUESTS[0]}"
+        withdraw_one "$request" "$token_name"
+        done_ids+="$request "
+        REQUESTS=("${REQUESTS[@]:1}")
+    done
+    withdraw_queue "$done_ids"
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+# withdraw_queue DONE_IDS: the waiting requests of this run that the list
+# did not hold.
+withdraw_queue() {
+    local done_ids="$1" request token_name
     rest withdraw-queue GET "/api/v1/approvals?status=pending&order=newest" CPC_ADMIN_TOKEN
     if [[ "$REPLY_CODE" != 200 ]]; then
         left "the waiting requests of this run: could not read the queue (HTTP $REPLY_CODE)"
@@ -1466,7 +1678,7 @@ withdraw_requests() {
             continue
         fi
         if ! token_name="$(token_of_sub "$sub")"; then
-            left "request $request (work reference $ref of this run, login ${sub:-unknown}): not withdrawn, the login is none of the script's"
+            left "request $request (work reference of this run): not withdrawn, its sender is not known"
             continue
         fi
         withdraw_one "$request" "$token_name"
@@ -1486,10 +1698,8 @@ took_back_later() {
 }
 
 # The state before the run, so the take-back keeps what was there before:
-# the overrides of the operations an Admin edits in the checks, and the
-# tenant's policy file, which holds the agent rule of check 4 and the
-# approval routing of the custom role of check 5.
-BEFORE_OVERRIDES="null"; BEFORE_POLICY=""; BEFORE_POLICY_READ=""
+# the overrides of the operations an Admin edits in the checks.
+BEFORE_OVERRIDES="null"
 read_state_before() {
     rest before-overrides GET /api/v1/connectors/operation-overrides CPC_ADMIN_TOKEN
     if [[ "$REPLY_CODE" == 200 ]] && jq -e '.overrides | type == "array"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
@@ -1497,66 +1707,58 @@ read_state_before() {
     else
         note "the overrides could not be read at the start (HTTP $REPLY_CODE); the person steps that edit an override do not run"
     fi
-    policy_file before-policy-file
-    BEFORE_POLICY="$POLICY_TEXT"; BEFORE_POLICY_READ="$POLICY_READ"
     return 0
 }
 
-# policy_file STEP: the tenant's policy file as text. Sets POLICY_TEXT, and
-# POLICY_READ to yes when it was read.
-POLICY_TEXT=""; POLICY_READ=""
-policy_file() {
-    rest "$1" GET "/api/v1/policy/export?scope=tenant" CPC_ADMIN_TOKEN
-    POLICY_TEXT=""; POLICY_READ=""
-    if [[ "$REPLY_CODE" == 200 && -n "$REPLY_TEXT" ]]; then
-        POLICY_TEXT="$REPLY_TEXT"; POLICY_READ=yes
-    fi
-    return 0
-}
-
-# The stored settings of each override of one operation, in words: a JSON
-# list of {scope, "risk level", approval, category, labels, "always wait"},
-# sorted by scope. The jq input is the answer of the overrides list; $o and
-# $c name the operation and its connector.
+# The settings of each override of one operation that the override list
+# shows: a JSON list of {scope, "risk level", category, labels, "always
+# wait"}, sorted by scope. The list shows the values that apply to the
+# operation in the override's scope, which may come from the policy file,
+# not only what the override row stores. Labels stay key and value pairs.
+# The approval setting is left out: the list shows only the approval that
+# applies, not the one the override row stores. The jq input is the answer
+# of the overrides list; $o and $c name the operation and its connector.
 # shellcheck disable=SC2016  # jq text: $o and $c are jq arguments
 OVERRIDE_SETTINGS='[.overrides[]? | select(.op_id == $o and .connector_id == $c)
   | {scope: "\(.scope // "unknown scope")\(if .tenant_id then " (\(.tenant_id))" else "" end)",
      "risk level": (.safety_level // "not set"),
-     approval: (if .requires_approval == null then "not set" else (.requires_approval | tostring) end),
      category: (.category // "not set"),
-     labels: ((.labels // {}) | to_entries | sort_by(.key) | map("\(.key)=\(.value)")
-              | if length == 0 then "none" else join(" ") end),
+     labels: (if (.labels | type) == "object" then .labels else {} end),
      "always wait": (if .always_wait == null then "not set" else (.always_wait | tostring) end)}]
   | sort_by(.scope)'
-OVERRIDE_FIELDS='["risk level", "approval", "category", "labels", "always wait"]'
+OVERRIDE_FIELDS='["risk level", "category", "labels", "always wait"]'
+# shellcheck disable=SC2016  # jq text
+OVERRIDE_TEXT='def shown: if type == "object" then
+      (if length == 0 then "none" else (to_entries | sort_by(.key) | from_entries | tojson) end)
+    else tostring end;
+  def text($x): [$f[] | "\(.) \($x[.] | shown)"] | join(", ");'
 
 # overrides_of OVERRIDES_JSON OP_VAR: each override of the operation with
-# every stored setting, as text; or "none".
+# the settings the list shows, as text; or "none".
 overrides_of() {
     jq -r --arg o "$(op_part "$2" 2)" --arg c "$(op_part "$2" 1)" --argjson f "$OVERRIDE_FIELDS" \
-        "$OVERRIDE_SETTINGS"' | map(. as $x | "\($x.scope) override: " + ([$f[] | "\(.) \($x[.])"] | join(", ")))
+        "$OVERRIDE_TEXT$OVERRIDE_SETTINGS"' | map("\(.scope) override: \(text(.))")
          | if length == 0 then "none" else join("; ") end' \
         <<<"$1" 2>/dev/null || echo unreadable
 }
 
-# override_changes BEFORE_JSON NOW_JSON OP_VAR: one line for each stored
-# setting of an override of the operation that is not as before the run, and
-# one for an override that was added or removed. No line: as before.
+# override_changes BEFORE_JSON NOW_JSON OP_VAR: one line for each setting of
+# an override of the operation that is not as before the run, and one for an
+# override that was added or removed. No line: as before.
 override_changes() {
     local before now
     before="$(jq -c --arg o "$(op_part "$3" 2)" --arg c "$(op_part "$3" 1)" "$OVERRIDE_SETTINGS" <<<"$1" 2>/dev/null)" \
         || { echo "the overrides before the run could not be read"; return 0; }
     now="$(jq -c --arg o "$(op_part "$3" 2)" --arg c "$(op_part "$3" 1)" "$OVERRIDE_SETTINGS" <<<"$2" 2>/dev/null)" \
         || { echo "the overrides could not be read"; return 0; }
-    jq -nr --argjson b "$before" --argjson n "$now" --argjson f "$OVERRIDE_FIELDS" '
-        def text($x): [$f[] | "\(.) \($x[.])"] | join(", ");
+    jq -nr --argjson b "$before" --argjson n "$now" --argjson f "$OVERRIDE_FIELDS" "$OVERRIDE_TEXT"'
         ([$b[].scope] + [$n[].scope] | unique)[] as $s
         | ([$b[] | select(.scope == $s)][0]) as $x
         | ([$n[] | select(.scope == $s)][0]) as $y
         | if $x == null then "\($s) override: added (\(text($y)))"
           elif $y == null then "\($s) override: removed (before the run: \(text($x)))"
           else $f[] as $k | select($x[$k] != $y[$k])
-               | "\($s) override: \($k) is \($y[$k]), before the run \($x[$k])"
+               | "\($s) override: \($k) is \($y[$k] | shown), before the run \($x[$k] | shown)"
           end' 2>/dev/null || echo "the overrides could not be compared"
 }
 
@@ -1569,15 +1771,20 @@ take_back_text() { # the person's task for one entry of TAKE_BACK
             if [[ "$before" == none ]]; then
                 printf '%s: remove any override of %s that it left' "$label" "$(op_label "$op_var")"
             else
-                printf '%s: set the overrides of %s back to how they were before the run (%s)' "$label" "$(op_label "$op_var")" "$before"
+                printf '%s: set the overrides of %s back to how they were before the run (%s; category, labels and the "always wait" mark are the values that apply to the operation, which may come from the policy file)' \
+                    "$label" "$(op_label "$op_var")" "$before"
             fi ;;
         *) printf 'remove %s' "$label" ;;
     esac
 }
 
 # Read back one entry of TAKE_BACK: a [left] line when it is still there, or
-# when its removal cannot be confirmed. The agent rule and the role are read
-# from the tenant's policy file, never from an explain answer.
+# when its removal cannot be confirmed. MEHO has no route yet that reads a
+# personal agent rule or a custom role from the place where it keeps them,
+# so their removal is never confirmed. A tenant policy file that is the same
+# before and after the run, or an explain answer, is no proof that they are
+# gone. The approval setting of an override from before the run is not
+# confirmed either: the override list shows only the approval that applies.
 read_back() {
     local kind label op_var
     IFS='|' read -r kind label op_var <<<"$1"
@@ -1590,19 +1797,18 @@ read_back() {
             local change
             while IFS= read -r change; do
                 [[ -n "$change" ]] && left "$label: not as before the run: $change"
-            done < <(override_changes "$BEFORE_OVERRIDES" "$TAKEBACK_OVERRIDES" "$op_var") ;;
-        agent_rule|role)
-            if [[ -z "$BEFORE_POLICY_READ" || -z "$TAKEBACK_POLICY_READ" ]]; then
-                left "$label: removal not confirmed: the tenant's policy file could not be read"
-            elif [[ "$TAKEBACK_POLICY" != "$BEFORE_POLICY" ]]; then
-                left "$label: removal not confirmed: the tenant's policy file is not as it was before the run"
+            done < <(override_changes "$BEFORE_OVERRIDES" "$TAKEBACK_OVERRIDES" "$op_var")
+            if [[ "$(overrides_of "$BEFORE_OVERRIDES" "$op_var")" != none ]]; then
+                left "$label: approval setting not confirmed"
             fi ;;
+        agent_rule|role)
+            left "$label: removal not confirmed" ;;
     esac
 }
 
 # Ask the person to take back only what the person steps of this run added,
 # each by name, then read back each one. No person step done: no question.
-TAKEBACK_OVERRIDES="null"; TAKEBACK_POLICY=""; TAKEBACK_POLICY_READ=""
+TAKEBACK_OVERRIDES="null"
 take_back_changes() {
     [[ ${#TAKE_BACK[@]} -gt 0 ]] || return 0
     local entry text="Take back. As an Admin, in the web console:"
@@ -1617,8 +1823,6 @@ take_back_changes() {
     if [[ "$REPLY_CODE" == 200 ]] && jq -e '.overrides | type == "array"' <<<"$REPLY_BODY" >/dev/null 2>&1; then
         TAKEBACK_OVERRIDES="$REPLY_BODY"
     fi
-    policy_file takeback-policy-file
-    TAKEBACK_POLICY="$POLICY_TEXT"; TAKEBACK_POLICY_READ="$POLICY_READ"
     for entry in "${TAKE_BACK[@]}"; do read_back "$entry"; done
 }
 

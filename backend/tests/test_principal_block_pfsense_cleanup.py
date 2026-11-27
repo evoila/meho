@@ -15,7 +15,8 @@ MEHO keeps the firewall's reply to the create, so it can remove the new user.
 When that removal fails because the SSH connection is lost, MEHO still keeps
 the reply: it stores the password, or removes the new user when the caller
 is blocked. When the call is cancelled during that removal, MEHO removes the
-new user the reply names, then passes the cancel on.
+new user the reply names, then passes the cancel on. That cancel holds only
+the name and the uid of the user, also in its cause and context chain.
 
 The firewall is a scripted SSH connection under the real ``_run_command``
 and ``run_capped``; it keeps its users. Vault is the stand-in HTTP server
@@ -25,6 +26,7 @@ with the real ``hvac`` client. All names and values are made up.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -66,10 +68,18 @@ def _user(name: str, uid: str, *, scope: str = "user") -> str:
 class _Firewall:
     """A scripted pfSense that keeps its local users and records each command."""
 
-    def __init__(self, *, undo_fails: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        undo_fails: bool = False,
+        password: str = _PASSWORD,
+        cancel_on_script_removal: asyncio.Task[Any] | None = None,
+    ) -> None:
         self.users: dict[str, str] = {}
         self.commands: list[str] = []
         self.undo_fails = undo_fails
+        self.password = password
+        self.cancel_on_script_removal = cancel_on_script_removal
         self.closed = False
 
     def _config(self) -> str:
@@ -88,7 +98,7 @@ class _Firewall:
             self.users["guest-1"] = "2000"
             return (
                 "MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-1\n"
-                f"MEHO_VPN_PASSWORD={_PASSWORD}\n",
+                f"MEHO_VPN_PASSWORD={self.password}\n",
                 0,
             )
         if cmd.startswith("pfSsh.php playback meho_openvpn_user_undo_"):
@@ -109,6 +119,10 @@ class _Firewall:
 
     def create_process(self, cmd: str, **_kwargs: object) -> FakeSshProcess:
         self.commands.append(cmd)
+        task = self.cancel_on_script_removal
+        if task is not None and cmd.startswith("rm -f ") and "meho_openvpn_user_create_" in cmd:
+            self.cancel_on_script_removal = None
+            task.cancel()
         stdout, status = self._answer(cmd)
         return FakeSshProcess(command=cmd, stdout=stdout, exit_status=status)
 
@@ -416,3 +430,38 @@ async def test_a_failed_undo_after_a_cancel_during_the_script_removal_names_the_
     assert firewall.users == {"guest-1": "2000"}
     assert vault.sent("POST", "/v1/secret/data/") == 0
     assert _PASSWORD not in str(err.value)
+
+
+def _chain(err: BaseException) -> list[BaseException]:
+    """The error and every error in its cause and context chain."""
+    seen: list[BaseException] = []
+    todo: list[BaseException | None] = [err]
+    while todo:
+        item = todo.pop()
+        if item is None or any(item is s for s in seen):
+            continue
+        seen.append(item)
+        todo += [item.__cause__, item.__context__]
+    return seen
+
+
+async def test_the_error_of_a_cancel_during_the_script_removal_holds_no_reply_of_the_firewall(
+    vault: VaultStandIn,
+) -> None:
+    password = secrets.token_urlsafe(24)
+    firewall = _Firewall(password=password)
+    await _connector(firewall)
+    task = asyncio.ensure_future(_run("pfsense.openvpn.user.create", _CREATE))
+    firewall.cancel_on_script_removal = task
+
+    with pytest.raises(asyncio.CancelledError) as err:
+        await task
+
+    assert task.cancelled()
+    assert firewall.played("meho_openvpn_user_undo_") == 1
+    assert firewall.users == {}
+    chain = _chain(err.value)
+    for item in chain:
+        texts = [str(item), repr(item.args), repr(vars(item))]
+        assert not any(password in text for text in texts), type(item).__name__
+    assert any("guest-1" in str(item) for item in chain)

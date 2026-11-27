@@ -758,7 +758,9 @@ async def _play_create(
     The removal of the staged script is a clean-up with no block check. The
     firewall's reply is kept also when that removal fails, so the handler can
     store the password or remove the new user. A cancel during that removal
-    removes the user the reply names, then passes the cancel on.
+    removes the user the reply names, then passes the cancel on. That cancel
+    holds only the name and the uid of the user: it is raised outside the
+    ``except`` block, so it has no cause or context that holds the reply.
     """
     try:
         return await _apply_playback(
@@ -771,20 +773,20 @@ async def _play_create(
         )
     except PlaybackCancelledAfterRunError as exc:
         made = _made_user(exc.output, name) if exc.exit_status == 0 else None
-        if made is None:
-            raise asyncio.CancelledError(
-                f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
-            ) from exc
-        undone = await _undo_create(self, target, made[0], made[1], operator)
-        raise asyncio.CancelledError(
-            f"openvpn.user.create was cancelled after the firewall made the user; {undone}"
-        ) from exc
     except asyncio.CancelledError as exc:
         raise asyncio.CancelledError(
             f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"openvpn.user.create: {exc}. {_may_exist(name)}") from exc
+    if made is None:
+        raise asyncio.CancelledError(
+            f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
+        )
+    undone = await _undo_create(self, target, made[0], made[1], operator)
+    raise asyncio.CancelledError(
+        f"openvpn.user.create was cancelled after the firewall made the user; {undone}"
+    )
 
 
 def _made_user(played: str, name: str) -> tuple[str, str] | None:

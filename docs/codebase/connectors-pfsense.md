@@ -1275,7 +1275,8 @@ let a user's tunnel address in). Checked against the pfSense 2.7.2 sources
   lost), so it stores the password, or removes the new user when the caller
   is blocked. When the call is cancelled during that removal, MEHO removes
   the user the firewall's answer names, then raises the cancel again. The
-  error of the cancel says whether the user was removed. The Vault write runs
+  error of the cancel says whether the user was removed. It holds only the
+  name and the `uid` of the user, and no part of the firewall's answer. The Vault write runs
   in a thread and can still finish after a cancel: the password may then be
   stored at the path although the user was removed, and a new create at
   this path stops with `vault_field_exists`. The error of the cancel says so.

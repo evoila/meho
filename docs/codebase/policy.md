@@ -583,13 +583,14 @@ it.
   the switch off; so does a card that waited during an upgrade. After the
   approval, the run reads the switch again. When it is not the same as on
   the card, the run writes nothing and gives the same sentence.
-- The card of a tenant import planned with `CUSTOM_POLICY` on also holds
-  `planned_with_install_limits`: the hash of the install's stored
-  `limits` and `classifications` (`install_limits_sha256`). The run after
-  the approval compares it with the install's policy at the run, in the
-  same transaction as the write. When they differ: "The install's policy
-  changed since this request was planned. Ask again." Nothing is written,
-  and the audit row of the run holds the sentence.
+- The stored card of a tenant import planned with `CUSTOM_POLICY` on
+  also holds `planned_with_install_limits`: the hash of the install's
+  stored `limits` and `classifications` (`install_limits_sha256`). At the
+  run after the approval, MEHO compares this recorded value with the
+  install's stored policy and refuses the run when they differ: "The
+  install's policy changed since this request was planned. Ask again."
+  Nothing is written, and the audit row of the run holds the sentence.
+  Only the run reads the recorded value, from the stored card.
 - How each reader sees a stored import card:
   `connectors/policy/apply_card.py` (`policy_card_as_read`, registered
   with `register_card_view` in `operations/platform_admin_card.py`). Every
@@ -601,7 +602,11 @@ it.
   warnings). The stored row never changes. With `CUSTOM_POLICY` off,
   every view shows the card without `agents`, `runs_at_once`,
   `agents_above_limit` and its warnings, `planned_with_custom_policy` and
-  `planned_with_install_limits`. With it on, a person over REST and in
+  `planned_with_install_limits`. With it on, no reader gets
+  `planned_with_install_limits` in any view (the REST approvals answers,
+  `meho_approvals_get`, `meho_approvals_list`, `preview_operation`, the
+  console detail page and the bell panel); it stays in the stored card,
+  where the run reads it. A person over REST and in
   the console reads each role's whole `runs_at_once` list; every MCP
   answer (the approval tools and `preview_operation`, also for a person)
   and an agent or service login over REST get, for each role, `count`,

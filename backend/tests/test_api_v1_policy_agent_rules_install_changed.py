@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""An approved tenant import runs only on the install policy it was planned with.
+"""A tenant import is refused when the install policy differs at the run.
 
-With ``CUSTOM_POLICY`` on, the card of a tenant import records the hash of
-the install's ``limits`` and ``classifications``. When they change while
-the request waits, the run after the click is refused with one sentence,
-nothing is stored, and the audit row of the run holds the sentence. When
-only other parts of the install's policy change, the run stores the file.
+With ``CUSTOM_POLICY`` on, the stored card of a tenant import records the
+hash of the install's ``limits`` and ``classifications``. At the run after
+the click, MEHO compares the recorded value with the install's stored
+policy. When they differ, the run is refused with one sentence, nothing is
+stored, and the audit row of the run holds the sentence. When only other
+parts of the install's policy changed, the run stores the file.
 With the switch off, the card has no such record and the run is as before.
 
 A tenant admin asks for the import with a token; another admin of the
@@ -119,7 +120,7 @@ async def _ask_change_and_click(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("change", "runs"), _CHANGES)
-async def test_a_tenant_import_runs_only_on_the_install_policy_it_was_planned_with(
+async def test_a_tenant_import_is_refused_when_the_install_policy_differs_at_the_run(
     client: TestClient,
     embedding: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,

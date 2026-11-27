@@ -423,11 +423,11 @@ agents:
   for a person, gives for each role the count, the first 50 operations,
   and "N more" when there are more. So does every answer to a caller that
   is not a person: the REST approvals answers and `meho policy history`.
-- A tenant's import that waits for approval runs only on the install's
-  policy it was planned with. If the install's outer limit or its
-  classifications change while it waits, the click does not store the
-  file: "The install's policy changed since this request was planned.
-  Ask again."
+- When a tenant's import waits for approval, its card records the
+  install's outer limit and classifications. At the run, MEHO compares
+  the recorded value with the install's stored policy and refuses the run
+  when they differ: "The install's policy changed since this request was
+  planned. Ask again." Nothing is stored.
 - Setting the rules is a change of the policy. In the web console, an
   Admin who signed in again just before runs the import in the Run
   window, and it runs at once. With a token it waits until an Admin

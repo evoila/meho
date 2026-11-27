@@ -43355,6 +43355,32 @@
         "title": "RunCompletedResponse",
         "description": "Returned by ``meho_runbook_next`` when the previous step was the last.\n\nThe terminal-state shape: no step body, just the run coordinates\nand the transition timestamp. The companion abort-side shape is\n:class:`AbortRunResponse`.\n\nThe :attr:`state` and :attr:`kind` literals both carry ``\"completed\"``\nby design: :attr:`kind` is the parent-union discriminator (per the\nexplicit-tag decision documented at the module docstring), while\n:attr:`state` matches the run's storage-level state column\n(``runbook_runs.state``) so the response shape mirrors the row\none-for-one."
       },
+      "RunNowModel": {
+        "properties": {
+          "can_run": {
+            "type": "boolean",
+            "title": "Can Run"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true,
+            "title": "Code"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "can_run",
+          "code",
+          "reason"
+        ],
+        "title": "RunNowModel",
+        "description": "Whether the caller can run the test read now, with no wait.\n\n``code`` and ``reason`` are ``None`` when ``can_run`` is true. Otherwise\n``code`` is one of ``not_enabled``, ``waits_for_approval`` and\n``not_allowed``, and ``reason`` is the one fixed sentence of that code."
+      },
       "RunSummary": {
         "properties": {
           "run_id": {
@@ -47023,6 +47049,10 @@
             "type": "string",
             "nullable": true,
             "title": "Test Operation"
+          },
+          "test_operation_run": {
+            "$ref": "#/components/schemas/RunNowModel",
+            "nullable": true
           }
         },
         "type": "object",
@@ -47033,10 +47063,11 @@
           "default_port",
           "target_fields",
           "credential_ways",
-          "test_operation"
+          "test_operation",
+          "test_operation_run"
         ],
         "title": "TargetFormClass",
-        "description": "What one connector class declares. ``None`` means \"not declared\".\n\n``test_operation`` is also ``None`` while the stored row of the test read\nhas a risk level other than ``safe`` or is turned off, or while an\noverride of the install or of the caller's tenant raises its risk level\nor makes it wait for approval. Otherwise it names the test read the\nconnector declares; whether the caller may run it is decided when it is\ncalled."
+        "description": "What one connector class declares. ``None`` means \"not declared\".\n\n``test_operation`` names the test read the class declares.\n``test_operation_run`` is ``None`` when the class declares none. Otherwise\nit says whether the caller can run that read now, with the code and the\nfixed sentence of the reason when not."
       },
       "TargetFormResponse": {
         "properties": {

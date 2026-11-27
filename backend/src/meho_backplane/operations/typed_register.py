@@ -158,7 +158,7 @@ from meho_backplane.operations.composite_invariant import (
 )
 from meho_backplane.operations.connector_declaration_check import (
     assert_connector_declarations_valid,
-    collect_code_safety_levels,
+    code_safety_levels,
     note_code_safety_level,
 )
 from meho_backplane.operations.dead_handler_sweep import retire_dead_handler_rows
@@ -522,13 +522,12 @@ async def operation_catalog_write(
     try:
         async with get_sessionmaker()() as session:
             async with _bind_catalog_session(session):
-                with collect_code_safety_levels() as code_levels:
-                    await _populate_catalog(session, embedding_service=embedding_service)
+                await _populate_catalog(session, embedding_service=embedding_service)
                 await retire_dead_handler_rows(session=session)
                 await assert_registered_composites_have_no_ingested_dispatch(session=session)
                 await assert_connector_declarations_valid(
                     session,
-                    code_levels=code_levels,
+                    code_levels=code_safety_levels(session),
                     allow_missing_rows=get_settings().test_amortize_typed_op_registrars,
                 )
                 await record_catalog_release(session)
@@ -1784,7 +1783,12 @@ async def _register_in_session(
         parameter_schema, safety_level=safety_level, requires_approval=requires_approval
     )
     note_code_safety_level(
-        product=product, version=version, impl_id=impl_id, op_id=op_id, safety_level=safety_level
+        session,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=op_id,
+        safety_level=safety_level,
     )
 
     # A parameter switch name that MEHO does not know stops the op from

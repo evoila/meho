@@ -975,12 +975,24 @@ async def test_shared_session_login_follows_a_same_origin_redirect(
     ids=["other-host", "other-scheme"],
 )
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 async def test_shared_session_login_redirect_to_another_origin_ends_the_call(
-    status: int, location_origin: str
+    on: bool, status: int, location_origin: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other origin gets no request, the operation is not sent, the error names no address."""
-    from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
+    """The other origin gets no request and the operation is not sent, in both modes.
 
+    With the switch on, the error is MEHO's fixed login sentence and names no
+    address. With it off, the login gives its own error for the status.
+    """
+    from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
+    from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("REDIRECT_ON_CHANGE_RESULT", "true" if on else "false")
+    get_settings.cache_clear()
     connector = _SessionConnector(f"/api/{_LOGIN_MARKER}/session")
     location = f"{location_origin}/{_LOGIN_MARKER}/x?q={_LOGIN_MARKER}-query"
     with respx.mock(assert_all_called=False) as mock:
@@ -989,7 +1001,7 @@ async def test_shared_session_login_redirect_to_another_origin_ends_the_call(
         )
         elsewhere = mock.route(url__startswith=location_origin + "/").respond(200, json={})
         operation = mock.put(f"{_LOGIN_ORIGIN}/api/items/7").respond(200, json={})
-        with pytest.raises(SessionLoginRedirectError) as caught:
+        with pytest.raises(SessionLoginError) as caught:
             await connector._post_json(
                 _LOGIN_TARGET,  # type: ignore[arg-type]
                 "/api/items/7",
@@ -998,13 +1010,19 @@ async def test_shared_session_login_redirect_to_another_origin_ends_the_call(
                 json={"n": 1},
             )
     await connector.aclose()
+    get_settings.cache_clear()
 
     message = str(caught.value)
-    assert message == (
-        f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
-        "follow it and did not send the operation."
-    )
-    assert _LOGIN_MARKER not in message
+    if on:
+        assert type(caught.value) is SessionLoginRedirectError
+        assert message == (
+            f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+            "follow it, so the login did not finish."
+        )
+        assert _LOGIN_MARKER not in message
+    else:
+        assert type(caught.value) is SessionLoginError
+        assert message.endswith(f"returned HTTP {status}")
     assert login.call_count == 1
     assert elsewhere.call_count == 0
     assert operation.call_count == 0

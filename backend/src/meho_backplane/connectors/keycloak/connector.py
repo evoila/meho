@@ -96,6 +96,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_entry_keys,
     target_secret_cache_key,
 )
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
@@ -472,15 +473,16 @@ class KeycloakConnector(HttpConnector):
         client = await self._http_client(target)
         token_path = fill_path(_TOKEN_PATH, {"realm": realms.admin_realm})
         try:
-            resp = await client.post(
-                token_path,
-                data=_token_request_body(creds),
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                },
-                extensions=self._request_extensions(target),
-            )
+            with login_request():
+                resp = await client.post(
+                    token_path,
+                    data=_token_request_body(creds),
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                    extensions=self._request_extensions(target),
+                )
             resp.raise_for_status()
             payload = resp.json()
         except httpx.HTTPStatusError as exc:

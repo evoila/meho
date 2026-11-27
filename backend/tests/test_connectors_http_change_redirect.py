@@ -33,6 +33,7 @@ from meho_backplane.connectors.adapters.http import (
     HttpConnector,
     _SameOriginRedirectClient,
     change_sent_once_before,
+    login_request,
 )
 from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.session import (
@@ -48,6 +49,13 @@ from meho_backplane.settings import get_settings
 
 _BASE = "https://svc.example.com"
 _CHANGE_METHODS = ["PUT", "POST", "PATCH", "DELETE"]
+
+
+def _core_client(**kwargs: Any) -> _SameOriginRedirectClient:
+    """A pooled client with the change rule, as a connector that comes with MEHO gets it."""
+    client = _SameOriginRedirectClient(**kwargs)
+    client.change_rule = True
+    return client
 
 
 class _Server:
@@ -72,15 +80,21 @@ def _operation_request() -> Iterator[None]:
         http_adapter._operation_request.reset(token)
 
 
+def _client(server: _Server) -> _SameOriginRedirectClient:
+    """A client with the change rule, as a connector that comes with MEHO gets it."""
+    client = _SameOriginRedirectClient(base_url=_BASE, transport=httpx.MockTransport(server))
+    client.change_rule = True
+    return client
+
+
 async def _send(
     server: _Server, method: str, path: str, *, operation: bool = True
 ) -> httpx.Response:
-    """Send one request; by default as the operation's own request."""
-    async with _SameOriginRedirectClient(
-        base_url=_BASE, transport=httpx.MockTransport(server)
-    ) as client:
+    """Send one request: the operation's own request, or else a named login."""
+    async with _client(server) as client:
         if not operation:
-            return await client.request(method, path, json={"name": "widget"})
+            with login_request():
+                return await client.request(method, path, json={"name": "widget"})
         with _operation_request():
             return await client.request(method, path, json={"name": "widget"})
 
@@ -207,9 +221,7 @@ async def test_change_307_compares_the_encoded_path(sent: str, location: str) ->
             return httpx.Response(307, headers={"Location": location})
         return httpx.Response(200, json={})
 
-    async with _SameOriginRedirectClient(
-        base_url=_BASE, transport=httpx.MockTransport(answer)
-    ) as client:
+    async with _core_client(base_url=_BASE, transport=httpx.MockTransport(answer)) as client:
         with _operation_request():
             await client.request("PUT", httpx.URL(_BASE + sent), json={"name": "widget"})
 
@@ -256,14 +268,12 @@ async def test_change_307_that_adds_only_a_login_part_is_not_sent_again() -> Non
     "location",
     ["/keys/redirect-secret-value", "https://other.example.com/keys/redirect-secret-value"],
 )
-async def test_log_line_of_a_change_redirect_keeps_only_the_origin(location: str) -> None:
+async def test_log_line_of_a_change_redirect_keeps_only_the_host_name(location: str) -> None:
     # The sent path and the path the target names can both carry a secret
-    # value of the call. The log line of a change names the origins only.
+    # value of the call. The log line of a change names the host names only.
     server = _Server(_redirect(307, location))
     with capture_logs() as captured:
-        async with _SameOriginRedirectClient(
-            base_url=_BASE, transport=httpx.MockTransport(server)
-        ) as client:
+        async with _core_client(base_url=_BASE, transport=httpx.MockTransport(server)) as client:
             with _operation_request():
                 await client.request("PUT", "/keys/sent-secret-value", json={"name": "widget"})
 
@@ -272,7 +282,7 @@ async def test_log_line_of_a_change_redirect_keeps_only_the_origin(location: str
     dumped = json.dumps(captured, default=str)
     assert "sent-secret-value" not in dumped
     assert "redirect-secret-value" not in dumped
-    assert warnings[0]["from_url"] == _BASE
+    assert warnings[0]["from_url"] == "svc.example.com"
 
 
 @pytest.mark.asyncio
@@ -859,6 +869,18 @@ async def test_stored_redirect_entry_of_a_keycloak_write_has_no_body() -> None:
     assert "kc-hidden-value" not in _dumped(spans)
 
 
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The settings every answer reads; the switch stays off unless a test sets it."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.delenv("REDIRECT_ON_CHANGE_RESULT", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def answer_switch(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Set the switch ``REDIRECT_ON_CHANGE_RESULT`` for one test."""
@@ -959,16 +981,21 @@ def test_result_leaves_out_the_sent_path_for_an_operation_that_sends_a_secret(
 
 @pytest.mark.usefixtures("answer_switch_on")
 @pytest.mark.parametrize("status", [307, 308])
-def test_result_for_307_308_says_the_target_did_not_run_the_call(status: int) -> None:
+def test_result_for_307_308_asks_for_a_new_approval(status: int) -> None:
+    # A 307 or 308 asks for the same request at another address. The answer
+    # says that, makes no claim about what the target ran, and has no
+    # uncertain mark.
     result = _classify(_status_error("PUT", status, "/items/8?ticket=abc"))
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_error"
     assert result.extras["http_status"] == status
-    assert "did not run this call" in result.error
+    assert "did not run" not in result.error
+    assert "change happened" not in result.error
     assert "https://svc.example.com/items/8" in result.error
     assert "ticket" not in result.error
     assert "not the approved call" in result.error
-    assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
+    assert "execution_outcome" not in result.extras
+    assert "retry" not in result.extras
 
 
 @pytest.mark.usefixtures("answer_switch_on")
@@ -1006,25 +1033,18 @@ def test_redirect_without_location_keeps_the_generic_result() -> None:
 def test_with_the_switch_off_a_change_redirect_gets_the_generic_answer(
     status: int, answer_switch: Any
 ) -> None:
+    # With the switch off the answer is the generic ``connector_error``
+    # answer for that status, word for word.
     answer_switch(False)
     exc = _real_status_error(status, "/jobs/42")
     generic = result_connector_error("svc.item.update", exc, 1.0)
 
     result = _classify(exc)
 
-    assert result.status == generic.status == "error"
-    assert result.error == generic.error == "connector_error: HTTPStatusError"
-    assert set(result.extras) == set(generic.extras)
-    assert result.extras["error_code"] == "connector_error"
-    assert result.extras["http_status"] == status
+    assert result == generic
+    assert result.error == "connector_error: HTTPStatusError"
     for key in ("execution_outcome", "retry", "remediation", "message_source"):
         assert key not in result.extras
-    assert result.extras["exception_message"] == (
-        f"Redirect response '{exc.response.status_code} {exc.response.reason_phrase}' "
-        f"for url '{_BASE}/jobs'\nRedirect location: '{_BASE}/jobs/42'\n"
-        f"For more information check: "
-        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status}"
-    )
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
@@ -1036,10 +1056,13 @@ def test_with_the_switch_on_a_change_redirect_gets_the_answer_by_its_code(
     result = _classify(_real_status_error(status, "/jobs/42"))
 
     assert result.error.startswith("connector_error: HTTPStatusError. ")
+    assert result.extras["message_source"] == "meho"
+    if status in (307, 308):
+        assert "execution_outcome" not in result.extras
+        return
     assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
     assert result.extras["retry"] is False
     assert "remediation" in result.extras
-    assert result.extras["message_source"] == "meho"
 
 
 _MARKERS = (
@@ -1076,10 +1099,9 @@ def _marked_status_error(status: int, sent_path: str) -> httpx.HTTPStatusError:
     return caught.value
 
 
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_both_modes_hide_the_marked_values(status: int, on: bool, answer_switch: Any) -> None:
-    answer_switch(on)
+def test_the_switch_on_answer_hides_the_marked_values(status: int, answer_switch: Any) -> None:
+    answer_switch(True)
 
     result = _classify(_marked_status_error(status, "/items/7"))
 
@@ -1089,12 +1111,11 @@ def test_both_modes_hide_the_marked_values(status: int, on: bool, answer_switch:
     assert f"{_BASE}/items/7" in dumped
 
 
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-def test_both_modes_hide_the_path_of_an_operation_that_sends_a_secret(
-    status: int, on: bool, answer_switch: Any
+def test_the_switch_on_answer_hides_the_path_of_an_operation_that_sends_a_secret(
+    status: int, answer_switch: Any
 ) -> None:
-    answer_switch(on)
+    answer_switch(True)
 
     result = _classify(
         _marked_status_error(status, "/keys/marker-secret-path"), op_sends_secret=True

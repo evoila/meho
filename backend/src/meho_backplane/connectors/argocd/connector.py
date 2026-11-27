@@ -670,7 +670,9 @@ class ArgoCdConnector(HttpConnector):
             raise ValueError(f"_write_json only accepts POST/PUT/DELETE; got {verb!r}")
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
-        resp = await client.request(verb, path, params=params, json=json, headers=headers)
+        resp = await self._send_traced(
+            client, verb, path, params=params, json=json, headers=headers
+        )
         resp.raise_for_status()
         if not resp.content:
             return {}

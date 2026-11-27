@@ -76,6 +76,7 @@ from meho_backplane.connectors._shared.cache_key import (
     target_entry_keys,
     target_secret_cache_key,
 )
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
@@ -579,33 +580,6 @@ helper is just the round-trip.
 """
 
 
-def _session_login_error(
-    exc: httpx.HTTPStatusError, path: str, target_name: str
-) -> SessionLoginError:
-    """The error of a login POST that got a non-2xx answer."""
-    if 300 <= exc.response.status_code < 400:
-        # A redirect MEHO did not follow. The error names no part of the
-        # login path or of the ``Location``. Imported here: the error module
-        # imports this one.
-        from meho_backplane.connectors._shared.login_redirect import (
-            SessionLoginRedirectError,
-        )
-
-        return SessionLoginRedirectError(exc.response.status_code)
-    message = (
-        f"vcf session-login failed for target {target_name!r}: "
-        f"POST {path} returned HTTP {exc.response.status_code}"
-    )
-    # A 401 (rotated/stale password) or 403 (locked-out account) at
-    # establish is an auth-class failure the dispatcher maps to the
-    # structured ``connector_auth_failed`` code; every other status keeps the
-    # generic ``SessionLoginError`` shape. ``ConnectorAuthError`` subclasses
-    # ``SessionLoginError``, so consumers catching the latter are unaffected.
-    return session_establish_auth_error(
-        exc, message=message, target_name=target_name
-    ) or SessionLoginError(message)
-
-
 async def vcf_session_login(
     client: httpx.AsyncClient,
     path: str,
@@ -673,12 +647,26 @@ async def vcf_session_login(
     else:
         body = {"username": username, "password": password}
     try:
-        resp = await client.post(
-            path, json=body, headers=request_headers, extensions=request_extensions or {}
-        )
+        with login_request():
+            resp = await client.post(
+                path, json=body, headers=request_headers, extensions=request_extensions or {}
+            )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise _session_login_error(exc, path, target_name) from exc
+        message = (
+            f"vcf session-login failed for target {target_name!r}: "
+            f"POST {path} returned HTTP {exc.response.status_code}"
+        )
+        # #2329: a 401 (rotated/stale password) or 403 (locked-out account)
+        # at establish is an auth-class failure the dispatcher maps to the
+        # structured ``connector_auth_failed`` code; every other status keeps
+        # the generic ``SessionLoginError`` shape. ``ConnectorAuthError``
+        # subclasses ``SessionLoginError``, so consumers catching the latter
+        # are unaffected.
+        raise (
+            session_establish_auth_error(exc, message=message, target_name=target_name)
+            or SessionLoginError(message)
+        ) from exc
     token = token_extractor(resp)
     if not token:
         raise SessionLoginError(

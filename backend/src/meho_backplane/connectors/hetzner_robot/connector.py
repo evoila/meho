@@ -353,7 +353,7 @@ class HetznerRobotConnector(HttpConnector):
         """
         client = await self._http_client(target)
         headers = await self.auth_headers(target, synthesise_system_operator())
-        resp = await client.request("POST", path, data=data, headers=headers)
+        resp = await self._send_traced(client, "POST", path, data=data, headers=headers)
         if resp.status_code == 401:
             raise RuntimeError(
                 f"auth_failed: Hetzner Robot returned 401 for target "

@@ -51,6 +51,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.rejected_token import drop_rejected_token
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
@@ -231,12 +232,13 @@ class FreeipaConnector(FreeipaIdentityWriteOps, FreeipaAccessWriteOps, HttpConne
         """Log in with a password and return the session. The login is never traced."""
         referer = referer_for(target)
         client = await self._http_client(target)
-        resp = await client.post(
-            LOGIN_PATH,
-            data={"user": username, "password": password},
-            headers={"Referer": referer, "Accept": "text/plain"},
-            extensions=self._request_extensions(target),
-        )
+        with login_request():
+            resp = await client.post(
+                LOGIN_PATH,
+                data={"user": username, "password": password},
+                headers={"Referer": referer, "Accept": "text/plain"},
+                extensions=self._request_extensions(target),
+            )
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:

@@ -36,7 +36,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
-from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient
+from meho_backplane.connectors.adapters.http import _SameOriginRedirectClient, login_request
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.approval_queue import _dump_result_envelope
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME
@@ -50,6 +50,13 @@ from tests.test_operations_session_expired_hook import (  # noqa: F401
     _run,
     _web_operator,
 )
+
+
+def _core_client(**kwargs: Any) -> _SameOriginRedirectClient:
+    """A pooled client with the change rule, as a connector that comes with MEHO gets it."""
+    client = _SameOriginRedirectClient(**kwargs)
+    client.change_rule = True
+    return client
 
 
 @pytest.fixture(autouse=True)
@@ -106,7 +113,7 @@ class _RedirectingConnector(_NoHook403Connector):
             self.sent.append(request.method)
             return self.answer(request)
 
-        async with _SameOriginRedirectClient(
+        async with _core_client(
             base_url="https://vcfops.example.test", transport=httpx.MockTransport(answer)
         ) as client:
             # The operation's own request, sent the way an operation sends it.
@@ -132,12 +139,22 @@ class _LoginEndedRedirectConnector(_RedirectingConnector):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-async def test_change_that_gets_a_redirect_is_marked_uncertain(
-    stub_embedding_service: AsyncMock, session: AsyncSession, status: int
+async def test_change_that_may_have_run_is_marked_uncertain_in_the_audit_row(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    status: int,
+    on: bool,
+    answer_switch: Any,
 ) -> None:
+    # A 301, 302 or 303 after a change: the target may have run it. The audit
+    # row says so in both switch states. A 307 or 308 gets no mark. The
+    # "do not send again" advice in the answer needs the switch on.
+    answer_switch(on)
+
     class _Conn(_RedirectingConnector):
-        impl_id = f"vcfops-rest-redirect-{status}"
+        impl_id = f"vcfops-rest-redirect-{status}-{'on' if on else 'off'}"
 
     _Conn.status = status
     result, connector = await _run(
@@ -150,9 +167,19 @@ async def test_change_that_gets_a_redirect_is_marked_uncertain(
     )
 
     assert result.status == "error"
-    assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
-    assert result.extras["retry"] is False
-    assert connector.sent[0] == "PUT"
+    assert connector.sent == ["PUT"]
+    may_have_run = status in (301, 302, 303)
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    audited = rows[0].payload["error"]
+    assert (audited.get("execution_outcome") == UNCERTAIN_OUTCOME) is may_have_run
+    if on and may_have_run:
+        assert result.extras["execution_outcome"] == UNCERTAIN_OUTCOME
+        assert result.extras["retry"] is False
+        assert "remediation" in result.extras
+    else:
+        for key in ("execution_outcome", "retry", "remediation"):
+            assert key not in result.extras
 
 
 @pytest.mark.asyncio
@@ -341,7 +368,8 @@ async def test_login_redirect_is_reported_as_the_login(
     assert result.status == "error"
     assert "execution_outcome" not in result.extras
     assert "login of this connector got HTTP 303" in result.extras["exception_message"]
-    assert "did not send the operation" in result.extras["exception_message"]
+    assert "MEHO did not follow it" in result.extras["exception_message"]
+    assert "did not send the operation" not in result.extras["exception_message"]
     assert "change ran" not in (result.error or "")
 
 
@@ -417,7 +445,8 @@ async def test_change_repeated_after_login_follows_no_redirect(
     assert result.status == "error"
     assert result.extras["http_status"] == 307
     assert result.error is not None
-    assert "did not run this call" in result.error
+    assert "not the approved call" in result.error
+    assert "did not run" not in result.error
     rows = await _audit_rows()
     assert len(rows) == 1
     assert rows[0].payload["session_resent"] is True
@@ -450,13 +479,13 @@ async def test_login_redirect_message_stays_for_an_operation_that_sends_a_secret
     assert connector.sent == []
     assert result.status == "error"
     assert result.extras["exception_message"] == (
-        "The login of this connector got HTTP 303, a redirect. MEHO did not follow it "
-        "and did not send the operation."
+        "The login of this connector got HTTP 303, a redirect. MEHO did not follow it, "
+        "so the login did not finish."
     )
     assert "execution_outcome" not in result.extras
     rows = await _audit_rows()
     assert len(rows) == 1
-    assert "did not send the operation" in json.dumps(rows[0].payload)
+    assert "so the login did not finish" in json.dumps(rows[0].payload)
 
 
 class _LoginRedirectedOnRecoveryConnector(_RedirectingConnector):
@@ -486,11 +515,12 @@ class _LoginRedirectedOnRecoveryConnector(_RedirectingConnector):
         return httpx.Response(200, json={"ok": True})
 
     async def _send(self, method: str, path: str) -> dict[str, Any]:
-        async with _SameOriginRedirectClient(
+        async with _core_client(
             base_url="https://vcfops.example.test", transport=httpx.MockTransport(self.answer)
         ) as client:
             if self.logged_out:
-                login = await client.request("POST", "/api/session", json={"user": "made-up"})
+                with login_request():
+                    login = await client.request("POST", "/api/session", json={"user": "made-up"})
                 login.raise_for_status()
                 self.logged_out = False
             resp = await self._send_traced(client, method, path, headers={}, json={"name": "w"})
@@ -625,11 +655,10 @@ async def _assert_no_marker(result: Any, markers: tuple[str, ...]) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
-async def test_both_modes_hide_the_marked_values(
-    stub_embedding_service: AsyncMock, session: AsyncSession, on: bool, answer_switch: Any
+async def test_the_switch_on_answer_hides_the_marked_values(
+    stub_embedding_service: AsyncMock, session: AsyncSession, answer_switch: Any
 ) -> None:
-    answer_switch(on)
+    answer_switch(True)
     result, _ = await _run(
         _MarkedRedirectConnector,
         stub_embedding_service,
@@ -646,11 +675,10 @@ async def test_both_modes_hide_the_marked_values(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
-async def test_both_modes_hide_the_path_of_an_operation_that_sends_a_secret(
-    stub_embedding_service: AsyncMock, session: AsyncSession, on: bool, answer_switch: Any
+async def test_the_switch_on_answer_hides_the_path_of_an_operation_that_sends_a_secret(
+    stub_embedding_service: AsyncMock, session: AsyncSession, answer_switch: Any
 ) -> None:
-    answer_switch(on)
+    answer_switch(True)
     result, _ = await _run(
         _MarkedSecretPathConnector,
         stub_embedding_service,
@@ -692,7 +720,7 @@ class _CrossOriginLoginConnector(_RedirectingConnector):
             self.sent.append(f"{request.method} {request.url.host}{request.url.path}")
             return self.answer(request)
 
-        async with _SameOriginRedirectClient(
+        async with _core_client(
             base_url="https://vcfops.example.test", transport=httpx.MockTransport(answer)
         ) as client:
             await vcf_session_login(
@@ -715,7 +743,7 @@ _LOGIN_MARKERS = ("mrk-login-path-3a", "mrk-location-path-3a", "mrk-query-3a", "
 @pytest.mark.parametrize("tags", [[], ["credential"]], ids=["plain", "sends-a-secret"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 @pytest.mark.parametrize("on", [False, True], ids=["switch-off", "switch-on"])
-async def test_a_login_redirect_to_another_origin_says_so_in_both_modes(
+async def test_a_login_redirect_to_another_origin_ends_the_login_in_both_modes(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     on: bool,
@@ -745,11 +773,26 @@ async def test_a_login_redirect_to_another_origin_says_so_in_both_modes(
     assert isinstance(connector, _CrossOriginLoginConnector)
     assert connector.sent == ["POST vcfops.example.test/api/mrk-login-path-3a/session"]
     assert result.status == "error"
-    assert result.extras["exception_message"] == (
-        f"The login of this connector got HTTP {status}, a redirect. MEHO did not follow it "
-        "and did not send the operation."
-    )
-    await _assert_no_marker(result, _LOGIN_MARKERS)
+    if on:
+        # The fixed sentence of MEHO: no address and no text of the answer.
+        assert result.extras["exception_message"] == (
+            f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+            "follow it, so the login did not finish."
+        )
+        await _assert_no_marker(result, _LOGIN_MARKERS)
+    elif tags:
+        # The login's own error, withheld as for every error of a secret call.
+        assert result.extras["exception_message"] == (
+            "<vendor text withheld: this operation sends a secret>"
+        )
+        await _assert_no_marker(result, _LOGIN_MARKERS)
+    else:
+        # The login's own error for the status, as the login code words it.
+        assert result.extras["exception_message"] == (
+            "vcf session-login failed for target 'lab-target': "
+            f"POST /api/mrk-login-path-3a/session returned HTTP {status}"
+        )
+        await _assert_no_marker(result, _LOGIN_MARKERS[1:])
     dumped_logs = json.dumps(logs, default=str)
     for marker in ("mrk-location-path-3a", "mrk-query-3a", "mrk-login-body-3a"):
         assert marker not in dumped_logs
@@ -787,7 +830,7 @@ class _FaultRedirectConnector(_RedirectingConnector):
 @pytest.mark.parametrize("tags", [[], ["credential"]], ids=["plain", "sends-a-secret"])
 @pytest.mark.parametrize("fault", [True, False], ids=["vendor-fault", "other-body"])
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
-async def test_with_the_switch_off_the_answer_has_the_keys_of_the_generic_answer(
+async def test_with_the_switch_off_the_answer_is_the_generic_answer(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     status: int,
@@ -796,6 +839,7 @@ async def test_with_the_switch_off_the_answer_has_the_keys_of_the_generic_answer
     answer_switch: Any,
 ) -> None:
     from meho_backplane.operations._errors import result_connector_error
+    from meho_backplane.operations._vendor_text import redact_error_result, withhold_vendor_text
 
     answer_switch(False)
 
@@ -817,12 +861,15 @@ async def test_with_the_switch_off_the_answer_has_the_keys_of_the_generic_answer
 
     assert isinstance(connector, _FaultRedirectConnector)
     assert connector.error is not None
-    generic = result_connector_error(_OP_ID, connector.error, 1.0)
+    # The generic answer for that status, through the same last steps that
+    # every error answer passes (the vendor text of a secret call is withheld).
+    generic = redact_error_result(
+        withhold_vendor_text(
+            result_connector_error(_OP_ID, connector.error, 1.0), op_id=_OP_ID, tags=tags
+        )
+    )
     assert generic.extras is not None
     assert ("upstream_fault" in generic.extras) is fault
     assert result.status == generic.status == "error"
     assert result.error == generic.error
-    assert set(result.extras) == set(generic.extras)
-    assert result.extras["upstream_message"] is None
-    assert result.extras.get("upstream_fault") is None
-    await _assert_no_marker(result, ("mrk-fault-text-6b",))
+    assert result.extras == generic.extras

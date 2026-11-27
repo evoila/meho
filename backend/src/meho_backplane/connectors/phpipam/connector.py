@@ -42,6 +42,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
@@ -180,17 +181,28 @@ class PhpipamConnector(HttpConnector):
         config = resolve_target_config(target)
         path = api_path(config.base_path, _USER_PATH, {"app_id": config.app_id})
         client = await self._http_client(target)
-        response = await client.post(
-            path,
-            headers={
-                "Authorization": basic_auth_header(
-                    credentials.username or "", credentials.password or ""
-                )
-            },
-            extensions=self._request_extensions(target),
-        )
+        with login_request():
+            response = await client.post(
+                path,
+                headers={
+                    "Authorization": basic_auth_header(
+                        credentials.username or "", credentials.password or ""
+                    )
+                },
+                extensions=self._request_extensions(target),
+            )
         if response.status_code in (401, 403):
             raise auth_error(response, target=target, stage="login")
+        if 300 <= response.status_code < 400:
+            # A redirect that MEHO did not follow is never a login, whatever
+            # its body holds. Nothing of the body reaches the error.
+            raise PhpipamApiError(
+                f"phpIPAM user login for target {target.name!r} failed with HTTP "
+                f"{response.status_code}",
+                http_status=response.status_code,
+                upstream_message=None,
+                remediation=AUTH_REMEDIATION,
+            )
         if response.status_code >= 400:
             # phpIPAM answers HTTP 500 to a wrong user name or password.
             raise PhpipamApiError(

@@ -106,7 +106,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
-from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
+from meho_backplane.connectors._shared.login_mark import login_request
 from meho_backplane.connectors._shared.profile_auth import (
     SESSION_SCHEME_SPECS,
     STATELESS_SCHEMES,
@@ -136,7 +136,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 
-__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector", "SessionLoginRedirectError"]
+__all__ = ["ProfileCredentialsLoader", "ProfiledRestConnector"]
 
 _log = structlog.get_logger(__name__)
 
@@ -538,12 +538,6 @@ class ProfiledRestConnector(HttpConnector):
             auth_error = session_establish_auth_error(exc, message=message, target=target)
             if auth_error is not None:
                 raise auth_error from exc
-            if 300 <= exc.response.status_code < 400:
-                # The login got a redirect that MEHO did not follow (another
-                # origin, or no ``Location``). The error
-                # holds no login path (it can come from the credential), no
-                # ``Location`` and no body, with the switch off and on.
-                raise SessionLoginRedirectError(exc.response.status_code) from exc
             raise
         return resp.json(), established_path
 
@@ -580,16 +574,18 @@ class ProfiledRestConnector(HttpConnector):
                     f"{auth.scheme!r} declares login_credentials='basic' but its "
                     f"build_login_auth produced no credential pair"
                 )
+            with login_request():
+                return await client.post(
+                    path, headers=request_headers, auth=basic_auth, extensions=extensions
+                )
+        with login_request():
+            if spec.encoding == "form":
+                return await client.post(
+                    path, data=dict(body), headers=request_headers, extensions=extensions
+                )
             return await client.post(
-                path, headers=request_headers, auth=basic_auth, extensions=extensions
+                path, json=dict(body), headers=request_headers, extensions=extensions
             )
-        if spec.encoding == "form":
-            return await client.post(
-                path, data=dict(body), headers=request_headers, extensions=extensions
-            )
-        return await client.post(
-            path, json=dict(body), headers=request_headers, extensions=extensions
-        )
 
     @staticmethod
     def _session_spec(scheme: str) -> SessionSchemeSpec:

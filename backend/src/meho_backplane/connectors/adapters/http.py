@@ -88,7 +88,7 @@ import hashlib
 import os
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import anyio
 import httpx
@@ -99,6 +99,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.principal_block import raise_if_send_refused
 from meho_backplane.auth.principal_block_run import mark_request_sent
+from meho_backplane.connector_packages import connector_package_of
 from meho_backplane.connectors._shared.cache_key import (
     DEFAULT_PORTS,
     effective_scheme,
@@ -106,6 +107,7 @@ from meho_backplane.connectors._shared.cache_key import (
 )
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.log_host import UNPARSEABLE_ADDRESS, host_for_log
+from meho_backplane.connectors._shared.login_mark import in_login_request, login_request
 from meho_backplane.connectors._shared.pinned_transport import build_port_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -807,14 +809,16 @@ def _log_redirect_not_followed(request: httpx.Request, location: str | None) -> 
 # only a 307 / 308 to the same path (see :func:`_change_may_be_sent_again`).
 _MAX_CHANGE_REDIRECTS = 1
 
+#: The HTTP codes of a redirect.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
 
 #: Set while :meth:`HttpConnector._request_json`,
 #: :meth:`HttpConnector._post_json` or :meth:`HttpConnector._send_traced`
-#: sends the operation's own request. Only then does the change rule of the
-#: client apply (at most two sends, only a 307 or 308 to the same path), and
-#: only then does the client put each followed redirect into the trace. Every
-#: other request (a login, for example) follows a redirect on the same
-#: origin with the rule of a read and stays out of the trace.
+#: sends the operation's own request. Only then does the client put each
+#: followed redirect into the trace, so login traffic stays out of it. The
+#: operation's own request is never a login, also when it is sent inside a
+#: :func:`login_request` block.
 _operation_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "meho_operation_request", default=False
 )
@@ -840,26 +844,6 @@ def _encoded_path(url: httpx.URL) -> str:
 def _folded_path(url: httpx.URL) -> str:
     """The encoded path of *url* without one trailing slash, in lower case."""
     return _encoded_path(url).removesuffix("/").lower()
-
-
-#: Set while a request is a login that the code names as a login: inside
-#: :func:`login_request`, and while the core asks a connector for its auth
-#: headers (:meth:`HttpConnector.auth_headers`). A login follows a redirect on
-#: the same origin with the rule of a read. Every other request that is not a
-#: read gets the change rule.
-_login_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "meho_login_request", default=False
-)
-
-
-@contextlib.contextmanager
-def login_request() -> Iterator[None]:
-    """Name the requests sent inside as a login."""
-    token = _login_request.set(True)
-    try:
-        yield
-    finally:
-        _login_request.reset(token)
 
 
 #: Set while MEHO sends an operation again after "the login ended": the
@@ -963,15 +947,22 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
     vcsim's ``/rest`` mount and some appliances emit) is still followed, so
     no vendor flow regresses.
 
-    There are two redirect rules. The operation's own change request (a
-    method that is not a read, sent by ``_request_json``, ``_post_json`` or
-    ``_send_traced``) follows at most one redirect: a 307 or 308 to the same
-    path with the same query. Every other request, a read or a login,
-    follows redirects on the same origin up to the hop budget. Any cross-origin
+    The redirect rule depends on the kind of request. A read (GET, HEAD,
+    OPTIONS) and a named login (:func:`login_request`, or a request sent
+    inside a connector's ``auth_headers``) follow redirects on the same
+    origin up to the hop budget. When :attr:`change_rule` is on, every other
+    request gets the change rule: at most two sends, and a second send only
+    after a 307 or 308 to the same path with the same query. When it is off,
+    every request follows redirects on the same origin. Any cross-origin
     ``Location`` terminates the loop and the ``3xx`` response is returned to
     the caller unfollowed — the request is **never** replayed off-origin, so
     no header or body crosses the origin boundary.
     """
+
+    #: Whether a request that is neither a read nor a named login gets the
+    #: change rule. :meth:`HttpConnector._build_http_client` sets it from
+    #: :meth:`HttpConnector.uses_change_rule`.
+    change_rule: bool = False
 
     async def send(
         self,
@@ -989,9 +980,36 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         response = await _run_stop_safe(
             lambda: self._send_same_origin(request, stream, auth), discard=_close_answer
         )
+        if self._is_unfollowed_login_redirect(response):
+            await response.aclose()
+            # Imported here: the error module imports the login helpers.
+            from meho_backplane.connectors._shared.login_redirect import (
+                SessionLoginRedirectError,
+            )
+
+            raise SessionLoginRedirectError(response.status_code)
         if stream and isinstance(response.stream, httpx.AsyncByteStream):
             response.stream = _StopSafeCloseStream(response.stream)
         return response
+
+    def _is_unfollowed_login_redirect(self, response: httpx.Response) -> bool:
+        """Whether a named login ends on a redirect that MEHO did not follow.
+
+        Only with the switch ``redirect_on_change_result`` on, and only for a
+        client with the change rule. Then the login ends with
+        :class:`SessionLoginRedirectError` before the login code reads the
+        answer. With the switch off the login code reads the answer itself.
+        """
+        if not (
+            self.change_rule
+            and response.status_code in _REDIRECT_STATUSES
+            and in_login_request()
+            and not _operation_request.get()
+        ):
+            return False
+        from meho_backplane.settings import get_settings
+
+        return get_settings().redirect_on_change_result
 
     def _build_redirect_request(
         self, request: httpx.Request, response: httpx.Response
@@ -1017,11 +1035,12 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
         # following; this class owns the redirect decision so the
         # same-origin invariant cannot be undone by a per-call
         # ``follow_redirects=True`` slipping through a convenience method.
-        # The change rule holds only for the operation's own request. A login
-        # is not the change: it follows a redirect on the same origin, as a
-        # read does.
-        is_change = request.method.upper() not in _IDEMPOTENT_METHODS and not (
-            _login_request.get() and not _operation_request.get()
+        # A read and a named login follow a redirect on the same origin. Every
+        # other request is a change, when this client has the change rule.
+        is_change = (
+            self.change_rule
+            and request.method.upper() not in _IDEMPOTENT_METHODS
+            and not (in_login_request() and not _operation_request.get())
         )
         if is_change:
             # The repeated operation request follows no redirect.
@@ -1106,6 +1125,11 @@ class _SameOriginRedirectClient(httpx.AsyncClient):
             response = await super().send(request, stream=stream, auth=auth, follow_redirects=False)
 
 
+#: The client class that knows the change rule, under a name that a test
+#: which patches ``_SameOriginRedirectClient`` does not replace.
+_ChangeRuleClient = _SameOriginRedirectClient
+
+
 def _as_login(method: Callable[..., Awaitable[dict[str, str]]]) -> Any:
     """Wrap a connector's ``auth_headers`` so each request it sends is a login."""
 
@@ -1131,6 +1155,24 @@ class HttpConnector(Connector):
     #: never redirects (Azure) sets a class that follows none, so a redirect
     #: on the same host can never carry a token to another path.
     _client_class: type[httpx.AsyncClient] | None = None
+
+    #: A connector package sets this to ``True`` to say that it names each of
+    #: its logins: it sends them inside :meth:`auth_headers` or inside
+    #: :func:`login_request`. Then every other request of the package that is
+    #: not a read gets the change rule (see :meth:`uses_change_rule`). A
+    #: connector that comes with MEHO itself gets the change rule always.
+    names_its_logins: ClassVar[bool] = False
+
+    @classmethod
+    def uses_change_rule(cls) -> bool:
+        """Whether a request of this connector that is not a read or a login gets the change rule.
+
+        Yes for a connector that comes with MEHO itself, and for a connector
+        package that declares :attr:`names_its_logins`. A package that does
+        not declare it keeps the rule of a read for every request: a login it
+        sends outside ``auth_headers`` would otherwise end on a redirect.
+        """
+        return cls.names_its_logins or connector_package_of(cls.__module__) is None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -1323,7 +1365,7 @@ class HttpConnector(Connector):
         # The screen gets the port the socket dials.
         transport = build_port_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
         client_class = self._client_class or _SameOriginRedirectClient
-        return client_class(
+        client = client_class(
             base_url=self._base_url(target),
             timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
             # Same-origin-only redirect following (see
@@ -1343,6 +1385,9 @@ class HttpConnector(Connector):
             # part of the operation may have run.
             event_hooks={"request": [_note_request_sent]},
         )
+        if isinstance(client, _ChangeRuleClient):
+            client.change_rule = self.uses_change_rule()
+        return client
 
     async def _ephemeral_http_client(self, target: Target) -> httpx.AsyncClient:
         """A new, un-pooled client for *target* -- same SSRF + TLS posture, own cookie jar.
@@ -1677,6 +1722,9 @@ class HttpConnector(Connector):
         *,
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        extensions: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """Send one operation request through *client* and put it into the trace.
 
@@ -1687,11 +1735,20 @@ class HttpConnector(Connector):
         login, so login traffic stays out of the trace. The answer is
         returned as it is; the caller checks its status.
         """
-        with flight_recorder_capture.request_body_values(json, path):
+        body = json if json is not None else data
+        with flight_recorder_capture.request_body_values(body, path):
             _fr_start = flight_recorder_capture.span_start()
             trace_hops = _operation_request.set(True)
             try:
-                resp = await client.request(method, path, json=json, headers=headers)
+                resp = await client.request(
+                    method,
+                    path,
+                    json=json,
+                    data=data,
+                    params=params,
+                    headers=headers,
+                    extensions=extensions,
+                )
             except httpx.TransportError as exc:
                 flight_recorder_capture.record_vendor_call_error(
                     _fr_start, method=_failed_method(exc, method), exc=exc
@@ -1704,8 +1761,8 @@ class HttpConnector(Connector):
                 method=resp.request.method,
                 request_headers=headers,
                 response=resp,
-                request_body=json if resp.request.method == method else None,
-                request_content_type="application/json" if json is not None else None,
+                request_body=body if resp.request.method == method else None,
+                request_content_type=_post_body_content_type(json, data),
                 response_body=self._trace_response_body(_fr_start, resp),
             )
         return resp

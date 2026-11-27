@@ -92,6 +92,7 @@ __all__ = [
     "UPSTREAM_SAID",
     "VAULT_SAID",
     "is_redirect_on_change",
+    "redirect_change_may_have_run",
     "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
@@ -110,7 +111,6 @@ __all__ = [
     "result_connector_not_found",
     "result_connector_package_not_installed",
     "result_connector_probe_refused",
-    "result_connector_redirect_generic",
     "result_connector_redirect_on_change",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -1731,6 +1731,15 @@ def is_redirect_on_change(exc: httpx.HTTPStatusError) -> bool:
     )
 
 
+def redirect_change_may_have_run(exc: httpx.HTTPStatusError) -> bool:
+    """Whether the target may have run the change before it sent the redirect.
+
+    Yes for a 301, 302 or 303. A 307 or 308 asks for the same request at
+    another address.
+    """
+    return exc.response.status_code in (301, 302, 303)
+
+
 def _safe_address(url: httpx.URL) -> str:
     """*url* as scheme, host and path only: no query, fragment or login part."""
     return str(url.copy_with(query=None, fragment=None, username=None, password=None))
@@ -1772,9 +1781,10 @@ def result_connector_redirect_on_change(
 ) -> OperationResult:
     """A change got a redirect that MEHO did not follow.
 
-    The text follows what the HTTP status code means: 307 / 308 say the
-    target did not handle the request; 303 says the change ran and the result
-    is at the address; 301 / 302 are unclear. The result keeps the shape of a
+    The answer while the switch ``redirect_on_change_result`` is on. The text
+    follows what the HTTP status code means: 307 / 308 ask for the same call
+    at another address; 303 says the change ran and the result is at the
+    address; 301 / 302 are unclear. The result keeps the shape of a
     ``connector_error`` and adds no field.
 
     Every text is built here from the status, the method and the safe parts
@@ -1790,8 +1800,8 @@ def result_connector_redirect_on_change(
     address = _ADDRESS_WITHHELD if withhold_address else _redirect_address(exc)
     if status_code in (307, 308):
         message = (
-            f"The target did not run this call. It asked for it to go to {address}. "
-            "That is not the approved call. Make a new preview and approval for that address."
+            f"The target asked for this call to go to {address}. MEHO did not follow it: "
+            "that is not the approved call. Make a new preview and approval for that address."
         )
     elif status_code == 303:
         message = (
@@ -1821,50 +1831,6 @@ def result_connector_redirect_on_change(
             "upstream_message": None,
         },
     )
-
-
-def result_connector_redirect_generic(
-    op_id: str,
-    exc: httpx.HTTPStatusError,
-    duration_ms: float,
-    *,
-    withhold_address: bool = False,
-) -> OperationResult:
-    """A change got a redirect that MEHO did not follow: the generic answer.
-
-    The answer while the switch ``redirect_on_change_result`` is off. It has
-    the keys and the ``error`` text of :func:`result_connector_error` for that
-    status, and hides the same values as
-    :func:`result_connector_redirect_on_change`: ``exception_message`` is
-    httpx's status text, rebuilt from the status and the safe parts of the two
-    addresses (scheme, host and path; only scheme, host and port with
-    *withhold_address*). Each value read from the redirect body
-    (``upstream_message``, and ``upstream_fault`` when the generic answer has
-    it) is empty.
-    """
-    result = result_connector_error(op_id, exc, duration_ms)
-    status_code = exc.response.status_code
-    redirect_url = _redirect_url(exc)
-    if withhold_address:
-        sent = _origin(exc.request.url)
-        location = "?" if redirect_url is None else _origin(redirect_url)
-    else:
-        sent = _safe_address(exc.request.url)
-        location = "?" if redirect_url is None else _safe_address(redirect_url)
-    text = (
-        f"Redirect response '{status_code} {exc.response.reason_phrase}' for url '{sent}'\n"
-        f"Redirect location: '{location}'\n"
-        f"For more information check: "
-        f"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status_code}"
-    )
-    extras = dict(result.extras or {})
-    extras["exception_message"] = _sanitize_free_text(text)
-    # The same keys as the generic answer; each value read from the body of
-    # the redirect answer is empty.
-    extras["upstream_message"] = None
-    if "upstream_fault" in extras:
-        extras["upstream_fault"] = None
-    return result.model_copy(update={"extras": extras})
 
 
 def result_vault_credentials_read_error(

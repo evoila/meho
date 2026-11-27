@@ -693,7 +693,7 @@ class HarborConnector(HttpConnector):
         check_robot_in_project(robot, robot_id=robot_id, project=project)
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
-        resp = await client.request("DELETE", path, headers=headers)
+        resp = await self._send_traced(client, "DELETE", path, headers=headers)
         resp.raise_for_status()
         return {"id": robot_id, "deleted": True}
 

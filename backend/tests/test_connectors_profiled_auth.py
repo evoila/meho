@@ -35,6 +35,7 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import credential_cache_key
+from meho_backplane.connectors._shared.login_redirect import SessionLoginRedirectError
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
@@ -44,7 +45,7 @@ from meho_backplane.connectors.profile import (
     FingerprintSpec,
     PaginationSpec,
 )
-from meho_backplane.connectors.profiled import ProfiledRestConnector, SessionLoginRedirectError
+from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.settings import get_settings
 
@@ -750,10 +751,12 @@ async def test_a_profiled_login_redirect_to_another_origin_ends_the_call(
 ) -> None:
     """A login never follows a redirect to another origin, with the switch off and on.
 
-    The error says in plain words that the login got a redirect that MEHO
-    did not follow, and names the status. It holds no part of the login path,
-    the ``Location`` path or its query. The other origin gets no request and
-    the operation is not sent.
+    With the switch on, the error says in plain words that the login got a
+    redirect that MEHO did not follow, and names the status. It holds no part
+    of the login path, the ``Location`` path or its query. With the switch
+    off, the login code gets the redirect answer and raises its own error.
+    In both modes the other origin gets no request and the operation is not
+    sent.
     """
     answer_switch(on)
     connector = _connector("session_login", {"username": "svc", "password": "pw"})
@@ -766,19 +769,24 @@ async def test_a_profiled_login_redirect_to_another_origin_ends_the_call(
         )
         elsewhere = mock.route(url__startswith=location_origin + "/").respond(200, json={})
         operation = mock.put("https://vrli.invalid/api/v2/items/7").respond(200, json={})
-        with pytest.raises(SessionLoginRedirectError) as exc_info:
+        with pytest.raises(Exception) as exc_info:
             await connector._post_json(
                 target, "/api/v2/items/7", operator=_operator(), verb="PUT", json={"n": 1}
             )
     await connector.aclose()
 
-    message = str(exc_info.value)
-    assert message == (
-        f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
-        "follow it and did not send the operation."
-    )
-    assert _LOGIN_PATH_MARKER not in message
-    assert "/api/v2/sessions" not in message
+    if on:
+        assert type(exc_info.value) is SessionLoginRedirectError
+        message = str(exc_info.value)
+        assert message == (
+            f"The login of this connector got HTTP {status}, a redirect. MEHO did not "
+            "follow it, so the login did not finish."
+        )
+        assert _LOGIN_PATH_MARKER not in message
+        assert "/api/v2/sessions" not in message
+    else:
+        assert type(exc_info.value) is httpx.HTTPStatusError
+        assert exc_info.value.response.status_code == status
     assert login.call_count == 1
     assert elsewhere.call_count == 0
     assert operation.call_count == 0
@@ -804,11 +812,12 @@ def _login_redirect(status: int, with_location: bool) -> httpx.Response:
 async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
     on: bool, status: int, with_location: bool, answer_switch: Any
 ) -> None:
-    """A read whose login ends on a redirect: the answer holds no part of the login's answer.
+    """A read whose login ends on a redirect: the read is not sent, in both modes.
 
-    The login path, the ``Location`` and the body of the login's answer stay
-    out in both modes, with a ``Location`` on another origin and without
-    one. The read is not sent.
+    With the switch on, the answer holds no part of the login's answer: the
+    login path, the ``Location`` and the body stay out, with a ``Location``
+    on another origin and without one. With the switch off, the login code
+    raises its own error for the redirect answer.
     """
     from meho_backplane.operations._errors import result_connector_error
 
@@ -821,12 +830,16 @@ async def test_a_read_whose_login_gets_a_redirect_answers_as_the_login(
             return_value=_login_redirect(status, with_location)
         )
         operation = mock.get("/api/v2/items").respond(200, json={})
-        with pytest.raises(SessionLoginRedirectError) as exc_info:
+        with pytest.raises(Exception) as exc_info:
             await connector._request_json(target, "GET", "/api/v2/items", operator=_operator())
     await connector.aclose()
 
     assert login.call_count == 1
     assert operation.call_count == 0
+    if not on:
+        assert type(exc_info.value) is httpx.HTTPStatusError
+        return
+    assert type(exc_info.value) is SessionLoginRedirectError
     answer = result_connector_error("op.read", exc_info.value, 1.0)
     text = answer.model_dump_json()
     for marker in _LOGIN_MARKERS:

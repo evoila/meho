@@ -18,12 +18,14 @@
 
   Context variables:
     rows         -- list[dict]: projected rows (see ``_results.html``)
-    operator_sub -- str: the calling operator's sub (self-scope label)
+  The signed-in person's name (``session_display_name``) comes from the
+  chassis context processor. The label never shows the Keycloak
+  ``sub``; with no name it reads "last 24h" alone ("My" already says whose).
 -#}
 <div id="audit-my-recent" class="space-y-3">
   <header class="flex items-center justify-between gap-2">
     <h2 class="text-sm font-semibold uppercase text-subtle">My recent activity</h2>
-    <span class="text-xs text-subtle">last 24h &middot; <span class="font-mono break-all">{{ operator_sub }}</span></span>
+    <span class="text-xs text-subtle">last 24h{% if session_display_name %} &middot; <span class="break-all" data-field="my-recent-name">{{ session_display_name }}</span>{% endif %}</span>
   </header>
   {% if rows %}
     <ul

@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+import structlog.testing
 from httpx import ASGITransport
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -354,3 +355,57 @@ async def test_a_database_error_in_the_sign_in_check_answers_503_and_keeps_the_b
     assert response.json()["detail"] == "principal_block_check_unavailable"
     assert await _blocked()
     assert await _unblock_rows() == []
+
+
+@pytest.mark.parametrize("step", ["lock", "scan"])
+@pytest.mark.asyncio
+async def test_a_database_error_in_the_sign_in_check_logs_no_login_and_no_sign_in_key(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    ac, key = _client
+    login = f"login-{uuid.uuid4().hex}"
+    sign_in_key = f"key-{uuid.uuid4().hex}"
+    await _seed_block(login)
+
+    async def _fail(*args: Any, **kwargs: Any) -> Any:
+        params = {"sub": login, "sign_in_key": sign_in_key, "args": repr(args), **kwargs}
+        raise OperationalError(f"SELECT {login} {sign_in_key}", params, ConnectionError(login))
+
+    if step == "lock":
+        monkeypatch.setattr(approval_queue, "take_approval_lock", _fail)
+    else:
+        monkeypatch.setattr(principal_block, "earlier_sign_in_uses", _fail)
+
+    with structlog.testing.capture_logs() as logs:
+        response = await _unblock(ac, _sign_in(key, "s-log-database", sub=login), login)
+
+    assert response.status_code == 503, response.text
+    failed = [e for e in logs if e["event"] == "principal_unblock_sign_in_check_failed"]
+    assert failed == [
+        {
+            "event": "principal_unblock_sign_in_check_failed",
+            "log_level": "warning",
+            "operation": "sign_in_check",
+            "error_type": "OperationalError",
+        }
+    ]
+    assert login not in repr(failed)
+    assert sign_in_key not in repr(failed)
+    assert await _blocked(login)
+
+
+@pytest.mark.asyncio
+async def test_a_reused_sign_in_logs_no_login(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    plain = await _park(destructive=False)
+    assert (await _approve(ac, plain, _sign_in(key, "s-log-reused"))).status_code == 200
+    await _seed_block()
+
+    with structlog.testing.capture_logs() as logs:
+        _assert_used(await _unblock(ac, _sign_in(key, "s-log-reused")))
+
+    reused = [e for e in logs if e["event"] == "principal_unblock_sign_in_reused"]
+    assert reused == [{"event": "principal_unblock_sign_in_reused", "log_level": "warning"}]
+    assert _PERSON not in repr(reused)

@@ -449,10 +449,14 @@ async def _refuse_used_sign_in(
             session, sub=operator.sub, sign_in_key=key, auth_time=int(sign_in["auth_time"])
         )
     except Exception as exc:
-        _log.warning("principal_unblock_sign_in_check_failed", exc_info=True)
+        _log.warning(
+            "principal_unblock_sign_in_check_failed",
+            operation="sign_in_check",
+            error_type=type(exc).__name__,
+        )
         raise PrincipalBlockUnavailableError(str(type(exc).__name__)) from exc
     if any(use.kind == "approval" for use in uses):
-        _log.warning("principal_unblock_sign_in_reused", operator_sub=operator.sub)
+        _log.warning("principal_unblock_sign_in_reused")
         raise SignInAlreadyUsedError
 
 

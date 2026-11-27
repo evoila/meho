@@ -2214,7 +2214,8 @@ type ApprovalSignInStatusState string
 // platform admin approves a change of rights in MEHO's own login realm, and
 // never the person who asked with a token, so with fewer than two some
 // changes cannot be approved. “GET /api/v1/health“ reports it; the
-// “meho_status“ tool leaves it out.
+// “meho_status“ tool of an MCP session and of a hosted agent leaves it
+// out (:func:`agent_health_payload`).
 type ApprovalsStatus struct {
 	Custody                    string `json:"custody"`
 	DelegatedDecisionPosture   string `json:"delegated_decision_posture"`
@@ -7280,7 +7281,8 @@ type HealthResponse struct {
 	// platform admin approves a change of rights in MEHO's own login realm, and
 	// never the person who asked with a token, so with fewer than two some
 	// changes cannot be approved. ``GET /api/v1/health`` reports it; the
-	// ``meho_status`` tool leaves it out.
+	// ``meho_status`` tool of an MCP session and of a hosted agent leaves it
+	// out (:func:`agent_health_payload`).
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

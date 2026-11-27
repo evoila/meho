@@ -329,7 +329,12 @@ def test_read_only_pages_share_the_floor_of_their_rest_twin() -> None:
         assert TenantRole.TENANT_ADMIN not in floors, ui_path
 
 
-def test_read_only_session_is_refused_on_every_other_console_page() -> None:
+def test_read_only_session_is_refused_on_every_other_console_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the switch on, the pages that exist only behind it are there to walk.
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
     app = _build_app()
     walked = [
         ("GET", route)

@@ -20,6 +20,17 @@ It holds:
   full path or its group attribute, gets one of the five group kinds and a
   set of categories (:mod:`meho_backplane.policy.bindings`). Only a
   tenant's file holds bindings.
+* ``limits``: in the install's file only, how far a tenant's policy may go
+  (:mod:`meho_backplane.policy.limits`). The install's file may hold it
+  only while the ``CUSTOM_POLICY`` switch is on (the caller passes
+  ``custom_policy=True``), and a tenant's file that holds it is always
+  refused.
+
+The file reserves seven top-level keys: ``limits`` and six refused keys,
+``agents``, ``approvers``, ``role_bindings``, ``risk_levels``,
+``custom_roles`` and ``baseline``. A file that holds one of the six is
+refused, whatever its value, with the sentence of
+:func:`~meho_backplane.policy.limits.not_read_mistake`.
 
 The parser uses the strict YAML loader of the settings file
 (:mod:`meho_backplane.instance_settings.schema`): a repeated key, a YAML
@@ -55,6 +66,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     render_path,
 )
+from meho_backplane.policy.limits import PolicyLimits, not_read_mistake
 from meho_backplane.policy.store import _check_labels
 
 __all__ = [
@@ -64,6 +76,7 @@ __all__ = [
     "GROUP_KINDS",
     "MAX_POLICY_BYTES",
     "POLICY_VERSION",
+    "RESERVED_KEYS",
     "ParsedPolicy",
     "PolicyFile",
     "binding_dict",
@@ -113,6 +126,19 @@ BINDING_PRINCIPALS: Final[tuple[str, ...]] = ("person", "agent", "service", "run
 
 #: The one ``categories`` value of a binding that means every category.
 ALL_CATEGORIES: Final[str] = "*"
+
+#: The six reserved top-level keys that a file is refused for, whatever their value.
+_REFUSED_KEYS: Final[tuple[str, ...]] = (
+    "agents",
+    "approvers",
+    "role_bindings",
+    "risk_levels",
+    "custom_roles",
+    "baseline",
+)
+
+#: The seven reserved top-level keys: ``limits`` and the six refused keys.
+RESERVED_KEYS: Final[tuple[str, ...]] = ("limits", *_REFUSED_KEYS)
 
 
 class _Strict(BaseModel):
@@ -294,6 +320,7 @@ class PolicyFile(_Strict):
     classifications: list[PolicyClassification] = Field(default_factory=list, max_length=2000)
     routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
     bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
+    limits: PolicyLimits | None = None
 
 
 @dataclass
@@ -368,9 +395,10 @@ def parse_policy_file(content: bytes) -> ParsedPolicy:
         return ParsedPolicy(None, mistakes)
     if "policy" in raw and raw["policy"] != POLICY_VERSION:
         mistakes.append(f"`policy` is not a file format this MEHO reads; use `{POLICY_VERSION}`.")
+    mistakes.extend(not_read_mistake(key) for key in _REFUSED_KEYS if key in raw)
     model: PolicyFile | None = None
     try:
-        model = PolicyFile.model_validate(raw)
+        model = PolicyFile.model_validate({k: v for k, v in raw.items() if k not in _REFUSED_KEYS})
     except ValidationError as exc:
         mistakes.extend(format_validation_errors(exc))
     if model is not None:
@@ -413,6 +441,11 @@ def document_of(model: PolicyFile) -> dict[str, Any]:
         ]
     if model.bindings:
         document["bindings"] = [binding_dict(b) for b in model.bindings]
+    if "limits" in model.model_fields_set:
+        # Kept when empty: the checks read whether the file has the key.
+        document["limits"] = (
+            model.limits.model_dump(exclude_none=True) if model.limits is not None else {}
+        )
     return document
 
 

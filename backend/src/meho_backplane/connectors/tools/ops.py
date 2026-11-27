@@ -410,6 +410,8 @@ async def register_tools_sign_out_operation(
         tags=["tools", "write", "logins"],
         safety_level="caution",
         requires_approval=True,
+        hard_to_undo="stops",
+        changes_rights=True,
         llm_instructions=_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

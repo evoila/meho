@@ -59,8 +59,15 @@ caller. It never puts the token into an answer or an error.
 `dependencies = ["meho-connector-kit>=1.0,<2"]`. The kit has its own
 version. It is not the MEHO release number.
 
-- The first number goes up when a change can break a package.
-- The second number goes up when names are only added.
+- The first number goes up when a change can break a package: a name
+  is removed, a function gets a new input that can be given by its place
+  or has no default, an input that exists changes (its default, type or
+  meaning), a function with a `**` input gets a new input, or the name
+  changes in another way (for example its answer type).
+- The second number goes up when names are only added, a name is marked
+  as old, or a function only gets new inputs that are given only by name
+  (after the `*` or after a `*args` input) and have a default. A function
+  with no such input before may get the `*` together with the new inputs.
 
 The kit names and the kit version of a MEHO release are in
 `backend/connector-kit/` of that release. The kit is not on a public

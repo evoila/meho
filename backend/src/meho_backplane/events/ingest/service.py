@@ -178,6 +178,7 @@ async def _build_ingest_operator(tenant_id: uuid.UUID) -> Operator:
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
         check_runner_dispatch=True,
+        in_code_kind="system",
     )
 
 

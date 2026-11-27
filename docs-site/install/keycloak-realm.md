@@ -838,7 +838,9 @@ To fill the groups from your company directory instead of by hand, see
 
 The policy file can say which group is which team, in `bindings`
 ([The policy file](../guides/policy-file.md#which-login-group-is-which-team)).
-This needs the setting `POLICY_APPROVER_ROUTING`. MEHO matches a team
+This needs the setting `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING`.
+Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`, `POLICY_APPROVER_ROUTING`) still turns on its own part alone.
+MEHO matches a team
 group by its full path or by a group attribute, never by its short name:
 a short name can belong to more than one group. So the token must carry
 one of the two:

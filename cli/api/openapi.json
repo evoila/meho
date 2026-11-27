@@ -2450,13 +2450,71 @@
         }
       }
     },
+    "/api/v1/policy/carry-over/dry-run": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Carry Over",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
+        "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarryOverDryRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policy/explain": {
       "post": {
         "tags": [
           "policy"
         ],
         "summary": "Explain",
-        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
+        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with ``CUSTOM_POLICY``\nor ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
         "operationId": "explain_api_v1_policy_explain_post",
         "parameters": [
           {
@@ -6127,7 +6185,7 @@
           "connectors"
         ],
         "summary": "List Operation Overrides",
-        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``POLICY_CLASSIFICATION`` switch on, the values include the\nclassification, and ``rule_ref`` names the entry that decided it.",
+        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``CUSTOM_POLICY`` or ``POLICY_CLASSIFICATION`` switch on, the\nvalues include the classification, and ``rule_ref`` names the entry that decided it.",
         "operationId": "list_operation_overrides_api_v1_connectors_operation_overrides_get",
         "parameters": [
           {
@@ -13460,7 +13518,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token is not a fresh approval sign-in (#3979, #5515): it\n  does not come from the approval client (``azp``), or its\n  ``auth_time`` is missing or older than\n  ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the\n  limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the\n  sign-in must not have approved anything else. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + approved-run checks + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token is not a fresh approval sign-in (#3979, #5515): it\n  does not come from the approval client (``azp``), or its\n  ``auth_time`` is missing or older than\n  ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the\n  limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the\n  sign-in must not have approved anything else. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -13716,7 +13774,7 @@
           "approvals"
         ],
         "summary": "Rerun Approval Request",
-        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. Each re-run, and each\nrefused re-run, writes an ``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
+        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. The re-run checks\nwhat the first run checks (the grants of an agent that asked, a revoked\nagent login, a blocked login and the risk level), and also the caller's\nrole and grants from the caller's token now, as for a new call: it\nneeds the ``operator`` role. A refused request stays approved and can\nrun again later. Each re-run, and each refused re-run, writes an\n``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request, the caller's role is too\n  low (``insufficient_role``), or a new call of the caller made now\n  would be refused (``approval_rerun_refused``).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
         "operationId": "rerun_approval_request_api_v1_approvals__request_id__rerun_post",
         "parameters": [
           {
@@ -33298,6 +33356,125 @@
         "title": "CapabilityRead",
         "description": "One persisted capability row, built from the ORM via ``model_validate``."
       },
+      "CarryOverDryRun": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverSetting"
+            },
+            "type": "array",
+            "title": "Settings"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Dry run: nothing was changed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "sandbox_mode",
+          "settings"
+        ],
+        "title": "CarryOverDryRun",
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+      },
+      "CarryOverOperation": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "step_of": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "step_of"
+        ],
+        "title": "CarryOverOperation",
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once. It is empty when none does, or when the\nsetting makes only the direct call wait, not the step."
+      },
+      "CarryOverSetting": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "policy_file"
+            ],
+            "title": "Source"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Match"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverOperation"
+            },
+            "type": "array",
+            "title": "Operations"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "scope",
+          "ref",
+          "match",
+          "operations",
+          "warnings"
+        ],
+        "title": "CarryOverSetting",
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``."
+      },
       "CatalogListResponse": {
         "properties": {
           "catalog": {
@@ -33485,7 +33662,7 @@
           "entries"
         ],
         "title": "ClassificationListResponse",
-        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``POLICY_CLASSIFICATION`` switch is\noff; then nothing is read and ``entries`` is empty."
+        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``CUSTOM_POLICY`` and\n``POLICY_CLASSIFICATION`` switches are off; then nothing is read and ``entries`` is empty."
       },
       "ClassificationMatch": {
         "properties": {
@@ -41312,7 +41489,7 @@
           "evaluator": {
             "$ref": "#/components/schemas/ExplainEvaluator",
             "nullable": true,
-            "description": "Null while POLICY_ENGINE_SHADOW is off."
+            "description": "Null while CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off."
           },
           "classification": {
             "$ref": "#/components/schemas/ExplainClassification",
@@ -41691,7 +41868,7 @@
             "type": "object",
             "nullable": true,
             "title": "Policy Rule",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
           },
           "approvers": {
             "items": {
@@ -41700,7 +41877,7 @@
             "type": "array",
             "nullable": true,
             "title": "Approvers",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
           },
           "proposed_effect": {
             "additionalProperties": true,

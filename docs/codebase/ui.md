@@ -56,6 +56,7 @@ own page:
 | `/ui/automation`, `/ui/pairing` | [`addon-pairing.md`](addon-pairing.md) |
 | `/ui/connectors/overrides` | [`spec-ingestion.md`](spec-ingestion.md) |
 | `/ui/policy/classify` | [`policy-classification.md`](policy-classification.md) |
+| `/ui/policy` (menu entry "Policy", only with the switch `CUSTOM_POLICY` on; else the address does not exist) | read only: the fixed rules (`policy/fixed_rules.py`) and the risk-level edits (the rows of `/ui/connectors/overrides`), for a tenant admin; `ui/routes/policy/` |
 | `/ui/keycloak` | [`ui-keycloak-console.md`](ui-keycloak-console.md) |
 | `/ui/agents/{name}/run` | [`ui-agent-run-console.md`](ui-agent-run-console.md) |
 | `/ui/sensors` | the `meho_backplane.ui.routes` row of "Key types" below, and [`sensor.md`](sensor.md) |

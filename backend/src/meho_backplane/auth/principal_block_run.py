@@ -24,6 +24,9 @@ what its steps did.
 * :func:`cleanup_without_block_check` marks a clean-up: the removal of an
   account, user or token that the same run just made on a target and could
   not store. Its requests run with no block check (:func:`in_cleanup`).
+* :func:`finish_without_block_check` marks a finish: the step that brings
+  the target and the secret store in step after a change that the run
+  cannot undo. Its requests run with no block check too.
   :func:`note_not_removed` notes what such a clean-up could not remove, so
   the answer names it (:func:`not_removed`).
 """
@@ -38,6 +41,7 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "cleanup_without_block_check",
+    "finish_without_block_check",
     "in_cleanup",
     "mark_request_sent",
     "mark_step_refused",
@@ -175,13 +179,7 @@ def step_refused_in_run() -> Exception | None:
 
 
 @contextmanager
-def cleanup_without_block_check() -> Iterator[None]:
-    """Run the requests of this block with no block check: the one way to skip it.
-
-    Only for a clean-up: the removal of an account, user or token that the
-    same run just made on a target and could not store, and the end of
-    MEHO's own Vault login. The requests still count as sent.
-    """
+def _without_block_check() -> Iterator[None]:
     token = _cleanup_var.set(True)
     try:
         yield
@@ -189,8 +187,34 @@ def cleanup_without_block_check() -> Iterator[None]:
         _cleanup_var.reset(token)
 
 
+@contextmanager
+def cleanup_without_block_check() -> Iterator[None]:
+    """Run the requests of this block with no block check, for a clean-up.
+
+    Only for the removal of an account, user or token that the same run just
+    made on a target and could not store, and the end of MEHO's own Vault
+    login. The requests still count as sent.
+    """
+    with _without_block_check():
+        yield
+
+
+@contextmanager
+def finish_without_block_check() -> Iterator[None]:
+    """Run the requests of this block with no block check, so the run finishes.
+
+    Only for an operation that changed a target and cannot undo the change:
+    the step that brings the target and the secret store in step runs to its
+    end. Examples: the store of a token that the run rotated, and the setting
+    of a password that the run stored for a login. The requests still count
+    as sent.
+    """
+    with _without_block_check():
+        yield
+
+
 def in_cleanup() -> bool:
-    """True inside :func:`cleanup_without_block_check`."""
+    """True inside :func:`cleanup_without_block_check` or :func:`finish_without_block_check`."""
     return _cleanup_var.get()
 
 

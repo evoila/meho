@@ -75,7 +75,6 @@ References: Tasks #2429/#2430; Initiative #2172; molds proxmox/bind9/holodeck
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import posixpath
 import re
@@ -84,6 +83,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from meho_backplane.auth.principal_block_run import finish_without_block_check
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
 from meho_backplane.connectors.base import ConnectorOwnMessage
 from meho_backplane.connectors.rke2._sudo import run_remote_bash_with_sudo
@@ -379,19 +380,24 @@ async def _stash_token_in_vault(
     cluster token, persisted on the node's own disk), so the partial state is
     surfaced honestly -- ``rotated: True`` with ``token_ref: None`` and a
     ``vault_error`` class name, still without the token value.
+
+    The rotate cannot be undone, so the store runs to its end with no block
+    check (its Vault login and its write): the run ends with the new token in
+    Vault, also when an admin blocked the caller after the rotate.
     """
     from meho_backplane.auth.vault import vault_client_for_operator
 
     mount = "secret"
     path = _vault_token_path(operator, target)
     try:
-        async with vault_client_for_operator(operator) as client:
-            write_payload = await asyncio.to_thread(
-                client.secrets.kv.v2.create_or_update_secret,
-                path=path,
-                secret={"token": new_token},
-                mount_point=mount,
-            )
+        with finish_without_block_check():
+            async with vault_client_for_operator(operator) as client:
+                write_payload = await to_thread_checked(
+                    client.secrets.kv.v2.create_or_update_secret,
+                    path=path,
+                    secret={"token": new_token},
+                    mount_point=mount,
+                )
         kv_version = write_payload["data"]["version"]
     except Exception as exc:
         return {

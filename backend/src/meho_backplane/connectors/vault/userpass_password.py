@@ -18,7 +18,10 @@ A generated password is safe to run twice. When the login exists and the KV
 path already holds a password, nothing changes, unless ``rotate`` is true.
 The KV write comes first on purpose: a run that stops after it leaves the
 password in KV, never a login whose password nobody knows. The KV write uses
-``cas`` (the secret version), so a second writer cannot be overwritten.
+``cas`` (the secret version), so a second writer cannot be overwritten. Once
+the new password is stored, setting it on the login runs with no block check,
+so the login gets the stored password also when an admin blocked the caller
+during the store.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import hvac.exceptions
 
+from meho_backplane.auth.principal_block_run import finish_without_block_check
 from meho_backplane.auth.secret_read_as import record_caller_secret_read
 from meho_backplane.auth.send_check import to_thread_checked
 
@@ -257,16 +261,21 @@ def _apply_sync(
             return {"changed": True, "credential_generated": False}
         return {"changed": False, "credential_generated": False}
 
-    generated = False
-    password = stored
-    if password is None or plan.rotate:
-        password = generate_password_value(plan.length)
-        _write_kv(client, plan, found, password)
-        generated = True
-    _set_user(
-        client, username=username, mount=mount, password=password, token_policies=token_policies
-    )
-    return {"changed": True, "credential_generated": generated}
+    if stored is not None and not plan.rotate:
+        _set_user(
+            client, username=username, mount=mount, password=stored, token_policies=token_policies
+        )
+        return {"changed": True, "credential_generated": False}
+
+    password = generate_password_value(plan.length)
+    _write_kv(client, plan, found, password)
+    # The new password is stored, so setting it on the login runs to its end
+    # with no block check: the login and the stored password stay in step.
+    with finish_without_block_check():
+        _set_user(
+            client, username=username, mount=mount, password=password, token_policies=token_policies
+        )
+    return {"changed": True, "credential_generated": True}
 
 
 async def apply_credential_source(

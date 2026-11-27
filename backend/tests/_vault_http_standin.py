@@ -4,8 +4,9 @@
 """A stand-in Vault: a plain HTTP server on the local host, for the real ``hvac`` client.
 
 It answers the few Vault requests the block tests send: the JWT login, the
-end of a login, a KV v2 item (read, write, patch), the capabilities request
-and the mount read. It keeps the KV items and counts each request.
+end of a login, a KV v2 item (read, write, patch), the capabilities request,
+the mount read and a userpass login (read, write). It keeps the KV items and
+the userpass logins, and counts each request.
 
 :meth:`VaultStandIn.on_request` runs a step while one request is on the
 wire, before Vault answers it: a test blocks the caller there. The step runs
@@ -43,6 +44,7 @@ class VaultStandIn:
     url: str = ""
     requests: list[tuple[str, str]] = field(default_factory=list)
     items: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict)
+    users: dict[str, dict[str, Any]] = field(default_factory=dict)
     hooks: list[_Hook] = field(default_factory=list)
     loop: asyncio.AbstractEventLoop | None = None
 
@@ -110,10 +112,24 @@ def _handler(state: VaultStandIn) -> type[BaseHTTPRequestHandler]:
                 self._reply(200, {"capabilities": grant, **dict.fromkeys(paths, grant)})
             elif path.startswith("/v1/sys/internal/ui/mounts/"):
                 self._reply(200, {"data": {"type": "kv", "options": {"version": "2"}}})
+            elif path.startswith("/v1/auth/userpass/users/"):
+                self._user(method, path.rsplit("/", 1)[1], body)
             elif (key := _kv_key(path)) is not None:
                 self._kv(method, key, body)
             else:
                 self._reply(404, {"errors": []})
+
+        def _user(self, method: str, name: str, body: dict[str, Any]) -> None:
+            if method == "GET":
+                user = state.users.get(name)
+                if user is None:
+                    self._reply(404, {"errors": []})
+                    return
+                policies = user.get("token_policies", [])
+                self._reply(200, {"data": {"token_policies": policies}})
+                return
+            state.users[name] = {**state.users.get(name, {}), **body}
+            self._reply(204)
 
         def _kv(self, method: str, key: str, body: dict[str, Any]) -> None:
             version, data = state.items.get(key, (0, {}))

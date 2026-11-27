@@ -4,10 +4,10 @@
 """``hard_to_undo`` and ``changes_rights`` on an operation's own definition.
 
 The rules: registration leaves out an operation that sets ``hard_to_undo`` on
-a ``safe`` level, refuses any word other than ``deletes``, ``stops`` and
-``overwrites``; the stored row
-carries both values, for a typed and a multi-step operation; and each start
-writes them from the code again.
+a ``safe`` level, and writes and deletes nothing for it; it refuses any word
+other than ``deletes``, ``stops`` and ``overwrites``; the stored row carries
+both values, for a typed and a multi-step operation; and each start writes
+them from the code again.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.operations import _left_out
 from meho_backplane.operations.typed_register import (
     register_composite_operation,
     register_typed_operation,
@@ -38,6 +39,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setattr(_left_out, "_LEFT_OUT", frozenset())
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -134,14 +136,25 @@ async def test_registration_leaves_out_hard_to_undo_on_a_safe_op(
 
 
 @pytest.mark.asyncio
-async def test_a_left_out_op_loses_the_row_an_earlier_start_wrote(
+async def test_a_left_out_op_keeps_the_row_an_earlier_start_wrote(
     session: AsyncSession, embedding: AsyncMock
 ) -> None:
     op_id = "undo-demo.widget.purge"
     await _register(session, embedding, op_id)
-    assert await _row(session, op_id) is not None
+    before = await _row(session, op_id)
+    assert before is not None
+    stored = {c.name: getattr(before, c.name) for c in before.__table__.columns}
+    session.expunge_all()
+
     await _register(session, embedding, op_id, hard_to_undo="deletes")
-    assert await _row(session, op_id) is None
+
+    after = await _row(session, op_id)
+    assert after is not None
+    assert {c.name: getattr(after, c.name) for c in after.__table__.columns} == stored
+    assert [op.op_id for op in _left_out.left_out_ops()] == [op_id]
+
+    await _register(session, embedding, op_id)
+    assert _left_out.left_out_ops() == frozenset()
 
 
 @pytest.mark.asyncio

@@ -122,6 +122,7 @@ __all__ = [
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_operation_left_out",
     "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_probe_pool_busy",
@@ -337,6 +338,33 @@ def result_connector_package_not_installed(
         duration_ms=duration_ms,
         extras={
             "error_code": "connector_package_not_installed",
+            "connector_id": connector_id,
+            "package": package,
+        },
+    )
+
+
+def result_operation_left_out(
+    op_id: str, connector_id: str, package: str | None, duration_ms: float
+) -> OperationResult:
+    """Registration left the op out at the start: its mark does not fit its risk level.
+
+    MEHO wrote and deleted nothing for the op, so a row an earlier start
+    stored stays, hidden, with the operator's settings on it. A later
+    start without the fault uses it again.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"operation_left_out: operation {op_id!r} of connector {connector_id!r} was "
+            "left out at the start: its mark does not fit its risk level. The MEHO log "
+            "line 'operation_left_out' names the reason. A fix of the connector code "
+            "brings the operation back at the next start."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "operation_left_out",
             "connector_id": connector_id,
             "package": package,
         },

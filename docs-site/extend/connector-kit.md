@@ -221,7 +221,10 @@ The inputs of `register_typed_operation`:
     registration, and the log line names it. Every other operation
     registers, and the start goes on. For example, an operation with
     `hard_to_undo` on a `safe` level is left out: look for the log line
-    `operation_left_out`.
+    `operation_left_out`. MEHO writes and deletes no row for it, and a
+    call answers `operation_left_out`. Every other check of the operation
+    still runs. When you fix the mark, the next start uses the operation
+    again, with the settings an operator stored on it.
   - `changes_rights=True` when a call gives or takes rights, a login or
     an access policy in the target system. The default is `False`.
 

@@ -347,13 +347,32 @@ connector kit (kit 1.7 or higher).
 - MEHO leaves an operation whose mark does not fit its risk level out at
   registration, and the log line names it. Every other operation
   registers, and the start goes on. The first such mark is
-  `hard_to_undo` on a `safe` operation. The operation gets no row (a row
-  of an earlier start is deleted), so a call answers as for an operation
-  that does not exist. The log line is `operation_left_out`, with the
-  operation, its connector (product, version, implementation and the
-  connector package, if any) and the reason. The checks are in
+  `hard_to_undo` on a `safe` operation. The checks are in
   `_MARK_FIT_CHECKS` in `operations/typed_register.py`; a new check is
   one more entry there.
+- For a left-out operation, no row is written or deleted. A row that an
+  earlier start, an import or a tenant stored under that key stays as it
+  is, with the operator's settings on it. The start keeps the key in
+  memory, bound to the code that registered it (its connector package, or
+  built-in code) and to its kind (typed or multi-step)
+  (`operations/_left_out.py`). The lookups hide exactly that code's row,
+  the same way they hide the rows of a connector package that is not
+  installed (`installed_owner_clause` in `operations/_lookup.py` and its
+  raw-SQL twin in `operations/_search.py`). So search, the group list and
+  the connector list do not offer it, and a call answers
+  `operation_left_out`, also when no row is stored. A row with the same
+  key of other code (a built-in connector, another package, an import, a
+  tenant) is not hidden. A later start without the fault uses the stored
+  row again, with the operator's settings.
+- The log line is `operation_left_out`, with the operation, its connector
+  (product, version, implementation and the connector package, if any)
+  and the reason. When the operation is the test read a connector
+  declares, the connector starts without a test read, and a second line,
+  `connector_test_read_left_out`, names the connector and the operation
+  (`connector-target-form.md`).
+- Every other check of a registration still runs for a left-out operation
+  (for example an unknown switch name in a parameter), and a second fault
+  stops the start with its own message.
 - Registration refuses any `hard_to_undo` word other than the three. The
   error names the operation and says why, and the start stops.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`

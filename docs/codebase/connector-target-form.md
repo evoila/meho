@@ -78,6 +78,14 @@ map.
    risk level or makes the operation wait for approval. For each such value
    MEHO logs one warning line, `connector_test_operation_not_ready`, with the
    connector class, the op id and the stored value. Then it starts.
+6. When registration leaves the test read out in this start, because a mark
+   does not fit its risk level (`operation_left_out`, see
+   `policy-classification.md`), the start goes on. MEHO logs one more line,
+   `connector_test_read_left_out`, with the connector class, its product,
+   version, implementation, connector package (if any) and the op id. That
+   connector has no test read now. A test read that no registrar writes and
+   that MEHO did not leave out (for example a typo in the op id) still
+   fails step 3.
 
 The route `GET /api/v1/connectors/target-form?product=<product>`
 (`backend/src/meho_backplane/api/v1/connectors_target_form.py`) returns the
@@ -93,7 +101,9 @@ The route answers `test_operation: null` for a class while the stored row
 of its test read has a risk level other than `safe` or is turned off, or
 while an override of the install or of the caller's tenant raises its risk
 level or makes it wait for approval (`ready_test_operations`). Then the
-console offers no test read for that class. Otherwise the route names the
+console offers no test read for that class. When MEHO leaves the test read
+out at registration, the connector starts without a test read, and the
+route answers `test_operation: null` for that class. Otherwise the route names the
 test read the connector declares; whether the caller may run it is decided
 when it is called. The answer holds what the classes declare: names,
 labels, help texts, kinds, choices and the declared defaults of target

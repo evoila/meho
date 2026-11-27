@@ -10,10 +10,12 @@ its operation rows. For each registered connector class:
   :func:`~meho_backplane.connectors.target_form.check_connector_declaration`;
 * a declared ``test_operation`` must be written by a registrar of the same
   connector in this start, with risk level ``safe`` in the registrar's own
-  code; its built-in row must still exist after the start retired old
-  operations; and a call with no input must pass the same parameter check a real
-  call runs (the schema with its ``oneOf`` / ``anyOf`` rules, and the op's
-  own params check).
+  code (when registration left it out there, because a mark does not fit
+  its risk level, the connector starts without a test read); its built-in
+  row must still exist after the start retired old operations; and a call
+  with no input must pass the same parameter check a real call runs (the
+  schema with its ``oneOf`` / ``anyOf`` rules, and the op's own params
+  check).
 
 These are facts of the code. A broken one stops the start with a message that
 names the connector class. A value that lives only in the database (a stored
@@ -26,7 +28,7 @@ changes how a connector logs in.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -44,6 +46,7 @@ from meho_backplane.connectors.target_form import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.operations._left_out import LeftOutOp, left_out_op, row_is_left_out
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     ingested_schema_for_validation,
@@ -190,11 +193,28 @@ async def _check_test_operation(
     cls: type[Connector],
     *,
     code_levels: CodeLevels,
+    left_out: Collection[LeftOutOp],
     allow_missing_rows: bool,
 ) -> None:
     op_id = cls.test_operation
     if op_id is None:
         return
+    if (cls.product, cls.version, cls.impl_id, op_id) not in code_levels:
+        dropped = left_out_op(
+            product=cls.product, version=cls.version, impl_id=cls.impl_id, op_id=op_id, ops=left_out
+        )
+        if dropped is not None:
+            structlog.get_logger(__name__).error(
+                "connector_test_read_left_out",
+                connector=cls.__name__,
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                connector_package=dropped.owner_package,
+                op_id=op_id,
+                reason="registration left the test read out; this connector has no test read now",
+            )
+            return
     _check_code_level(cls, op_id, code_levels, allow_missing_rows=allow_missing_rows)
     row = await _test_row(session, cls, op_id)
     if row is None:
@@ -223,12 +243,22 @@ async def assert_connector_declarations_valid(
     session: AsyncSession,
     *,
     code_levels: CodeLevels,
+    left_out: Collection[LeftOutOp] = (),
     allow_missing_rows: bool = False,
 ) -> None:
     """Raise :class:`ConnectorDeclarationError` for the first broken declaration.
 
     *code_levels* holds the operations the registrars wrote in this start,
     with the risk level of their code (:func:`collect_code_safety_levels`).
+
+    *left_out* holds the operations registration left out in this start,
+    because a mark does not fit the risk level
+    (:mod:`meho_backplane.operations._left_out`). A connector whose test
+    read is one of them starts without its test read: MEHO logs one
+    ``connector_test_read_left_out`` line that names the connector and the
+    op, and checks nothing more for it. A test read that no registrar
+    writes and that was not left out (for example a typo in the op id)
+    still stops the start.
 
     ``allow_missing_rows`` is for the test-only registrar snapshot
     (``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS``): a snapshot replay runs no
@@ -241,7 +271,11 @@ async def assert_connector_declarations_valid(
         check_connector_declaration(cls)
     for cls in classes:
         await _check_test_operation(
-            session, cls, code_levels=code_levels, allow_missing_rows=allow_missing_rows
+            session,
+            cls,
+            code_levels=code_levels,
+            left_out=left_out,
+            allow_missing_rows=allow_missing_rows,
         )
 
 
@@ -253,8 +287,9 @@ async def ready_test_operations(
     The overrides read are those of the install and of *tenant_id*. A class is
     in the set when the stored row has risk level ``safe`` and is not turned
     off, and no override raises its risk level or makes it wait for approval.
-    A class with no row, or with a problem from :func:`stored_state_problems`,
-    is not in the set.
+    A class with no row, with a row that registration left out in this start
+    (:func:`~meho_backplane.operations._left_out.row_is_left_out`), or with a
+    problem from :func:`stored_state_problems`, is not in the set.
     """
     wanted = [cls for cls in classes if cls.test_operation is not None]
     if not wanted:
@@ -264,7 +299,7 @@ async def ready_test_operations(
         for cls in wanted:
             op_id = str(cls.test_operation)
             row = await _test_row(session, cls, op_id)
-            if row is None:
+            if row is None or row_is_left_out(row):
                 continue
             key = OpKey(cls.product, cls.version, cls.impl_id, op_id)
             overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(

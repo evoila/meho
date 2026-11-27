@@ -1429,6 +1429,22 @@ jobs:
             exit 1
           fi
 
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-unit-shard.xml
+
       - name: Upload per-test times (input for the shard split)
         # #4809: tests/_unit_shard_split.py balances the shards with the
         # seconds in tests/_unit_shard_durations.json. Refresh that file
@@ -1439,7 +1455,7 @@ jobs:
         # never fail or hold the shard.
         # Not on a one-connector run (#5297) or a test map run (#5642): their
         # times cover only some files, so they must not be mixed into a refresh.
-        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == '' && needs.changes.outputs.test_map != 'true'
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == '' && needs.changes.outputs.test_map != 'true'
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -2462,6 +2478,22 @@ jobs:
             "${SHARD_FILES[@]}" 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
 
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-coverage-junit-*.xml pytest-coverage.log
+
       - name: Upload shard coverage data (parallel files)
         # Raw per-worker parallel data files (`.coverage.<host>.<pid>.<rand>`)
         # for THIS shard — the python-coverage-combine job below merges every
@@ -2473,7 +2505,7 @@ jobs:
         # timeout-minutes (#3172): same job-cap-cancel hole as every
         # post-pytest step — a hung upload must degrade to an absorbed step
         # failure.
-        if: always()
+        if: always() && steps.hide-proxy-name.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -2493,7 +2525,7 @@ jobs:
         # --timeout). Uploaded whenever the log exists so the NEXT hang says
         # WHERE it hung, not just that the job ran long. continue-on-error is
         # belt-and-suspenders on top of the whole-job continue-on-error.
-        if: always() && hashFiles('backend/pytest-coverage.log') != ''
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-coverage.log') != ''
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
@@ -3075,13 +3107,29 @@ jobs:
             kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
           fi
 
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-integration-shard.xml
+
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these
         # artifacts (one per shard) of a green run; the docstring of
         # tests/_unit_shard_split.py has the commands. continue-on-error +
         # timeout-minutes: a failed or hung upload must never fail or hold
         # the shard.
-        if: always() && hashFiles('backend/pytest-integration-shard.xml') != ''
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-integration-shard.xml') != ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2

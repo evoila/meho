@@ -422,6 +422,10 @@ class StartTest(LiveTestCase):
         result = self.live.run(good_answers(), CPC_PARAMS_DELETE="[1]")
         self.assertEqual(result.returncode, 2)
         self.assertIn("CPC_PARAMS_DELETE is not a JSON object", result.stderr)
+        result = self.live.run(good_answers(), CPC_NO_RESULT_HISTORY="yes")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("CPC_NO_RESULT_HISTORY must be 1 or not set", result.stderr)
+        self.assertEqual(self.live.calls(), [])
 
     def test_every_operation_setting_is_named(self) -> None:
         for name in OPS:

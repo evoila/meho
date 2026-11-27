@@ -183,10 +183,13 @@ These lines are always `[skip]`, also in a run where every check passes:
   one for an operation that shows a secret or calls an address the caller
   gives.
 - `check ... (..., the caller kind): not run: waits for #6962`, as long as
-  the audit row has no caller kind. Each line that expects a caller kind
-  (checks 1 to 6, 10 and 11) still checks the rest: the answer, the rule
-  and the audit row. Only the caller kind part is `[skip]`. A row that is
-  not found still fails.
+  the audit row holds no `caller_kind` field. Each line that expects a
+  caller kind (checks 1 to 6, 10 and 11) still checks the rest: the
+  answer, the rule, the audit row and the fresh result. Such a line never
+  prints `[ok]`: it prints `[FAIL]` when another part failed, and else
+  only this `[skip]` line. The summary line counts these lines as "caller
+  kind not proven: N". A `caller_kind` of null, a wrong caller kind and a
+  row that is not found still fail.
 - Check 11 always prints `[skip]` for the event intake, the findings
   investigator and the runner executor, because the script cannot start
   their work on a sandbox install.
@@ -259,7 +262,7 @@ the agent rule and the custom role.
 | 1 | An Admin lowers a `dangerous` operation to `caution` with a reason and a fresh sign-in. A person in the console runs it at once. The audit row names the override made in this run. |
 | 2 | A former `caution` operation with the plain mark is now `dangerous` (read first). An Operator cannot approve another person's request for it; an Admin can. |
 | 3 | A saved "always wait" from before the switch is now `destructive`: without a preview the call is refused; with a preview it waits. |
-| 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it. |
+| 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it, by the rule `default:service.caution_write`. |
 | 5 | A custom role approves requests on one connector. A person without the role is refused at the click. |
 | 6 | A credential read, a credential write, a change of rights, a change of the policy (with the Admin's token), a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login's root command on a host waits by the rule `default:service.root_shell`. A service login with a delete grant runs the delete (sandbox mode). An agent's policy import (`policy.apply`) is refused before anything waits, and so is an Operator's (it needs the tenant_admin role). An agent's approve attempt is refused. |
 | 8 | A write is never lowered below `caution`: in the console and with a token (a policy file preview). |
@@ -288,9 +291,12 @@ What makes a check pass:
   (`meho_connector_edit_op`) of that operation. `rule_ref` of the override
   list names a classification entry, so the script does not use it. The
   edit row is the Admin's edit on the connector of `CPC_OP_LOWERED` that
-  changed the risk level to `caution`. An edit of an operation with the
-  same id on another connector, an edit of another setting, or the
-  removal of an override is not that row. It takes only the run row of
+  lowered the risk level to `caution`: its new level is `caution`, and its
+  old level is higher (in the order `safe`, `caution`, `dangerous`,
+  `destructive`). An edit that leaves the level at `caution`, a raise to
+  `caution`, an edit of an operation with the same id on another
+  connector, an edit of another setting, or the removal of an override is
+  not that row. It takes only the run row of
   the Operator of `CPC_PERSON_TOKEN`, with the connector and target of
   `CPC_OP_LOWERED`, after that edit row. The run's
   audit row must carry a rule of the source `override`.
@@ -350,9 +356,13 @@ What makes a check pass:
   that `GET /api/v1/sensors/{id}/results` shows evaluated at or after
   `next_fire_at`. An install that keeps no result history
   (`CHECKS_EVIDENCE_RETENTION_DAYS=0`) answers that route with no row.
-  Then the script reads the sensor list again, and the sensor's
-  `last_evaluated_at` counts when it is at or after `next_fire_at`. The
-  audit row of the run is still needed.
+  For such an install, set `CPC_NO_RESULT_HISTORY=1`. Only then does an
+  empty list lead the script to read the sensor list again, and the
+  sensor's `last_evaluated_at` counts when it is at or after
+  `next_fire_at`. Without the setting, an empty list is no fresh result,
+  and the check runner line fails. Any other value than `1` stops the
+  script with exit code 2 before any call. A fresh result row counts in
+  both cases. The audit row of the run is still needed.
 
 Check 7 runs last, because it turns the switch off. The script reads the
 switch again first and fails when it is still on or cannot be read. Then

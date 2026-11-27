@@ -67,7 +67,7 @@ class DryRunTestCase(unittest.TestCase):
         self.answers = good_answers()
         self.baseline = self.dir / "baseline.tsv"
 
-    def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         write_answers(self.dir, self.answers)
         if not self.baseline.exists():
             self.baseline.write_text(baseline_text())
@@ -76,6 +76,7 @@ class DryRunTestCase(unittest.TestCase):
         env.update(PARAMS)
         env["CPC_SENSOR_ID"] = SENSOR_ID
         env["CPC_CUSTOM_ROLE"] = "Approvers-VMW"
+        env.update(extra)
         return subprocess.run(
             ["bash", str(SCRIPT), "--dry-run", str(self.dir), *args],
             capture_output=True,
@@ -113,7 +114,10 @@ class FullRunTest(DryRunTestCase):
         for line in lines:
             if line.startswith("[ok]") and "risk level" not in line:
                 self.assertRegex(line, r"rows? [0-9a-f-]{36}", line)
-        self.assertIn("passed, 0 failed, 6 not run, 2 not taken back", result.stdout)
+        self.assertIn(
+            "passed, 0 failed, 6 not run, 2 not taken back, caller kind not proven: 0",
+            result.stdout,
+        )
 
     def test_runs_the_checks_in_order_and_ends_with_the_switch_off(self) -> None:
         result = self.run_script()
@@ -784,9 +788,18 @@ class Check11Test(DryRunTestCase):
             "kind): not run: waits for #6962",
             result.stdout,
         )
-        self.assertIn("[ok]   check 11 (the check runner", result.stdout)
+        self.assertNotIn("[ok]   check 11 (the check runner", result.stdout)
+        self.assertIn("caller kind not proven: 1", result.stdout)
         self.assertEqual(self.fails(result), [])
         self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_a_row_without_its_caller_kind_and_no_fresh_result_fails(self) -> None:
+        self.answers["c11-row"] = self.sensor_row(None)
+        self.answers["c11-results"] = {"code": 200, "body": {"items": []}}
+        result = self.run_script()
+        self.assert_one_fail(result, "check 11 (the check runner", "no fresh result")
+        self.assertNotIn("check 11 (the check runner, a sensor run started over REST, the "
+                         "caller kind)", result.stdout)  # fmt: skip
 
     def test_the_check_runner_needs_the_kind_system_on_the_row_of_its_run(self) -> None:
         self.assertIn("[ok]   check 11 (the check runner", self.run_script().stdout)
@@ -1528,19 +1541,29 @@ class CallerKindWaitsTest(DryRunTestCase):
         self.answers["c6-rights-row"] = self.without_kind(self.answers["c6-rights-row"])
         result = self.run_script()
         self.assertEqual(self.fails(result), [])
-        self.assertRegex(result.stdout, r"\[ok\]\s+check 6 change of rights \(an Operator's token")
-        self.assertIn(
-            "[skip] check 6 change of rights (an Operator's token, a personal agent, REST, the "
-            "caller kind): not run: waits for #6962",
-            result.stdout,
+        self.assertNotRegex(result.stdout, r"\[ok\]\s+check 6 change of rights")
+        skips = [
+            line
+            for line in result_lines(result.stdout)
+            if line.startswith("[skip] check 6 change of rights")
+        ]
+        self.assertEqual(
+            skips,
+            [
+                "[skip] check 6 change of rights (an Operator's token, a personal agent, REST, "
+                "the caller kind): not run: waits for #6962"
+            ],
         )
+        self.assertIn("caller kind not proven: 1", result.stdout)
         self.assertEqual(result.returncode, NOT_COMPLETE)
 
     def test_the_rest_of_the_line_still_fails(self) -> None:
         answer = self.without_kind(self.answers["c6-rights-row"])
         answer["body"]["policy_rule"] = "default:person.caution"
         self.answers["c6-rights-row"] = answer
-        self.assert_one_fail(self.run_script(), "check 6 change of rights", "expected rule")
+        result = self.run_script()
+        self.assert_one_fail(result, "check 6 change of rights", "expected rule")
+        self.assertNotIn("[skip] check 6 change of rights", result.stdout)
 
     def test_a_row_that_was_not_found_still_fails_on_the_caller_kind(self) -> None:
         del self.answers["c6-rights-row"]
@@ -1560,6 +1583,29 @@ class CallerKindWaitsTest(DryRunTestCase):
             self.assertIn(
                 f"[skip] {start}, the caller kind): not run: waits for #6962", result.stdout
             )
+            self.assertNotIn(f"[ok]   {start}", result.stdout)
+        self.assertIn("caller kind not proven: 2", result.stdout)
+
+    def test_a_caller_kind_of_null_still_fails(self) -> None:
+        answer = self.answers["c6-rights-row"]
+        answer["body"]["caller_kind"] = None
+        self.assert_one_fail(
+            self.run_script(), "check 6 change of rights", "expected caller kind personal_agent"
+        )
+
+    def test_a_run_without_any_caller_kind_proves_none(self) -> None:
+        for answer in self.answers.values():
+            body = answer.get("body")
+            entries = body.get("rows", [body]) if isinstance(body, dict) else []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    entry.pop("caller_kind", None)
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        for line in result_lines(result.stdout):
+            self.assertFalse(line.startswith("[ok]") and "caller kind none" in line, line)
+        self.assertIn("caller kind not proven: 24", result.stdout)
+        self.assertEqual(result.returncode, NOT_COMPLETE)
 
     def test_a_wrong_caller_kind_still_fails(self) -> None:
         self.answers["c6-rights-row"] = row("c6-rights", "floor:rights_change_waits", "person")
@@ -1584,28 +1630,74 @@ class Check1StartTest(DryRunTestCase):
             with self.subTest(case=name):
                 self.answers = good_answers()
                 self.answers["c1-edits"] = rows(
-                    edit_row("c1-edit", "k8s.scale", level="caution"), other
+                    edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous"), other
                 )
                 result = self.run_script()
                 self.assertRegex(result.stdout, r"\[ok\]\s+check 1 \(the Operator", result.stdout)
 
     def test_fails_without_an_edit_to_caution_on_its_connector(self) -> None:
         self.answers["c1-edits"] = rows(
-            edit_row("c1-edit", "k8s.scale", level="caution", connector="k9s")
+            edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous", connector="k9s")
         )
         self.assertRegex(
             self.run_script().stdout,
-            r"\[FAIL\] check 1 \(the Operator.*no edit row of the Admin on k8s that changed "
+            r"\[FAIL\] check 1 \(the Operator.*no edit row of the Admin on k8s lowered "
             r"the risk level to caution",
         )
 
+    def test_passes_on_the_lowering_from_dangerous(self) -> None:
+        edit = self.answers["c1-edits"]["body"]["rows"][0]
+        self.assertEqual(
+            edit["payload"]["changes"]["safety_level"], {"old": "dangerous", "new": "caution"}
+        )
+        self.assertRegex(self.run_script().stdout, r"\[ok\]\s+check 1 \(the Operator")
+
+    def test_an_edit_that_does_not_lower_to_caution_is_not_the_start(self) -> None:
+        for old in ("caution", "safe"):
+            with self.subTest(old=old):
+                self.answers["c1-edits"] = rows(
+                    edit_row("c1-edit", "k8s.scale", level="caution", old=old)
+                )
+                self.assertRegex(
+                    self.run_script().stdout,
+                    r"\[FAIL\] check 1 \(the Operator.*no edit row of the Admin on k8s "
+                    r"lowered the risk level to caution",
+                )
+
+    def test_the_edit_rows_of_check_9_keep_their_own_levels(self) -> None:
+        levels = [
+            entry["payload"]["changes"].get("safety_level")
+            for entry in self.answers["c9-rows"]["body"]["rows"]
+        ]
+        self.assertIn({"old": "caution", "new": "dangerous"}, levels)
+
 
 class NoResultHistoryTest(DryRunTestCase):
-    """With no result history kept, check 11 takes the sensor's last_evaluated_at."""
+    """With CPC_NO_RESULT_HISTORY=1, check 11 takes the sensor's last_evaluated_at."""
 
     def setUp(self) -> None:
         super().setUp()
         self.answers["c11-results"] = {"code": 200, "body": {"items": [], "next_cursor": None}}
+
+    def run_script(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        extra.setdefault("CPC_NO_RESULT_HISTORY", "1")
+        return super().run_script(*args, **extra)
+
+    def test_without_the_setting_an_empty_list_is_no_fresh_result(self) -> None:
+        self.answers["c11-sensors-now"] = self.sensors_now("2026-01-01T00:00:05.500000+00:00")
+        for result in (DryRunTestCase.run_script(self), self.run_script(CPC_NO_RESULT_HISTORY="")):
+            self.assert_one_fail(result, "check 11 (the check runner", "no fresh result")
+
+    def test_a_fresh_result_row_counts_without_the_setting(self) -> None:
+        self.answers = good_answers()
+        result = DryRunTestCase.run_script(self)
+        self.assertRegex(result.stdout, r"\[ok\]\s+check 11 \(the check runner")
+
+    def test_another_value_stops_before_any_check(self) -> None:
+        result = self.run_script(CPC_NO_RESULT_HISTORY="yes")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("CPC_NO_RESULT_HISTORY must be 1 or not set", result.stderr)
+        self.assertEqual(result_lines(result.stdout), [])
 
     def sensors_now(self, evaluated_at: str | None) -> dict[str, Any]:
         sensor = dict(self.answers["c11-sensors"]["body"]["items"][1])
@@ -1769,6 +1861,64 @@ class RuleIdTest(unittest.TestCase):
         # table does not name it, and floors.py does.
         self.assertNotIn("token_runs_only_safe", fixed_rule_table())
         self.assertIn("token_runs_only_safe", floor_rule_ids())
+
+
+def service_caution_write_rule() -> str:
+    """The rule id that _service_ladder of policy/evaluate.py gives a service login's caution write."""
+    tree = ast.parse((ROOT / "backend/src/meho_backplane/policy/evaluate.py").read_text())
+    ladder = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_service_ladder"
+    )
+    for node in ast.walk(ladder):
+        test = ast.unparse(node.test) if isinstance(node, ast.If) else ""
+        if "'caution'" in test and "mutating" in test:
+            call = next(
+                c
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "_default"
+            )
+            assert isinstance(call.args[0], ast.Constant)
+            return f"default:{call.args[0].value}"
+    raise AssertionError("no caution write in _service_ladder")
+
+
+def check_4_service_rule() -> str:
+    """The rule argument of the expect line of check 4's service login."""
+    for line in SCRIPT.read_text().splitlines():
+        if line.strip().startswith("expect c4-service-row "):
+            return shlex.split(line, comments=True)[6]
+    raise AssertionError("no expect line for c4-service-row")
+
+
+class Check4ServiceRuleTest(DryRunTestCase):
+    """Check 4's service login passes only on the full rule id of _service_ladder."""
+
+    def test_the_script_expects_the_rule_id_of_evaluate_py(self) -> None:
+        self.assertEqual(service_caution_write_rule(), "default:service.caution_write")
+        self.assertEqual(check_4_service_rule(), service_caution_write_rule())
+
+    def test_the_fixture_answer_passes(self) -> None:
+        self.assertRegex(
+            self.run_script().stdout,
+            r"\[ok\]\s+check 4 \(a service login without a grant, a service agent, REST\)",
+        )
+
+    def test_another_default_rule_fails(self) -> None:
+        for rule in ("default:person.token.caution", "default:service.dangerous"):
+            for kind in ("service_agent", None):
+                with self.subTest(rule=rule, kind=kind):
+                    answer = row("c4s", rule, kind or "")
+                    if kind is None:
+                        del answer["body"]["caller_kind"]
+                    self.answers = good_answers()
+                    self.answers["c4-service-row"] = answer
+                    self.assert_one_fail(
+                        self.run_script(),
+                        "check 4 (a service login without a grant, a service agent, REST)",
+                        f"expected rule {service_caution_write_rule()}",
+                    )
 
 
 class DocsPageTest(unittest.TestCase):

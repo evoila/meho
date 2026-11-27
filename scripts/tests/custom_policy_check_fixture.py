@@ -205,13 +205,14 @@ def edit_row(
     *,
     removed: bool = False,
     level: str | None = None,
+    old: str = "caution",
     ts: str = C1_EDIT_AT,
     connector: str = "k8s",
 ) -> dict[str, Any]:
     """The audit row of an Admin's edit of one operation's risk level, or of its removal."""
     payload: dict[str, Any] = {"connector_id": connector, "op_id": op, "changes": {}}
     if level is not None:
-        payload["changes"]["safety_level"] = {"old": "caution", "new": level}
+        payload["changes"]["safety_level"] = {"old": old, "new": level}
     if removed:
         payload["override_removed"] = True
     return {
@@ -345,7 +346,7 @@ def _person_steps(a: dict[str, dict[str, Any]]) -> None:
     a["c1-start-row"] = rows(
         {"id": audit_id("c1-start"), "request_id": "@request-id:c1-start", "ts": C1_START}
     )
-    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale", level="caution"))
+    a["c1-edits"] = rows(edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous"))
     a["c1-overrides"] = {
         "code": 200,
         "body": {

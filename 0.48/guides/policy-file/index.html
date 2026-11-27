@@ -2604,6 +2604,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-outer-limit-for-personal-agents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The outer limit for personal agents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#rules-that-no-file-can-loosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3362,6 +3373,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-outer-limit-for-personal-agents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The outer limit for personal agents
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#rules-that-no-file-can-loosen" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3736,6 +3758,44 @@ import a file with <code>bindings</code> while both are off: the bindings take
 effect when one of them goes on. The policy commands, and so
 the import of bindings, also need the setting <code>CUSTOM_POLICY</code> or
 <code>POLICY_CLASSIFICATION</code> (Helm <code>config.policy.classification</code>).</p>
+</div>
+<h2 id="the-outer-limit-for-personal-agents">The outer limit for personal agents<a class="headerlink" href="#the-outer-limit-for-personal-agents" title="Permanent link">&para;</a></h2>
+<p>The install's policy file can say how far a tenant's rule for personal
+agents may go, for the whole install. This is the outer limit:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">policy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v1</span>
+<span class="nt">limits</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">personal_agent_up_to</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">caution</span><span class="w">   </span><span class="c1"># safe, caution or dangerous</span>
+</code></pre></div>
+<ul>
+<li><code>personal_agent_up_to</code> is the highest risk level that a tenant's rule
+  for personal agents may let run at once. A <code>destructive</code> operation
+  always waits, so <code>destructive</code> is not a value.</li>
+<li>Without a <code>limits</code> part, the limit is <code>safe</code>. An empty part
+  (<code>limits: {}</code>) means the same.</li>
+<li>Only the install's file holds <code>limits</code>. A tenant's file with <code>limits</code>
+  is refused: "<code>limits</code> belongs to the install's policy file. Only a
+  platform admin sets the outer limit; a tenant's file stays inside it."</li>
+<li>Only a platform admin imports the install's file:
+  <code>meho policy import FILE --scope install</code>. The import is a change of the
+  policy. In the web console it runs at once after a fresh sign-in. With
+  a token it waits until a platform admin approves it in the web console.
+  An agent, a service login or a hosted agent run cannot ask for it.</li>
+<li><code>meho policy export --scope install</code> writes the <code>limits</code> part. An
+  exported file imports again with "No change.".</li>
+<li>If MEHO cannot read a stored limit, it uses <code>safe</code>, the strictest
+  limit, and logs one warning that names the place. Import the install's
+  file again to fix it.</li>
+<li>No call decision reads the limit: every call gets the same answer as
+  without it.</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Off by default</p>
+<p>The outer limit needs the setting <code>CUSTOM_POLICY</code> (Helm
+<code>config.policy.customPolicy</code>). While it is off, a file with <code>limits</code>
+is refused: "<code>limits</code> needs CUSTOM_POLICY: the outer limit counts only
+while the CUSTOM_POLICY setting is on. Remove the part, or ask the
+person who runs MEHO to turn the setting on." A limit stored while the
+setting was on is then ignored, and the export leaves it out.</p>
 </div>
 <h2 id="rules-that-no-file-can-loosen">Rules that no file can loosen<a class="headerlink" href="#rules-that-no-file-can-loosen" title="Permanent link">&para;</a></h2>
 <p>MEHO checks each file against these rules. A file that breaks one is

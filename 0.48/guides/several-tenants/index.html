@@ -3863,6 +3863,10 @@ also in at least one role group.</p>
   They count as an admin there, so they may approve their own changes
   like members of <code>MEHO-Admins</code>. A change of rights they approve only
   with a click in the web console.</li>
+<li>set the outer limit for personal agents in the install's policy file,
+  while the setting <code>CUSTOM_POLICY</code> is on. Only a platform admin imports
+  the install's file, and a tenant's file cannot hold the limit. See
+  <a href="../policy-file/#the-outer-limit-for-personal-agents">The outer limit for personal agents</a>.</li>
 <li>use the cross-tenant options, for example <code>--tenant</code> on the commands
   that have it. For a tenant where the person has a role group, MEHO
   answers <code>403 tenant_select_with_header</code>: pick that tenant with

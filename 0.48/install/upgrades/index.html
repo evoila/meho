@@ -4092,6 +4092,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>With the setting <code>CUSTOM_POLICY</code> on, a platform admin can store the outer limit for personal agents in the install's policy file (<code>limits.personal_agent_up_to</code>); with it off, a file with <code>limits</code> is refused with "needs CUSTOM_POLICY". A roll-back to v0.48 is safe: v0.48 reads a stored policy key by key and does not check it against the file model, so it ignores a stored <code>limits</code> part, its export leaves the part out, and its next import of the install's file removes it.</td>
+<td>None. To use the limit, turn on <code>CUSTOM_POLICY</code> and import the install's file with <code>meho policy import --scope install</code>.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Every call of <code>k8s.delete</code>, <code>k8s.label</code>, <code>k8s.annotate</code> and <code>k8s.namespace.create</code> waits for a person. No standing grant, no agent grant, no run approval, no approval override and no approved multi-step run covers it. Grant create, agent grant create and run approval create refuse these four operations. In sandbox mode a delete grant still covers <code>k8s.delete</code>, and only that one of the four. <code>k8s.scale</code>, <code>k8s.rollout.restart</code>, <code>k8s.cordon</code> and <code>k8s.cronjob.run</code> keep their rules: a standing grant and a run approval still cover them.</td>
 <td>A service login or an agent that runs one of the four operations under a grant or a run approval now waits for a person at each call: plan for a person to approve each call in the console or the CLI. Find the grants, agent grants and run approvals that name <code>k8s.delete</code>, <code>k8s.label</code>, <code>k8s.annotate</code> or <code>k8s.namespace.create</code> with <code>meho service-principals grants list</code>, <code>meho agent grant list</code> and <code>meho approvals runs list</code>, and remove them: they never run such a call. Sandbox delete grants for <code>k8s.delete</code> stay. No schema action.</td>
 </tr>
@@ -4187,7 +4192,7 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
-<td>The policy file reserves seven top-level keys: <code>limits</code>, <code>agents</code>, <code>approvers</code>, <code>role_bindings</code>, <code>risk_levels</code>, <code>custom_roles</code> and <code>baseline</code>. A file that holds one of them is refused, whatever its value. The answer is one sentence, for example "This version of MEHO does not read <code>agents</code> in a policy file; remove it." So no stored policy holds them, and v0.48 reads every stored policy after a roll-back (it also skips a key it does not know).</td>
+<td>The policy file reserves seven top-level keys: <code>limits</code>, <code>agents</code>, <code>approvers</code>, <code>role_bindings</code>, <code>risk_levels</code>, <code>custom_roles</code> and <code>baseline</code>. A file that holds <code>agents</code>, <code>approvers</code>, <code>role_bindings</code>, <code>risk_levels</code>, <code>custom_roles</code> or <code>baseline</code> is refused, whatever its value, with one sentence, for example "This version of MEHO does not read <code>agents</code> in a policy file; remove it." A tenant's file that holds <code>limits</code> is refused. The install's file may hold <code>limits</code> only while the setting <code>CUSTOM_POLICY</code> is on; with it off, the file is refused with "<code>limits</code> needs CUSTOM_POLICY: ...", and with it on, the install's stored policy can hold a <code>limits</code> part. v0.48 reads every stored policy after a roll-back (it skips a key it does not know); what a roll-back does with a stored <code>limits</code> part is in the row install-policy-outer-limit.</td>
 <td>None.</td>
 </tr>
 <tr>

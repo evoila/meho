@@ -410,13 +410,9 @@ async def approve_in_console(request_id: UUID, person: Operator) -> None:
 
 
 async def _run_ended(request_id: UUID) -> None:
-    """Wait until the run the approve started has ended (at most 60 seconds).
-
-    The run goes on in the background; a busy CI runner can need more than
-    a few seconds for it.
-    """
+    """Wait until the run the approve started has ended (at most 20 seconds)."""
     going = {OperationRunStatus.PENDING.value, OperationRunStatus.RUNNING.value}
-    for _ in range(1200):
+    for _ in range(400):
         async with get_sessionmaker()() as s:
             stmt = select(OperationRun).where(OperationRun.approval_request_id == request_id)
             runs = list((await s.execute(stmt)).scalars())

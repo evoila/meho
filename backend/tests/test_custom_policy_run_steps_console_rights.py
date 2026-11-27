@@ -23,6 +23,7 @@ All names and values are made up.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -274,7 +275,10 @@ async def test_an_admin_s_console_approval_of_the_run_does_not_run_the_change_of
 
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         put = _mount(mock)
-        await c.approve_in_console(request_id, admin.model_copy(update={"sid": str(uuid.uuid4())}))
+        # The admin is built when the tests are collected; the sign-in is a few
+        # seconds old when the test runs.
+        signed_in = {"sid": str(uuid.uuid4()), "auth_time": int(time.time()) - 5}
+        await c.approve_in_console(request_id, admin.model_copy(update=signed_in))
 
     path = "child-call" if child else "step"
     expected = _ON if on else _OFF_ON_MAIN[(admin.sub, path)]

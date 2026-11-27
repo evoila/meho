@@ -411,7 +411,9 @@ target registration) is documented in
     changes the policies in a second request. Vault keeps the login's
     policies on that password request, and it needs no other Vault
     capability than `create`, `update` and `read` on that path and the
-    rights on the KV path.
+    rights on the KV path. MEHO reads the login right before that password
+    request. When an admin removed the login during the KV write, MEHO sets
+    nothing and does not make the login again.
 
   The result never holds the password. It says `credential_source`
   (`request`, `kv_path` or `generated`), `credential_generated` and

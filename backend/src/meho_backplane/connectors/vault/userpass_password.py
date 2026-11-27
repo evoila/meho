@@ -22,7 +22,8 @@ password in KV, never a login whose password nobody knows. The KV write uses
 the new password is stored for a login that exists, setting only that password
 on the login (on ``auth/<mount>/users/<name>``, the path of every set) runs
 with no block check, so the login gets the stored password also when an
-admin blocked the caller during the store. A change of the
+admin blocked the caller during the store. MEHO reads the login right before
+that set, and sets nothing when the login was removed during the store. A change of the
 login's policies, and the create of a login that does not exist, keep the
 block check.
 """
@@ -283,8 +284,16 @@ def _apply_sync(
     # password stay in step. It uses the same path as every other set
     # (``auth/<mount>/users/<name>``), with the password as the only field, so
     # Vault keeps the login's policies and the role needs no other right. A
-    # change of the policies is its own request and keeps the check.
+    # change of the policies is its own request and keeps the check. Vault
+    # makes a login on that path when it is missing, so MEHO reads the login
+    # right before the set and sets nothing when an admin removed it.
     with finish_without_block_check():
+        if _user_policies(client, username, mount) is None:
+            raise PasswordSecretError(
+                f"the login {username!r} was removed while MEHO stored its new password at "
+                f"KV {plan.mount!r} path {plan.path!r} field {plan.field!r}; MEHO did not "
+                "make the login again"
+            )
         _set_user(client, username=username, mount=mount, password=password, token_policies=None)
     if token_policies is not None and sorted(token_policies) != sorted(current_policies):
         _set_user(

@@ -392,6 +392,7 @@ async def test_the_password_set_with_no_block_check_uses_the_login_path_and_send
     stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
     # The end of MEHO's own Vault login is the other request with no check.
     assert unchecked == [
+        ("GET", _USER_PATH, {}),
         ("POST", _USER_PATH, {"password": stored}),
         ("POST", "/v1/auth/token/revoke-self", {}),
     ]
@@ -413,3 +414,26 @@ async def test_nothing_is_stored_or_set_when_the_caller_is_blocked_before_the_st
     if rotate:
         assert vault_ops.items[f"secret/{_PASSWORD_ITEM}"] == (1, {"password": "made-up-old"})
         assert vault_ops.users["svc-a"]["password"] == "made-up-old"
+
+
+async def test_a_login_removed_during_the_store_of_a_blocked_rotation_is_not_made_again(
+    vault_ops: VaultStandIn,
+) -> None:
+    params = _prepare(vault_ops, rotate=True)
+
+    async def _remove_the_login_and_block() -> None:
+        vault_ops.users.pop("svc-a")
+        await _block()
+
+    vault_ops.on_request("POST", _PASSWORD_DATA, _remove_the_login_and_block)
+
+    result = await _write_login(params)
+
+    assert result.status != "ok", (result.status, result.error)
+    assert "svc-a" not in vault_ops.users
+    assert vault_ops.user_writes == []
+    stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
+    assert stored not in json.dumps(result.model_dump(mode="json"))
+    (row,) = await _dispatch_rows(_USERPASS)
+    assert row.payload["result_status"] != "ok"
+    assert stored not in json.dumps(row.payload) + json.dumps(row.raw_payload)

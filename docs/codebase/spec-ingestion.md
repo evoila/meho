@@ -531,7 +531,11 @@ meho-automation floor (`connectors/meho_automation/ingest_safety.py`)
 pins its four write POSTs at `caution`. Connector packages register
 their own floors the same way. Floors
 are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
-an already stricter safety tier and an existing approval requirement. Existing
+an already stricter safety tier and an existing approval requirement.
+An ingested operation declared as a credential write or mint (class
+`credential_write` or `credential_mint`) counts as governed by a floor
+(`has_safety_floor`), so a re-ingest only raises its stored risk level and
+approval flag and never lowers them. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
 

@@ -10,6 +10,8 @@
 * A call with ``extras`` and ``extras_changes`` is refused before an
   approval request is stored.
 * The realm warnings of the card use the merged map.
+* A realm warning in the answer of an ``extras_changes`` call names the key
+  ``managed_realm``, never the realm.
 * The instruction text names every field of the answer.
 
 Every test value is made up at run time.
@@ -38,6 +40,7 @@ from meho_backplane.connectors.targets.ops import TARGETS_REGISTRY_CONNECTOR_ID
 from meho_backplane.connectors.targets.update import (
     _LLM_INSTRUCTIONS,
     TARGETS_UPDATE_OP_ID,
+    TARGETS_UPDATE_PARAMETER_SCHEMA,
     TARGETS_UPDATE_RESPONSE_SCHEMA,
     targets_update_card_warnings,
 )
@@ -51,6 +54,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.targets import keycloak_realm_warnings as realm_warnings
 from tests._people_behind_helpers import give_known_person
 from tests.test_targets_extras_changes import (
     _KEY,
@@ -313,6 +317,12 @@ def test_the_instruction_text_names_every_field_of_the_answer() -> None:
         assert f"'{field}'" in shape, field
 
 
+def test_the_parameter_text_says_the_answer_holds_no_extras_value() -> None:
+    text = TARGETS_UPDATE_PARAMETER_SCHEMA["properties"]["extras_changes"]["description"]
+    assert "The answer names the keys set and removed, never a value" in text
+    assert "a warning names a key, not its value" in text
+
+
 # ---------------------------------------------------------------------------
 # The realm warnings of the card
 # ---------------------------------------------------------------------------
@@ -336,3 +346,61 @@ async def test_the_card_realm_warnings_use_the_merged_map() -> None:
 
     assert len(warnings) == 1
     assert "admin realm" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# The realm warnings of the answer name the key, never the realm
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("risk", ["admin-realm", "meho-sign-in-realm"])
+async def test_the_answer_warning_names_the_key_and_no_realm(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, risk: str
+) -> None:
+    realm, other_value = _made("realm"), _made("other")
+    if risk == "admin-realm":
+        extras = {"managed_realm": realm, "admin_realm": realm}
+        expected = "is the admin realm of this Keycloak"
+    else:
+        extras = {"managed_realm": realm, "admin_realm": _made("admin")}
+        expected = "is the realm MEHO itself signs in with"
+        monkeypatch.setattr(realm_warnings, "backplane_login_realms", lambda: {realm})
+    row = await _insert_target(name=_NAME, product="keycloak", extras=dict(extras))
+
+    response = _patch(client, {"extras_changes": {"other_key": other_value}})
+    assert response.status_code == 202, response.text
+    request_id = response.json()["approval_request_id"]
+    result = await _approve_and_run(uuid.UUID(request_id))
+    assert result.status == "ok", result
+    assert await _extras(row.id) == {**extras, "other_key": other_value}
+
+    [warning] = result.result["warnings"]
+    assert "`managed_realm`" in warning
+    assert expected in warning
+    answer = _call(client, "GET", f"/api/v1/approvals/{request_id}/result")
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["result"]["result"]["warnings"] == [warning]
+    [request] = await _requests()
+    audit_text = " ".join(_columns(r) for r in await _audit_rows())
+    for place in (repr(result.result), answer.text, repr(request.resume_result), audit_text):
+        assert realm not in place
+        assert other_value not in place
+
+
+async def test_a_full_extras_answer_keeps_the_realm_in_its_warning() -> None:
+    realm = _made("realm")
+    extras = {"managed_realm": realm, "admin_realm": realm}
+    row = await _insert_target(name=_NAME, product="keycloak", extras={})
+
+    result = await dispatch(
+        operator=_operator(),
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=TARGETS_UPDATE_OP_ID,
+        target=None,
+        params={"target_id": str(row.id), "extras": extras},
+        _approved=True,
+    )
+
+    assert result.status == "ok", result
+    [warning] = result.result["warnings"]
+    assert repr(realm) in warning

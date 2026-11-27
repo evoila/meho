@@ -195,7 +195,8 @@ TARGETS_UPDATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "do not name keep their value. MEHO merges when the change runs, "
                 "so a key added while the call waited stays. Not together with "
                 "`extras`. The answer names the keys set and removed, never a "
-                "value; read the target to see the values."
+                "value, and a warning names a key, not its value; read the "
+                "target to see the values."
             ),
         },
         "notes": {
@@ -260,6 +261,7 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Only present when a setting is allowed but risky, for example a "
                 "Keycloak target that manages the realm MEHO itself signs in with. "
+                "With `extras_changes` a line names the key, not its value. "
                 "Tell the person about each line."
             ),
         },
@@ -388,7 +390,11 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 
-    warnings = keycloak_realm_warnings(updated.product, updated.extras)
+    # With extras_changes the answer holds no value of the extras, so a
+    # warning names the key, not the realm.
+    warnings = keycloak_realm_warnings(
+        updated.product, updated.extras, name_realm=body.extras_changes is None
+    )
     return {
         "target_id": str(updated.id),
         "name": updated.name,

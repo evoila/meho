@@ -3028,8 +3028,7 @@ def params_with_secret_fields_hidden(
         hidden = {
             **hidden,
             map_name: {
-                key: None if value is None else HIDDEN_PARAM_MARKER
-                for key, value in values.items()
+                key: None if value is None else HIDDEN_PARAM_MARKER for key, value in values.items()
             },
         }
         found = found or any(value is not None for value in values.values())

@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``own_approval`` is ``null`` where the approve reads the values of the call.
+"""``own_approval`` is ``null`` for a person where the approve reads the values of the call.
 
 Explain asks without values. For an operation registered with
 ``register_rights_change_check``, ``register_grant_op`` or
-``register_requester_check``, ``web`` and ``token`` are ``null`` and both
-reasons say why. The real call with values, then the real approve of the
-stored request, show the answer depends on them:
+``register_requester_check``, ``web`` and ``token`` are ``null`` for a
+person and both reasons say why. An agent login and a service login read
+``false`` with the text of the approve sign: the approve refuses them
+before it reads any values. The real call with values, then the real
+approve of the stored request, show the answer:
 
 * case A: a change of rights only for some values;
 * case B: a change of the rights of one login that the values name;
@@ -31,6 +33,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.connectors.policy.apply import register_policy_apply_operation
 from meho_backplane.connectors.policy.classify import POLICY_REGISTRY_CONNECTOR_ID
 from meho_backplane.main import app
+from meho_backplane.operations.approval_queue import NonHumanApprovalError
 from meho_backplane.operations.grant_approval import (
     RIGHTS_CHANGE_CONSOLE_ONLY,
     RIGHTS_CHANGE_REFUSAL,
@@ -45,6 +48,7 @@ from ._own_approval_cases import (
     ADMIN_WEB,
     AGENT,
     DEPENDS,
+    MACHINE,
     OPERATOR_TOKEN,
     OPERATOR_WEB,
     PLATFORM_TOKEN,
@@ -96,14 +100,16 @@ async def _null_then_call(
     *,
     connector_id: str = "demo-1.x",
 ) -> dict[str, tuple[bool, str]] | str:
-    """Explain says ``null``; then what the real call and the approve of its request do.
+    """Explain says ``null`` for a person and ``false`` for a machine login; then the call.
 
-    Returns the approve for each way, or the refusal of the call when it does
-    not wait.
+    Returns what the real approve of the call's request does for each way,
+    or the refusal of the call when it does not wait. The approve refuses
+    a machine login with :class:`NonHumanApprovalError`.
     """
     body = caller.ask(client, key, op_id, connector_id=connector_id)
     assert body["answer"] == "wait", (caller.name, body)
-    assert body["own_approval"] == _NULL, (caller.name, body["own_approval"])
+    part = MACHINE if caller.machine else _NULL
+    assert body["own_approval"] == part, (caller.name, body["own_approval"])
     result = await call(caller.operator(), op_id, params, connector_id=connector_id)
     if result.status != "awaiting_approval":
         return str(result.error or result)
@@ -111,6 +117,8 @@ async def _null_then_call(
     done = {}
     for way, web in (("web", True), ("token", False)):
         outcome = await approve(caller, request_id, web=web, params=params)
+        if caller.machine:
+            assert type(outcome.error) is NonHumanApprovalError, (caller.name, way, outcome)
         done[way] = (outcome.accepted, outcome.reason)
     return done
 
@@ -237,6 +245,20 @@ async def test_case_c_an_operation_with_a_check_of_who_may_ask(
                         connector_id=POLICY_REGISTRY_CONNECTOR_ID,
                     )
                 )
+        for machine in (AGENT, SERVICE):
+            body = machine.ask(
+                client, key, "policy.apply", connector_id=POLICY_REGISTRY_CONNECTOR_ID
+            )
+            assert body["answer"] == "deny", (machine.name, body)
+            assert "own_approval" not in body, (machine.name, body)
+            for scope in ("install", "tenant"):
+                result = await call(
+                    machine.operator(),
+                    "policy.apply",
+                    _policy_params(scope),
+                    connector_id=POLICY_REGISTRY_CONNECTOR_ID,
+                )
+                assert result.status != "awaiting_approval", (machine.name, scope, result)
     for admin in (ADMIN_TOKEN, ADMIN_WEB):
         assert "Only a platform admin can ask to import the install's policy." in str(
             found[(admin.name, "install")]
@@ -251,3 +273,27 @@ async def test_case_c_an_operation_with_a_check_of_who_may_ask(
                 False,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_a_question_with_groups_for_a_machine_login_reads_false(
+    client: TestClient,
+    embedding: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The made-up login of a question with groups: a machine login reads ``false``."""
+    switches(monkeypatch, CUSTOM_POLICY="true")
+    isolate_registries(monkeypatch)
+    register_rights_change_check("demo.thing.write", lambda params: params.get("side") == "kc")
+    await register(embedding, "demo.thing.write", "caution", params=("side",))
+    key = make_rsa_keypair("kid-ownappr-groups-machine")
+    found = {}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        for principal in ("agent", "service", "person"):
+            body = PLATFORM_TOKEN.ask(
+                client, key, "demo.thing.write", groups=["Operators"], principal=principal
+            )
+            assert body["answer"] == "wait", (principal, body)
+            found[principal] = body["own_approval"]
+    assert found == {"agent": MACHINE, "service": MACHINE, "person": _NULL}

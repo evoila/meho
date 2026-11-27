@@ -14,6 +14,7 @@ same order, so the sign never says something else than the approve does:
 
 1. A machine login never approves (:func:`_check_reviewer_role`).
 2. A ``read_only`` person without the ``approver`` flag cannot decide.
+   :func:`decide_refusal` gives these first two answers.
 3. Only a ``pending`` request can be approved.
 4. The group rule (:func:`_check_approver_group`): a change of rights only
    for an admin, with a click in the web interface (the admin may be the
@@ -65,6 +66,7 @@ __all__ = [
     "ApproveRightReason",
     "approve_right",
     "approve_right_any_status",
+    "decide_refusal",
     "self_approval_confirmation",
 ]
 
@@ -258,7 +260,13 @@ def _routed(
     return _refused(ApproveRightReason.NOT_ROUTED, refusal)
 
 
-def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool) -> ApproveRight:
+def decide_refusal(operator: Operator) -> ApproveRight | None:
+    """The refusal of the check the approve runs first, or ``None`` when *operator* may decide.
+
+    A machine login never approves, and a ``read_only`` person without the
+    ``approver`` flag cannot decide. The approve refuses these before it
+    reads anything of the request.
+    """
     try:
         _check_reviewer_role(operator)
     except NonHumanApprovalError:
@@ -272,6 +280,13 @@ def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool)
             "Your role cannot decide approval requests "
             "(operator role or the approver capability required).",
         )
+    return None
+
+
+def _right(operator: Operator, request: ApprovalRequest, *, check_pending: bool) -> ApproveRight:
+    refusal = decide_refusal(operator)
+    if refusal is not None:
+        return refusal
     if check_pending and request.status != ApprovalRequestStatus.PENDING.value:
         return _refused(
             ApproveRightReason.NOT_PENDING,

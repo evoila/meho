@@ -9,7 +9,9 @@ token. Explain asks without the call's values and without the card, so
 ``web`` and ``token`` are ``null`` with the reason. The real call stores
 the card: outside a protected login realm it records ``login_realm=false``
 and the admin approves it in the web console; in a protected login realm
-it records ``true`` and the admin does not approve it.
+it records ``true`` and the admin does not approve it. An agent login and a
+service login read ``false`` with the text of the approve sign, and the
+approve refuses them before it reads the card.
 
 Fixture values are made up.
 """
@@ -23,11 +25,15 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.operations.approval_queue import ApprovalError, approve_request
+from meho_backplane.operations.approval_queue import (
+    ApprovalError,
+    NonHumanApprovalError,
+    approve_request,
+)
 from meho_backplane.policy.explain import CallQuestion, explain_call
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
@@ -40,7 +46,7 @@ from tests.test_rights_change_console_run import (
     keycloak,  # noqa: F401 -- fixture: registers the Keycloak operations
 )
 
-from ._own_approval_cases import DEPENDS, call
+from ._own_approval_cases import DEPENDS, MACHINE, call, switches
 
 _OP = "keycloak.authflow.ensure_approval_flow"
 _DEMO_TARGET = "demo-keycloak"
@@ -153,3 +159,53 @@ async def test_case_d_the_part_is_null_and_the_card_holds_the_login_realm(
         await _approve(request_id, web=False, params=params),
     )
     assert done == approve
+
+
+def _machine(kind: PrincipalKind, *, web: bool) -> Operator:
+    return Operator(
+        sub=f"demo-{kind.value}",
+        raw_jwt="<demo-raw-jwt>",
+        tenant_id=_TENANT_ID,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=kind,
+        client_id=f"demo-{kind.value}",
+        web_session=web,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("runs")
+@pytest.mark.parametrize("self_approval", ["false", "true"])
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE], ids=str)
+@pytest.mark.parametrize("target_name", [_DEMO_TARGET, _TARGET_NAME])
+async def test_case_d_a_machine_login_reads_false_and_the_approve_refuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+    self_approval: str,
+    kind: PrincipalKind,
+    target_name: str,
+) -> None:
+    switches(monkeypatch, APPROVAL_ALLOW_SELF_APPROVAL=self_approval)
+    await _seed_demo_target()
+    asker = _machine(kind, web=False)
+    answer = await explain_call(
+        CallQuestion(
+            asker=asker, me=True, connector_id=_CONNECTOR_ID, op_id=_OP, target=target_name
+        )
+    )
+    assert answer.answer == "wait", answer
+    assert answer.own_approval is not None
+    assert answer.own_approval.model_dump() == MACHINE
+
+    async with get_sessionmaker()() as session:
+        target = await resolve_target(session, _TENANT_ID, target_name)
+    params = {"client_id": "demo-cli-approve"}
+    result = await call(asker, _OP, params, connector_id=_CONNECTOR_ID, target=target)
+    assert result.status == "awaiting_approval", result
+    request_id = uuid.UUID(str(result.extras["approval_request_id"]))
+    for web in (True, False):
+        async with get_sessionmaker()() as session:
+            with pytest.raises(NonHumanApprovalError):
+                await approve_request(
+                    session, request_id, operator=_machine(kind, web=web), params=params
+                )
+            await session.rollback()

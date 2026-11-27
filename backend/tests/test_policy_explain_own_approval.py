@@ -44,6 +44,7 @@ from ._own_approval_cases import (
     ADMIN_TOKEN,
     AGENT,
     ALL_CALLERS,
+    NOT_A_PERSON,
     OPERATOR_TOKEN,
     OPERATOR_WEB,
     OPS,
@@ -153,9 +154,6 @@ async def test_own_approval_says_what_the_approve_does(
     assert admin is not None and admin["web"] and admin["token"]
 
 
-_NOT_A_PERSON = "Only a person can approve. AI tools and other machine logins never approve."
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("self_approval", _SETTINGS)
 @pytest.mark.parametrize("caller", [AGENT, SERVICE], ids=["agent", "service"])
@@ -190,7 +188,7 @@ async def test_a_machine_login_reads_the_refusal_of_the_approve(
             sign = approve_right(caller.operator(web=web), request)
             assert sign.may_approve is False
             assert row.own[way] is False, (row.where, way)
-            assert row.own[f"{way}_reason"] == sign.message == _NOT_A_PERSON, (row.where, way)
+            assert row.own[f"{way}_reason"] == sign.message == NOT_A_PERSON, (row.where, way)
 
 
 @pytest.mark.asyncio

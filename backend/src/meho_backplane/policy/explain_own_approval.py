@@ -13,9 +13,16 @@ an admin in the web console, an own change by the own-approval rule
 (:func:`~meho_backplane.operations.approval_queue._check_self_approval`),
 the role floor, and the routing. Nothing is stored.
 
-The rule of the part:
+The rule of the part, in the order of the approve step:
 
-* Where the approve step reads a fact that only the call has, ``web`` and
+* First, who may decide at all
+  (:func:`~meho_backplane.operations.approval_rights.decide_refusal`, the
+  check the approve step and the approve sign run first). An agent login
+  or a service login never approves: ``web`` and ``token`` are ``False``
+  for every operation, and both reasons are the text of the approve sign,
+  "Only a person can approve. AI tools and other machine logins never
+  approve."
+* For a person, where the approve step reads a fact that only the call has, ``web`` and
   ``token`` are ``None`` and both reasons are :data:`DEPENDS_ON_VALUES`.
   Such facts are the values of the call, and the facts of the approval
   card that MEHO reads from the values or from the target (for example
@@ -25,8 +32,8 @@ The rule of the part:
   :func:`~meho_backplane.operations.role_floors.register_requester_check`;
   :func:`~meho_backplane.operations.grant_approval.approve_reads_call_facts`
   decides it.
-* For every other operation, ``web`` and ``token`` are ``True`` or
-  ``False``, as the approve step decides for that caller, and a refusal
+* For every other operation of a person, ``web`` and ``token`` are
+  ``True`` or ``False``, as the approve step decides for that caller, and a refusal
   has the approve step's reason.
 
 The part answers for the person and the request. The approve still checks
@@ -52,7 +59,7 @@ from meho_backplane.auth.delegation import ACTOR_SUB_KEY
 from meho_backplane.auth.operator import Operator, is_human_principal
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, EndpointDescriptor
 from meho_backplane.operations._validate import TOKEN_CALL_WAIT, waits_only_for_token_call
-from meho_backplane.operations.approval_rights import approve_right_any_status
+from meho_backplane.operations.approval_rights import approve_right_any_status, decide_refusal
 from meho_backplane.operations.grant_approval import (
     ASKED_IN_WEB_CONSOLE,
     approve_reads_call_facts,
@@ -137,6 +144,10 @@ def own_approval_view(
     """
     if not custom_policy_on(get_settings()):
         return None
+    refusal = decide_refusal(asker)
+    if refusal is not None:
+        reason = (refusal.message, refusal.message)
+        return ExplainOwnApproval.of(web=False, web_reason=reason, token=False, token_reason=reason)
     if approve_reads_call_facts(descriptor.op_id):
         reason = (DEPENDS_ON_VALUES, DEPENDS_ON_VALUES)
         return ExplainOwnApproval.of(web=None, web_reason=reason, token=None, token_reason=reason)

@@ -39,6 +39,10 @@ SAFE_MARKED = "safe-marked"
 OPS = (*LEVELS, SAFE_MARKED)
 #: Both reasons of the part when the approve reads the values of the call.
 DEPENDS = "This depends on the values of the call. Explain asks without them."
+#: Both reasons of the part of an agent login and a service login: the text of the approve sign.
+NOT_A_PERSON = "Only a person can approve. AI tools and other machine logins never approve."
+#: The part of an agent login and a service login, for every operation.
+MACHINE = {"web": False, "web_reason": NOT_A_PERSON, "token": False, "token_reason": NOT_A_PERSON}
 
 
 @dataclass(frozen=True)

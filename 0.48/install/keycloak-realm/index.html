@@ -5707,7 +5707,19 @@ person (the console's live stream and <code>GET /api/v1/feed</code>) ends within
 4 seconds.
 <code>&lt;sub&gt;</code> is the person's login id (the user id in Keycloak). To undo it,
 run <code>meho principal unblock &lt;sub&gt;</code>. <code>meho principal blocked</code> lists the
-blocks.</p>
+blocks. The console page <code>/ui/blocked-people</code> ("Blocked people" in the
+menu) does the same for a person with the tenant admin role: it lists the blocks, blocks a
+person with a reason, and unblocks a person after a confirm step. The
+page never removes a block on your own login. A platform admin removes a
+block on their own login with <code>meho principal unblock &lt;sub&gt; --reason "&lt;why&gt;"</code>,
+run in the tenant of that block, with a fresh sign-in. It removes only the
+block of that tenant. A block in every tenant stays until another platform
+admin removes it. A tenant admin cannot remove a block on their own login.
+This holds on the page and with the command. Another tenant admin of that
+tenant removes a block of that tenant, and a platform admin with
+<code>tenant_admin</code> in the current tenant removes every block of another login,
+on the Blocked people page or with <code>meho principal unblock</code>. Only a platform
+admin removes a block in every tenant.</p>
 <p>Who blocks whom:</p>
 <ul>
 <li>A tenant admin blocks a person in their own tenant.</li>

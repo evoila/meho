@@ -1,0 +1,95 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  What the connector of the picked product declares for its targets: the
+  one-line summary, the choice of connector class (only when the classes of
+  the product declare different settings), and one input for each extra
+  setting. Rendered inside ``#target-declared-fields``, by
+  ``_target_form_fields.html`` or alone by ``GET /ui/connectors/target-fields``.
+
+  Context:
+    * ``declared``   -- dict built by ``forms_declared.declared_view``.
+-#}
+{% if declared.summary %}
+  <p class="text-xs text-subtle" data-declared="summary">{{ declared.summary }}</p>
+{% endif %}
+{% if declared.default_port %}
+  <input type="hidden" name="declared_port" value="{{ declared.default_port }}" />
+{% endif %}
+{% if declared.impl_choices %}
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Connector</span>
+    <select
+      name="preferred_impl_id"
+      required
+      hx-get="/ui/connectors/target-fields"
+      hx-trigger="change"
+      hx-target="#target-declared-fields"
+      hx-swap="innerHTML"
+      hx-include="closest form"
+      class="select select-bordered select-sm w-full {% if declared.impl_error %}select-error{% endif %}"
+      aria-label="Connector"
+    >
+      {% for choice in declared.impl_choices %}
+        <option value="{{ choice.impl_id }}" {% if choice.impl_id == declared.chosen_impl_id %}selected{% endif %}>
+          {{ choice.impl_id }} ({{ choice.version }})
+        </option>
+      {% endfor %}
+    </select>
+    <span class="text-xs text-subtle">This product has more than one connector. They need different settings.</span>
+    {% if declared.impl_error %}
+      <span class="text-xs text-error" role="alert" data-error-for="preferred_impl_id">{{ declared.impl_error }}</span>
+    {% endif %}
+  </label>
+{% endif %}
+{% for f in declared.fields %}
+  {% if f.kind == "boolean" %}
+    <label class="label cursor-pointer justify-start gap-3">
+      <input type="hidden" name="{{ f.name }}" value="false" />
+      <input
+        type="checkbox"
+        name="{{ f.name }}"
+        value="true"
+        {% if f.checked %}checked{% endif %}
+        class="checkbox checkbox-sm"
+        aria-label="{{ f.label }}"
+      />
+      <span class="text-sm font-medium">{{ f.label }}</span>
+    </label>
+    {% if f.help %}<span class="text-xs text-subtle">{{ f.help }}</span>{% endif %}
+  {% else %}
+    <label class="flex flex-col gap-1">
+      <span class="text-sm font-medium">
+        {{ f.label }}
+        {% if f.required %}<span class="text-error" aria-hidden="true">*</span>{% else %}<span class="text-subtle">(optional)</span>{% endif %}
+      </span>
+      {% if f.kind == "choice" %}
+        <select
+          name="{{ f.name }}"
+          {% if f.required %}required{% endif %}
+          class="select select-bordered select-sm w-full {% if f.error %}select-error{% endif %}"
+          aria-label="{{ f.label }}"
+        >
+          <option value="" {% if not f.value %}selected{% endif %}>-</option>
+          {% for choice in f.choices %}
+            <option value="{{ choice }}" {% if choice == f.value %}selected{% endif %}>{{ choice }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input
+          type="{{ 'number' if f.kind == 'number' else 'text' }}"
+          name="{{ f.name }}"
+          {% if f.required %}required{% endif %}
+          value="{{ f.value }}"
+          class="input input-bordered input-sm w-full {% if f.error %}input-error{% endif %}"
+          aria-label="{{ f.label }}"
+        />
+      {% endif %}
+      {% if f.help %}<span class="text-xs text-subtle">{{ f.help }}</span>{% endif %}
+      {% if f.error %}
+        <span class="text-xs text-error" role="alert" data-error-for="{{ f.name }}">{{ f.error }}</span>
+      {% endif %}
+    </label>
+  {% endif %}
+{% endfor %}

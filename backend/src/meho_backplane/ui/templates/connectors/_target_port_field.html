@@ -1,0 +1,27 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The port input of the target form. Included by ``_target_form_fields.html``
+  and, as an out-of-band swap, by ``_target_declared_fields.html`` so the
+  declared port can fill it when the product changes.
+
+  Context: ``port_value`` (string to show), ``port_oob`` (true for the swap),
+  ``port_error`` (the message under the input, if any).
+-#}
+  <label id="target-port-field" class="flex flex-col gap-1"{% if port_oob %} hx-swap-oob="outerHTML"{% endif %}>
+    <span class="text-sm font-medium">Port <span class="text-subtle">(optional)</span></span>
+    <input
+      type="number"
+      name="port"
+      min="1"
+      max="65535"
+      value="{{ port_value }}"
+      class="input input-bordered input-sm w-full {% if port_error is defined and port_error %}input-error{% endif %}"
+      aria-label="Port"
+      placeholder="1-65535"
+    />
+    {% if port_error is defined and port_error %}
+      <span class="text-xs text-error" role="alert" data-error-for="port">{{ port_error }}</span>
+    {% endif %}
+  </label>

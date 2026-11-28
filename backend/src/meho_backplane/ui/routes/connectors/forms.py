@@ -75,6 +75,8 @@ token lines up with the cookie.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import structlog
 from fastapi import Request, status
 from fastapi.responses import HTMLResponse
@@ -95,6 +97,12 @@ from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.routes.connectors.forms_declared import (
+    DeclaredForm,
+    check_declared,
+    declared_view,
+    load_declared,
+)
 from meho_backplane.ui.routes.connectors.forms_realm import (
     is_keycloak,
     realm_extras,
@@ -217,6 +225,7 @@ async def render_create_modal(
 async def render_edit_modal(
     request: Request,
     session_ctx: UISessionContext,
+    operator: Operator,
     db_session: AsyncSession,
     *,
     target_name: str,
@@ -256,6 +265,9 @@ async def render_edit_modal(
         "notes": target.notes,
         "managed_realm": (target.extras or {}).get("managed_realm"),
     }
+    declared = await load_declared(operator, target.product, target.preferred_impl_id)
+    if declared is not None:
+        context["declared"] = declared_view(declared, values={}, stored=target.extras)
     response = get_templates().TemplateResponse(
         request,
         "connectors/_edit_modal.html",
@@ -277,6 +289,7 @@ def _build_form_context(csrf_token: str, *, mode: str) -> dict[str, object]:
         # Bare-form re-render carries no errors / submitted values.
         "errors": {},
         "values": {},
+        "declared": None,
     }
 
 
@@ -311,6 +324,8 @@ async def submit_create(
     aliases_raw: str | None,
     notes: str | None,
     managed_realm: str | None = None,
+    preferred_impl_id: str | None = None,
+    extra_values: Mapping[str, str] | None = None,
 ) -> HTMLResponse:
     """Build a :class:`TargetCreate` and delegate to the REST create handler.
 
@@ -336,42 +351,36 @@ async def submit_create(
         "aliases": aliases_raw or "",
         "notes": notes or "",
         "managed_realm": managed_realm or "",
+        "preferred_impl_id": preferred_impl_id or "",
+        **(extra_values or {}),
     }
-    realm_error = realm_field_error(product, managed_realm)
-    if realm_error is not None:
+    declared, extras, impl_id, errors = await _read_declared(
+        operator, product, managed_realm, preferred_impl_id, extra_values
+    )
+    if errors:
         return _render_form_with_errors(
             request,
             csrf_session_id=str(session_ctx.session_id),
             mode="create",
             values=raw_values,
-            errors=realm_error,
+            errors=errors,
+            declared=declared,
         )
-    # #2872: pass ``secret_ref`` only when the operator actually typed one.
-    # A blank field must stay *omitted* so ``create_target`` derives the
-    # #1723 per-tenant default; passing ``secret_ref=None`` explicitly would
-    # now land in ``model_fields_set`` and register as a deliberate "no
-    # credential" (persisted NULL), which is not what a blank create form
-    # means. (``submit_edit`` keeps ``secret_ref or None`` on purpose:
-    # blanking a populated field there *is* an intentional clear.)
-    # Building the input as a dict + ``model_validate`` (mirroring the import
-    # path's ``_build_create_body``) keeps ``model_fields_set`` key-accurate:
-    # ``secret_ref`` is present only when the operator typed one.
     try:
-        create_data: dict[str, object] = {
-            "name": name,
-            "product": product,
-            "host": host,
-            "port": _coerce_port(port),
-            "auth_model": AuthModel(auth_model),
-            "vpn_required": vpn_required,
-            "aliases": parse_aliases(aliases_raw),
-            "notes": notes or None,
-        }
-        if secret_ref and secret_ref.strip():
-            create_data["secret_ref"] = secret_ref
-        if is_keycloak(product) and managed_realm:
-            create_data["extras"] = realm_extras(None, managed_realm)
-        body = TargetCreate.model_validate(create_data)
+        body = _create_body(
+            name=name,
+            product=product,
+            host=host,
+            port=port,
+            auth_model=auth_model,
+            vpn_required=vpn_required,
+            aliases_raw=aliases_raw,
+            notes=notes,
+            secret_ref=secret_ref,
+            extras=extras,
+            impl_id=impl_id,
+            managed_realm=managed_realm,
+        )
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
             request,
@@ -379,6 +388,7 @@ async def submit_create(
             mode="create",
             exc=exc,
             values=raw_values,
+            declared=declared,
         )
 
     created = await create_target(body=body, operator=operator, session=db_session)
@@ -407,6 +417,8 @@ async def submit_edit(
     aliases_raw: str | None,
     notes: str | None,
     managed_realm: str | None = None,
+    preferred_impl_id: str | None = None,
+    extra_values: Mapping[str, str] | None = None,
 ) -> HTMLResponse:
     """Build a :class:`TargetUpdate` and delegate to the REST update handler.
 
@@ -433,32 +445,37 @@ async def submit_edit(
         "aliases": aliases_raw or "",
         "notes": notes or "",
         "managed_realm": managed_realm or "",
+        "preferred_impl_id": preferred_impl_id or "",
+        **(extra_values or {}),
     }
-    realm_error = realm_field_error(product, managed_realm)
-    if realm_error is not None:
+    declared, extras, impl_id, errors = await _read_declared(
+        operator, product, managed_realm, preferred_impl_id, extra_values
+    )
+    if errors:
         return _render_form_with_errors(
             request,
             csrf_session_id=str(session_ctx.session_id),
             mode="edit",
             values=raw_values,
-            errors=realm_error,
+            errors=errors,
+            declared=declared,
         )
-    update_data: dict[str, object] = {}
-    if is_keycloak(product) and managed_realm:
-        target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
-        update_data["extras"] = realm_extras(target.extras, managed_realm)
     try:
-        update_data.update(
+        merged = await _merged_extras(
+            db_session, session_ctx, target_name, product, managed_realm, declared, extras
+        )
+        body = _update_body(
+            merged,
+            impl_id,
             product=product,
             host=host,
-            port=_coerce_port(port),
-            auth_model=AuthModel(auth_model),
-            secret_ref=secret_ref or None,
+            port=port,
+            auth_model=auth_model,
+            secret_ref=secret_ref,
             vpn_required=vpn_required,
-            aliases=parse_aliases(aliases_raw),
-            notes=notes or None,
+            aliases_raw=aliases_raw,
+            notes=notes,
         )
-        body = TargetUpdate.model_validate(update_data)
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
             request,
@@ -466,6 +483,7 @@ async def submit_edit(
             mode="edit",
             exc=exc,
             values=raw_values,
+            declared=declared,
         )
 
     updated = await update_target(
@@ -481,6 +499,132 @@ async def submit_edit(
         name=target_name,
     )
     return saved_with_warnings(request, target_name, updated.warnings) or _redirect_to_list()
+
+
+async def _read_declared(
+    operator: Operator,
+    product: str,
+    managed_realm: str | None,
+    preferred_impl_id: str | None,
+    extra_values: Mapping[str, str] | None,
+) -> tuple[DeclaredForm | None, dict[str, object], str | None, dict[str, str]]:
+    """The declarations, the extras, the chosen class and the field errors of a submit."""
+    declared = await load_declared(operator, product, preferred_impl_id)
+    extras: dict[str, object] = {}
+    impl_id: str | None = None
+    errors = dict(realm_field_error(product, managed_realm) or {})
+    if declared is not None:
+        extras, impl_id, extra_errors = check_declared(
+            declared, extra_values or {}, preferred_impl_id
+        )
+        errors.update(extra_errors)
+    return declared, extras, impl_id, errors
+
+
+async def _merged_extras(
+    db_session: AsyncSession,
+    session_ctx: UISessionContext,
+    target_name: str,
+    product: str,
+    managed_realm: str | None,
+    declared: DeclaredForm | None,
+    extras: Mapping[str, object],
+) -> dict[str, object] | None:
+    """The stored extras with the submitted declared values and realm put in.
+
+    ``None`` when the form has nothing to change in the extras. Keys the
+    connector does not declare stay as they are.
+    """
+    keycloak_realm = is_keycloak(product) and bool(managed_realm)
+    fields = declared.fields if declared is not None else ()
+    if not keycloak_realm and not fields:
+        return None
+    target = await resolve_target(db_session, session_ctx.tenant_id, target_name)
+    merged = dict(target.extras or {})
+    for field in fields:
+        merged.pop(field.key, None)
+    merged.update(extras)
+    return realm_extras(merged, str(managed_realm)) if keycloak_realm else merged
+
+
+def _create_body(
+    *,
+    name: str,
+    product: str,
+    host: str,
+    port: str | None,
+    auth_model: str,
+    vpn_required: bool,
+    aliases_raw: str | None,
+    notes: str | None,
+    secret_ref: str | None,
+    extras: Mapping[str, object],
+    impl_id: str | None,
+    managed_realm: str | None,
+) -> TargetCreate:
+    """Build the :class:`TargetCreate` of a create form (may raise a validation error)."""
+    # #2872: pass ``secret_ref`` only when the operator actually typed one.
+    # A blank field must stay *omitted* so ``create_target`` derives the
+    # #1723 per-tenant default; passing ``secret_ref=None`` explicitly would
+    # now land in ``model_fields_set`` and register as a deliberate "no
+    # credential" (persisted NULL), which is not what a blank create form
+    # means. (``submit_edit`` keeps ``secret_ref or None`` on purpose:
+    # blanking a populated field there *is* an intentional clear.)
+    # Building the input as a dict + ``model_validate`` (mirroring the import
+    # path's ``_build_create_body``) keeps ``model_fields_set`` key-accurate:
+    # ``secret_ref`` is present only when the operator typed one.
+    create_data: dict[str, object] = {
+        "name": name,
+        "product": product,
+        "host": host,
+        "port": _coerce_port(port),
+        "auth_model": AuthModel(auth_model),
+        "vpn_required": vpn_required,
+        "aliases": parse_aliases(aliases_raw),
+        "notes": notes or None,
+    }
+    if secret_ref and secret_ref.strip():
+        create_data["secret_ref"] = secret_ref
+    all_extras = (
+        realm_extras(extras, managed_realm) if is_keycloak(product) and managed_realm else extras
+    )
+    if all_extras:
+        create_data["extras"] = dict(all_extras)
+    if impl_id:
+        create_data["preferred_impl_id"] = impl_id
+    return TargetCreate.model_validate(create_data)
+
+
+def _update_body(
+    merged_extras: dict[str, object] | None,
+    impl_id: str | None,
+    *,
+    product: str,
+    host: str,
+    port: str | None,
+    auth_model: str,
+    secret_ref: str | None,
+    vpn_required: bool,
+    aliases_raw: str | None,
+    notes: str | None,
+) -> TargetUpdate:
+    """Build the :class:`TargetUpdate` of an edit form (may raise a validation error)."""
+    update_data: dict[str, object] = {}
+    if merged_extras is not None:
+        update_data["extras"] = merged_extras
+    if impl_id:
+        update_data["preferred_impl_id"] = impl_id
+    update_data.update(
+        product=product,
+        host=host,
+        port=_coerce_port(port),
+        auth_model=AuthModel(auth_model),
+        secret_ref=secret_ref or None,
+        vpn_required=vpn_required,
+        aliases=parse_aliases(aliases_raw),
+        notes=notes or None,
+    )
+    return TargetUpdate.model_validate(update_data)
 
 
 def _coerce_port(raw: str | None) -> int | None:
@@ -590,6 +734,7 @@ def _render_form_with_errors(
     values: dict[str, object],
     exc: ValidationError | ValueError | None = None,
     errors: dict[str, str] | None = None,
+    declared: DeclaredForm | None = None,
 ) -> HTMLResponse:
     """Re-render the modal form fragment carrying per-field errors + 422.
 
@@ -611,6 +756,8 @@ def _render_form_with_errors(
     context = _build_form_context(csrf_token, mode=mode)
     context["errors"] = errors
     context["values"] = values
+    if declared is not None:
+        context["declared"] = declared_view(declared, values=values, errors=errors)
     if mode == "edit":
         # The edit modal reads ``target.name`` for the form action URL;
         # echo it back from the submitted values so the re-render posts

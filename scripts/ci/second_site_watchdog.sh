@@ -13,7 +13,13 @@
 # the watchdog keeps waiting, at most for the time limit of the shard job. A
 # cancelled run must run again in full, which costs more than the wait. When
 # the jobs of the other runs cannot be read, the run is stopped after the
-# limit, as before.
+# limit, as before. A shard of this run that started on the site also shows
+# that the site is up, so it never leads to a "site is down" stop.
+#
+# A watchdog that cannot read this run's jobs, or cannot decide, stops the
+# run too: then the run does not wait on the site, and its re-run uses
+# today's runners. Only when the cancel fails every time does the job end
+# red, and then it asks for a cancel by hand.
 #
 # A stopped run goes red instead of hanging. A re-run uses today's pool (see
 # `runs-on` of python-unit-shard-second-site). GitHub has no way to stop one
@@ -44,6 +50,26 @@ lookback_hours() {
     ci.yml) echo 3 ;;
     *) echo $(( 30 * 24 )) ;;
   esac
+}
+
+# Prints the `created` filters that together cover the look-back time of a
+# workflow, newest first. GitHub returns at most 1,000 runs for a search with
+# `created`, also page by page. So a long look-back is read in parts of at
+# most 5 days: the smoke check runs twice an hour, so a part holds about 240
+# runs. The parts do not overlap and leave no gap.
+part_hours=120
+created_filters() {
+  local hours parts
+  hours="$(lookback_hours "$1")"
+  parts=$(( (hours + part_hours - 1) / part_hours ))
+  jq -nr --argjson span "$(( hours * 3600 ))" --argjson parts "${parts}" '
+    def t: strftime("%Y-%m-%dT%H:%M:%SZ");
+    (now | floor) as $now
+    | range(0; $parts) as $k
+    | ($now - ($k + 1) * $span / $parts | floor) as $start
+    | if $k == 0 then "%3E%3D" + ($start | t)
+      else ($start | t) + ".." + ($now - ($k * $span / $parts | floor) - 1 | t)
+      end'
 }
 
 api="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
@@ -85,38 +111,50 @@ done
 jq_defs='def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;'
 
 # Prints the start time (seconds since 1970) of a job that a runner of the
-# second site started in the last limit minutes, in any run of the workflows
-# that use the site. Prints nothing when there is none. Returns 1 when a read
-# fails or its answer is odd. Stops at the first run with such a job, so a
-# busy site costs few API calls.
-site_last_start() {
-  local window=$(( limit_minutes * 60 )) created workflow runs ids run jobs newest
-  for workflow in "${site_workflows[@]}"; do
-    created="$(jq -nr --argjson s "$(( $(lookback_hours "${workflow}") * 3600 ))" \
-      'now - $s | strftime("%Y-%m-%dT%H:%M:%SZ")')" || return 1
-    runs="$(gh api --paginate \
-      "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?per_page=100&created=%3E%3D${created}" \
+# second site started in the last limit minutes, in a run of one workflow
+# that was created in one `created` filter. Prints nothing when there is
+# none. Returns 1 when a read fails or its answer is odd. Stops at the first
+# run with such a job, so a busy site costs few API calls.
+site_start_in() {
+  local workflow="$1" filter="$2" window=$(( limit_minutes * 60 )) runs ids run jobs newest
+  runs="$(gh api --paginate \
+    "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?per_page=100&created=${filter}" \
+    2>/dev/null)" || return 1
+  # A run that ended before the window cannot hold a job that started in it.
+  # A re-run moves `updated_at` of an old run.
+  ids="$(jq -sr --argjson w "${window}" "${jq_defs}"'
+    .[].workflow_runs[]
+    | select(.status != "completed" or (.updated_at | epoch) >= now - $w)
+    | .id' <<<"${runs}" 2>/dev/null)" || return 1
+  for run in ${ids}; do
+    # `filter=all` reads every attempt: a site job of the first attempt
+    # counts also when a later attempt ran on today's pool.
+    jobs="$(gh api --paginate \
+      "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?per_page=100&filter=all" \
       2>/dev/null)" || return 1
-    # A run that ended before the window cannot hold a job that started in it.
-    # A re-run moves `updated_at` of an old run.
-    ids="$(jq -sr --argjson w "${window}" "${jq_defs}"'
-      .[].workflow_runs[]
-      | select(.status != "completed" or (.updated_at | epoch) >= now - $w)
-      | .id' <<<"${runs}" 2>/dev/null)" || return 1
-    for run in ${ids}; do
-      # `filter=all` reads every attempt: a site job of the first attempt
-      # counts also when a later attempt ran on today's pool.
-      jobs="$(gh api --paginate \
-        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?per_page=100&filter=all" \
-        2>/dev/null)" || return 1
-      # A queued job has a start time too, but no runner name yet.
-      newest="$(jq -sr --arg label "${site_label}" --argjson w "${window}" "${jq_defs}"'
-        [.[].jobs[]
-         | select((.labels // []) | any(. == $label))
-         | select(.status == "in_progress" or .status == "completed")
-         | select((.runner_name // "") != "")
-         | .started_at | epoch | select(. >= now - $w)]
-        | max // empty | floor' <<<"${jobs}" 2>/dev/null)" || return 1
+    # A queued job has a start time too, but no runner name yet.
+    newest="$(jq -sr --arg label "${site_label}" --argjson w "${window}" "${jq_defs}"'
+      [.[].jobs[]
+       | select((.labels // []) | any(. == $label))
+       | select(.status == "in_progress" or .status == "completed")
+       | select((.runner_name // "") != "")
+       | .started_at | epoch | select(. >= now - $w)]
+      | max // empty | floor' <<<"${jobs}" 2>/dev/null)" || return 1
+    if [[ -n "${newest}" ]]; then
+      printf '%s\n' "${newest}"
+      return 0
+    fi
+  done
+}
+
+# Like site_start_in, for every workflow that uses the site and its whole
+# look-back time.
+site_last_start() {
+  local workflow filters filter newest
+  for workflow in "${site_workflows[@]}"; do
+    filters="$(created_filters "${workflow}")" || return 1
+    for filter in ${filters}; do
+      newest="$(site_start_in "${workflow}" "${filter}")" || return 1
       if [[ -n "${newest}" ]]; then
         printf '%s\n' "${newest}"
         return 0
@@ -126,11 +164,16 @@ site_last_start() {
 }
 
 # Prints the reason to stop the run in $reason and returns 0, or returns 1
-# when the shards should wait more because the site is busy.
+# when the shards should wait more because the site is busy. Sets
+# $site_down to 1 when the reason is that the site looks down (or its jobs
+# cannot be read): a shard of this run that started on the site disproves
+# that reason, but not the end of the busy wait.
 busy_until=0
+site_down=0
 decide() {
   local now newest
   now="$(date +%s)"
+  site_down=0
   if (( busy_polls_left <= 0 )); then
     reason="${waiting_now} unit shard(s) waited $(( limit_minutes + busy_minutes )) minutes for a runner of the second site. The site is busy, not down, but this is longer than the time limit of the shard, so this run is stopped."
     return 0
@@ -139,6 +182,7 @@ decide() {
     echo "${waiting_now} unit shard(s) still wait; the second site is busy, so waiting more"
     return 1
   fi
+  site_down=1
   if ! newest="$(site_last_start)"; then
     reason="${waiting_now} unit shard(s) waited ${limit_minutes} minutes for a runner of the second site, and the jobs of the other runs could not be read, so this run is stopped."
     return 0
@@ -152,13 +196,26 @@ decide() {
   return 1
 }
 
+# Asks GitHub to cancel this run, and ends the script when it accepts.
+cancel_failures=0
+cancel_run() {
+  if gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+    echo "Cancel request accepted."
+    exit 0
+  fi
+  cancel_failures=$(( cancel_failures + 1 ))
+  echo "the cancel request failed"
+}
+
 # What the loop saw is at least a minute old, and a shard may have started
 # since. The reads of the site take time too. So once the site looks down (or
 # its jobs cannot be read, or the busy wait is over), this run is read once
 # more, and the cancel comes right after that read, only when it shows at
-# least one shard that still waits. A read of this run that fails, or that
-# shows no waiting shard but not every shard started, never leads to a
-# cancel: it is read again.
+# least one shard that still waits. When the site looks down, that read must
+# also show that no shard has started: a started shard shows the site is up,
+# and the watchdog waits more. A read of this run that fails, or that shows
+# no waiting shard but not every shard started, is read again. When it still
+# cannot decide after the last try, it cancels the run anyway (see the end).
 try=1
 stop_reason=""
 while (( try <= last_tries )); do
@@ -167,6 +224,11 @@ while (( try <= last_tries )); do
   else
     read -r found waiting_now started <<<"${result}"
     if [[ "${waiting_now}" -gt 0 ]]; then
+      if [[ -n "${stop_reason}" && "${site_down}" -eq 1 && "${started}" -gt 0 ]]; then
+        echo "::notice title=Second runner site::${started} unit shard(s) of this run started on the second site, so the site is up, not down. The watchdog keeps waiting for the other ${waiting_now} shard(s)."
+        stop_reason=""
+        busy_until=$(( $(date +%s) + limit_minutes * 60 ))
+      fi
       if [[ -z "${stop_reason}" ]]; then
         if ! decide; then
           busy_polls_left=$(( busy_polls_left - 1 ))
@@ -178,11 +240,7 @@ while (( try <= last_tries )); do
         continue
       fi
       echo "::error title=Second runner site::${stop_reason} Re-run it: a re-run uses today's runners. If this repeats, set the repository variable MEHO_CI_SECOND_SITE to off."
-      if gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-        echo "Cancel request accepted."
-        exit 0
-      fi
-      echo "the cancel request failed"
+      cancel_run
     elif [[ "${found}" -eq "${expected}" && "${started}" -eq "${expected}" ]]; then
       echo "Every unit shard on the second site has a runner now. Nothing to stop."
       exit 0
@@ -195,5 +253,21 @@ while (( try <= last_tries )); do
   fi
   try=$(( try + 1 ))
 done
-echo "::error title=Second runner site::Could not stop this run, or could not read its jobs in full. Check it, and cancel it by hand if shards still wait."
+
+# The watchdog cannot tell if shards still wait. A run that waits on a site
+# that is down would wait until GitHub ends it after 24 hours, as a shard's
+# time limit counts only after it started. So it cancels the run anyway,
+# unless every cancel so far failed.
+if (( cancel_failures < last_tries )); then
+  echo "::error title=Second runner site::Could not read this run's jobs in full, so the watchdog cannot tell if unit shards still wait for a runner of the second site. It stops this run, so that the run does not wait on the site. Re-run it: a re-run uses today's runners."
+  try=1
+  while (( try <= last_tries )); do
+    cancel_run
+    if (( try < last_tries )); then
+      sleep "${retry_seconds}"
+    fi
+    try=$(( try + 1 ))
+  done
+fi
+echo "::error title=Second runner site::Could not cancel this run. It may wait on the second site until GitHub ends it after 24 hours, so cancel it by hand."
 exit 1

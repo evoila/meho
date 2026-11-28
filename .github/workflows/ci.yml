@@ -4249,8 +4249,10 @@ jobs:
   # stops the run when a shard waited 30 minutes and the site started no job
   # in that time (#7200), right after a fresh read of the jobs, so the check
   # goes red instead. A site that started a job is busy, not down: the job
-  # then waits up to 35 minutes more (the time limit of a shard). A failed
-  # read of this run never leads to a cancel.
+  # then waits up to 35 minutes more (the time limit of a shard), and so does
+  # a shard of this run that started on the site. When the job cannot read
+  # this run's jobs, or cannot decide, it stops the run too, so the run never
+  # waits on the site.
   #
   # Not a required check. It runs only when `changes` picked the second site,
   # on a GitHub-hosted runner so it does not need that site, and not on a

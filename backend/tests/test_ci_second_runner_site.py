@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import itertools
 import json
 import os
 import re
@@ -1311,14 +1312,17 @@ def _watch(
     runs: dict[str, str] | None = None,
     jobs: dict[int, str] | None = None,
     latest_jobs: dict[int, str] | None = None,
+    run_parts: dict[str, list[str]] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the watchdog.
 
     Reads of this run's jobs give ``answers`` in turn; the last repeats.
     ``runs`` answers the run list of a workflow file, and ``jobs`` the jobs of
     every attempt of another run (``filter=all``). Without ``filter=all``,
-    ``latest_jobs`` answers instead, when given. All default to an empty
-    list. ``FAIL`` makes ``gh`` fail.
+    ``latest_jobs`` answers instead, when given. ``run_parts`` answers the
+    run list of a workflow file per ``created`` part, in the order they are
+    read, before ``runs``. All default to an empty list. ``FAIL`` makes
+    ``gh`` fail.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1334,6 +1338,9 @@ def _watch(
         (site_dir / f"jobs-{run_id}").write_text(answer)
     for run_id, answer in (latest_jobs or {}).items():
         (site_dir / f"jobs-{run_id}-latest").write_text(answer)
+    for workflow, parts in (run_parts or {}).items():
+        for index, answer in enumerate(parts):
+            (site_dir / f"runs-{workflow}-part{index}").write_text(answer)
     calls = tmp_path / "calls.log"
     count = tmp_path / "count"
     count.write_text("0")
@@ -1351,7 +1358,9 @@ case "$args" in
     file="{answer_dir}/$n"; empty='{{}}' ;;
   */actions/workflows/*)
     rest="${{args#*/actions/workflows/}}"
-    file="{site_dir}/runs-${{rest%%/*}}"; empty='{{"workflow_runs": []}}' ;;
+    file="{site_dir}/runs-${{rest%%/*}}"; empty='{{"workflow_runs": []}}'
+    part=$(cat "$file-count" 2>/dev/null || echo 0); echo $((part + 1)) > "$file-count"
+    if [ -f "$file-part$part" ]; then file="$file-part$part"; fi ;;
   */actions/runs/*)
     rest="${{args#*/actions/runs/}}"
     file="{site_dir}/jobs-${{rest%%/*}}"; empty='{{"jobs": []}}'
@@ -1399,6 +1408,19 @@ def _assert_read_right_before_each_cancel(calls: list[str]) -> None:
             assert "/attempts/" in calls[index - 1], calls
 
 
+_UNDECIDED = "the watchdog cannot tell if unit shards still wait"
+_HAND_CANCEL = "Could not cancel this run. It may wait on the second site"
+
+
+def _assert_cancelled_undecided(result: subprocess.CompletedProcess[str], calls: list[str]) -> None:
+    """It could not decide, so it cancelled the run, and ended right after."""
+    assert result.returncode == 0, result.stdout
+    assert len(_cancels(calls)) == 1, calls
+    assert calls[-1].startswith("run cancel"), calls
+    assert _UNDECIDED in result.stdout
+    assert "Cancel request accepted." in result.stdout
+
+
 def test_watchdog_reads_the_shard_names_of_the_new_job() -> None:
     names = [
         f"Python unit shard {shard}/6"
@@ -1419,10 +1441,10 @@ def test_watchdog_ends_when_every_shard_has_a_runner(tmp_path: Path) -> None:
 
 
 def test_watchdog_stops_a_run_that_waits_too_long(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, [_shards(s4="queued", s5="in_progress", s6="in_progress")])
+    result, calls = _watch(tmp_path, [_WAITING])
     assert result.returncode == 0
     assert _cancels(calls) == [f"run cancel 42 --repo {_REPO}"]
-    assert "1 unit shard(s) waited 30 minutes" in result.stdout
+    assert "3 unit shard(s) waited 30 minutes" in result.stdout
     assert "MEHO_CI_SECOND_SITE" in result.stdout
 
 
@@ -1444,7 +1466,7 @@ def test_watchdog_reads_the_jobs_right_before_it_cancels(tmp_path: Path) -> None
     assert result.returncode == 0
     assert len(_cancels(calls)) == 1
     assert len(_shard_reads(calls)) == _POLLS + 2, "the polls, a read before and after the site"
-    assert len(_site_reads(calls)) == 2, "the run list of each workflow of the site"
+    assert len(_site_reads(calls)) == 1 + _SMOKE_PARTS, "the run lists of the site's workflows"
     _assert_read_right_before_each_cancel(calls)
 
 
@@ -1455,17 +1477,12 @@ def test_watchdog_leaves_shards_that_started_during_the_last_wait(tmp_path: Path
     assert "has a runner now" in result.stdout
 
 
-def test_watchdog_does_not_cancel_from_old_status_when_the_read_fails(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["FAIL"])
-    assert result.returncode == 1
-    assert _cancels(calls) == []
-    assert "Could not stop this run, or could not read its jobs" in result.stdout
-
-
-def test_watchdog_does_not_cancel_from_old_status_on_an_odd_answer(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + ["not json"])
-    assert result.returncode == 1
-    assert _cancels(calls) == []
+@pytest.mark.parametrize("answer", ["FAIL", "not json"])
+def test_watchdog_cancels_when_the_last_reads_fail(tmp_path: Path, answer: str) -> None:
+    """It cannot tell if shards still wait, so the run must not wait on the site."""
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + [answer])
+    _assert_cancelled_undecided(result, calls)
+    assert len(_shard_reads(calls)) == _POLLS + 3, "three fresh reads before it gives up"
 
 
 def test_watchdog_failed_reads_during_the_wait_do_not_count(tmp_path: Path) -> None:
@@ -1481,10 +1498,19 @@ def test_watchdog_tries_the_last_read_again(tmp_path: Path) -> None:
     _assert_read_right_before_each_cancel(calls)
 
 
-def test_watchdog_never_cancels_when_it_cannot_read_the_jobs(tmp_path: Path) -> None:
-    result, calls = _watch(tmp_path, ["FAIL"])
+def test_watchdog_cancels_when_every_api_call_fails(tmp_path: Path) -> None:
+    runs = {"ci.yml": "FAIL", "second-site-smoke.yml": "FAIL"}
+    result, calls = _watch(tmp_path, ["FAIL"], runs=runs)
+    _assert_cancelled_undecided(result, calls)
+    assert _site_reads(calls) == [], "the site is read only after a read of this run"
+
+
+def test_watchdog_reports_when_the_cancel_after_failed_reads_fails(tmp_path: Path) -> None:
+    result, calls = _watch(tmp_path, ["FAIL"], cancel_exit=1)
     assert result.returncode == 1
-    assert _cancels(calls) == []
+    assert len(_cancels(calls)) == 3
+    assert calls[-3:] == _cancels(calls), "it ends right after the last cancel"
+    assert _HAND_CANCEL in result.stdout
 
 
 def test_watchdog_cancels_when_a_fresh_read_shows_a_waiting_shard(tmp_path: Path) -> None:
@@ -1496,34 +1522,31 @@ def test_watchdog_cancels_when_a_fresh_read_shows_a_waiting_shard(tmp_path: Path
     assert "2 unit shard(s) waited 30 minutes" in result.stdout
 
 
-def test_watchdog_never_cancels_on_shards_with_no_status(tmp_path: Path) -> None:
+def test_watchdog_cancels_on_shards_with_no_status(tmp_path: Path) -> None:
     """An incomplete answer: three shards, none with a status."""
     result, calls = _watch(tmp_path, [_no_status("s4", "s5", "s6")])
-    assert result.returncode == 1
-    assert _cancels(calls) == []
-    assert len(calls) == _POLLS + 3, "the polls go on, then three fresh reads"
-    assert "Could not stop this run, or could not read its jobs in full" in result.stdout
+    _assert_cancelled_undecided(result, calls)
+    assert len(calls) == _POLLS + 3 + 1, "the polls go on, then three fresh reads, then the cancel"
 
 
 def test_watchdog_does_not_end_early_on_shards_with_no_status(tmp_path: Path) -> None:
     result, calls = _watch(tmp_path, [_no_status("s6", s4="in_progress", s5="in_progress")])
-    assert result.returncode == 1
-    assert _cancels(calls) == []
+    _assert_cancelled_undecided(result, calls)
     assert "Nothing left to watch" not in result.stdout
 
 
-def test_watchdog_never_cancels_when_no_listed_shard_waits(tmp_path: Path) -> None:
+def test_watchdog_cancels_when_no_listed_shard_waits_and_one_is_missing(tmp_path: Path) -> None:
     result, calls = _watch(tmp_path, [_shards(s4="in_progress", s5="completed")])
-    assert result.returncode == 1
-    assert _cancels(calls) == []
+    _assert_cancelled_undecided(result, calls)
 
 
 def test_watchdog_reports_when_it_cannot_stop_the_run(tmp_path: Path) -> None:
     result, calls = _watch(tmp_path, [_WAITING], cancel_exit=1)
     assert result.returncode == 1
-    assert len(_cancels(calls)) == 3
+    assert len(_cancels(calls)) == 3, "no more tries after three failed ones"
     _assert_read_right_before_each_cancel(calls)
-    assert "Could not stop this run" in result.stdout
+    assert _HAND_CANCEL in result.stdout
+    assert _UNDECIDED not in result.stdout
 
 
 def test_watchdog_reads_only_this_attempt(tmp_path: Path) -> None:
@@ -1535,6 +1558,9 @@ def test_watchdog_reads_only_this_attempt(tmp_path: Path) -> None:
 
 # The site is busy for this many polls after the limit, then the run stops.
 _BUSY_POLLS = 35
+# The smoke runs of 30 days are read in parts of 5 days.
+_SMOKE_PARTS = 6
+_ONE_STARTED = _shards(s4="in_progress", s5="queued", s6="queued")
 _CI_RUNS = {"ci.yml": _site_runs((7, "in_progress", 1))}
 
 
@@ -1584,6 +1610,37 @@ def test_watchdog_stops_a_busy_wait_at_the_time_limit_of_the_shard(tmp_path: Pat
     _assert_read_right_before_each_cancel(calls)
     assert len(_shard_reads(calls)) == _POLLS + _BUSY_POLLS + 2
     assert "waited 65 minutes for a runner of the second site. The site is busy" in result.stdout
+
+
+def test_watchdog_keeps_waiting_when_the_last_read_shows_a_started_shard(
+    tmp_path: Path,
+) -> None:
+    """The site started no job lately, but one shard of this run started: it is up."""
+    answers = [_WAITING] * _POLLS + [_ONE_STARTED, _ONE_STARTED, _STARTED]
+    result, calls = _watch(tmp_path, answers)
+    assert result.returncode == 0
+    assert _cancels(calls) == []
+    assert "1 unit shard(s) of this run started on the second site" in result.stdout
+    assert "has a runner now" in result.stdout
+
+
+def test_watchdog_stops_the_run_with_a_started_shard_at_the_time_limit_of_the_shard(
+    tmp_path: Path,
+) -> None:
+    result, calls = _watch(tmp_path, [_WAITING] * _POLLS + [_ONE_STARTED])
+    assert result.returncode == 0
+    assert len(_cancels(calls)) == 1
+    _assert_read_right_before_each_cancel(calls)
+    assert "2 unit shard(s) waited 65 minutes" in result.stdout
+    assert "looks down" not in result.stdout
+
+
+def test_watchdog_cancels_when_reads_fail_during_a_busy_wait(tmp_path: Path) -> None:
+    answers = [_WAITING] * (_POLLS + 1) + ["FAIL"]
+    result, calls = _watch(tmp_path, answers, runs=_CI_RUNS, jobs={7: _site_jobs(5)})
+    assert "It is busy, not down" in result.stdout
+    _assert_cancelled_undecided(result, calls)
+    assert len(_shard_reads(calls)) == _POLLS + 1 + 3, "three failed reads in a row"
 
 
 def test_watchdog_reads_the_site_again_only_when_its_last_job_is_old(tmp_path: Path) -> None:
@@ -1639,16 +1696,59 @@ def _created_hours_ago(call: str) -> float:
     return (dt.datetime.now(dt.UTC) - moment).total_seconds() / 3600
 
 
+def _created_part(call: str) -> tuple[dt.datetime, dt.datetime | None]:
+    """The start and end of the ``created`` filter of a run list; no end for ``>=``."""
+    match = re.search(r"&created=(\S+)", call)
+    assert match is not None, call
+    value = match.group(1)
+
+    def moment(text: str) -> dt.datetime:
+        return dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.UTC)
+
+    if value.startswith("%3E%3D"):
+        return moment(value.removeprefix("%3E%3D")), None
+    start, end = value.split("..")
+    return moment(start), moment(end)
+
+
 def test_watchdog_asks_only_for_runs_that_can_hold_a_recent_site_job(tmp_path: Path) -> None:
     """ci.yml: the last 3 hours. Smoke check: 30 days, as a re-run can come that late."""
     _, calls = _watch(tmp_path, [_WAITING])
-    lists = _site_reads(calls)[:2]
+    lists = _site_reads(calls)
     assert [call.split("?")[0] for call in lists] == [
-        f"api --paginate repos/{_REPO}/actions/workflows/ci.yml/runs",
-        f"api --paginate repos/{_REPO}/actions/workflows/second-site-smoke.yml/runs",
-    ]
+        f"api --paginate repos/{_REPO}/actions/workflows/ci.yml/runs"
+    ] + [f"api --paginate repos/{_REPO}/actions/workflows/second-site-smoke.yml/runs"] * (
+        _SMOKE_PARTS
+    )
     assert 2.9 < _created_hours_ago(lists[0]) < 3.1
-    assert 30 * 24 - 0.1 < _created_hours_ago(lists[1]) < 30 * 24 + 0.1
+    oldest_start, _ = _created_part(lists[-1])
+    oldest_hours = (dt.datetime.now(dt.UTC) - oldest_start).total_seconds() / 3600
+    assert 30 * 24 - 0.1 < oldest_hours < 30 * 24 + 0.1
+
+
+def test_watchdog_reads_the_smoke_runs_in_parts_with_no_gap(tmp_path: Path) -> None:
+    """GitHub gives at most 1,000 runs for a search with ``created``, also page by page."""
+    _, calls = _watch(tmp_path, [_WAITING])
+    parts = [_created_part(call) for call in _site_reads(calls) if "second-site-smoke" in call]
+    assert len(parts) == _SMOKE_PARTS
+    assert parts[0][1] is None, "the newest part has no end"
+    for (newer_start, _), (older_start, older_end) in itertools.pairwise(parts):
+        assert older_end == newer_start - dt.timedelta(seconds=1), "no gap and no overlap"
+        # Twice an hour: at most 240 scheduled runs in a part, far below 1,000.
+        assert newer_start - older_start <= dt.timedelta(days=5)
+
+
+def test_watchdog_finds_a_site_job_in_the_oldest_part_of_the_smoke_runs(tmp_path: Path) -> None:
+    """A smoke run from 4 weeks ago, behind more than 1,000 newer runs, re-run lately."""
+    empty = json.dumps({"workflow_runs": []})
+    parts = [empty] * (_SMOKE_PARTS - 1) + [_site_runs((9, "completed", 2))]
+    answers = [_WAITING] * (_POLLS + 1) + [_STARTED]
+    result, calls = _watch(
+        tmp_path, answers, run_parts={"second-site-smoke.yml": parts}, jobs={9: _site_jobs(5)}
+    )
+    assert any("/runs/9/jobs" in call for call in calls)
+    assert _cancels(calls) == []
+    assert "It is busy, not down" in result.stdout
 
 
 def test_watchdog_counts_a_re_run_of_an_old_smoke_run(tmp_path: Path) -> None:

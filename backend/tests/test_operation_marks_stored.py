@@ -42,9 +42,20 @@ The test fails when:
 * a stored row holds other marks than its definition;
 * a definition has no stored row, also when its package queues no
   registrar;
+* a register call passes a mark from a place the test does not read. The
+  test reads a plain value, a name set once to a plain value (a local name
+  or a name of the module), a dict that is set once and unpacked with
+  ``**``, and a field of an op record (``op.hard_to_undo``,
+  ``spec["hard_to_undo"]``, ``spec.get("hard_to_undo")``, a ``**`` record
+  of a loop, a name that a spec loop sets). A call that leaves a mark out
+  writes no mark. So a local dict that the function changes (for example
+  with ``.pop``) or a local dict read by key fails here, with the file and
+  the line of the call;
 * a register function keeps a mark in a local variable or a local dict,
-  and no register call of the function passes that value on. The op ids in
-  the message are the ones each call registered during the start;
+  and one of its register calls does not pass that value on. A local
+  variable keeps a mark when its name holds ``undo`` (``hard_to_undo``) or
+  ``rights`` (``changes_rights``). The op ids in the message are the ones
+  each call registered during the start;
 * a spec dict has a key that its register call does not read;
 * a ``safe`` row has a mark.
 
@@ -100,6 +111,10 @@ Connector = tuple[str, str, str]
 Site = tuple[str, int, int]
 
 _NO_MARK: Mark = (None, False)
+#: A value that the test cannot read.
+_UNREAD: Any = type("_Unread", (), {"__repr__": lambda self: "<a value the test cannot read>"})()
+#: The dict methods that read a dict and do not change it.
+_READING_METHODS = frozenset({"get", "items", "keys", "values", "copy"})
 _MARK_FIELDS = ("hard_to_undo", "changes_rights")
 _CONNECTOR_FIELDS = ("product", "version", "impl_id")
 _HANDLER_FIELDS = ("handler", "handler_attr", "handler_name")
@@ -438,6 +453,31 @@ class _Scope:
     shadowed: set[str] = field(default_factory=set)
     #: ``(local name, mark field, value)``: the marks that the function itself keeps.
     marks: list[tuple[str, str, Any]] = field(default_factory=list)
+    #: The names that a ``for`` loop of the function sets, such as ``op`` or ``spec``.
+    loop_names: set[str] = field(default_factory=set)
+    #: The local names that are set to a dict literal.
+    local_dicts: set[str] = field(default_factory=set)
+
+
+def _mark_named(name: str) -> str | None:
+    """The mark that a local name keeps: a name with ``undo`` or ``rights`` in it."""
+    lowered = name.lower()
+    return next((mark for mark in _MARK_FIELDS if mark.rpartition("_")[2] in lowered), None)
+
+
+def _changed_names(function: ast.AST) -> set[str]:
+    """The names whose value the function changes after it sets it, such as ``d.pop(...)``."""
+    changed: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Attribute) and node.attr not in _READING_METHODS:
+            target: ast.expr = node.value
+        elif isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load):
+            target = node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            changed.add(target.id)
+    return changed
 
 
 def _text_dict(node: ast.expr) -> dict[str, ast.expr] | None:
@@ -483,17 +523,30 @@ def _function_scope(function: ast.FunctionDef | ast.AsyncFunctionDef, outer: _Sc
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             bound[node.id].append(simple.get(id(node)))
     scope = _Scope(outer.module, dicts=dict(outer.dicts))
+    scope.loop_names = {
+        name.id
+        for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.AsyncFor))
+        for name in ast.walk(node.target)
+        if isinstance(name, ast.Name)
+    }
+    changed = _changed_names(function)
     literals: dict[str, dict[str, ast.expr]] = {}
     for name, values in bound.items():
         scope.dicts.pop(name, None)
         value = values[0] if len(values) == 1 else None
         literal = _text_dict(value) if value is not None else None
+        mark = _mark_named(name)
         if isinstance(value, ast.Constant):
             scope.constants[name] = value.value
-            if name in _MARK_FIELDS:
-                scope.marks.append((name, name, value.value))
+            if mark is not None:
+                scope.marks.append((name, mark, value.value))
         elif literal is not None:
-            literals[name] = literal
+            scope.local_dicts.add(name)
+            if name not in changed:
+                literals[name] = literal
+            else:
+                scope.shadowed.add(name)
         else:
             scope.shadowed.add(name)
     # A dict value can be a local constant, so the dicts are read after them.
@@ -501,8 +554,8 @@ def _function_scope(function: ast.FunctionDef | ast.AsyncFunctionDef, outer: _Sc
         scope.dicts[name] = literal
         for key, item in literal.items():
             readable, value = _plain(item, scope)
-            if key in _MARK_FIELDS and readable:
-                scope.marks.append((name, key, value))
+            if key in _MARK_FIELDS:
+                scope.marks.append((name, key, value if readable else _UNREAD))
     return scope
 
 
@@ -519,12 +572,71 @@ def _resolve(node: ast.expr, scope: _Scope) -> Any:
 
 
 def _plain(node: ast.expr, scope: _Scope) -> tuple[bool, Any]:
-    """``(True, value)`` for a plain value or a local name set to one, else ``(False, None)``."""
+    """``(True, value)`` for a plain value or a name set to one, else ``(False, None)``.
+
+    The name is a local name set once, or a name of the module.
+    """
     if isinstance(node, ast.Constant):
         return True, node.value
     if isinstance(node, ast.Name) and node.id in scope.constants:
         return True, scope.constants[node.id]
+    if isinstance(node, ast.Name) and node.id not in scope.shadowed:
+        value = getattr(scope.module, node.id, _UNREAD)
+        if value is None or isinstance(value, (str, bool)):
+            return True, value
     return False, None
+
+
+def _record_field(node: ast.expr, mark: str, scope: _Scope) -> bool:
+    """Whether *node* reads *mark* from an op record: ``op.mark``, ``spec["mark"]``.
+
+    ``spec.get("mark")`` and a name that a spec loop sets count too. A local
+    dict literal is not a record.
+    """
+    if isinstance(node, ast.Name):
+        return node.id == mark and node.id in scope.loop_names
+    key: ast.expr
+    if isinstance(node, ast.Attribute):
+        record, key = node.value, ast.Constant(node.attr)
+    elif isinstance(node, ast.Subscript):
+        record, key = node.value, node.slice
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+        record, key = node.func.value, node.args[0]
+        if node.func.attr != "get":
+            return False
+    else:
+        return False
+    return (
+        isinstance(record, ast.Name)
+        and record.id not in scope.local_dicts
+        and isinstance(key, ast.Constant)
+        and key.value == mark
+    )
+
+
+def _unread_marks(node: ast.Call, scope: _Scope) -> list[str]:
+    """The marks of a register call that come from a place the test does not read.
+
+    A mark comes from a keyword or a ``**`` dict the test reads (a plain
+    value, a name set to one, a field of a record), from a ``**`` record of
+    a loop, or the call leaves it out.
+    """
+    keywords: dict[str, ast.expr] = {}
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            keywords[keyword.arg] = keyword.value
+        elif not (isinstance(keyword.value, ast.Name) and keyword.value.id in scope.loop_names):
+            unpacked = _unpacked(keyword.value, scope)
+            if unpacked is None:
+                return list(_MARK_FIELDS)
+            keywords.update(unpacked)
+    return [
+        mark
+        for mark in _MARK_FIELDS
+        if mark in keywords
+        and not _plain(keywords[mark], scope)[0]
+        and not _record_field(keywords[mark], mark, scope)
+    ]
 
 
 def _unpacked(node: ast.expr, scope: _Scope) -> dict[str, ast.expr] | None:
@@ -673,9 +785,9 @@ def _local_mark_lines(
 ) -> Iterator[str]:
     """A line for each local mark of *function* that none of its register *calls* passes on."""
     for name, mark, value in scope.marks:
-        if any(_passes(call, name, mark, value) for call in calls):
-            continue
         for call in calls:
+            if value is not _UNREAD and _passes(call, name, mark, value):
+                continue
             readable, sent = call.passed[mark]
             shown = f"{mark}={sent!r}" if readable else f"{mark} as a value the test cannot read"
             for op_id in call.op_ids or ["an op that the start did not register"]:
@@ -844,9 +956,21 @@ def _read_module(owner: str, module: ModuleType, tracked: _Tracked, found: _Defi
             call = _call_definition(node, scope)
             if _call_name(node) in _REGISTER_CALLS:
                 seen = sorted(tracked.sites.get(_site(filename, node), set()))
-                op_ids = seen or ([call[0]["op_id"]] if call else [])
+                op_id = next(
+                    (_resolve(k.value, scope) for k in node.keywords if k.arg == "op_id"), None
+                )
+                op_ids = seen or (
+                    [call[0]["op_id"]] if call else [op_id] if isinstance(op_id, str) else []
+                )
                 register_calls[id(scope)].append(
                     _RegisterCall(node, op_ids, _passed_marks(node, scope))
+                )
+                found.problems.extend(
+                    f"{where}: the register call of {op_ids or 'an unknown op'} passes {mark} in "
+                    "a form the test does not read. Pass it as a plain value, a name set once "
+                    "to a plain value, a dict that is set once and unpacked with **, or a field "
+                    f"of an op record such as op.{mark}"
+                    for mark in _unread_marks(node, scope)
                 )
             if call is None:
                 continue
@@ -1080,3 +1204,105 @@ def test_a_local_mark_that_a_register_call_drops_is_a_problem(
             if any(f"register function {function} " in line for line in found.problems)
         )
         assert functions == ["register_local_name", "register_loop"], found.problems
+
+
+_FORMS_HEADER = """
+async def _handler():
+    return None
+
+
+async def register_typed_operation(**kwargs):
+    return None
+
+
+RIGHTS = True
+"""
+
+#: ``form -> (the register function, its form with the mark passed, with it dropped)``.
+_FORMS = {
+    "a local with another name": (
+        """
+async def register():
+    undo = "deletes"
+    await register_typed_operation(op_id="zz.form", handler=_handler{passed})
+""",
+        ", hard_to_undo=undo",
+    ),
+    "a dict value from a module constant": (
+        """
+async def register():
+    rights = {{"changes_rights": RIGHTS}}
+    await register_typed_operation(op_id="zz.form", handler=_handler{passed})
+""",
+        ", **rights",
+    ),
+    "two register calls": (
+        """
+async def register():
+    changes_rights = True
+    await register_typed_operation(op_id="zz.first", handler=_handler, **{{"changes_rights": True}})
+    await register_typed_operation(op_id="zz.form", handler=_handler{passed})
+""",
+        ", changes_rights=changes_rights",
+    ),
+    "a mark taken out of a local dict": (
+        """
+async def register():
+    rights = {{"changes_rights": True}}
+    {passed}
+    await register_typed_operation(op_id="zz.form", handler=_handler, **rights)
+""",
+        "pass",
+    ),
+}
+
+
+def _case_problems(
+    name: str, source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """The problems that the test finds in a made-up module with *source*."""
+    path = tmp_path / f"{name}.py"
+    path.write_text(_FORMS_HEADER + source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    found = _Definitions()
+    _read_module("zz", module, _Tracked(), found)
+    return found.problems
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS))
+@pytest.mark.parametrize("passes_the_mark", [False, True], ids=["dropped", "passed"])
+def test_each_form_with_a_dropped_mark_is_a_problem(
+    form: str, passes_the_mark: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A register call that drops a mark of its function is a problem, in each form."""
+    function, passed = _FORMS[form]
+    dropped = 'rights.pop("changes_rights")' if passed == "pass" else ""
+    source = function.format(passed=passed if passes_the_mark else dropped)
+    problems = _case_problems(
+        f"zz_form_{len(form)}_{passes_the_mark}", source, tmp_path, monkeypatch
+    )
+    if passes_the_mark:
+        assert problems == []
+    else:
+        assert problems and all("zz.form" in line for line in problems), problems
+
+
+def test_a_mark_read_from_a_local_dict_by_key_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The test does not read this form, so it says so, also when the marks are right."""
+    source = """
+async def register():
+    rights = {"changes_rights": True}
+    await register_typed_operation(
+        op_id="zz.form", handler=_handler, changes_rights=rights["changes_rights"]
+    )
+"""
+    problems = _case_problems("zz_form_by_key", source, tmp_path, monkeypatch)
+    assert any(
+        "passes changes_rights in a form the test does not read" in line for line in problems
+    )

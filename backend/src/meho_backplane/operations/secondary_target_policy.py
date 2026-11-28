@@ -176,13 +176,43 @@ async def requester_policy_preflight(
     as allowed: the approval being asked for satisfies it. This never
     refuses the park; the reviewer sees the verdict and the resume enforces
     it.
+
+    In the re-run of an approved call, a call that waits belongs to the
+    caller who started the run. So the verdict and the record are of that
+    caller, rebuilt from the run's requester record, not of *operator*, who
+    runs the re-run.
     """
+    starter = _run_starter(operator)
+    if starter is not None:
+        operator, act = starter
+        with structlog.contextvars.bound_contextvars(**{ACTOR_SUB_KEY: act}):
+            return await requester_policy_preflight(operator, write, target)
     reason = await _refusal(operator, write, target, approved=True, decide_only=True)
     return {
         "requester": requester_subject(operator),
         "requester_denied": reason is not None,
         "requester_reason": reason,
     }
+
+
+def _run_starter(operator: Operator) -> tuple[Operator, str | None] | None:
+    """The caller who started the approved run being re-run, with its ``act``.
+
+    ``None`` outside such a re-run, when *operator* started it, or when the
+    run's request has no readable requester record.
+    """
+    from meho_backplane.operations.approval_queue import resume_requester_var
+
+    requester = resume_requester_var.get()
+    if requester is None or requester.subject is None or requester.sub == operator.sub:
+        return None
+    bound = _Requester(
+        operator.tenant_id, requester.sub, requester.act, requester.subject, requester.kind
+    )
+    try:
+        return _requester_operator(bound, requester.subject), requester.act
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 @contextmanager

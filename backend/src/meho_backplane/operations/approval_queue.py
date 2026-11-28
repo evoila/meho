@@ -104,7 +104,7 @@ from meho_backplane.auth.client_identity import (
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.principal_block import checking_logins_for_steps
 from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
@@ -2066,12 +2066,12 @@ class ResumeRequester(NamedTuple):
 _PERMISSION_PREFLIGHT_KEY = "permission_preflight"
 _REQUESTER_KEY = "requester"
 
-#: The requester of the approval request whose composite is being re-run
+#: The requester of the approval request whose call is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
-#: (the reviewer's and the agent's). A composite step that waits again
-#: during the re-run is saved for this requester, so the new request belongs
-#: to whoever started the operation, whoever runs the re-run. ``None``
-#: outside such a re-run.
+#: (the reviewer's and the agent's). A step of the step gate or a child call
+#: (``dispatch_child``) that waits during the re-run is saved for this
+#: requester, so the new request belongs to whoever started the operation,
+#: whoever runs the re-run. ``None`` outside such a re-run.
 resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
     "resume_requester",
     default=None,
@@ -3875,12 +3875,24 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217), with its ``client`` block and record."""
-    from meho_backplane.operations._preview import stored_requester_record
+    """The requester saved on *request*, with its ``client`` block and record.
+
+    The record is the card's requester record, else the record a person's
+    or a service login's request keeps under
+    :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`.
+    It is kept only when its ``sub`` is the row's, as
+    :func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`
+    does; else the requester has no record.
+    """
+    from meho_backplane.operations._preview import REQUESTER_RECORD_KEY, stored_requester_record
 
     effect = request.proposed_effect or {}
     client = effect.get(CLIENT_PAYLOAD_KEY)
     subject = stored_requester_record(effect)
+    if not isinstance(subject, dict):
+        subject = effect.get(REQUESTER_RECORD_KEY)
+    if not isinstance(subject, dict) or subject.get("sub") != request.principal_sub:
+        subject = None
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
@@ -3895,7 +3907,7 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
 def _with_requester_record(
     proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
 ) -> dict[str, Any]:
-    """Put the agent requester's record on the card (#6314), when there is one.
+    """Put the requester's record on the card.
 
     An approvals surface runs the approved call as the person who approved
     it. It rebuilds the agent from this record to check the agent's grants
@@ -3909,14 +3921,28 @@ def _with_requester_record(
     The REST and MCP approval tools leave it out.
     While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
     under ``permission_preflight["requester"]``.
+
+    A person's or a service login's record, of its own request or of a run it
+    started, is kept only under
+    :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`, which
+    only a re-run of the approved call reads (:func:`requester_of`). So a call
+    that waits during the re-run is checked as the caller who started the run.
     """
-    from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
+    from meho_backplane.operations._preview import (
+        AGENT_REQUESTER_RECORD_KEY,
+        REQUESTER_RECORD_KEY,
+    )
     from meho_backplane.operations.approved_step_check import requester_record
+    from meho_backplane.operations.secondary_target_policy import requester_subject
     from meho_backplane.settings import get_settings
 
     record = requester_record(operator) if requester is None else requester.subject
     if record is None:
+        if requester is None:
+            return {REQUESTER_RECORD_KEY: requester_subject(operator), **proposed_effect}
         return proposed_effect
+    if requester is not None and not _is_agent_record(record):
+        return {REQUESTER_RECORD_KEY: record, **proposed_effect}
     effect = {AGENT_REQUESTER_RECORD_KEY: record, **proposed_effect}
     if get_settings().agent_grant_required == "off":
         return effect
@@ -3924,6 +3950,12 @@ def _with_requester_record(
     preflight = dict(preflight) if isinstance(preflight, dict) else {}
     preflight.setdefault(_REQUESTER_KEY, record)
     return {**effect, _PERMISSION_PREFLIGHT_KEY: preflight}
+
+
+def _is_agent_record(record: dict[str, Any]) -> bool:
+    """True when *record* is of an agent: an agent login, or a hosted agent run."""
+    is_agent_login = record.get("principal_kind") == PrincipalKind.AGENT.value
+    return is_agent_login or record.get("act") is not None
 
 
 @contextmanager
@@ -3956,15 +3988,20 @@ def composite_resume_binding(
       ran is not sent again
       (:mod:`~meho_backplane.operations.composite_steps`).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
-      nothing; the caller keeps its generic re-dispatch.
+      no re-entry vars; the caller keeps its generic re-dispatch.
 
     When the park saved a ``state`` (#4217), the block also binds
     :data:`~meho_backplane.operations.composite.composite_resume_state_var`
     with it and the park's ``after_main_effect`` mark, so the re-entered
     composite can continue at the step that waited instead of running from
-    the start. It binds :data:`resume_requester_var` with *requester*, the
-    requester of the request being re-run, so a step that waits again is
-    saved for that requester on both resume paths (#4217).
+    the start.
+
+    For every park, direct or sub-op, the block binds
+    :data:`resume_requester_var` with *requester*, the requester of the
+    request being re-run. So a step of the step gate or a child call
+    (``dispatch_child``) that waits during the run is saved for the caller
+    who started the run, on both resume paths, not for the reviewer
+    who runs it.
 
     For every park, direct or sub-op, the block also binds
     :data:`~meho_backplane.operations._preview.approved_preview_var` with
@@ -3977,6 +4014,7 @@ def composite_resume_binding(
     from meho_backplane.operations._preview import approved_preview_var
 
     preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    requester_token = resume_requester_var.set(requester)
     try:
         if resume_parent is None:
             yield None
@@ -3985,10 +4023,10 @@ def composite_resume_binding(
                 subop_op_id=subop_op_id,
                 subop_params_hash=subop_params_hash,
                 resume_parent=resume_parent,
-                requester=requester,
             ) as parent_call:
                 yield parent_call
     finally:
+        resume_requester_var.reset(requester_token)
         approved_preview_var.reset(preview_token)
 
 
@@ -4004,7 +4042,6 @@ def _composite_parent_binding(
     subop_op_id: str,
     subop_params_hash: str,
     resume_parent: dict[str, Any],
-    requester: ResumeRequester | None,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
@@ -4029,7 +4066,6 @@ def _composite_parent_binding(
         if isinstance(saved_state, dict)
         else None
     )
-    requester_token = resume_requester_var.set(requester)
     try:
         with composite_resume_steps(
             parent_op_id,
@@ -4038,7 +4074,6 @@ def _composite_parent_binding(
         ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
-        resume_requester_var.reset(requester_token)
         composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)

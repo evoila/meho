@@ -45,7 +45,11 @@ from meho_backplane.operations._handler_resolve import (
     _CONNECTOR_INSTANCE_CACHE,
     forget_target_if_changed,
 )
-from meho_backplane.operations._preview import PreviewContext, proposed_effect_for_agent
+from meho_backplane.operations._preview import (
+    PreviewContext,
+    proposed_effect_for_agent,
+    without_internal_effect_keys,
+)
 from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
@@ -467,7 +471,7 @@ async def test_the_approval_tools_show_the_linux_card_only_with_the_switch_on(
     assert shown is not None
     sink = shown["preview"]["sink"]
     if on:
-        assert shown == stored
+        assert shown == without_internal_effect_keys(stored)
     else:
         assert sink == {
             "kind": "linux",

@@ -3644,8 +3644,12 @@ async def _build_proposed_effect(
         base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
-        # approve it with a click in the web interface.
-        if waits_only_for_token_call(operator, descriptor):
+        # approve it with a click in the web interface. Not in the re-run of
+        # an approved call: *operator* then runs the re-run, and the request
+        # belongs to the caller who started the run.
+        from meho_backplane.operations.approval_queue import resume_requester_var
+
+        if resume_requester_var.get() is None and waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
@@ -3991,6 +3995,7 @@ async def _handle_needs_approval(
         IdempotencyKeyConflictError,
         create_pending_request,
         record_approval_step_event,
+        resume_requester_var,
         rights_change_note,
     )
 
@@ -4115,6 +4120,10 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                # A child call that waits while an approved run goes on belongs
+                # to the caller who started the run, like a step of the step
+                # gate. ``None`` outside such a run.
+                requester=resume_requester_var.get(),
                 category=descriptor.policy_category,
                 wait_reason=wait_reason,
                 install_category=descriptor.policy_install_category,

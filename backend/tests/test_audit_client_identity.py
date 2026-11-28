@@ -45,6 +45,7 @@ from meho_backplane.db.models import ApprovalRequest, AuditEventClass, AuditLog
 from meho_backplane.main import app
 from meho_backplane.mcp.audit import write_mcp_audit_row
 from meho_backplane.operations._audit import write_audit_row
+from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ResumeRequester,
@@ -363,7 +364,10 @@ async def test_request_stores_the_requester_client(switch_on: None) -> None:
 @pytest.mark.asyncio
 async def test_request_stores_nothing_with_the_switch_off() -> None:
     request = await _park(_operator(sub="op-requester", azp="meho-mcp"))
-    assert request.proposed_effect == {"op_id": "vm.create", "connector_id": "vmware-rest-9.0"}
+    assert without_internal_effect_keys(request.proposed_effect) == {
+        "op_id": "vm.create",
+        "connector_id": "vmware-rest-9.0",
+    }
     assert "client" not in (await _row(request.request_audit_id)).payload
 
 

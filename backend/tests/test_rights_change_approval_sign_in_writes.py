@@ -590,7 +590,7 @@ async def test_no_approval_response_returns_the_marker(
     row = await _row(request_id)
     stored = dict(row.proposed_effect or {})
     assert stored[ASKED_IN_WEB_CONSOLE] is web
-    without_marker = {key: value for key, value in stored.items() if key != ASKED_IN_WEB_CONSOLE}
+    without_marker = {k: v for k, v in stored.items() if k not in INTERNAL_EFFECT_KEYS}
 
     agent_view = proposed_effect_for_agent(
         row.op_id,

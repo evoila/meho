@@ -60,6 +60,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.log_host import origin_for_log
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import Connector, ShimKind, shim_kind
 from meho_backplane.connectors.registry import register_connector_v2
@@ -564,7 +565,7 @@ def ensure_connector_class_registered(
         impl_id=impl_id,
         cls=cls.__name__,
         supported_version_range=cls.supported_version_range,
-        base_url=base_url,
+        base_url=origin_for_log(base_url) if base_url is not None else None,
     )
     return True
 

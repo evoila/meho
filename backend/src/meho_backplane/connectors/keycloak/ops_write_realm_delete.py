@@ -261,7 +261,8 @@ def _check_approved_id(rep: dict[str, Any]) -> None:
     """Refuse a realm whose id is not the id MEHO showed for this call.
 
     An approved run compares with the approval card. A run under a delete
-    grant compares with the fresh preview MEHO built for that call.
+    grant compares with the fresh preview MEHO built for that call. With
+    neither, the delete is refused.
     """
     card = approved_preview(REALM_DELETE_OP)
     shown_on = "the approval card"
@@ -269,7 +270,12 @@ def _check_approved_id(rep: dict[str, Any]) -> None:
         card = grant_preview(REALM_DELETE_OP)
         shown_on = "the preview MEHO built for this call"
     if card is None:
-        return
+        raise KeycloakDeleteRefusedError(
+            REALM_DELETE_OP,
+            "no_approved_id",
+            "MEHO has no approval card or preview with the realm id for this call. "
+            "Nothing was deleted. Send a new request.",
+        )
     block = card.get("blast_radius")
     shown = block.get("object") if isinstance(block, dict) else None
     approved_id = shown.get("id") if isinstance(shown, dict) else None

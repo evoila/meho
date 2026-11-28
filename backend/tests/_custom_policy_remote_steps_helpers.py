@@ -124,8 +124,8 @@ def probe_row(step: Step, tenant_id: UUID | None, facts: dict[str, Any]) -> Endp
     """A stored row of the step's operation under ``probe-1.x``.
 
     *facts* may hold ``schema``, ``tags``, ``level`` (the stored risk
-    level; by default the step's declared level), ``hard_to_undo`` and
-    ``typed`` (a typed row whose handler is :func:`probe_handler`, so a
+    level; by default the step's declared level), ``hard_to_undo``,
+    ``changes_rights`` and ``typed`` (a typed row whose handler is :func:`probe_handler`, so a
     child call needs no target; by default an ingested row). An op id
     without a verb (``probe.things.wipe_old``) stores no verb and no path.
     """
@@ -148,6 +148,7 @@ def probe_row(step: Step, tenant_id: UUID | None, facts: dict[str, Any]) -> Endp
         safety_level=facts.get("level", step.safety_level),
         requires_approval=step.requires_approval,
         hard_to_undo=facts.get("hard_to_undo"),
+        changes_rights=facts.get("changes_rights"),
         is_enabled=True,
         embedding=h.EMBEDDING,
     )

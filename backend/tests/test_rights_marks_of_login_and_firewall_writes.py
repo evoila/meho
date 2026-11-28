@@ -331,7 +331,11 @@ _REMOVE = "windns.record.remove"
 async def test_a_grant_or_a_run_approval_covers_a_call_that_changes_rights(
     monkeypatch: pytest.MonkeyPatch, handler_calls: list[str], switch_on: bool, cover: str
 ) -> None:
-    """A ``caution`` operation with ``changes_rights`` runs at once for a service login."""
+    """A ``caution`` operation with ``changes_rights`` and a service login's grant or run approval.
+
+    With the switch off, the call runs at once. With ``CUSTOM_POLICY`` on, the
+    fixed rule ``target_rights_waits`` holds: the call waits for a person.
+    """
     _switch(monkeypatch, switch_on)
     (row,) = [
         row
@@ -358,6 +362,11 @@ async def test_a_grant_or_a_run_approval_covers_a_call_that_changes_rights(
 
     answer = await call_operation(_caller(PrincipalKind.SERVICE), arguments)
 
+    if switch_on:
+        assert answer["status"] == "awaiting_approval", answer
+        assert handler_calls == []
+        assert await _waiting_ops() == [_ENABLE]
+        return
     assert answer["status"] == "ok", answer
     assert handler_calls == [_ENABLE]
     assert await _waiting_ops() == []

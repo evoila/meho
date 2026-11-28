@@ -146,6 +146,7 @@ __all__ = [
     "enforce_subop_policy",
     "get_dispatch_child",
     "run_governed_subop",
+    "runs_after_approval",
 ]
 
 
@@ -697,10 +698,10 @@ async def _covered_by_approved_run(rows: Sequence[EndpointDescriptor], caller: O
             return False
         if await step_keeps_own_approval(row, caller):
             return False
-    return _runs_after_approval()
+    return runs_after_approval()
 
 
-def _runs_after_approval() -> bool:
+def runs_after_approval() -> bool:
     """True while a run goes on after a person's approval (:data:`approved_run_var`, a resume)."""
     return approved_run_var.get() or composite_resume_scope_var.get() is not None
 
@@ -717,7 +718,7 @@ def credential_step_waits_after_approval(op_id: str, stored_op_class: str | None
     """
     from meho_backplane.operations.service_grants import credential_call_waits
 
-    return _runs_after_approval() and credential_call_waits(op_id, stored_op_class)
+    return runs_after_approval() and credential_call_waits(op_id, stored_op_class)
 
 
 def _resume_parent_for_current_composite(

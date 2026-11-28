@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block import PrincipalBlockedStepError, check_before_send
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import TenantScopedTargetLike
 from meho_backplane.connectors._shared.cache_key import target_cache_key as _target_cache_key
@@ -155,12 +156,14 @@ __all__ = [
     "PermissionPreflight",
     "PreviewBuilder",
     "PreviewContext",
+    "PrincipalBlockedStepError",
     "ProbeResult",
     "RetiredOp",
     "Target",
     "TargetField",
     "VaultClientError",
     "VaultCredentialsReadError",
+    "check_before_send",
     "compute_audit_digest_hash",
     "declare_root_shell",
     "is_acceptable_auth_model",

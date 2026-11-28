@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.7**.
+The kit version this page describes: **1.8**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -114,6 +114,8 @@ part that starts with an underscore is private by its name too.
 | Approvals | `PermissionPreflight` | The type of a check that runs while a change waits: may the caller make it? |
 | Approvals | `register_permission_preflight` | Register such a check for one operation. |
 | Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
+| Requests | `check_before_send` | The check of a caller's block right before a request goes out. Use it in every client your package builds itself. See "A client your package builds" below. Needs kit 1.8 or higher. |
+| Requests | `PrincipalBlockedStepError` | The refusal that `check_before_send` raises when the caller is blocked. Let it pass: do not retry it and do not turn it into a vendor error. Needs kit 1.8 or higher. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
 Inside six classes, the kit also promises some parts:
@@ -182,6 +184,27 @@ operations you register, not `execute`.
   (kit 1.6 or higher).
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
+- **Clients your package builds.** Every client your package builds itself
+  carries the check of the caller's block. An `httpx.AsyncClient` gets it as
+  a request hook:
+  `httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})`.
+  `httpx` runs the hook before every request, also before each redirect hop
+  and each retry that your package sends again through the client. The kit
+  supports this way for `httpx`. The template's test
+  `tests/test_httpx_clients_have_the_check.py` reports every other `httpx`
+  client it finds, also a synchronous `httpx.Client`. A file that uses another
+  client goes into `EXCEPTIONS` in that test file, with one line that says
+  where the file calls `kit.check_before_send()`. Such a client (a vendor
+  library, a database driver, an SSH connection, an `httpx.Client`) calls
+  `await kit.check_before_send()` right before each call that sends something:
+  each statement, each command, each request. A blocking library that runs in
+  a thread (`asyncio.to_thread`) is checked in the event loop, right before the
+  thread starts, not inside the thread. A check before the thread starts does
+  not cover the redirects that the library follows by itself: turn them off
+  and check before each request, or use `httpx.AsyncClient` with the hook.
+  A client that MEHO builds (the one of `HttpConnector`) needs nothing. Outside
+  a running call the check does nothing. The template's test cannot see
+  clients that are not `httpx`: cover those with a test that runs them.
 
 The steps, with code, are in
 [connector-packages.md, "Writing the connector"](https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#writing-the-connector).

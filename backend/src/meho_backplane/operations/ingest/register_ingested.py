@@ -127,6 +127,7 @@ import structlog
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connectors._shared.log_host import spec_source_for_log
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
@@ -459,7 +460,7 @@ async def register_ingested_operations(
             product=product,
             version=version,
             impl_id=impl_id,
-            spec_source=spec_source,
+            spec_source=spec_source_for_log(spec_source),
             dropped_count=len(allowlist_result.dropped),
             dropped_ops=[f"{op.method} {op.path}" for op in allowlist_result.dropped],
         )
@@ -669,7 +670,7 @@ async def _register_in_session(
             version=coords.version,
             impl_id=coords.impl_id,
             op_id=proto.op_id,
-            spec_source=coords.spec_source,
+            spec_source=spec_source_for_log(coords.spec_source),
         )
 
     safety_changes = await _collect_safety_changes(
@@ -692,7 +693,7 @@ async def _register_in_session(
         product=coords.product,
         version=coords.version,
         impl_id=coords.impl_id,
-        spec_source=coords.spec_source,
+        spec_source=spec_source_for_log(coords.spec_source),
         safety_change_count=len(safety_changes),
         **counts,
     )

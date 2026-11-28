@@ -44,14 +44,16 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations import run_step_rules
 from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from meho_backplane.operations.op_policy import apply_policy_edit
 from tests import _composite_wait_audit_helpers as h
 from tests import _custom_policy_remote_steps_helpers as r
 from tests import _custom_policy_run_steps_helpers as c
@@ -107,6 +109,11 @@ async def _run_step(
 ) -> Any:
     """Register *step*, start the run, approve its first step, and let the run go on."""
     await c.register(session, stub, step, child=child, **stored)
+    return await _start_and_resume(child=child, approver_role=approver_role)
+
+
+async def _start_and_resume(*, child: bool, approver_role: TenantRole) -> Any:
+    """Start the run, approve its first step as *approver_role*, and let the run go on."""
     request_id = await c.start_run(c.run_op(child=child))
     request = await h.approve(request_id, sub=c.APPROVER_SUB, role=approver_role)
     return await resume_dispatch_after_approval(
@@ -391,6 +398,67 @@ async def test_a_step_an_override_raised_to_destructive_is_denied(
     assert len(await c.requests()) == 1
     step_rows = await h.rows(_OVERRIDDEN.op_id)
     assert [r.payload["result_status"] for r in step_rows] == ["denied"]
+
+
+async def _admin_turns_approval_on(step: Step) -> OperationPolicyOverride | None:
+    """A tenant admin turns approval on for *step*; returns the stored override row."""
+    admin = Operator(
+        sub="admin-a",
+        raw_jwt="header.payload.signature",
+        tenant_id=h.TENANT_ID,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+    )
+    async with get_sessionmaker()() as s, s.begin():
+        row = (
+            await s.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == step.op_id)
+            )
+        ).scalar_one()
+        await apply_policy_edit(
+            s,
+            row=row,
+            scope_tenant_id=h.TENANT_ID,
+            operator=admin,
+            safety_level=None,
+            requires_approval=True,
+            reason="test: approval on",
+            person_present=True,
+            tighten_only=False,
+            max_age_seconds=300,
+        )
+    async with get_sessionmaker()() as s:
+        return (
+            await s.execute(
+                select(OperationPolicyOverride).where(OperationPolicyOverride.op_id == step.op_id)
+            )
+        ).scalar_one_or_none()
+
+
+@_BOTH_STATES
+@_BOTH_PATHS
+async def test_an_admin_s_approval_on_for_a_plain_mark_step_makes_the_step_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+    child: bool,
+) -> None:
+    """With the switch on the edit is stored, and the step waits under an Admin's run approval.
+
+    With the switch off the code's mark already makes the step wait, so the
+    edit stores nothing and the step waits as before.
+    """
+    c.switch(monkeypatch, on=on)
+    await c.register(session, stub_embedding_service, _PLAIN_CAUTION, child=child, stored=True)
+    stored = await _admin_turns_approval_on(_PLAIN_CAUTION)
+    if on:
+        assert stored is not None
+        assert stored.requires_approval is True
+    else:
+        assert stored is None
+    result = await _start_and_resume(child=child, approver_role=TenantRole.TENANT_ADMIN)
+    await _waits(result, _PLAIN_CAUTION, child=child)
 
 
 # -- a built-in row and the tenant's own row of a step-gate step ------------------

@@ -922,7 +922,8 @@ def _new_approval_field(
             not effective_policy(t.code_safety, t.code_approval, t.own).requires_approval
             for t in tenants
         )
-        return None if row.requires_approval and not turned_off and not needed_by_a_tenant else True
+        code_flag = row.requires_approval and not plain_mark_counts_as_level(row)
+        return None if code_flag and not turned_off and not needed_by_a_tenant else True
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()
     if has_caller_address(row.parameter_schema):

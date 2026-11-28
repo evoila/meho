@@ -64,7 +64,7 @@ jobs:
       - name: Install cosign
         # Checks the signature of the previous release's catalog. Same pin as
         # cli-release.yml and linux-download.yml.
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Write operation-catalog.json
         working-directory: backend
@@ -157,7 +157,7 @@ jobs:
           path: ${{ runner.temp }}/catalog
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532  # v4.1.3
 
       - name: Sign both files
         # The same keyless signing as SHA256SUMS-linux in linux-download.yml.
@@ -182,7 +182,7 @@ jobs:
       - name: Attach the files to the release
         # GoReleaser created the release in cli-release.yml's `release` job.
         # Same pinned action as the other attach steps.
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3.0.4
         with:
           tag_name: ${{ inputs.tag }}
           files: |

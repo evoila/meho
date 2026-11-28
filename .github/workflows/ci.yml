@@ -1061,7 +1061,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -1175,7 +1175,7 @@ jobs:
         # stay hidden on main. Same pinned action and Helm version as
         # chart.yml and the helm-lint-template job below. Every shard
         # needs it: the file split can put a chart test file in any shard.
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 
@@ -2050,7 +2050,7 @@ jobs:
         # The tests/test_chart_*.py files render the chart with helm. Same pin
         # as the unit shards; MEHO_REQUIRE_HELM=1 below makes them fail, not
         # skip, when helm is missing.
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 
@@ -2195,7 +2195,7 @@ jobs:
         continue-on-error: true
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -2924,7 +2924,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -3654,7 +3654,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -3664,7 +3664,7 @@ jobs:
         # and runs `meho admin keycloak bootstrap-clients` against the
         # Keycloak container. Same version + cache shape as the
         # go-lint-test lane.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26.11'
           check-latest: true
@@ -3852,7 +3852,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -4031,7 +4031,7 @@ jobs:
         # queue). The test images come through the Harbor proxy, so a
         # failed login only gives up the Docker Hub rate-limit headroom.
         continue-on-error: true
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -4081,7 +4081,7 @@ jobs:
         # supply-chain audit covers both. cache-dependency-path keys
         # the Go module cache off cli/go.sum, the only Go module in
         # the tree today.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           # Tracks the `go` directive in `cli/go.mod`. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
@@ -4266,7 +4266,7 @@ jobs:
         # `make generate` runs the pinned oapi-codegen (installed by the
         # Makefile `tools` target) which needs Go. Same version + cache
         # shape as the go-lint-test lane.
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.26.11'
           check-latest: true
@@ -4356,7 +4356,7 @@ jobs:
         # the central CI check exercises the same Helm binary the
         # publish pipeline uses. >=3.8 ships OCI helm push (irrelevant
         # here — this job never pushes — but kept aligned).
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
         with:
           version: v3.16.4
 

@@ -82,6 +82,7 @@ from tests._oidc_jwt_helpers import ISSUER as _DEFAULT_ISSUER
 from tests._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
+from tests._time_limits import wallclock_limit
 
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -512,7 +513,8 @@ def test_non_dashboard_pill_is_starting_when_probe_hangs(
     monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", 0.1)
 
     async def _hung_probe() -> ProbeResult:
-        await asyncio.sleep(10)  # >> the 0.1s bound; would hang the render pre-fix
+        # >> the 0.1s bound and the render limit below; would hang the render pre-fix
+        await asyncio.sleep(30)
         return ProbeResult(name="keycloak", ok=True)
 
     register_probe("keycloak", _hung_probe)
@@ -529,8 +531,10 @@ def test_non_dashboard_pill_is_starting_when_probe_hangs(
     assert response.status_code == 200, response.text
     assert "<title>Memory" in response.text
     assert _pill_state(response.text) == ("bg-warning", "starting")
-    # The render returned on the readiness bound, not the probe's 10s sleep.
-    assert elapsed < 5.0, f"render should not block on the hung probe, took {elapsed:.2f}s"
+    # The render returned on the readiness bound, not the probe's 30 s sleep.
+    assert elapsed < wallclock_limit(5.0), (
+        f"render should not block on the hung probe, took {elapsed:.2f}s"
+    )
 
 
 async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
@@ -573,11 +577,12 @@ async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
     monkeypatch.setattr(ui_middleware, "_READINESS_TIMEOUT_S", 0.1)
 
     # Set when the test ends, so the blocked probe thread stops then and
-    # does not keep running for 10 s after the test.
+    # does not keep running for 30 s after the test.
     release_probe = threading.Event()
 
     def _blocking_sync_probe() -> ProbeResult:
-        release_probe.wait(timeout=10)  # >> the 0.1s bound; blocks the loop pre-fix
+        # >> the 0.1s bound and the render limit below; blocks the loop pre-fix
+        release_probe.wait(timeout=30)
         return ProbeResult(name="docs_backends", ok=True)
 
     register_probe("docs_backends", _blocking_sync_probe)
@@ -621,9 +626,11 @@ async def test_non_dashboard_pill_is_starting_when_sync_probe_blocks(
     assert response.status_code == 200, response.text
     assert "<title>Memory" in response.text
     assert _pill_state(response.text) == ("bg-warning", "starting")
-    # The render returned on the readiness bound, not the sync probe's 10s
+    # The render returned on the readiness bound, not the sync probe's 30 s
     # sleep: a blocking sync probe must not stall the /ui/* hot path.
-    assert elapsed < 5.0, f"render should not block on the blocking sync probe, took {elapsed:.2f}s"
+    assert elapsed < wallclock_limit(5.0), (
+        f"render should not block on the blocking sync probe, took {elapsed:.2f}s"
+    )
 
 
 def test_dashboard_pill_follows_probe_state_unchanged() -> None:

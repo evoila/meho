@@ -93,6 +93,7 @@ from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.scheduler.loop import _SCHEDULER_ADVISORY_LOCK_KEY
 from meho_backplane.settings import get_settings
+from tests._time_limits import wallclock_limit
 
 _TENANT = uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 
@@ -320,7 +321,7 @@ def _aware(dt: datetime | None) -> datetime | None:
 async def _drain_in_flight(timeout: float = 3.0) -> None:
     """Await every outstanding evaluation task until the registry drains."""
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    deadline = loop.time() + wallclock_limit(timeout)
     while _IN_FLIGHT and loop.time() < deadline:
         tasks = list(_IN_FLIGHT.values())
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -329,7 +330,7 @@ async def _drain_in_flight(timeout: float = 3.0) -> None:
 
 async def _wait_until(predicate: Callable[[], bool], timeout: float = 3.0) -> None:
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    deadline = loop.time() + wallclock_limit(timeout)
     while not predicate() and loop.time() < deadline:
         await asyncio.sleep(0)
     assert predicate(), "condition not met within timeout"

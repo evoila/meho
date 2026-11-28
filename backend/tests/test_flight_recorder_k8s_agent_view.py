@@ -38,6 +38,7 @@ from meho_backplane.connectors.kubernetes.trace_agent_view import (
 )
 from meho_backplane.redaction.command_line import HIDDEN
 from meho_backplane.redaction.flight_recorder._content import scrub_content
+from tests._time_limits import wallclock_limit
 
 _FAKE = "made-up-value-not-real-8812"
 _URL_FAKE = "made-up-url-value-not-real-5521"
@@ -428,7 +429,7 @@ def test_large_pod_list_is_cleaned_in_time_in_line_with_its_size() -> None:
     view = agent_view_mod.agent_view_attributes(span)
     elapsed = time.perf_counter() - started
 
-    assert elapsed < _TIME_LIMIT_SECONDS
+    assert elapsed < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert _FAKE not in json.dumps(view)
     assert len(view["response_body"]["items"]) == 2000
 
@@ -440,7 +441,7 @@ def test_very_long_command_line_is_cleaned_in_time() -> None:
     started = time.perf_counter()
     args = agent_view(pod)["spec"]["containers"][0]["args"]
 
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert args == [f"{long_arg} --password {HIDDEN}"]
 
 

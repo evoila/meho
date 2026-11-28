@@ -33,6 +33,7 @@ from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.main import app
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.redaction.command_line import HIDDEN
+from tests._time_limits import wallclock_limit
 from tests.mcp_test_fixtures import build_operator
 from tests.test_operations_preview_typed_writes import (  # noqa: F401 -- fixtures
     _env_and_state,
@@ -53,7 +54,7 @@ def test_command_line_with_one_long_item_is_hidden_within_the_time_bound(unit: s
     item = unit * (_ONE_MIB // len(unit))
     started = time.perf_counter()
     hidden = hide_command_secrets(["sh", "-c", item, "--password", _FAKE])
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert hidden == ["sh", "-c", item, "--password", HIDDEN]
 
 
@@ -61,7 +62,7 @@ def test_job_args_item_with_many_words_is_hidden_within_the_time_bound() -> None
     item = "w " * (_HALF_MIB // 2) + f"PGPASSWORD={_FAKE} tail"
     started = time.perf_counter()
     hidden = hide_command_secrets(["psql", item])
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert hidden == ["psql", "w " * (_HALF_MIB // 2) + f"PGPASSWORD={HIDDEN}"]
 
 

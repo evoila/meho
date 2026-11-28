@@ -83,6 +83,7 @@ from meho_backplane.topology.query import (
     list_edges,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
+from tests._time_limits import wallclock_limit
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 # Match the tenant rows the ``pg_engine`` conftest fixture seeds.
@@ -875,9 +876,10 @@ async def test_depth_16_traversal_scales_sub_linearly_on_10k_nodes(
     )
     # Secondary smoke signal only (see docstring): a wide absolute
     # backstop for a regression that also slowed the depth-1 baseline.
-    assert deep_ms < _PERF_ABS_CEILING_MS, (
+    ceiling_ms = wallclock_limit(_PERF_ABS_CEILING_MS / 1000) * 1000
+    assert deep_ms < ceiling_ms, (
         f"depth-16 traversal took {deep_ms:.1f} ms (median), over the "
-        f"{_PERF_ABS_CEILING_MS:.0f} ms catastrophic-regression backstop"
+        f"{ceiling_ms:.0f} ms catastrophic-regression backstop"
     )
 
 

@@ -52,8 +52,8 @@ fi
 if [[ -z "${HEAD_REPO:-}" || "${HEAD_REPO}" != "${GITHUB_REPOSITORY:-}" ]]; then
   decide "" "today's pool: a pull request from a fork never uses the second site"
 fi
-# The token of a Dependabot run cannot cancel a run, so the watchdog could
-# not stop shards that wait on a dead site.
+# The token of a Dependabot run cannot cancel a run, so the second-site
+# watchdog could not stop shards that wait on a dead site.
 if [[ "${ACTOR:-}" == "dependabot[bot]" ]]; then
   decide "" "today's pool: a Dependabot run stays on today's pool"
 fi

@@ -328,3 +328,54 @@ def test_a_failed_cancel_does_not_stop_the_others(tmp_path: Path) -> None:
     assert outcome.returncode == 0, outcome.output
     assert outcome.cancelled == [_DROPPED["id"], _DROPPED_SCAN["id"], _DROPPED_QUEUED["id"]]
     assert "Could not cancel run 2 (CI)" in outcome.output
+
+
+# --- No queue job only watches the run (#7105) ------------------------------------
+
+
+def _queue_workflows() -> dict[str, dict[Any, Any]]:
+    """Every workflow that runs in the merge queue, by file name."""
+    found = {}
+    for path in sorted((_REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+        workflow = cast("dict[Any, Any]", yaml.safe_load(path.read_text()))
+        # PyYAML reads the key `on` as True.
+        triggers = workflow.get(True) or workflow.get("on") or {}
+        if "merge_group" in triggers:
+            found[path.name] = workflow
+    return found
+
+
+def _job_can_run_in_the_queue(job: dict[str, Any]) -> bool:
+    condition = " ".join(str(job.get("if", "")).split())
+    # Every job that cancels a run today names its one event at the start.
+    return not condition.startswith(
+        ("github.event_name == 'pull_request'", "github.event_name != 'merge_group'")
+    )
+
+
+def test_no_merge_group_job_only_watches_the_run() -> None:
+    """The sweep cancels a dropped group's runs from a hosted runner.
+
+    A job that may cancel a run needs ``actions: write``. A queue job with it
+    would hold a runner for the whole queue run only to watch it, and it once
+    cancelled a run whose other jobs had passed.
+    """
+    workflows = _queue_workflows()
+    assert "ci.yml" in workflows
+    watchers = [
+        f"{name}:{job_id}"
+        for name, workflow in workflows.items()
+        for job_id, job in workflow["jobs"].items()
+        if (job.get("permissions") or {}).get("actions") == "write"
+        and _job_can_run_in_the_queue(job)
+    ]
+    assert watchers == []
+    assert "merge-queue-watchdog" not in workflows["ci.yml"]["jobs"]
+
+
+def test_the_sweep_runs_every_five_minutes_on_a_hosted_runner() -> None:
+    workflow = _workflow()
+    assert workflow[True]["schedule"] == [{"cron": "2-59/5 * * * *"}]
+    sweep = workflow["jobs"]["sweep"]
+    assert sweep["runs-on"] == "ubuntu-latest"
+    assert sweep["permissions"] == {"contents": "read", "actions": "write"}

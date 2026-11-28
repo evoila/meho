@@ -13,7 +13,18 @@
 #     a narrower schema), with the same script.
 # A breaking change passes only when the pull request has the
 # `breaking-change` label and a "## Breaking changes" section in its text.
-# The job runs again when a label or the text changes.
+# So the workflow starts again when a label or the text changes.
+#
+# Copy instead of a new check (#7105). Most of those events change nothing
+# the check reads: a label other than `breaking-change`, or an edit of the
+# title only. Then the job `reuse` (GitHub-hosted, scripts/ci/compat_gates_reuse.sh)
+# finds the compatibility job of the newest earlier run on the same commit,
+# waits for it when it still runs, and the job `compat` copies its result
+# (success or failure) on a GitHub-hosted runner. It runs the full check when
+# there is no finished result to copy, for example when that job was
+# cancelled. The job `compat` is never skipped: a skipped job counts as
+# passed and would hide an earlier red result. Such a copy run has its own
+# concurrency group, so it does not cancel the check of the commit.
 #
 # Other checks keep the snapshots equal to the code: the ci.yml job
 # `cli-api-snapshot-freshness` and backend/tests/test_mcp_tools_snapshot_drift.py.
@@ -45,7 +56,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: compat-gates-${{ github.ref }}-${{ github.event_name }}
+  # A run that can copy a result gets a group of its own (see above).
+  group: compat-gates-${{ github.ref }}-${{ github.event_name }}${{ (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'breaking-change') || (github.event.action == 'edited' && github.event.changes.body == null && github.event.changes.base == null)) && format('-copy-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -54,14 +66,67 @@ env:
   OASDIFF_SHA256: 'dba65661f6d0f178a3e4884c309f19527a849388bb9df0e81545db76dbb697d6'
 
 jobs:
+  reuse:
+    name: Find the result of this commit
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # The script waits at most about 5 minutes for an earlier run.
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reuse: ${{ steps.decide.outputs.reuse }}
+      conclusion: ${{ steps.decide.outputs.conclusion }}
+    steps:
+      - name: Check out the script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          sparse-checkout: scripts/ci/compat_gates_reuse.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Copy the result, or run the check
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_ACTION: ${{ github.event.action }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          CHANGES_JSON: ${{ toJSON(github.event.changes) }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Must match the `name:` of the job `compat` below.
+          CHECK_NAME: REST API, MCP tools and Helm values compatibility
+          WORKFLOW_FILE: compat-gates.yml
+        run: bash scripts/ci/compat_gates_reuse.sh
+
   compat:
     name: REST API, MCP tools and Helm values compatibility
-    # Own pool, except a fork pull request (hosted runner). The job needs
-    # only git, Python and a public download.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+    needs: reuse
+    # Also when `reuse` was skipped (a manual run) or failed: then it runs
+    # the full check.
+    if: ${{ !cancelled() }}
+    # Own pool for the full check, except a fork pull request (hosted
+    # runner). A copied result needs no tools, so it runs hosted. The full
+    # check needs only git, Python and a public download.
+    runs-on: ${{ (needs.reuse.outputs.reuse == 'true' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
+    env:
+      REUSE: ${{ needs.reuse.outputs.reuse }}
     steps:
+      - name: Copy the result of the last check on this commit
+        if: env.REUSE == 'true'
+        env:
+          CONCLUSION: ${{ needs.reuse.outputs.conclusion }}
+        run: |
+          if [ "${CONCLUSION}" = "success" ]; then
+            echo "The last check on this commit passed. Nothing it reads has changed."
+            exit 0
+          fi
+          echo "::error title=Compatibility check::The last check on this commit failed (${CONCLUSION}). Nothing it reads has changed, so it still fails. Its log has the details."
+          exit 1
+
       - name: Checkout
+        if: env.REUSE != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -71,15 +136,18 @@ jobs:
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '2' }}
 
       - name: Set up Python
+        if: env.REUSE != 'true'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
 
       - name: Install PyYAML
+        if: env.REUSE != 'true'
         # The check reads values.yaml of the Helm chart.
         run: python -m pip install 'PyYAML==6.0.3'
 
       - name: Install oasdiff
+        if: env.REUSE != 'true'
         run: |
           set -euo pipefail
           TAR="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
@@ -91,6 +159,7 @@ jobs:
           /tmp/oasdiff/oasdiff --version
 
       - name: Check for breaking changes
+        if: env.REUSE != 'true'
         env:
           EVENT: ${{ github.event_name }}
           BASE_INPUT: ${{ inputs.base }}

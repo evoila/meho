@@ -36,8 +36,8 @@
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
 # unchanged. Merge-queue runs are the exception (#6325, #6350): there
-# `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness` and the
-# merge-queue watchdog use the internal `meho-runners-ci` pool. The
+# `python-lint`, `go-lint-test` and `cli-api-snapshot-freshness` use the
+# internal `meho-runners-ci` pool. The
 # four short jobs `changes`, `python-unit-lane`, `python-integration` and
 # `helm-lint-template` stay hosted, to keep the main pool free.
 #
@@ -148,16 +148,11 @@
 # is scoped to pull_request refs only so PR force-pushes still cancel
 # their predecessors cleanly. A push to `main` starts no run (#6387).
 #
-# Merge-queue watchdog (#4732): the queue drops a group as soon as one of
-# its required checks fails, or when it rebuilds the group behind a pull
-# request it took out, and then deletes the group's branch. GitHub does not
-# stop the group's CI run, so the run's jobs kept waiting for and using
-# runners for up to three hours after the drop. The `merge-queue-watchdog`
-# job (last in this file) runs only on `merge_group` events. It cancels its
-# own run when a job that carries or feeds a required check has not passed,
-# or when the queue branch is gone. It ends quietly once every job that
-# carries or feeds a required check has finished, so a run that passed and
-# merged is never cancelled.
+# Dropped queue groups (#7105): the queue drops a group as soon as one of
+# its required checks fails, and GitHub does not stop the group's run. The
+# sweep in merge-queue-cleanup.yml cancels such runs every 5 minutes, on a
+# GitHub-hosted runner. No job of this file waits on a runner only to watch
+# the run; test_ci_merge_queue_cleanup.py keeps it so.
 
 name: CI
 
@@ -215,7 +210,10 @@ jobs:
     # (job-level `if:` on this job's outputs, NEVER `on.paths`):
     #
     #   migrations — `true` when a PR touches migration-related files, so the
-    #                required `python-migration-tests` job runs only then.
+    #                required `python-migration-tests` job runs only then. A
+    #                merge-queue run uses the same file pattern, on the diff
+    #                from the group's base commit to its head (#7105). The
+    #                nightly run and any diff problem keep it `true`.
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
     #                heavy Python lanes (`python-lint`, the `python-unit-shard`
@@ -315,6 +313,10 @@ jobs:
           fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
+        env:
+          # Set only in a merge-queue run (#7105).
+          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          QUEUE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           # Full run unless proven. The four outputs start at the full run:
@@ -339,6 +341,13 @@ jobs:
           c_backend_python=
           c_redaction_compare=
           c_single_connector=
+
+          # Files that make the migration suite meaningful to run: the
+          # alembic tree, the relocated migration test suite, the db
+          # migrate/migrations modules under test, the compat script, and
+          # the workflows that define this gate. A pull request and a
+          # merge-queue run use this one pattern (#2140, #7105).
+          migration_files='^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'
 
           # Run `grep` on a file and return 0 (match), 1 (no match) or 2
           # (error). `set -e` does not stop a command whose status is
@@ -390,13 +399,9 @@ jobs:
               1) ;;
               *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
             esac
-            # --- migration classification (#2140, unchanged) ---
-            # Files that make the migration suite meaningful to run: the
-            # alembic tree, the relocated migration test suite, the db
-            # migrate/migrations modules under test, the compat script, and
-            # the workflows that define this gate.
+            # --- migration classification (#2140) ---
             rc=0
-            grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' "${list}" || rc=$?
+            grep -qE "${migration_files}" "${list}" || rc=$?
             case "${rc}" in
               0) c_migrations=true; echo "migration-related change detected -> migrations=true" ;;
               1) c_migrations=false; echo "no migration-related change -> migrations=false" ;;
@@ -464,8 +469,68 @@ jobs:
             return 0
           }
 
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # merge_group / nightly: never fast-path; always the full matrix.
+          # merge_group (#7105): only the migration gate is worked out. The
+          # group can hold more than one pull request, so HEAD^1 is not its
+          # base: the diff runs from the group's base commit to its head.
+          # Every other output keeps the full run. Returns 0 only when the
+          # answer is sure; the caller then takes c_migrations.
+          classify_queue_migrations() {
+            local list rc sha
+            for sha in "${QUEUE_BASE_SHA:-}" "${QUEUE_HEAD_SHA:-}"; do
+              case "${sha}" in
+                *[!0-9a-f]*|'') reason="no base or head commit of the queue group"; return 1 ;;
+              esac
+              if [ "${#sha}" -ne 40 ] && [ "${#sha}" -ne 64 ]; then
+                reason="no base or head commit of the queue group"
+                return 1
+              fi
+            done
+            # The checkout holds the head and its parent only.
+            if ! git fetch --no-tags --quiet --depth=1 origin "${QUEUE_BASE_SHA}"; then
+              reason="could not fetch the base commit of the queue group"
+              return 1
+            fi
+            if ! list="$(mktemp "${RUNNER_TEMP:-/tmp}/queue-files.XXXXXX")"; then
+              reason="could not make the list file"
+              return 1
+            fi
+            if ! git -c core.quotePath=false diff --name-only --no-renames "${QUEUE_BASE_SHA}" "${QUEUE_HEAD_SHA}" >"${list}"; then
+              reason="git diff failed"
+              return 1
+            fi
+            if [ ! -s "${list}" ]; then
+              reason="empty diff"
+              return 1
+            fi
+            printf 'changed files (queue base..head):\n'
+            cat "${list}"
+            rc=0
+            grep -q '^"' "${list}" || rc=$?
+            case "${rc}" in
+              0) reason="quoted path in the diff"; return 1 ;;
+              1) ;;
+              *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            rc=0
+            grep -qE "${migration_files}" "${list}" || rc=$?
+            case "${rc}" in
+              0) c_migrations=true ;;
+              1) c_migrations=false ;;
+              *) reason="migration check failed (grep exit ${rc})"; return 1 ;;
+            esac
+            return 0
+          }
+
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            # Never a fast path for the other lanes: the full matrix runs.
+            if classify_queue_migrations; then
+              migrations="${c_migrations}"
+              echo "merge_group -> migrations=${migrations} (from the queue diff), docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
+            else
+              echo "merge_group: ${reason} -> migrations=${migrations} (fail-safe), docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
+            fi
+          elif [ "${{ github.event_name }}" != "pull_request" ]; then
+            # nightly: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
           elif classify; then
             migrations="${c_migrations}"
@@ -3550,7 +3615,7 @@ jobs:
     # required unit lane (the python-unit-shard matrix) excludes
     # tests/migrations from its find, so this job carries the deep
     # per-migration coverage — but only on
-    # migration-touching PRs, gated by the `changes` job.
+    # migration-touching PRs and queue groups, gated by the `changes` job.
     #
     # Safety net: the unit lane's session-scoped `_schema_template_db`
     # fixture still runs `alembic upgrade head` on every PR, so a broken
@@ -3561,13 +3626,16 @@ jobs:
     # migrations)" in branches/main branch protection (manual ops step,
     # not code — #2140 acceptance item B.3).
     needs: changes
-    # Run on any non-PR event (merge_group / nightly — never leave a required
-    # check Pending), OR a same-repo PR that touched migration files. A
-    # no-migration same-repo PR (and every fork PR) skips this job via
-    # `if:`, which reports Success and satisfies the required check.
+    # Runs on the nightly run, on a merge-queue run whose group changes
+    # migration files (#7105), and on a same-repo PR that touched migration
+    # files. `changes` fails closed to `migrations=true`. A run without
+    # migration changes (and every fork PR) skips this job via `if:`, which
+    # reports Success and satisfies the required check.
     if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'schedule' ||
+      (github.event_name == 'merge_group' && needs.changes.outputs.migrations == 'true') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.migrations == 'true')
     runs-on: meho-runners-ci
     timeout-minutes: 45
@@ -4015,216 +4083,6 @@ jobs:
             /tmp/rendered.yaml
 
   # ---------------------------------------------------------------------------
-  # Merge-queue watchdog (#4732). Stops a merge-queue CI run as soon as its
-  # result no longer counts, so its runners go back to live runs.
-  #
-  # Why: the queue drops a group when a required check of the group fails,
-  # or when it takes out a pull request ahead of the group and builds the
-  # group again. It then deletes the group's branch. GitHub does not stop
-  # the group's CI run. On 2026-10-21 a broken Go vulnerability scan failed
-  # 31 queue runs in their first minute; the queue dropped every group
-  # within about a minute, but the runs went on for a median of 131 more
-  # minutes and held 73 percent of the heavy runner pool for most of the
-  # morning. Almost half of that day's merge-queue runner time was spent on
-  # runs whose result nobody could use.
-  #
-  # Why not `cancel-in-progress` for merge_group: each group has its own
-  # branch, so a new group never replaces the run of an old group, and a
-  # cancelled live check drops its group (see the `concurrency:` comment).
-  #
-  # What the job does, about once a minute, with 2 API calls per poll (3
-  # on the one poll that finds the branch gone):
-  #   1. Lists this run's jobs. If every job other than this one and the
-  #      `CLI API snapshot freshness` job has finished, it ends with
-  #      success — checked on two polls in a row, because a job that still
-  #      waits on `needs` (the `Python (ruff + mypy + pytest)` fan-in) is
-  #      not listed until its dependencies finish. This check runs BEFORE
-  #      the branch check, so a run that passed and merged (which also
-  #      deletes the queue branch) is never cancelled. The snapshot job is
-  #      left out because the group can merge while it still runs: it is
-  #      not required, so a run that merged with it still open must not be
-  #      cancelled either.
-  #   2. If a job other than `CLI API snapshot freshness` ended in failure,
-  #      cancelled or timed_out, it cancels the run (rule a). Every other
-  #      job of a merge-queue run either carries a required check or feeds
-  #      the required fan-in, so its failure drops the group anyway. The
-  #      snapshot job is not required: its failure alone keeps the group,
-  #      so it must not cancel the run.
-  #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
-  #      still exists. Only a `404` can cancel the run (rule b). Any other
-  #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
-  #      Before it cancels, it lists the jobs once more: the last required
-  #      job can pass, and the group can merge, between step 1 and step 3,
-  #      and a merged run has lost its branch too. It cancels only when
-  #      that second look still shows required work open (or a red job).
-  #      If the second look fails, or shows every required job finished,
-  #      the run stays alive.
-  #
-  # It never fails (the runner starts the step with `bash -e`, so every
-  # call is checked; a failed or unreadable call only means "look again
-  # next minute", and no branch check runs while the jobs' state is
-  # unknown), it is not a required check, and
-  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
-  # slot there for the whole run; the test shards it watches run on the
-  # heavy pools, so it does not take their slots. The queue builds at most
-  # 4 groups at once, so at most
-  # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
-  # hour that the job token may make per repository, worst case.
-  # ---------------------------------------------------------------------------
-  merge-queue-watchdog:
-    name: Merge queue watchdog
-    # Only merge-queue runs. A pull-request run must still show every failing
-    # job, and the nightly run has no queue group that can be dropped.
-    if: github.event_name == 'merge_group'
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
-    # Backstop only: the loop below stops itself, with success, after 170
-    # minutes. A green merge-queue run took at most 78 minutes (#4732), and
-    # the queue itself gives up on a group long before this cap.
-    timeout-minutes: 180
-    # `actions: write` is what cancelling a run needs. Only this job gets it;
-    # the workflow-wide default stays `contents: read`. `contents: read` is
-    # listed again because a job-level block replaces the workflow-wide one.
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Install gh and jq
-        # The internal runner image ships without the `gh` CLI (#3171).
-        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
-        # step. continue-on-error keeps the watchdog from ever failing: if
-        # the install fails, every gh call below fails too, and the loop
-        # only looks again next minute.
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          missing=()
-          command -v gh >/dev/null 2>&1 || missing+=(gh)
-          command -v jq >/dev/null 2>&1 || missing+=(jq)
-          if [ "${#missing[@]}" -eq 0 ]; then
-            echo "gh and jq are already installed"
-            exit 0
-          fi
-          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
-            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
-            && gh --version; }; then
-            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
-            exit 1
-          fi
-      - name: Cancel this run once the queue has dropped its group
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUEUE_BRANCH: ${{ github.ref_name }}
-          # Must match this job's `name:` above — the jobs API lists display
-          # names, and the loop has to leave itself out of "all other jobs".
-          SELF_NAME: Merge queue watchdog
-          # The one job that is not required and feeds no required fan-in.
-          # Its failure does not drop the group, and the group can merge
-          # while it still runs. Keep in sync with that job's `name:`.
-          HARMLESS_JOB: CLI API snapshot freshness
-        run: |
-          set -uo pipefail
-          api="repos/${GITHUB_REPOSITORY}"
-          interval=60
-          stop_after=$((170 * 60))
-          quiet_polls=0
-
-          cancel_run() {
-            echo "::notice title=Merge queue watchdog::${1} Cancelling run ${GITHUB_RUN_ID}."
-            if timeout 30 gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"; then
-              echo "cancel request accepted; GitHub stops the other jobs and then this one"
-              return 0
-            fi
-            echo "cancel request failed; the run keeps going and the next poll tries again"
-            return 1
-          }
-
-          # Reads this run's jobs into `open` (jobs that carry or feed a
-          # required check and are still queued or running) and `red` (such
-          # jobs that did not pass). Returns 1 when the jobs cannot be listed
-          # or read. The caller must then not cancel: a run that passed and
-          # merged has lost its branch too, so the branch alone proves nothing.
-          read_jobs() {
-            local jobs
-            if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
-              echo "jobs API did not answer (${jobs})"
-              return 1
-            fi
-            # The runner starts this step with `bash -e`, so every jq call is
-            # guarded: an unreadable answer must not end the watchdog.
-            if ! open="$(jq --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
-                  '[.jobs[] | select(.name != $me and .name != $ok and .status != "completed")] | length' <<<"${jobs}")" \
-               || ! red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
-                  '[.jobs[] | select(.name != $me and .name != $ok
-                     and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
-                   | .name] | join(", ")' <<<"${jobs}")"; then
-              echo "jobs API answer could not be read"
-              return 1
-            fi
-          }
-
-          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
-          while [ "${SECONDS}" -lt "${stop_after}" ]; do
-            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
-            # When the jobs cannot be listed or read, this poll ends here: the
-            # branch check below must not run while the jobs' state is unknown.
-            if ! read_jobs; then
-              quiet_polls=0
-              echo "keeping the run alive and looking again next minute"
-              sleep "${interval}"
-              continue
-            fi
-            if [ -n "${red}" ]; then
-              cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
-            elif [ "${open}" -eq 0 ]; then
-              quiet_polls=$((quiet_polls + 1))
-              if [ "${quiet_polls}" -ge 2 ]; then
-                echo "every job that carries or feeds a required check has finished; nothing left to watch"
-                exit 0
-              fi
-              # Do not look at the branch on this poll: with no required job
-              # running there is nothing worth freeing, and a run that just
-              # merged has lost its branch for a good reason.
-              echo "all listed required jobs have finished; one more poll in case a job was still waiting on 'needs'"
-              sleep "${interval}"
-              continue
-            else
-              quiet_polls=0
-              echo "${open} required job(s) still queued or running"
-            fi
-
-            # 3: the queue branch. Only a clear 404 means the group is gone.
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
-            case "${code}" in
-              200) echo "queue branch still exists" ;;
-              404)
-                # The last required job can pass, and the queue can merge the
-                # group, between the jobs lookup above and this branch lookup.
-                # A merged run has lost its branch too, so read the jobs once
-                # more: only required work that is still open proves a drop.
-                if ! read_jobs; then
-                  quiet_polls=0
-                  echo "the queue branch is gone, but the jobs could not be read again; keeping the run alive and looking again next minute"
-                elif [ -n "${red}" ]; then
-                  cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
-                elif [ "${open}" -eq 0 ]; then
-                  quiet_polls=1
-                  echo "the queue branch is gone, but every required job has finished since the last look, so the group may have merged; not cancelling"
-                else
-                  cancel_run "The queue branch '${QUEUE_BRANCH}' is gone while ${open} required job(s) still run: the queue has dropped this group and this run's result no longer counts." && exit 0
-                fi ;;
-              *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
-            esac
-            sleep "${interval}"
-          done
-          echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
-          exit 0
-
-  # ---------------------------------------------------------------------------
   # Second runner site watchdog (#7085). The site can die after its last good
   # smoke check, and unit shards 4-6 would then wait for a runner. A job that
   # has no runner is not stopped by `timeout-minutes`, and GitHub gives up on
@@ -4247,9 +4105,9 @@ jobs:
     runs-on: ubuntu-latest
     # Backstop only: the script stops itself after about 31 minutes.
     timeout-minutes: 40
-    # `actions: write` is what cancelling a run needs. Only this job and
-    # `merge-queue-watchdog` get it. `contents: read` is listed again because
-    # a job-level block replaces the workflow-wide one.
+    # `actions: write` is what cancelling a run needs. Only this job gets it.
+    # `contents: read` is listed again because a job-level block replaces
+    # the workflow-wide one.
     permissions:
       contents: read
       actions: write

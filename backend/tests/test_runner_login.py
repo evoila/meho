@@ -70,11 +70,12 @@ class _Central:
         self.reject_next_api_call = False
         self.public_key: dict[str, Any] | None = None
         self.api_auth: list[str] = []
-        self.client_id = "runner:site-a"
+        self.client_id: Any = "runner:site-a"
         self.token_url = _TOKEN_URL
         self.refuse_enrollment = False
         self.refuse_name = False
-        self.signing_alg = "ES256"
+        self.signing_alg: Any = "ES256"
+        self.leave_out_signing_alg = False
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -88,16 +89,16 @@ class _Central:
             if self.refuse_name:
                 return httpx.Response(409, json={"detail": "enrollment_code_for_another_runner"})
             self.public_key = body["public_key"]
-            return httpx.Response(
-                200,
-                json={
-                    "client_id": self.client_id,
-                    "issuer": _ISSUER,
-                    "token_endpoint": self.token_url,
-                    "signing_alg": self.signing_alg,
-                    "key_id": ec_key_id(body["public_key"]),
-                },
-            )
+            answer: dict[str, Any] = {
+                "client_id": self.client_id,
+                "issuer": _ISSUER,
+                "token_endpoint": self.token_url,
+                "signing_alg": self.signing_alg,
+                "key_id": ec_key_id(body["public_key"]),
+            }
+            if self.leave_out_signing_alg:
+                del answer["signing_alg"]
+            return httpx.Response(200, json=answer)
         if request.url.path.endswith("/openid-connect/token"):
             self.token_count += 1
             return httpx.Response(
@@ -487,36 +488,267 @@ async def test_a_missing_key_with_the_used_code_says_how_to_recover(tmp_path: Pa
     assert (tmp_path / LOGIN_FILE_NAME).read_text() == record
 
 
+_ENROLL_ONLY = ["/api/v1/runner-principals/enroll"]
+_MISSING = object()
+
+#: Every form of the signing type field that is not exactly ``ES256``.
+_NOT_ES256: list[tuple[str, Any]] = [
+    ("es384", "ES384"),
+    ("es512", "ES512"),
+    ("rs256", "RS256"),
+    ("ps256", "PS256"),
+    ("hs256", "HS256"),
+    ("eddsa", "EdDSA"),
+    ("none", "none"),
+    ("empty", ""),
+    ("missing", _MISSING),
+    ("null", None),
+    ("lower-case", "es256"),
+    ("mixed-case", "Es256"),
+    ("space-before", " ES256"),
+    ("line-break-after", "ES256\n"),
+    ("list-one", ["ES256"]),
+    ("list-two", ["ES256", "RS256"]),
+    ("number", 256),
+    ("object", {"alg": "ES256"}),
+    ("long-text", "ES256" + "a" * 200),
+    ("object-like-a-key", {"kty": "EC", "crv": "P-256", "x": "a" * 43, "y": "b" * 43}),
+]
+
+
+def _write_record_with(path: Path, value: Any) -> None:
+    record = json.loads(path.read_text())
+    if value is _MISSING:
+        del record["signing_alg"]
+    else:
+        record["signing_alg"] = value
+    path.write_text(json.dumps(record))
+
+
 @pytest.mark.asyncio
-async def test_the_runner_reads_only_es256_in_the_answer_and_in_the_saved_login(
+async def test_the_runner_reads_exactly_es256_in_the_answer_and_in_the_saved_login(
     tmp_path: Path,
 ) -> None:
-    central = _Central()
-    central.signing_alg = "RS256"
-    with pytest.raises(RunnerLoginError, match=r"signing type RS256.*only ES256"):
+    # Control: the exact value is accepted.
+    ok = _Central()
+    assert (
         await open_signed_jwt_login(
-            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
+            _settings(tmp_path / "ok", enrollment_code="c"), transport=ok.transport()
         )
-    assert not (tmp_path / LOGIN_FILE_NAME).exists()
-    assert [r.url.path for r in central.requests] == ["/api/v1/runner-principals/enroll"]
+        is not None
+    )
+    for name, value in _NOT_ES256:
+        # 1. The enrollment answer at the first start: refused, nothing saved.
+        first = tmp_path / f"answer-{name}"
+        central = _Central()
+        central.signing_alg = None if value is _MISSING else value
+        central.leave_out_signing_alg = value is _MISSING
+        with pytest.raises(RunnerLoginError):
+            await open_signed_jwt_login(
+                _settings(first, enrollment_code="c"), transport=central.transport()
+            )
+        assert not (first / LOGIN_FILE_NAME).exists(), name
+        assert [r.url.path for r in central.requests] == _ENROLL_ONLY, name
 
+        # 2. The saved login, no code; 3. the saved login with the code still set.
+        saved = tmp_path / f"saved-{name}"
+        central = _Central()
+        await open_signed_jwt_login(
+            _settings(saved, enrollment_code="c"), transport=central.transport()
+        )
+        _write_record_with(saved / LOGIN_FILE_NAME, value)
+        central.requests.clear()
+        with pytest.raises(RunnerLoginError, match=r"only ES256|damaged"):
+            await open_signed_jwt_login(_settings(saved), transport=central.transport())
+        assert central.requests == [], name
+        if value is _MISSING:
+            # A record without the field is damaged; the code makes a new one.
+            assert await open_signed_jwt_login(
+                _settings(saved, enrollment_code="c"), transport=central.transport()
+            )
+            assert [r.url.path for r in central.requests] == _ENROLL_ONLY, name
+            continue
+        with pytest.raises(RunnerLoginError, match="only ES256"):
+            await open_signed_jwt_login(
+                _settings(saved, enrollment_code="c"), transport=central.transport()
+            )
+        assert central.requests == [], name
+
+
+def _hidden_forms() -> list[tuple[str, Any]]:
+    return [
+        ("long-text", "q" * 200),
+        ("object", {"field": "w" * 40}),
+        ("list", ["z" * 30]),
+        ("line-break", "first\nsecond"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("name", "value"), _hidden_forms(), ids=lambda v: str(v)[:12])
+async def test_an_odd_signing_type_is_not_written_into_the_error_text(
+    tmp_path: Path, name: str, value: Any
+) -> None:
+    central = _Central()
+    central.signing_alg = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    text = str(caught.value)
+    assert "an unknown signing type" in text
+    for part in _pieces(value):
+        assert part not in text
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    _write_record_with(saved / LOGIN_FILE_NAME, value)
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    text = str(caught.value)
+    assert "an unknown signing type" in text
+    for part in _pieces(value):
+        assert part not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("name", "value"), _hidden_forms(), ids=lambda v: str(v)[:12])
+async def test_an_odd_client_id_is_not_written_into_the_error_text(
+    tmp_path: Path, name: str, value: Any
+) -> None:
+    central = _Central()
+    central.client_id = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    text = str(caught.value)
+    assert "an unknown client id" in text
+    for part in _pieces(value):
+        assert part not in text
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    record = json.loads((saved / LOGIN_FILE_NAME).read_text())
+    record["client_id"] = value
+    (saved / LOGIN_FILE_NAME).write_text(json.dumps(record))
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    text = str(caught.value)
+    assert "an unknown client id" in text
+    for part in _pieces(value):
+        assert part not in text
+
+
+#: A JSON value and how the error text names it.
+_SHOWN_SIGNING_TYPES: list[tuple[Any, str]] = [
+    (None, "an unknown signing type"),
+    (True, "an unknown signing type"),
+    (256, "an unknown signing type"),
+    ("RS256", "RS256"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "shown"), _SHOWN_SIGNING_TYPES, ids=repr)
+async def test_the_error_text_names_the_signing_type_only_when_it_is_a_short_text(
+    tmp_path: Path, value: Any, shown: str
+) -> None:
+    central = _Central()
+    central.signing_alg = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    assert str(caught.value) == (
+        f"enrollment answer has signing type {shown}; the runner reads only ES256"
+    )
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    _write_record_with(saved / LOGIN_FILE_NAME, value)
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    assert str(caught.value).startswith(
+        f"the login record {saved / LOGIN_FILE_NAME} has signing type {shown}; "
+        "the runner reads only ES256. Put the right files back"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [None, True, 123], ids=repr)
+async def test_a_client_id_that_is_not_text_is_not_written_into_the_error_text(
+    tmp_path: Path, value: Any
+) -> None:
+    central = _Central()
+    central.client_id = value
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(
+            _settings(tmp_path / "a", enrollment_code="c"), transport=central.transport()
+        )
+    assert str(caught.value).endswith("(the code is for an unknown client id)")
+
+    saved = tmp_path / "b"
+    central = _Central()
+    await open_signed_jwt_login(
+        _settings(saved, enrollment_code="c"), transport=central.transport()
+    )
+    record = json.loads((saved / LOGIN_FILE_NAME).read_text())
+    record["client_id"] = value
+    (saved / LOGIN_FILE_NAME).write_text(json.dumps(record))
+    with pytest.raises(RunnerLoginError) as caught:
+        await open_signed_jwt_login(_settings(saved), transport=central.transport())
+    assert f"the saved login in {saved} is for an unknown client id, " in str(caught.value)
+
+
+def _pieces(value: Any) -> list[str]:
+    """Parts of a value that must not appear in an error text."""
+    if isinstance(value, str):
+        return value.split("\n")
+    if isinstance(value, dict):
+        return [str(v) for v in value.values()]
+    return [str(v) for v in value]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_login_wins_over_the_fixed_token(tmp_path: Path) -> None:
     central = _Central()
     await open_signed_jwt_login(
         _settings(tmp_path, enrollment_code="c"), transport=central.transport()
     )
-    record = json.loads((tmp_path / LOGIN_FILE_NAME).read_text())
-    record["signing_alg"] = "HS256"
-    (tmp_path / LOGIN_FILE_NAME).write_text(json.dumps(record))
-    central.requests.clear()
-    with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
-        await open_signed_jwt_login(_settings(tmp_path), transport=central.transport())
+    provider = await open_signed_jwt_login(
+        _settings(tmp_path, runner_token="fixed-value"), transport=central.transport()
+    )
+    assert provider is not None
+    assert await provider.get_token() == "token-1"
+
+
+@pytest.mark.asyncio
+async def test_an_enrollment_code_wins_over_the_fixed_token(tmp_path: Path) -> None:
+    central = _Central()
+    provider = await open_signed_jwt_login(
+        _settings(tmp_path, enrollment_code="c", runner_token="fixed-value"),
+        transport=central.transport(),
+    )
+    assert provider is not None
+    assert [r.url.path for r in central.requests] == _ENROLL_ONLY
+
+
+@pytest.mark.asyncio
+async def test_an_empty_key_folder_and_a_fixed_token_use_the_fixed_token(tmp_path: Path) -> None:
+    central = _Central()
+    settings = _settings(tmp_path / "empty", runner_token="fixed-value")
+    assert await open_signed_jwt_login(settings, transport=central.transport()) is None
     assert central.requests == []
-    with pytest.raises(RunnerLoginError, match=r"signing type HS256.*only ES256"):
-        await open_signed_jwt_login(
-            _settings(tmp_path, enrollment_code="c"), transport=central.transport()
-        )
-    assert central.requests == []
-    assert json.loads((tmp_path / LOGIN_FILE_NAME).read_text())["signing_alg"] == "HS256"
 
 
 @pytest.mark.asyncio

@@ -949,8 +949,9 @@ A runner logs in in one of two modes. Which one runs is decided at start by
 
 - A login record (`runner-login.json`) in `MEHO_RUNNER_KEY_DIR`: key mode.
 - Else `MEHO_RUNNER_ENROLLMENT_CODE` set: enroll first, then key mode.
-- Else `MEHO_RUNNER_TOKEN` set: the fixed token mode (unchanged; no key,
-  no renewal).
+- Else `MEHO_RUNNER_TOKEN` set: the fixed token mode (no key, no renewal).
+  It runs only when the key folder holds no login record and no code is set;
+  a saved record wins over the token.
 - Else a `RunnerConfigError` that names the variables.
 
 In key mode `MEHO_RUNNER_CENTRAL_URL` and the token address (from central, or
@@ -1008,6 +1009,12 @@ says how to recover: put the files back, or register a new runner under a new
 name with a new, empty `MEHO_RUNNER_SPOOL_DIR` (the old spool's results carry
 the old name, and central refuses them under the new one). It never makes a
 new key for an old record without a code. The record is written in one step, so a stop leaves no half record.
+
+The runner reads only `ES256` as its signing type. It stops with a
+`RunnerLoginError` on another type in the enrollment answer or in the saved
+login record. The error text names the signing type or the client id only
+when the value is a short plain name; any other value is written as "an
+unknown signing type" or "an unknown client id".
 
 **Renewal.** `SignedJwtTokenProvider` signs a 60-second JWT (ES256, `kid`,
 `iss`=`sub`=client id, `aud`=issuer, unique `jti`) and posts it to the token
@@ -1072,8 +1079,7 @@ Three facts of the key login:
 The system it is proven on: the live test
 `backend/tests/integration/test_runner_key_login_keycloak.py` runs in CI
 against the Keycloak image `keycloak/keycloak:26.0` (the value of
-`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`). It was proven on
-the Keycloak image `keycloak/keycloak:26.0` of the CI live test.
+`MEHO_TEST_KEYCLOAK_IMAGE` in `.github/workflows/ci.yml`).
 
 **The key file.** `runner/login.py::_read_key_file` checks the mode of the
 open key file before it reads the key. Any right for the group or for

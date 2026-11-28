@@ -230,6 +230,17 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
 - Catalog stats are per-database — pass `database` to inspect a database other
   than the default `postgres`.
 
+## What a target needs
+
+`PostgresConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 5432.
+- Extra settings: `allow_superuser_query`, an optional yes/no setting (default no). `postgres.query` refuses a superuser login unless it is on.
+- Login: One way, `password`: `username` and `password`. A target with no secret connects as the trust-login role with no password.
+- Test read: `postgres.databases` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - asyncpg: <https://magicstack.github.io/asyncpg/current/>

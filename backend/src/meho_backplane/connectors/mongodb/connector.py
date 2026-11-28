@@ -59,12 +59,13 @@ from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.mongodb import queries
 from meho_backplane.connectors.mongodb.ops import MONGO_OPS, MONGO_WHEN_TO_USE_BY_GROUP
-from meho_backplane.connectors.mongodb.session import connect_client
+from meho_backplane.connectors.mongodb.session import DEFAULT_PORT, connect_client
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["MongoDbConnector"]
 
@@ -127,6 +128,27 @@ class MongoDbConnector(Connector):
     version = "7"
     impl_id = "mongodb-wire"
     supported_version_range = ">=7,<9"
+    default_port = DEFAULT_PORT
+    target_fields = ()
+    credential_ways = (
+        CredentialWay(
+            key="password",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="A MongoDB user. MEHO signs in against the admin database. "
+                    "Leave the target without a secret for a server with no login.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the user."
+                ),
+            ),
+        ),
+    )
+    test_operation = "mongodb.databases"
     strict_version_range = True
     priority = 1
 

@@ -56,11 +56,13 @@ from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.mssql import queries
 from meho_backplane.connectors.mssql.ops import MSSQL_OPS, MSSQL_WHEN_TO_USE_BY_GROUP
+from meho_backplane.connectors.mssql.session import DEFAULT_PORT
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["MssqlConnector"]
 
@@ -107,6 +109,28 @@ class MssqlConnector(Connector):
     impl_id = "mssql-tds"
     supported_version_range = ">=13,<17"
     priority = 1
+    default_port = DEFAULT_PORT
+    target_fields = ()
+    credential_ways = (
+        CredentialWay(
+            key="password",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="sql_username",
+                    label="User name",
+                    help="A SQL Server login (SQL authentication).",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="sql_password",
+                    label="Password",
+                    help="The password of the SQL Server login.",
+                ),
+            ),
+        ),
+    )
+    test_operation = "mssql.instance.version"
 
     # ------------------------------------------------------------------
     # instance group

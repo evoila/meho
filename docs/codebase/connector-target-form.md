@@ -25,8 +25,14 @@ answers `null` for all four.
 
 Declared today: the Linux SSH connector (`LinuxSshConnector`, two ways: key
 and password; both also take the known hosts text), Harbor (one way: user name and password) and Kubernetes (one
-way: kubeconfig). Other SSH connectors declare nothing, and nothing is
-declared on the shared `SshConnector` class.
+way: kubeconfig). Nothing is declared on the shared `SshConnector` class.
+
+The host, directory and database connectors declare them too: `rke2`, `bind9`,
+`pfsense`, `freeipa`, `msad`, `winsrv`, `windows_dns`, `wsfc`, `hyperv`,
+`mongodb`, `mssql` and `postgres`. The SSH ways come from
+`backend/src/meho_backplane/connectors/adapters/ssh_target_form.py`. The new test
+`test_connector_declarations_hosts.py` fails when a connector class in these
+folders has no `credential_ways`.
 
 ## Key types
 

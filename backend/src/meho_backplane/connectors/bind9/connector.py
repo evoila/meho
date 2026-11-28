@@ -78,6 +78,10 @@ from meho_backplane.connectors.adapters.ssh import (
     fingerprint_error_extras,
     run_capped,
 )
+from meho_backplane.connectors.adapters.ssh_target_form import (
+    SSH_DEFAULT_PORT,
+    ssh_credential_ways,
+)
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -271,6 +275,12 @@ class Bind9Connector(SshConnector):
     version = "9.x"
     impl_id = "bind9-ssh"
     supported_version_range = ">=9.18,<9.21"
+    default_port = SSH_DEFAULT_PORT
+    target_fields = ()
+    credential_ways = ssh_credential_ways(
+        user_help="The user to log in as. MEHO uses root when you leave it out.", sudo_password=True
+    )
+    test_operation = "bind9.zone.list"
 
     # ~18 lines of executable body wrapped in ~65 lines of docstring
     # encoding the safe-sudo invariant; iter-1 `p1` praised the

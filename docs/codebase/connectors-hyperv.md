@@ -264,6 +264,17 @@ regenerated in this PR via `cd cli && make snapshot-openapi && make generate`.
   handler runs under `-ErrorAction Stop`, so that surfaces as a real
   `PwshRunError`.
 
+## What a target needs
+
+`HypervConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 22.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: Two ways. `key`: `username` (optional), `ssh_private_key` (several lines), `known_hosts` (several lines). `password`: `username` (optional), `password`, `known_hosts` (several lines). `SshConnector._auth_config` also accepts `private_key` in place of `ssh_private_key`; the form shows the main name. `known_hosts` is required because the adapter refuses a host whose key it cannot check. On a Windows host set `username`: without it the adapter logs in as `root`.
+- Test read: `hyperv.host.info` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Initiative #3259 (Microsoft estate connectors) — design rules.

@@ -754,6 +754,17 @@ Tests: `tests/test_connectors_dns_topology.py`.
 - `backend/tests/integration/test_g3_4_bind9_e2e.py` -- end-to-end
   acceptance suite for the connector.
 
+## What a target needs
+
+`Bind9Connector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 22.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: Two ways. `key`: `username` (optional), `ssh_private_key` (several lines), `known_hosts` (several lines), and `sudo_password` (optional; the write operations read it before `password`). `password`: `username` (optional), `password`, `known_hosts` (several lines). `SshConnector._auth_config` also accepts `private_key` in place of `ssh_private_key`; the form shows the main name. `known_hosts` is required because the adapter refuses a host whose key it cannot check.
+- Test read: `bind9.zone.list` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Parent Initiative: [#367 G3.4 bind9-9.x typed-SSH connector](https://github.com/evoila/meho/issues/367)

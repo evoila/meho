@@ -364,6 +364,17 @@ generated Go client knows the token).
   connection before any credential is sent (`SshHostKeyUnpinnedError` in
   `connectors/adapters/ssh.py`).
 
+## What a target needs
+
+`WinsrvConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 22.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: Two ways. `key`: `username` (optional), `ssh_private_key` (several lines), `known_hosts` (several lines). `password`: `username` (optional), `password`, `known_hosts` (several lines). `SshConnector._auth_config` also accepts `private_key` in place of `ssh_private_key`; the form shows the main name. `known_hosts` is required because the adapter refuses a host whose key it cannot check. On a Windows host set `username`: without it the adapter logs in as `root`.
+- Test read: `winsrv.system.os-info` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Task #3261 (connector); Initiative #3259 (Microsoft estate); prerequisite

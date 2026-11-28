@@ -36,6 +36,11 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector, fingerprint_error_extras
+from meho_backplane.connectors.adapters.ssh_target_form import (
+    SSH_DEFAULT_PORT,
+    WINDOWS_USER_HELP,
+    ssh_credential_ways,
+)
 from meho_backplane.connectors.msad.ops import MSAD_OPS, MSAD_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -103,6 +108,11 @@ class MsadConnector(SshConnector):
 
     #: Connector-scoped structured-log event name for the shared transport.
     POWERSHELL_LOG_EVENT = "msad_pwsh_executed"
+
+    default_port = SSH_DEFAULT_PORT
+    target_fields = ()
+    credential_ways = ssh_credential_ways(user_help=WINDOWS_USER_HELP)
+    test_operation = "msad.domain.info"
 
     async def fingerprint(
         self,

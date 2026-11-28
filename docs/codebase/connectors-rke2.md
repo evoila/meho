@@ -526,6 +526,17 @@ log line.
   binary is not on the login shell PATH (agent nodes); reachability is not
   affected.
 
+## What a target needs
+
+`Rke2SshConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 22.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: Two ways. `key`: `username` (optional), `ssh_private_key` (several lines), `known_hosts` (several lines), and `sudo_password` (optional; the write operations read it before `password`). `password`: `username` (optional), `password`, `known_hosts` (several lines). `SshConnector._auth_config` also accepts `private_key` in place of `ssh_private_key`; the form shows the main name. `known_hosts` is required because the adapter refuses a host whose key it cannot check.
+- Test read: `rke2.node.service.status` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Parent Initiative #2172 (SSH cluster-node OS-lifecycle write ops); Task

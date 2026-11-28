@@ -74,6 +74,10 @@ from meho_backplane.connectors.adapters.ssh import (
     _known_hosts_from_secret,
     fingerprint_error_extras,
 )
+from meho_backplane.connectors.adapters.ssh_target_form import (
+    SSH_DEFAULT_PORT,
+    ssh_known_hosts_field,
+)
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -81,6 +85,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["PfSenseConnector"]
 
@@ -352,6 +357,35 @@ class PfSenseConnector(SshConnector):
     version = "2.7"
     impl_id = "pfsense-ssh"
     supported_version_range = ">=2.7,<2.10"
+    default_port = SSH_DEFAULT_PORT
+    target_fields = ()
+    # Key login only: ``_auth_config`` below refuses a password for SSH.
+    credential_ways = (
+        CredentialWay(
+            key="key",
+            label="SSH key",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user to log in as. MEHO uses admin when you leave it out.",
+                    required=False,
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="ssh_private_key",
+                    label="Private key",
+                    help=(
+                        "The private key of the user, as text. "
+                        "pfSense does not take a password for SSH."
+                    ),
+                    multiline=True,
+                ),
+                ssh_known_hosts_field(),
+            ),
+        ),
+    )
+    test_operation = "pfsense.version"
 
     def __init__(self) -> None:
         super().__init__()

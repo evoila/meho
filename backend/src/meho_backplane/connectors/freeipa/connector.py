@@ -84,6 +84,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["FreeipaConnector", "FreeipaRequestRefusedError"]
 
@@ -156,6 +157,26 @@ class FreeipaConnector(FreeipaIdentityWriteOps, FreeipaAccessWriteOps, HttpConne
     )
     supported_version_range = ">=4.9,<5.0"
     priority = 1
+    default_port = 443
+    target_fields = ()
+    credential_ways = (
+        CredentialWay(
+            key="password",
+            label="User name and password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="An IPA user that may read the domain. MEHO logs in with a password.",
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the user."
+                ),
+            ),
+        ),
+    )
+    test_operation = "freeipa.about"
 
     def __init__(self, *, credentials_loader: FreeipaCredentialsLoader | None = None) -> None:
         super().__init__()

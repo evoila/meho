@@ -1374,6 +1374,17 @@ two were read:
   other release (`version_not_checked`), also 2.8.x and 2.9.x, and a
   firewall whose version it cannot read.
 
+## What a target needs
+
+`PfSenseConnector` declares what a target of this product needs. The core only reads it; no login code changed.
+
+- Default port: 22.
+- Extra settings: none. The code reads no key of the target's `extras`.
+- Login: One way, `key`: `username` (optional; the code uses `admin` without it), `ssh_private_key` (several lines), `known_hosts` (several lines). There is no password way: `PfSenseConnector._auth_config` refuses a password for SSH.
+- Test read: `pfsense.version` (a `safe` read that needs no input).
+
+The declaration is on this class only. See [connector-target-form.md](connector-target-form.md).
+
 ## References
 
 - Task #844 (this skeleton): G3.7-T1 PfSenseConnector skeleton.

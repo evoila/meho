@@ -35,6 +35,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixtures
     _stub_embedding,
     _ticket,
 )
+from tests.conftest import MehoLogs
 
 _VENDOR_WORDS = "the vendor could not find this thing"
 
@@ -50,7 +51,7 @@ _VENDOR_WORDS = "the vendor could not find this thing"
 )
 @pytest.mark.parametrize("trace", [True, False], ids=["trace-on", "trace-off"])
 async def test_error_after_a_followed_redirect_names_only_the_host(
-    caplog: pytest.LogCaptureFixture, status_line: str, text: str, trace: bool
+    meho_logs: MehoLogs, status_line: str, text: str, trace: bool
 ) -> None:
     path, user, password, fragment = (_made_up() for _ in range(4))
     ticket, ticket_parts = _ticket()
@@ -61,7 +62,7 @@ async def test_error_after_a_followed_redirect_names_only_the_host(
 
     body = f'{{"message": "{_VENDOR_WORDS}"}}'.encode()
     result, places, _events = await _run(
-        caplog,
+        meho_logs,
         routes,
         trace=trace,
         route_status={_START: "307 Temporary Redirect", hop: status_line},
@@ -113,13 +114,13 @@ def _bodies(address: str) -> dict[str, tuple[str, bytes]]:
     "body_name", ["json message", "json escaped", "vim fault", "soap fault", "plain text"]
 )
 async def test_refused_redirect_passes_on_no_vendor_text(
-    caplog: pytest.LogCaptureFixture, body_name: str
+    meho_logs: MehoLogs, body_name: str
 ) -> None:
     address, values = _address()
     content_type, body = _bodies(address)[body_name]
     routes = {_START: {"Location": address, "Content-Type": content_type}}
 
-    result, places, _events = await _run(caplog, routes, route_body={_START: body})
+    result, places, _events = await _run(meho_logs, routes, route_body={_START: body})
 
     assert result.status == "error"
     assert result.extras["http_status"] == 302

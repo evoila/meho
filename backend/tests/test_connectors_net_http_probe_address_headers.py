@@ -50,6 +50,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixture 
     _row_text,
     _start_server,
 )
+from tests.conftest import MehoLogs
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000d303")
 _VENDOR_HEADER = "x-vendor-note"
@@ -119,13 +120,13 @@ async def _stored_text(audit_id: UUID) -> tuple[str, str]:
 
 
 async def _probe(
-    caplog: pytest.LogCaptureFixture, status: str, headers: dict[str, str]
+    meho_logs: MehoLogs, status: str, headers: dict[str, str]
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Probe a local server whose ``/thing`` answers *status* with *headers*."""
     server = await _start_server(
         {"/thing": {**headers, _VENDOR_HEADER: _VENDOR_WORDS}}, status=status
     )
-    caplog.set_level(logging.DEBUG)
+    meho_logs.caplog.set_level(logging.DEBUG)
     try:
         with capture_logs() as events:
             result = await dispatch(
@@ -146,7 +147,7 @@ async def _probe(
         "audit row": audit_text,
         "stored trace": trace_text,
         "log events": repr(events),
-        "log records": caplog.text,
+        "log records": meho_logs.text(),
         "agent copy of the trace": _AGENT_STORE.text(),
     }
     return result.result, places
@@ -171,11 +172,11 @@ def _address(authority: str) -> tuple[str, list[str]]:
     ],
 )
 async def test_address_header_of_the_last_answer_shows_only_the_host_name(
-    caplog: pytest.LogCaptureFixture, status: str, header: str
+    meho_logs: MehoLogs, status: str, header: str
 ) -> None:
     address, values = _address("appliance.test.invalid:8443")
 
-    result, places = await _probe(caplog, status, {header: address})
+    result, places = await _probe(meho_logs, status, {header: address})
 
     assert result["status"] == int(status.split()[0])
     assert result["headers"][header.lower()] == "appliance.test.invalid"
@@ -185,13 +186,13 @@ async def test_address_header_of_the_last_answer_shows_only_the_host_name(
 
 @pytest.mark.asyncio
 async def test_both_address_headers_and_a_relative_address_show_the_host_name(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     path, query = _made_up(), _made_up()
     address, values = _address("appliance.test.invalid")
 
     result, places = await _probe(
-        caplog, "201 Created", {"Location": f"/{path}?q={query}", "Content-Location": address}
+        meho_logs, "201 Created", {"Location": f"/{path}?q={query}", "Content-Location": address}
     )
 
     assert result["headers"]["location"] == "127.0.0.1"
@@ -201,12 +202,12 @@ async def test_both_address_headers_and_a_relative_address_show_the_host_name(
 
 @pytest.mark.asyncio
 async def test_address_with_an_unreadable_port_shows_one_fixed_mark(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     port = _made_up()
     address, values = _address(f"appliance.test.invalid:{port}")
 
-    result, places = await _probe(caplog, "200 OK", {"Content-Location": address})
+    result, places = await _probe(meho_logs, "200 OK", {"Content-Location": address})
 
     assert result["headers"]["content-location"] == UNPARSEABLE_ADDRESS
     _assert_absent([port, *values], places)

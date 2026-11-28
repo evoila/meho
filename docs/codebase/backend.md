@@ -254,6 +254,12 @@ this stage it exposes:
   `secret\s*[=:]` / `token\s*[=:]` / `api_key\s*[=:]` /
   `Authorization:\s*Bearer\s+\S+` regex pass over `capfd` + `caplog` (one-process; under xdist `caplog` + the structlog line list)
   on every test exit, fail-closed when any pattern matches.
+  A test that checks that one value is not in the logs uses the
+  `meho_logs` fixture of the same file: `meho_logs.text()` is all log
+  output of the test (stdout, stderr, the structlog print logger lines
+  and `caplog`). `caplog.text` alone does not hold MEHO's structured
+  lines, because they go to stdout. `tests/test_meho_logs_helper.py`
+  fails when the fixture stops seeing them.
 
 * Broadcast substrate (G6.1-T1 #307) — `src/meho_backplane/broadcast/`
   houses the async Valkey client (`client.py`) and the

@@ -49,6 +49,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 ACCESSOR = "auth_userpass_0001"
 SENTINEL = "Test-Only-Password-9f3a"
@@ -577,7 +578,7 @@ async def _dispatch(op_id: str, params: dict[str, Any]) -> Any:
 
 
 async def test_generated_password_reaches_only_kv_and_the_login(
-    fake: _Fake, registered: None, caplog: pytest.LogCaptureFixture
+    fake: _Fake, registered: None, caplog: pytest.LogCaptureFixture, meho_logs: MehoLogs
 ) -> None:
     result = await _dispatch(
         "vault.auth.userpass.write",
@@ -597,7 +598,7 @@ async def test_generated_password_reaches_only_kv_and_the_login(
     for row in rows:
         assert stored not in json.dumps(row.payload, default=str)
     assert stored not in json.dumps(result.result)
-    assert stored not in caplog.text
+    assert stored not in meho_logs.text()
 
 
 async def test_disable_and_enable_dispatch_with_a_readable_result(

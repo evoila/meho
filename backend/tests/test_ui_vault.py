@@ -88,6 +88,7 @@ from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 from tests._vault_fakes import install_fake_client
+from tests.conftest import MehoLogs
 
 _BACKPLANE_URL = "https://meho.test"
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -503,6 +504,7 @@ def test_vault_ui_list_handle_renders_metadata_not_blob(
 def test_vault_ui_read_waits_for_approval_and_shows_no_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     _stub_embedding_service: AsyncMock,
 ) -> None:
     """``GET /ui/vault/read`` asks to see the values, so it waits for approval.
@@ -553,6 +555,8 @@ def test_vault_ui_read_waits_for_approval_and_shows_no_value(
             assert _SECRET_VALUE not in str(value), (
                 f"secret value leaked into a log record attribute on {record.name}"
             )
+    # MEHO's structured log lines go to stdout, not to ``caplog``.
+    assert _SECRET_VALUE not in meho_logs.output()
     # REDACTION INVARIANT (2): the secret value must NOT appear in the
     # audit-trail-VISIBLE ``payload`` of any audit row. (The dispatcher
     # writes one DISPATCH audit row whose redacted ``payload`` carries

@@ -39,6 +39,7 @@ from meho_backplane.connectors.entra.connector import EntraConnector
 from meho_backplane.connectors.entra.session import EntraSecretShapeError, parse_credentials
 from tests._azure_fixtures import CLIENT_A, SECRET_A, TENANT_A, fake_jwt, operator, token_url
 from tests._entra_fixtures import ENTRA_SECRET_REF, EntraTargetStub
+from tests.conftest import MehoLogs
 
 _TOKEN_URL = token_url()
 _SCOPE = "https://graph.microsoft.com/.default"
@@ -282,7 +283,7 @@ async def test_a_bad_pair_at_the_token_request_names_the_target_and_the_secret(
 
 
 def test_the_private_key_is_in_no_repr_and_no_log_line(
-    pair: _Pair, caplog: pytest.LogCaptureFixture
+    pair: _Pair, caplog: pytest.LogCaptureFixture, meho_logs: MehoLogs
 ) -> None:
     credentials = pair.credentials()
     body = "".join(pair.private_key.splitlines()[1:-1])
@@ -290,7 +291,7 @@ def test_the_private_key_is_in_no_repr_and_no_log_line(
         build_client_assertion(credentials, audience=_TOKEN_URL)
     assert body not in repr(credentials)
     assert body not in str(credentials)
-    assert body not in caplog.text
+    assert body not in meho_logs.text()
 
 
 def test_a_certificate_field_that_also_holds_the_key_is_in_no_repr(pair: _Pair) -> None:

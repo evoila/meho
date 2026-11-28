@@ -64,6 +64,7 @@ __all__ = [
     "DEFAULT_TENANT_ID",
     "DEFAULT_TENANT_ROLE",
     "SECRET_LEAK_PATTERNS",
+    "MehoLogs",
     "make_rsa_keypair",
     "mint_token",
     "mock_discovery_and_jwks",
@@ -800,6 +801,59 @@ def _no_secret_leak_sweep(
                 f"pattern={pattern.pattern!r} preview={preview!r}",
                 pytrace=False,
             )
+
+
+class MehoLogs:
+    """Everything MEHO logged in one test, for a "not in the logs" check.
+
+    MEHO's structured log lines go to stdout through structlog's print
+    logger, so ``caplog.text`` does not hold them. :meth:`text` joins the
+    captured stdout and stderr, every line a structlog ``PrintLogger`` wrote,
+    and ``caplog.text``. The print logger lines are kept also under xdist,
+    where fd capture is not clean per test. A test that reads only some
+    ``caplog`` records (for example only MEHO's own loggers) adds
+    :meth:`output` to them.
+    """
+
+    def __init__(
+        self,
+        capfd: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+        printed: list[str],
+    ) -> None:
+        self._capfd = capfd
+        self.caplog = caplog
+        self._printed = printed
+        self._reads: list[str] = []
+
+    def output(self) -> str:
+        """Return what this test wrote to stdout and stderr so far, as one text.
+
+        It holds every structured log line, but not ``caplog``. Each
+        ``capfd`` read takes the output away, so the reads are kept and
+        every call returns the whole output since the test started.
+        """
+        read = self._capfd.readouterr()
+        self._reads += [read.out, read.err]
+        return "\n".join([*self._reads, *self._printed])
+
+    def text(self) -> str:
+        """Return all log output of this test so far: :meth:`output` and ``caplog``."""
+        return "\n".join([self.output(), self.caplog.text])
+
+
+@pytest.fixture
+def meho_logs(
+    _no_secret_leak_sweep: None,
+    capfd: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> MehoLogs:
+    """Give the test everything MEHO logged in it (see :class:`MehoLogs`).
+
+    Asks for the leak sweep first, so a read here is also seen by the sweep.
+    """
+    return MehoLogs(capfd, caplog, _record_structlog_prints(monkeypatch))
 
 
 # ---------------------------------------------------------------------------

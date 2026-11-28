@@ -64,6 +64,7 @@ from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.redaction.flight_recorder import classify_body_exclusion
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
+from tests.conftest import MehoLogs
 
 from ._vault_fakes import install_fake_client
 
@@ -422,6 +423,7 @@ async def test_password_and_tokens_leak_nowhere(
     kc: KeycloakConnector,
     spans: list[Any],
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     # The login is checked in master, so a platform admin approves.
     requester = _person("kc-check-requester")
@@ -498,7 +500,7 @@ async def test_password_and_tokens_leak_nowhere(
         json.dumps([dataclasses.asdict(span) for span in spans], default=str),
     )
     _assert_nothing_leaks("the structlog events", json.dumps(logs, default=str))
-    _assert_nothing_leaks("the stdlib log records", caplog.text)
+    _assert_nothing_leaks("the stdlib log records", meho_logs.text())
 
 
 async def test_refused_login_leaks_nothing_even_when_keycloak_echoes_the_password(

@@ -41,6 +41,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations import _preview, dispatch
 from meho_backplane.operations._preview import preview_failure_reason
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 from tests.test_k8s_apply_card_secrets import (
     _approve_and_run,
     _audit_text,
@@ -154,7 +155,10 @@ _ALL_SECRET_FORMS = sorted(
 
 @pytest.mark.parametrize("form", _ALL_SECRET_FORMS)
 def test_a_secret_value_is_on_no_card_and_not_in_the_stored_params(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, form: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
+    form: str,
 ) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
@@ -179,6 +183,7 @@ def test_a_secret_value_is_on_no_card_and_not_in_the_stored_params(
             for record in caplog.records
             if record.name.startswith("meho_backplane")
         ),
+        "printed log": meho_logs.output(),
     }
     for place, text in shown.items():
         assert secret not in text, place
@@ -283,7 +288,10 @@ _REFUSED_WITHOUT_THE_KEY: dict[str, str] = {
 
 @pytest.mark.parametrize("form", sorted(_REFUSED_WITHOUT_THE_KEY))
 def test_without_the_key_an_apply_with_a_hidden_value_is_refused_with_what_to_set(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, form: str
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
+    form: str,
 ) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
@@ -302,7 +310,7 @@ def test_without_the_key_an_apply_with_a_hidden_value_is_refused_with_what_to_se
         "answer": json.dumps(result.model_dump(mode="json"), default=str),
         "audit rows": _audit_text(),
         "structlog": json.dumps(logs, default=str),
-        "stdlib log": caplog.text,
+        "stdlib log": meho_logs.text(),
     }.items():
         assert value not in text, place
 

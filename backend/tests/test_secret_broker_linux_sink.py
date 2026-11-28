@@ -63,6 +63,7 @@ from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 from ._vault_fakes import install_fake_client
 
@@ -859,7 +860,9 @@ def _patch_wire(wire: _Wire) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_write_secret_sends_the_value_only_on_stdin(caplog: pytest.LogCaptureFixture) -> None:
+async def test_write_secret_sends_the_value_only_on_stdin(
+    caplog: pytest.LogCaptureFixture, meho_logs: MehoLogs
+) -> None:
     wire = _Wire(stdout="===MEHO_SINK_OK===\n")
     endpoint = LinuxSecretSinkEndpoint(f"{_TARGET_NAME}/home/seat/.config/key#seat")
     with caplog.at_level(logging.DEBUG):
@@ -878,8 +881,8 @@ async def test_write_secret_sends_the_value_only_on_stdin(caplog: pytest.LogCapt
     assert stdin is not None
     assert base64.b64encode(_SENTINEL.encode()).decode() in stdin
     assert "/home/seat/.config/key" in stdin
-    assert _SENTINEL not in caplog.text
-    assert _SUDO_CANARY not in caplog.text
+    assert _SENTINEL not in meho_logs.text()
+    assert _SUDO_CANARY not in meho_logs.text()
 
 
 @pytest.mark.asyncio
@@ -1032,6 +1035,7 @@ async def _dispatch_move(params: dict[str, Any]) -> OperationResult:
 async def test_vault_to_linux_move_keeps_the_value_out_of_every_output(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     move_env: None,
 ) -> None:
     install_fake_client(monkeypatch, secret={"client_secret": _SENTINEL})
@@ -1054,7 +1058,7 @@ async def test_vault_to_linux_move_keeps_the_value_out_of_every_output(
 
     assert _SENTINEL not in result.model_dump_json()
     assert _SENTINEL not in json.dumps(params)
-    assert _SENTINEL not in caplog.text
+    assert _SENTINEL not in meho_logs.text()
     assert all(_SENTINEL not in c for c in wire.commands)
 
     sessionmaker = get_sessionmaker()

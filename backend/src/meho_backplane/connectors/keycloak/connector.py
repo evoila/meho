@@ -82,6 +82,7 @@ References
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -674,7 +675,8 @@ class KeycloakConnector(HttpConnector):
         if not response.content:
             return None
         if reading_realm_name():
-            return _TRACE_BODY_WITHHELD
+            # JSON text: the trace engine reads it back as the marker string.
+            return json.dumps(_TRACE_BODY_WITHHELD)
         try:
             body = response.json()
         except ValueError:

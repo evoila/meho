@@ -352,8 +352,8 @@ The command line does not have the settings file yet.
   rule as `POST` and `PATCH /api/v1/targets`. A call with a token (the CLI,
   a script, an AI tool with a person's login) that applies such a file gets
   403 with the reason "A settings file that adds or changes targets is
-  applied in the web console. A call with a token cannot write targets at
-  once." Nothing is written, and no approval request is made. A person
+  applied on the settings file page of the web console (/ui/settings). A
+  call with a token cannot write targets at once." Nothing is written, and no approval request is made. A person
   applies such a file on the settings file page of the web console
   (`/ui/settings`); with a token, add or change targets through the
   target routes (a call with a token waits for approval there), then
@@ -431,9 +431,13 @@ nothing (see "Who may call"). Otherwise it adds or updates, never deletes:
   `tenancy/policies.py` for the tenant columns (`announce_gate_enabled` has
   no route of its own and is written there, audited), `ConventionsService`
   for conventions, and `create_target` / `update_target` for targets.
-- One `audit_log` row covers the whole import (`op_id=settings.import`). Its
-  `op_class` is `write` only when something is written; a refused or
-  unchanged file leaves a `read` row. The revision row keeps its id. Every
+- One `audit_log` row covers the whole import (`op_id=settings.import`).
+  `op_class` is `write` when the import starts to write; a refused or
+  unchanged file leaves a `read` row. A failed or cancelled apply keeps
+  `write`; its status says that nothing was saved. An import that stops
+  keeps only the attempt keys of `ATTEMPT_AUDIT_KEYS`
+  (`instance_settings/attempt_audit.py`), on the console and on REST. The
+  revision row keeps its id. Every
   `tenant_convention_history` row the import writes keeps the import's
   `request_id` (convention history no longer points at `audit_log`, #3747).
 - `diff` in the answer is what actually changed; `revision_id` is the new
@@ -461,7 +465,11 @@ The console operator has `web_session` true, so targets,
 `run_approval_target_kinds` turned on and `announce_gate_enabled` turned
 off apply here, the two policy changes with a reason. The gate (`require_ui_settings_admin`) asks for a person
 first (403 `human_principal_required` for an agent, service or runner
-login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`).
+login), then `tenant_admin` or `platform_admin` (403 `insufficient_role`
+as JSON on the preview and apply; the page `GET /ui/settings` answers a
+person without the role with a console error page, 403 HTML).
+An apply refused for a missing reason keeps the preview and its Apply form
+with the same file, and shows the refusal sentence above it.
 `build_plan` refuses a file that names another tenant for a
 `tenant_admin`. Such a refusal answers 403 with the reason as an HTML
 fragment, so the audit log keeps a refusal row for the preview and the

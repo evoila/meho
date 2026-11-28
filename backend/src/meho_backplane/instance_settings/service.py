@@ -72,7 +72,9 @@ from meho_backplane.db.models import (
     TenantConvention,
 )
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.instance_settings.attempt_audit import attempt_values
 from meho_backplane.instance_settings.console_only import (
+    SETTINGS_PAGE,
     console_only_changes,
     console_only_warnings,
     loosening_refusal,
@@ -151,8 +153,8 @@ _conventions = ConventionsService()
 #: changes targets. Only a person in the web console writes targets at once,
 #: the same rule as ``POST`` and ``PATCH /api/v1/targets``.
 TARGET_WRITES_NEED_CONSOLE: Final[str] = (
-    "A settings file that adds or changes targets is applied in the web console. "
-    "A call with a token cannot write targets at once."
+    "A settings file that adds or changes targets is applied on the settings file page "
+    f"of the web console ({SETTINGS_PAGE}). A call with a token cannot write targets at once."
 )
 
 
@@ -970,6 +972,13 @@ async def _apply_targets(
             failed.append(f"`{path}` ({name}) could not be written.")
 
 
+def _bind_plan_tenants(plan: ImportPlan) -> None:
+    """Bind the file hash and the tenants of *plan*, so the audit row names them."""
+    structlog.contextvars.bind_contextvars(
+        **attempt_values(plan.file_sha256, [str(tp.tenant_id) for tp in plan.tenants])
+    )
+
+
 async def apply_import(
     session: AsyncSession,
     operator: Operator,
@@ -993,21 +1002,19 @@ async def apply_import(
     plan = await build_plan(session, operator, content, lock=True)
     refusal = None if plan.mistakes else loosening_refusal(operator, plan.console_only, reason)
     if refusal is not None:
+        _bind_plan_tenants(plan)
         raise SettingsForbiddenError(refusal)
     result = ImportResult(plan=plan)
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
     if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
+        _bind_plan_tenants(plan)
         raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     tenant_ids = [tp.tenant_id for tp in plan.tenants]
     # Bound before the first write, so the row of an apply that stops names it.
-    structlog.contextvars.bind_contextvars(
-        audit_settings_import=True,
-        audit_settings_file_sha256=plan.file_sha256,
-        audit_settings_tenant_ids=[str(t) for t in tenant_ids],
-    )
+    _bind_plan_tenants(plan)
     broken = await _apply_tenant_rows(session, plan, result.failed)
     live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
     replanned = await _replan_new_tenants(session, plan, live)

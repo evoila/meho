@@ -462,6 +462,60 @@ agents:
     approval card shows no rule part while the setting is off, and a click
     on a request asked while it was on stores nothing.
 
+## Risk-level edits in the file
+
+An admin can raise the risk level of one operation, or make it ask for
+approval, in the web console or with `meho connector edit-op`. Each such
+change is a risk-level edit. With the setting `CUSTOM_POLICY` on,
+`meho policy export` also writes these edits, in the part `risk_levels`.
+So you keep them in the file, next to the rest of the policy.
+
+```yaml
+risk_levels:
+- rule: override:3c1f6a2e-5b7d-4e9a-8f10-2b3c4d5e6f70
+  operation:
+    product: inslim
+    version: 1.x
+    impl_id: inslim
+    op_id: inslim.vm.restart
+  scope: tenant
+  level: dangerous
+  reason: Restarts drop users.
+  set_by: admin-a
+  set_at: '2026-11-28T10:00:00+00:00'
+```
+
+- Each item is one edit: its rule id (`override:<id>`), the operation, the
+  scope, the risk level (`level`) or the approval flag
+  (`requires_approval`), the reason, who set it (`set_by`) and when
+  (`set_at`).
+- A tenant's file holds only the edits of that tenant. It holds no edit
+  for the whole install and no edit of another tenant.
+- The install's file (`--scope install`) holds only the edits for the
+  whole install. This includes a platform admin's "approval off"
+  (`requires_approval: false`).
+- An edit that sets only a category or labels is not in the part.
+- The file has no `risk_levels` part when there is no edit.
+- The export only reads. It changes no stored edit.
+
+The import does not change the edits in this version of MEHO:
+
+- A `risk_levels` part that is exactly what the export wrote changes
+  nothing. Export, then import of the same file, answers "No change.".
+- A part that differs is refused, with the line named, for example:
+  "Line 12: `risk_levels[1]` is not a stored risk-level edit. Changing
+  risk-level edits with a policy file is not in this version of MEHO. Keep
+  the part as `meho policy export` wrote it, or remove it." Nothing waits
+  and nothing is stored.
+- A file without the part leaves the edits as they are.
+
+!!! note "Off by default"
+
+    The part needs the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`). While it is off, the export has no
+    `risk_levels` part, and a file with the part is refused: "This version
+    of MEHO does not read `risk_levels` in a policy file; remove it."
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is

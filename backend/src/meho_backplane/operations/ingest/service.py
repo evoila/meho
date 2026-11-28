@@ -84,6 +84,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_exclusive
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass
+from meho_backplane.operations.change_reason import reason_refusal
 from meho_backplane.operations.ingest._internals import (
     _UNSET,
     OP_DELETE_CONNECTOR,
@@ -158,6 +159,7 @@ from meho_backplane.operations.ingest.spec_provenance import load_spec_provenanc
 from meho_backplane.operations.op_policy import (
     EffectivePolicy,
     OpKey,
+    OpPolicyEditError,
     PolicyEditResult,
     apply_policy_edit,
     effective_policy_map,
@@ -1220,6 +1222,8 @@ class ReviewService:
         destructive operation; *tighten_only* (the MCP tool) refuses every
         loosening.
         """
+        if (refusal := reason_refusal(reason)) is not None:
+            raise OpPolicyEditError("reason_looks_like_secret", refusal)
         if safety_level is None and requires_approval is None:
             return PolicyEditResult(changes={}, scope=_scope_name(scope.tenant_id))
         if scope.tenant_id is not None:

@@ -102,6 +102,8 @@ func newEditOpCmd() *cobra.Command {
 			"fresh sign-in: run `meho login` and retry within five minutes. It is\n" +
 			"never allowed for a destructive operation. List these operations\n" +
 			"with `meho connector overrides --reduced-approval`.\n\n" +
+			"A reason never holds a secret. MEHO refuses a --reason that looks\n" +
+			"like a secret and writes nothing.\n\n" +
 			"--category and --label set the operation's category and labels.\n" +
 			"Use them without the other flags.\n" +
 			classifyNote + "\n" +

@@ -3650,6 +3650,10 @@ async def _build_proposed_effect(
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
             base["credential_wait"] = descriptor_credential_card_line(descriptor)
+        # With CUSTOM_POLICY on: why a call whose params delete something waits.
+        delete_reason = getattr(descriptor, "delete_call_reason", None)
+        if delete_reason is not None:
+            base["delete_wait"] = delete_reason
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3962,7 +3966,9 @@ async def _handle_needs_approval(
     with the pending row's id in ``extras["approval_request_id"]``.
 
     With an ``idempotency_key`` (#3486), a retry of the same call by the
-    same principal returns the existing live row's id (and
+    same caller, asked the same way (``_Asker`` in ``approval_queue``: the
+    kind of login, the people behind it, the ``reveal_secret`` choice, the
+    acting agent and the agent run), returns the existing live row's id (and
     ``extras["approval_request_reused"] = True``) instead of a new row; no
     second ``approval.pending`` event is published. The gates above still
     run first, unchanged. A key held by a different call is refused with

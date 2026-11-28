@@ -308,10 +308,18 @@ Expected outcomes:
   attribution without extra machinery.
   ([Vault audit devices](https://developer.hashicorp.com/vault/docs/audit))
 - **Least privilege.** The templated policy is the *only* grant a
-  connector needs; the backplane never holds a god-mode Vault token.
-  A compromised backplane can read no more than the *currently-acting
-  operator* could — the blast-radius property the operator-context
-  decision buys.
+  connector needs. MEHO holds two logins of its own:
+  - The scheduler token reads and writes agent and runner client
+    secrets, and reads the service secrets MEHO needs, for example the
+    session store key (surface 6 of
+    [`vault-provisioning.md`](./vault-provisioning.md)).
+  - When the check runner is set up, MEHO holds the check runner's
+    login. With it, MEHO reads the secrets of the targets that Sensors
+    check (see "Bounding the check-runner principal" in
+    [`vault-provisioning.md`](./vault-provisioning.md)).
+
+  Every other read runs under the *currently-acting operator's* token —
+  the property the operator-context decision buys.
 - **Never disable HMAC** on the audit device in production; never log
   the credential value. The chassis keeps `{username,password}` /
   kubeconfig out of every log event and every `OperationResult` — the
@@ -526,7 +534,9 @@ Expected outcomes:
 
 The read path (§2–§5) and the write path use the **same** federated
 identity model: every KV op runs under the acting **operator's**
-OIDC-federated Vault token, never a shared god-mode backplane token. The
+OIDC-federated Vault token. MEHO holds no broad backplane token: its own
+logins are the scheduler token and, when the check runner is set up, the
+check runner's login (§5 lists what each one reads). The
 role the token logs in under is picked in this order (first match wins):
 
 1. the dispatch target's `extras.vault_role`, when the target sets one

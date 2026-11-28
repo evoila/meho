@@ -184,7 +184,8 @@ async def test_a_machine_login_reads_the_refusal_of_the_approve(
             assert type(done.error) is NonHumanApprovalError, (row.where, way, done)
             assert str(done.error) == (
                 f"principal {caller.sub!r} of kind {caller.kind.value!r} may not decide an "
-                "approval request — approval is a human decision (v0.1-spec §7)"
+                "approval request — approval is a human decision (v0.1-spec §7; "
+                "rule floor:agent_never_approves)"
             )
             sign = approve_right(caller.operator(web=web), request)
             assert sign.may_approve is False

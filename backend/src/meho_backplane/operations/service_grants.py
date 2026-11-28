@@ -635,8 +635,9 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     """Return a refusal reason if the resolved descriptor marks destruction.
 
     Best-effort second check (only when a descriptor resolves): the
-    ``destructive`` safety tier (#3183), the HTTP ``DELETE`` verb, or a
-    hand-authored ``destructive`` tag on a typed op. The three inputs
+    ``destructive`` safety tier (#3183) on the row or in the code
+    (``code_safety_level``, so a lowered level is still a delete), the HTTP
+    ``DELETE`` verb, or a hand-authored ``destructive`` tag on a typed op. The three inputs
     single-source the delete-shaped classification — ``DELETE:`` verbs and
     ``destructive``-tagged typed ops are the shapes an operator resolves
     into the ``destructive`` tier, so once the tier is set it is itself the
@@ -646,16 +647,39 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     operation's own definition says a call is hard to undo
     (:attr:`~meho_backplane.db.models.EndpointDescriptor.hard_to_undo`).
     With the switch off, the field changes no answer.
+
+    With the switch on, the row of one call can also carry the sign of the
+    call itself: its params delete something
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.delete_call_reason`,
+    set by
+    :func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     reason = _delete_reason_by_descriptor_fields(descriptor)
     if reason is None:
         reason = _hard_to_undo_reason(descriptor)
+    if reason is None:
+        reason = _delete_call_reason(descriptor)
     return reason
 
 
+def _delete_call_reason(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason when the params of this call delete something."""
+    sentence = getattr(descriptor, "delete_call_reason", None)
+    if sentence is None:
+        return None
+    return (
+        f"this call of op {descriptor.op_id!r} deletes something ({sentence}); "
+        "a standing grant and a run approval never cover such a call, a person approves it"
+    )
+
+
 def _delete_reason_by_descriptor_fields(descriptor: EndpointDescriptor) -> str | None:
-    """Return a refusal reason for the level, the HTTP verb or the tag, without ``hard_to_undo``."""
-    if descriptor.safety_level == "destructive":
+    """Return a refusal reason for the level, the HTTP verb or the tag, without ``hard_to_undo``.
+
+    The level counts on the row and in the code: an admin's edit that lowers
+    the row's level keeps the delete sign of a ``destructive`` operation.
+    """
+    if "destructive" in (descriptor.safety_level, getattr(descriptor, "code_safety_level", None)):
         return (
             f"op {descriptor.op_id!r} is safety_level=destructive; delete-shaped "
             "operations are never grantable — a standing grant is the floor of "

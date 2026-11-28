@@ -628,6 +628,11 @@
         <p class="mt-2 text-xs" data-testid="approval-credential-wait">{{ effect.get("credential_wait") }}</p>
       {% endif %}
 
+      {#- Why a call whose params delete something waits (CUSTOM_POLICY on). -#}
+      {% if effect.get("delete_wait") %}
+        <p class="mt-2 text-xs" data-testid="approval-delete-wait">{{ effect.get("delete_wait") }}</p>
+      {% endif %}
+
       {% if effect.get("write_capability_warning") %}
         {#- #2331: the permission preflight found the connector identity likely
             lacks write capability. A warning, not a gate -- the approver may

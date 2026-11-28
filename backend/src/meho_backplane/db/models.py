@@ -2101,6 +2101,12 @@ class EndpointDescriptor(Base):
     #: call waits for a person, and no standing grant, no agent grant and no
     #: run approval covers it.
     credential_call = False
+    #: Not a column. With the switch ``CUSTOM_POLICY`` on, the sentence of a
+    #: delete check (:func:`~meho_backplane.op_classes.declare_delete_check`)
+    #: on the row of one call whose params delete something. Then the call
+    #: has a delete sign: it waits for a person, and no standing grant and no
+    #: run approval covers it. ``None`` otherwise.
+    delete_call_reason = cast("str | None", None)
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or

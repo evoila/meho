@@ -216,6 +216,40 @@ def test_every_handler_gets_only_fixed_text(
     _assert_clean("\n".join(seen) + capfd.readouterr().out, values)
 
 
+def test_held_record_gets_no_added_field(
+    values: dict[str, str], capfd: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(logging.INFO)
+    seen: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append(f"{record.getMessage()} {getattr(record, 'mk_extra', '')}")
+
+    root_handler, lib_handler = Collect(), Collect()
+    logging.getLogger().addHandler(root_handler)
+    library = logging.getLogger("urllib3")
+    library.addHandler(lib_handler)
+    library.setLevel(logging.DEBUG)
+    library.debug("plain text", extra={"mk_extra": values["addr"]})
+    logging.getLogger("urllib3.connectionpool").warning(
+        "Retrying (%r) after connection broken by '%r': %s",
+        1,
+        2,
+        3,
+        extra={"mk_extra": values["query"]},
+    )
+    assert len(seen) == 4
+    _assert_clean("\n".join(seen) + capfd.readouterr().out, values)
+
+
+def test_make_record_is_wrapped_once() -> None:
+    configure_logging(logging.INFO)
+    configure_logging(logging.INFO)
+    assert logging.Logger.makeRecord is meho_logging._hold_make_record
+    assert meho_logging._previous_make_record is not meho_logging._hold_make_record
+
+
 def test_hold_record_factory_is_set_once() -> None:
     configure_logging(logging.INFO)
     configure_logging(logging.INFO)

@@ -33,10 +33,11 @@ at its first import when ``ANTHROPIC_LOG`` is set).
 
 :func:`configure_logging` also sets a log record factory. For a record of a
 listed logger below its held level, the factory keeps only a fixed text: no
-arguments, no exception and no stack. So every handler in the process gets
-that text, not only MEHO's. Four kinds of record that help an operator get
-their own fixed line instead (:data:`_SAFE_LINES`), and MEHO's handler lets
-that line through.
+arguments, no exception and no stack. MEHO also wraps ``Logger.makeRecord``
+once, so such a record gets no field that the caller added with ``extra``.
+So every handler in the process gets that text, not only MEHO's. Four kinds
+of record that help an operator get their own fixed line instead
+(:data:`_SAFE_LINES`), and MEHO's handler lets that line through.
 
 The configuration is idempotent — calling :func:`configure_logging`
 twice has the same effect as calling it once (the root handler is
@@ -161,9 +162,46 @@ def _hold_record_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
     return record
 
 
+_previous_make_record: Callable[..., logging.LogRecord] | None = None
+
+
+def _hold_make_record(
+    self: logging.Logger,
+    name: str,
+    level: int,
+    fn: str,
+    lno: int,
+    msg: object,
+    args: Any,
+    exc_info: Any,
+    func: str | None = None,
+    extra: Any = None,
+    sinfo: str | None = None,
+) -> logging.LogRecord:
+    """Make the record without the caller's added fields if it is held.
+
+    ``Logger.makeRecord`` adds the ``extra`` fields after the record factory
+    ran, so the factory alone cannot cut them.
+    """
+    assert _previous_make_record is not None
+    held = _held_level(name)
+    if held is not None and level < held:
+        extra = None
+    return _previous_make_record(
+        self, name, level, fn, lno, msg, args, exc_info, func, extra, sinfo
+    )
+
+
 def _install_record_factory() -> None:
-    """Set :func:`_hold_record_factory` once, keeping the factory set before it."""
-    global _previous_record_factory
+    """Set :func:`_hold_record_factory` and :func:`_hold_make_record` once.
+
+    Each keeps the one set before it and calls it.
+    """
+    global _previous_record_factory, _previous_make_record
+    if logging.Logger.makeRecord is not _hold_make_record:
+        if _previous_make_record is None:
+            _previous_make_record = logging.Logger.makeRecord
+        logging.Logger.makeRecord = _hold_make_record  # type: ignore[method-assign]
     current = logging.getLogRecordFactory()
     if current is _hold_record_factory:
         return

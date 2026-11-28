@@ -963,14 +963,16 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
         )
 
 
-def _require_keycloak_managed_realm(product: str, extras: Any, name: str) -> None:
+def _require_keycloak_managed_realm(
+    product: str, extras: Any, name: str, *, quote_value: bool = True
+) -> None:
     """Reject a Keycloak target that names no managed realm, with a 422.
 
     Runs on create and on update, on the target as it will be after the
     write. See :mod:`meho_backplane.targets.required_extras`.
     """
     try:
-        check_keycloak_managed_realm(product, extras, name)
+        check_keycloak_managed_realm(product, extras, name, quote_value=quote_value)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -1917,10 +1919,18 @@ def _validate_update_body_fields(
       is a 403 unless the operator is a platform admin. See
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
-    if "extras_changes" in updates:
+    # The refusal of an extras_changes call names the field and the reason,
+    # not the value: its error is stored with the audit row and the request.
+    sends_changes = "extras_changes" in updates
+    if sends_changes:
         updates["extras"] = merge_extras_changes(t.extras, updates.pop("extras_changes"))
     effective_product = _apply_product_patch(updates, t.product)
-    _require_keycloak_managed_realm(effective_product, updates.get("extras", t.extras), t.name)
+    _require_keycloak_managed_realm(
+        effective_product,
+        updates.get("extras", t.extras),
+        t.name,
+        quote_value=not sends_changes,
+    )
     _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:

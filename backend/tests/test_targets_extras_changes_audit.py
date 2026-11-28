@@ -387,6 +387,38 @@ async def test_the_answer_warning_names_the_key_and_no_realm(
         assert other_value not in place
 
 
+@pytest.mark.parametrize("key", ["managed_realm", "admin_realm"])
+async def test_a_refused_run_names_the_field_and_no_realm(client: TestClient, key: str) -> None:
+    extras = {"managed_realm": "lab", "admin_realm": "master"}
+    row = await _insert_target(name=_NAME, product="keycloak", extras=dict(extras))
+    refused = f"{_made('realm')}/{_made('part')}"
+
+    # A token call of the person that the REST views below sign in as.
+    waiting = await dispatch(
+        operator=_operator("admin-1"),
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=TARGETS_UPDATE_OP_ID,
+        target=None,
+        params={"target_id": str(row.id), "extras_changes": {key: refused}},
+    )
+    assert waiting.status == "awaiting_approval", waiting
+    [request] = await _requests()
+    request_id = str(request.id)
+    result = await _approve_and_run(request.id)
+    assert result.status != "ok", result
+    assert await _extras(row.id) == extras
+
+    answer = _call(client, "GET", f"/api/v1/approvals/{request_id}/result")
+    assert answer.status_code == 200, answer.text
+    [request] = await _requests()
+    audit_text = " ".join(_columns(r) for r in await _audit_rows())
+    for place in (repr(result), answer.text, repr(request.resume_result), audit_text):
+        assert refused not in place
+        assert refused.split("/")[0] not in place
+        assert f"extras.{key}" in place
+        assert "is not a plain realm name" in place
+
+
 async def test_a_full_extras_answer_keeps_the_realm_in_its_warning() -> None:
     realm = _made("realm")
     extras = {"managed_realm": realm, "admin_realm": realm}

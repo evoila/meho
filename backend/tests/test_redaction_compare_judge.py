@@ -1133,3 +1133,57 @@ def test_a_failed_base_build_prints_one_fixed_line_and_no_error_output(tmp_path:
     assert done.stdout.count("\n") == 1
     assert marker not in done.stdout + done.stderr
     assert marker in (out / "base.err").read_text(encoding="utf-8")
+
+
+# --- the staging lines stop at a link in place of a folder ---------------------
+
+
+def _docs_staging_lines() -> str:
+    block = _local_block()
+    first = block.index('mkdir "$tmp/head"')
+    last = block.index("git archive origin/main backend/tests", first)
+    return block[first : block.index("\n", last) + 1]
+
+
+@pytest.mark.parametrize("place", ["job", "docs"])
+@pytest.mark.parametrize("link", ["backend", "backend/tests"])
+def test_the_staging_lines_stop_at_a_link_and_keep_the_outside_folder(
+    tmp_path: Path, place: str, link: str
+) -> None:
+    outside = tmp_path / "outside"
+    (outside / "tests").mkdir(parents=True)
+    canary = outside / "tests" / "canary"
+    canary.write_text("keep\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "backend" / "tests").mkdir(parents=True)
+    (repo / "backend" / "tests" / "t.py").write_text("T = 1\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "rm", "-q", "-r", link)
+    (repo / link).parent.mkdir(exist_ok=True)
+    (repo / link).symlink_to(outside if link == "backend" else outside / "tests")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "link")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/main", base)
+    out = tmp_path / "out"
+    out.mkdir()
+    if place == "job":
+        lines = _step_part('stage="${dir}/head-input"', 'cp "${dir}/redaction_compare.py"')
+        env = {"base": base, "head": head, "dir": str(out)}
+    else:
+        lines = _docs_staging_lines()
+        env = {"tmp": str(out)}
+    done = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", lines],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "is a link, not a folder: the compare stops" in done.stdout + done.stderr
+    assert canary.read_text(encoding="utf-8") == "keep\n"

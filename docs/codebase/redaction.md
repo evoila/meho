@@ -1135,7 +1135,8 @@ before a reviewer reads the pull request.
   entry here too. It passes `--full-list` only when the judge of `main`
   knows that option. Like the job, it builds the pull request records from
   `backend/tests/` of `origin/main` and every other file of `backend/` from
-  the branch. It works in a new private folder from `mktemp -d`,
+  the branch. Like the job, it stops when `backend` or `backend/tests` of
+  the branch is a link and not a folder. It works in a new private folder from `mktemp -d`,
   stops when a step fails (also either record build), and removes the
   folder and the second checkout when it ends, so no record file is left
   behind or read again by a later run.
@@ -1156,6 +1157,10 @@ before a reviewer reads the pull request.
       && uv run python "$rules" --records "$tmp/base.jsonl")
     mkdir "$tmp/head"
     git archive HEAD backend | tar -x -C "$tmp/head"
+    if [ -L "$tmp/head/backend" ] || [ ! -d "$tmp/head/backend" ] || [ -L "$tmp/head/backend/tests" ]; then
+      echo "backend or backend/tests of this branch is a link, not a folder: the compare stops" >&2
+      exit 1
+    fi
     rm -rf "$tmp/head/backend/tests"
     git archive origin/main backend/tests | tar -x -C "$tmp/head"
     (cd "$tmp/head/backend" && uv sync --frozen \

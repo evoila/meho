@@ -1731,7 +1731,12 @@ jobs:
           mkdir "${stage}"
           git archive "${head}" backend | tar -x -C "${stage}"
           # backend/tests/ comes from the base commit; the rest of backend/
-          # comes from the pull request.
+          # comes from the pull request. Both paths must be real folders, so
+          # the rm below stays inside the staged tree.
+          if [ -L "${stage}/backend" ] || [ ! -d "${stage}/backend" ] || [ -L "${stage}/backend/tests" ]; then
+            echo "backend or backend/tests of the pull request is a link, not a folder: the compare stops"
+            exit 1
+          fi
           rm -rf "${stage}/backend/tests"
           git archive "${base}" backend/tests | tar -x -C "${stage}"
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"

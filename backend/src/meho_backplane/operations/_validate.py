@@ -59,7 +59,12 @@ from meho_backplane.operations.role_floors import (
     requester_check_denial,
     role_floor_denial,
 )
-from meho_backplane.policy.fixed_rules import fixed_rule_for
+from meho_backplane.policy.fixed_rules import (
+    POLICY_CHANGE_WAITS,
+    RIGHTS_CHANGE_WAITS,
+    TARGET_RIGHTS_WAITS,
+    fixed_rule_for,
+)
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -731,13 +736,13 @@ def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor
     """True when a fixed rule holds, so no standing grant and no run approval is looked up.
 
     The gate asks :func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`
-    before it reads a grant. In sandbox mode the grant lookup decides, so
-    a delete grant may still cover a delete (``docs/decisions/sandbox-mode.md``).
+    before it reads a grant. In sandbox mode the grant lookup decides the
+    other rules, so a delete grant may still cover a delete
+    (``docs/decisions/sandbox-mode.md``); a change of rights or of the
+    policy is held here in sandbox mode too.
     """
-    if sandbox_mode_active():
-        return False
     rule = fixed_rule_for(descriptor, operator)
-    if rule is None:
+    if rule is None or (sandbox_mode_active() and rule not in _HELD_IN_SANDBOX):
         return False
     _log.info(
         "policy_gate_fixed_rule_no_grant",
@@ -747,6 +752,13 @@ def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor
         fixed_rule=rule,
     )
     return True
+
+
+#: The fixed rules that the gate holds also in sandbox mode: no standing
+#: grant and no run approval covers a change of rights or of the policy.
+_HELD_IN_SANDBOX: Final[frozenset[str]] = frozenset(
+    {RIGHTS_CHANGE_WAITS, POLICY_CHANGE_WAITS, TARGET_RIGHTS_WAITS}
+)
 
 
 async def _grant_or_run_approval(

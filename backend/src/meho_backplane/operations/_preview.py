@@ -512,6 +512,11 @@ _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable"
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
 
+#: ``op_id`` -> {parameter name: a function that gives the value of that
+#: parameter with the hiding of the approval card}
+#: (:func:`register_card_param_echo`).
+_CARD_PARAM_ECHOES: dict[str, dict[str, Callable[[PreviewContext], Any]]] = {}
+
 
 def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     """Register *builder* as the preview computation for *op_id*.
@@ -520,6 +525,34 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_card_param_echo(op_id: str, param: str, echo: Callable[[PreviewContext], Any]) -> None:
+    """Show the parameter *param* of *op_id* on a preview as the approval card shows it.
+
+    The preview of the call (``preview_operation``) puts ``echo(ctx)`` in
+    place of the value it would copy from the params, so the copy hides the
+    same values as the card.
+    """
+    _CARD_PARAM_ECHOES.setdefault(op_id, {})[param] = echo
+
+
+def card_param_echoes(ctx: PreviewContext) -> dict[str, Any]:
+    """Each registered parameter of *ctx* (:func:`register_card_param_echo`), hidden as on the card.
+
+    Only a parameter present in the params is given. A value whose echo
+    cannot be built is the redaction marker, so nothing shows in clear text.
+    """
+    echoes: dict[str, Any] = {}
+    for param, echo in _CARD_PARAM_ECHOES.get(ctx.descriptor.op_id, {}).items():
+        if param not in ctx.params:
+            continue
+        try:
+            echoes[param] = echo(ctx)
+        except Exception as exc:
+            _log.warning("card_param_echo_failed", param=param, error=type(exc).__name__)
+            echoes[param] = _PARAM_REDACTED
+    return echoes
 
 
 def register_preview_last_step(op_id: str, step: PreviewLastStep) -> None:
@@ -1240,14 +1273,13 @@ def _k8s_apply_manifest_echo(
     from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
-        apply_manifest_echo,
         apply_run_commands,
         apply_subject,
         plain_copy,
     )
 
     _redact = _k8s_apply_redactor(ctx)
-    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    echo: dict[str, Any] = {"manifest": _k8s_apply_manifest_only(ctx)}
     if not ctx.agent_preview:
         run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
         if run_commands:
@@ -1258,6 +1290,13 @@ def _k8s_apply_manifest_echo(
     if subject is not None:
         echo["subject"] = subject
     return echo
+
+
+def _k8s_apply_manifest_only(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of the k8s.apply card, built from the params of *ctx* alone."""
+    from meho_backplane.connectors.kubernetes.ops_write_preview import apply_manifest_echo
+
+    return apply_manifest_echo(ctx.params["manifest"], redact=_k8s_apply_redactor(ctx))
 
 
 def _k8s_apply_redactor(
@@ -1422,6 +1461,7 @@ def _register_builtin_builders() -> None:
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
     register_preview_failure_keys("k8s.apply", _k8s_apply_failure_keys)
+    register_card_param_echo("k8s.apply", "manifest", _k8s_apply_manifest_only)
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",

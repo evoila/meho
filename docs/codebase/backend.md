@@ -1018,9 +1018,28 @@ At the default level (INFO), an operator does not see these lines of the librari
 - the retry lines of the AI SDKs ("Retrying request ...");
 - the credential-source line of the cloud libraries (`botocore` "Found credentials in ...");
 - the token refresh line of the cloud libraries (`google.auth.transport` "Refreshing credentials ...", `botocore` SSO token refresh);
-- the `urllib3` warnings: the connection pool warning, the certificate name warning and the retry warning;
-- the `botocore` warnings: the credential refresh warnings, the token refresh warnings and the deprecated endpoint warning;
-- the two `aiohttp` client warnings: the `.netrc` file warning and the proxy kind warning.
+- the WARNING lines of the held HTTP libraries in the table below (library versions read: urllib3 2.8.0, botocore 1.43.15, aiohttp 3.14.4).
+
+| Library | Logger | Message pattern (the library's own format text) | MEHO's line |
+|---|---|---|---|
+| urllib3 | `urllib3.connectionpool` | `Connection pool is full, discarding connection: %s. Connection pool size: %s` | none |
+| urllib3 | `urllib3.connection` | `Certificate did not match expected hostname: %s. Certificate: %s` | `http_tls_name_mismatch` |
+| urllib3 | `urllib3.connectionpool` | `Retrying (%r) after connection broken by '%r': %s` | `http_retry_after_broken_connection` |
+| urllib3 | `urllib3.connection` | `Failed to parse headers (url=%s): %s` | none |
+| botocore | `botocore.credentials` | `Refreshing temporary credentials failed during %s refresh period.` | `aws_credential_refresh_failed` |
+| botocore | `botocore.tokens` | `Refreshing token failed during the %s refresh period.` | `aws_token_refresh_failed` |
+| botocore | `botocore.tokens` | `SSO token refresh attempt failed` | `aws_token_refresh_failed` |
+| botocore | `botocore.regions` | `Client is configured with the deprecated endpoint: %s` | none |
+| aiohttp | `aiohttp.client` | `Could not parse .netrc file: %s` and `Could not read .netrc file: %s` | none |
+| aiohttp | `aiohttp.client` | `%s proxies %s are not supported, ignoring` | none |
+
+At the default level these lines do not show. The ERROR lines of these libraries still show.
+
+For each row with a line of MEHO's own, MEHO writes a short WARNING line instead. It has the logger name of the library, the event name of the table and a fixed text, and nothing from the library's record: no arguments, no exception, no stack. The match is exact on the logger name and the library's format text. A library version that changes its format text gets no line, and the record is dropped. The rules are `_SAFE_LINES` in `src/meho_backplane/logging.py`. For these loggers MEHO sets the level to WARNING, so the records exist, and the filter on MEHO's handler lets only these lines through.
+
+`configure_logging()` also sets a log record factory. For a record of a listed logger below its held level, the factory keeps only a fixed text, with no arguments, no exception and no stack. MEHO also wraps `Logger.makeRecord` once, so such a record gets no field that the caller added with `extra=`. So every handler in the process gets that text, also a handler that a library or a test adds to the root logger or to a library logger.
+
+`tests/test_logging_http_safe_lines.py` sends a record of each of the five message patterns with made-up values and a made-up exception, and makes a real retry with `requests`, at the root levels NOTSET, DEBUG, INFO and WARNING. It checks that MEHO's output holds the line once and no made-up value. It checks that another WARNING text of a held logger is dropped, and that a handler on the root logger and one on `urllib3` get no made-up value with `urllib3` at DEBUG.
 
 `tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept. At the end of the module it checks that each logger the tests change has its level from before.
 

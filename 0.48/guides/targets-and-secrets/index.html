@@ -4198,7 +4198,10 @@ meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> <
 meho<span class="w"> </span>targets<span class="w"> </span>update<span class="w"> </span>lab-prom<span class="w"> </span>--clear<span class="w"> </span>secret-ref<span class="w"> </span>--extra<span class="w"> </span><span class="nv">scheme</span><span class="o">=</span>http
 </code></pre></div>
 <p><code>--extra</code> on <code>update</code> replaces the whole <code>extras</code> map, so pass every key
-you want to keep. <code>--clear extra</code> removes every extra, and <code>--clear alias</code>
+you want to keep. To change one key and keep the others, use
+<code>--set-extra key=value</code> (a text value), <code>--set-extra-json key=&lt;json&gt;</code> (a
+number, <code>true</code> or <code>false</code>, a list or a map) and <code>--unset-extra key</code>. Each
+can be repeated. <code>--clear extra</code> removes every extra, and <code>--clear alias</code>
 removes every alias. In YAML, write <code>secret_ref: null</code>.</p>
 <h3 id="keycloak-targets-need-a-managed-realm">Keycloak targets need a managed realm<a class="headerlink" href="#keycloak-targets-need-a-managed-realm" title="Permanent link">&para;</a></h3>
 <p>A Keycloak target must name the realm MEHO manages, in
@@ -4208,6 +4211,9 @@ it. The target works on that realm only: a call that names another realm
 is refused.</p>
 <div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>add<span class="w"> </span>lab-sso<span class="w"> </span>--product<span class="w"> </span>keycloak<span class="w"> </span>--host<span class="w"> </span>sso.example.com<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--extra<span class="w"> </span><span class="nv">managed_realm</span><span class="o">=</span>example
+</code></pre></div>
+<p>To correct it later, change that one key; every other extra stays:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>targets<span class="w"> </span>update<span class="w"> </span>lab-sso<span class="w"> </span>--set-extra<span class="w"> </span><span class="nv">managed_realm</span><span class="o">=</span>example
 </code></pre></div>
 <p>In YAML, put it under <code>extras:</code> (<code>managed_realm: example</code>). The optional
 <code>extras.admin_realm</code> is the realm the target logs in to; it is <code>master</code>

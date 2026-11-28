@@ -22221,8 +22221,11 @@
 <li><code>--product</code> — new connector product slug</li>
 <li><code>--secret-field</code> — connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)</li>
 <li><code>--secret-ref</code> — Vault path of the target's credential</li>
+<li><code>--set-extra</code> — key=value to set in the extras map as text; the other keys stay (repeatable)</li>
+<li><code>--set-extra-json</code> — key=<json> to set in the extras map with its JSON type, e.g. retries=3 or tags=["a"] (repeatable)</li>
 <li><code>--tls-ca-pin</code> — PEM CA bundle to pin for this target</li>
 <li><code>--tls-server-name</code> — TLS SNI / certificate-verification hostname, decoupled from --host</li>
+<li><code>--unset-extra</code> — key to remove from the extras map; the other keys stay (repeatable)</li>
 <li><code>--verify-tls</code> — verify the target's TLS certificate; pass --verify-tls=false to opt out</li>
 <li><code>--version</code> — operator-asserted product version</li>
 <li><code>--vpn-required</code> — mark that a VPN must be up to reach the target; pass --vpn-required=false to clear it</li>

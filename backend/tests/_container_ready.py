@@ -17,13 +17,6 @@ one for the whole round trip).
 The message starts with ``container not ready`` so a person (or the
 fleet's loop) can tell a set-up failure from a failing test.
 
-``stopped`` (optional) is asked after each failed probe. When it returns
-a text, the container has stopped: the wait ends at once and the error
-gives that text (``docker_stopped`` builds it from the container's state
-and its last log lines). So a container that died fails in seconds with
-its reason, and a long time limit only waits for a container that still
-runs.
-
 Usage::
 
     wait_until_ready(
@@ -37,7 +30,6 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
 
 
 class ContainerNotReadyError(RuntimeError):
@@ -50,15 +42,13 @@ def wait_until_ready(
     what: str,
     timeout: float = 60.0,
     interval: float = 0.5,
-    stopped: Callable[[], str | None] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Call ``probe`` until it returns without raising, or fail after ``timeout`` seconds.
 
-    ``what`` names the container in the error message. ``stopped`` ends
-    the wait early (see the module text). ``clock`` and ``sleep`` can be
-    replaced so a test does not wait in real time.
+    ``what`` names the container in the error message. ``clock`` and
+    ``sleep`` can be replaced so a test does not wait in real time.
     """
     deadline = clock() + timeout
     last_error: Exception | None = None
@@ -68,12 +58,6 @@ def wait_until_ready(
             return
         except Exception as exc:  # any probe error means "not ready yet"
             last_error = exc
-        why = stopped() if stopped is not None else None
-        if why is not None:
-            raise ContainerNotReadyError(
-                f"container not ready: {what} stopped before it answered ({why}) "
-                f"(last error: {type(last_error).__name__}: {last_error})"
-            )
         if clock() >= deadline:
             break
         sleep(interval)
@@ -81,29 +65,6 @@ def wait_until_ready(
         f"container not ready: {what} gave no answer in {timeout:g} s "
         f"(last error: {type(last_error).__name__}: {last_error})"
     )
-
-
-def docker_stopped(container: Any, *, log_lines: int = 20) -> Callable[[], str | None]:
-    """A ``stopped`` check for a Docker SDK container (``get_wrapped_container()``).
-
-    It returns None while the container runs, and also when Docker cannot
-    be asked (then the time limit decides). Else it returns the state, the
-    exit code and the last ``log_lines`` lines of the container's log.
-    """
-
-    def check() -> str | None:
-        try:
-            container.reload()
-            status = container.status
-            if status in ("created", "running"):
-                return None
-            code = container.attrs.get("State", {}).get("ExitCode")
-            tail = container.logs(tail=log_lines).decode("utf-8", errors="replace").strip()
-        except Exception:  # Docker could not answer: keep waiting
-            return None
-        return f"state {status}, exit code {code}; last log lines:\n{tail}"
-
-    return check
 
 
 def ping_mongodb(

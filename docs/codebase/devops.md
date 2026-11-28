@@ -2196,13 +2196,7 @@ shape (deterministic file-level matrix + fan-in):
   file set **exactly** (union == full, pairwise disjoint;
   `tests/test_unit_shard_split.py` pins both). The splitter prints the
   file count and the predicted seconds per shard on stderr, so the shard
-  log shows when the measurements drift from the real wall. When a
-  quarter or more of the files have no measured time, it also prints a
-  warning ("Old test times") in the job log. That is a warning, not a
-  failed test: the count grows with each pull request that adds a test
-  file, so a failed test would hit whichever pull request crossed the
-  limit, also in the merge queue, although that pull request did nothing
-  wrong. Refresh the file when you see the warning. Each shard
+  log shows when the measurements drift from the real wall. Each shard
   writes its per-test times with `-o junit_family=xunit1 --junitxml` and
   uploads them as the artifact `python-unit-shard-junit-<N>`. To refresh
   the measurements, download the artifacts of one green run (one per
@@ -3216,17 +3210,6 @@ of CI. Two actions are unique to `ci.yml`:
 
 ### Tools that CI downloads
 
-**Rule: no step of a merge queue run takes a file from an outside server
-without our proxy or cache.** A merge queue run must not fail for a
-reason outside its pull request. A file from an outside server (a tool,
-a package, a schema, an image) comes from the runner image, our image
-proxy, or a cache (`actions/cache`) that the runs on `main` fill. A
-download is only the last way, when the cache does not have the file
-yet. Then a retry is allowed around that one network step: three tries
-at most, and the log says each new try. Never retry a whole job, and
-never skip a test or mark it as expected to fail to hide a download
-problem.
-
 A job must not fail because a download failed once. The rules:
 
 - `scripts/ci/install_tool.sh` puts a pinned tool on the PATH. It uses the
@@ -3242,19 +3225,6 @@ A job must not fail because a download failed once. The rules:
   last.
 - `scripts/ci/retry.sh` runs any download command (the language model
   warm-up) with the same three tries.
-- `scripts/ci/kubeconform.sh` runs kubeconform with `-cache`, so the
-  Kubernetes schemas it checks against come from
-  `~/.cache/meho-kubeconform-schemas` (restored with `actions/cache` in
-  `Helm (lint + template + kubeconform)` and in the `validate` job of
-  `chart.yml`). Only a schema that is not in the folder yet is downloaded.
-  When a schema download fails, the check runs again (three tries, and
-  the log says so). A finding in the manifests fails at once.
-- The `redaction-compare` job pulls its Python image in its own step,
-  with `retry.sh`, before it pipes the files of the pull request into
-  `docker run --pull never`. A failed pull then says so. Before, it ended
-  the container early and the log showed only a `tar` write error.
-- The GBK locale step of the unit shards uses the locale data of the
-  runner image, then the package files in the cache, and downloads last.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
   run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in
@@ -3270,12 +3240,6 @@ A job must not fail because a download failed once. The rules:
 - A runner image that carries the tools at the pinned versions makes the
   download step a no-op. Change the pin in `tool-versions.env` and in the
   image together.
-
-A test container that is slow to start must not fail the run either. The
-MongoDB integration test waits up to 120 s for the container to answer.
-When the container has stopped, the wait ends at once, and the error
-gives the container's state, exit code and last log lines
-(`backend/tests/_container_ready.py`).
 
 ## Untrusted pull-request isolation
 

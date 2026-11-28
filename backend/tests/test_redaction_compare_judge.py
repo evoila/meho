@@ -20,7 +20,6 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-import yaml
 
 from tests.redaction_compare.answers import record as answer_record
 from tests.redaction_compare.inputs import secret_inputs
@@ -543,20 +542,6 @@ def test_the_job_keeps_the_container_error_output_out_of_the_log() -> None:
     # Nothing prints that file.
     assert not re.search(r"(cat|tail|head|echo|<)\s+\"?\$\{dir\}/head\.err", step)
     assert "head.err" not in step.replace('2> "${dir}/head.err"', "")
-
-
-def test_the_job_pulls_the_image_in_its_own_step_before_the_record_build() -> None:
-    """A failed pull is retried and named; it never shows up as a tar error in the build."""
-    job = yaml.safe_load(_CI_YML.read_text(encoding="utf-8"))["jobs"]["redaction-compare"]
-    names = [step.get("name") for step in job["steps"]]
-    pull = names.index("Pull the Python image for the record build")
-    build = names.index("Build and judge the records of the base and of the pull request")
-    assert pull < build
-    pull_run = job["steps"][pull]["run"]
-    pull_line = 'retry.sh" docker pull --quiet "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}"'
-    assert pull_line in pull_run
-    assert "SETUP FAILURE, not a test failure: the Python image did not pull" in pull_run
-    assert "docker run --rm -i --pull never " in job["steps"][build]["run"]
 
 
 _DOCS = Path(__file__).resolve().parents[2] / "docs" / "codebase" / "redaction.md"

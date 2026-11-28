@@ -1866,9 +1866,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-    env:
-      # The Python base image of backend/Dockerfile (same digest).
-      IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
     steps:
       - name: Checkout
         # Pull request run: HEAD is the merge commit of the pull request into
@@ -1922,24 +1919,11 @@ jobs:
           enable-cache: true
           add-problem-matchers: false
 
-      - name: Pull the Python image for the record build
-        # The record build below pipes the files of the pull request into
-        # `docker run`. When the image pull failed there, the container
-        # ended before it read them, and the log showed only "tar: -: Wrote
-        # only 4096 of 10240 bytes". So the image is pulled here, on its
-        # own, with up to three tries (scripts/ci/retry.sh says each new try
-        # in the log), and a failure says that the pull failed. The build
-        # then runs with --pull never.
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! bash "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" docker pull --quiet "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}"; then
-            echo "::error::SETUP FAILURE, not a test failure: the Python image did not pull after 3 tries."
-            exit 1
-          fi
-
       - name: Build and judge the records of the base and of the pull request
         shell: bash
+        env:
+          # The Python base image of backend/Dockerfile (same digest).
+          IMAGE: python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
         run: |
           set -euo pipefail
           base="$(git rev-parse --verify "HEAD^1^{commit}")"
@@ -1992,7 +1976,7 @@ jobs:
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
           # The container's error output goes to a file that is never
           # printed: the job log is public.
-          if ! tar -c -C "${stage}" . | docker run --rm -i --pull never -e UV_PYTHON_DOWNLOADS=0 "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}" sh -euc '
+          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}" sh -euc '
             work="$(mktemp -d)"
             tar -x -C "${work}"
             cd "${work}/backend"
@@ -3972,19 +3956,6 @@ jobs:
             "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VER}/kubeconform-linux-amd64.tar.gz" \
             "${KUBECONFORM_SHA}" kubeconform
 
-      - name: Restore the Kubernetes schemas from the cache
-        # kubeconform checks each kind against a JSON schema that it would
-        # download from an outside server. scripts/ci/kubeconform.sh keeps
-        # the schemas in this folder, so a run reads them from the cache.
-        # Runs on main save the folder there. A new
-        # chart file makes a new key; the restore key brings the last folder,
-        # and only a schema it does not have yet is downloaded.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/meho-kubeconform-schemas
-          key: kubeconform-schemas-ci-${{ hashFiles('deploy/charts/meho/**') }}
-          restore-keys: kubeconform-schemas-ci-
-
       - name: Helm lint
         # The chart ships safe-by-default empty fields that
         # values.schema.json rejects at lint time on purpose; the same
@@ -4036,7 +4007,7 @@ jobs:
             --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
             > /tmp/rendered.yaml
 
-          "${GITHUB_WORKSPACE}/scripts/ci/kubeconform.sh" \
+          kubeconform \
             -strict \
             -kubernetes-version 1.28.0 \
             -ignore-missing-schemas \

@@ -116,60 +116,16 @@ def test_split_rejects_zero_shards() -> None:
         splitter.split(["tests/test_a.py"], {}, 0)
 
 
-def test_no_warning_while_fewer_than_a_quarter_of_the_files_have_no_time() -> None:
-    files = [f"tests/test_{i}.py" for i in range(8)]
-    durations = dict.fromkeys(files[:7], 1.0)
+def test_committed_durations_cover_most_ci_unit_files() -> None:
+    files = _ci_unit_files()
+    durations = splitter.load_durations()
 
-    assert splitter.old_measurements_warning(files, durations) is None
+    unmeasured = [name for name in files if name not in durations]
 
-
-def test_a_warning_when_a_quarter_of_the_files_have_no_time() -> None:
-    files = [f"tests/test_{i}.py" for i in range(8)]
-    durations = dict.fromkeys(files[:6], 1.0)
-
-    warning = splitter.old_measurements_warning(files, durations)
-
-    assert warning is not None
-    assert warning.startswith("::warning title=Old test times::2 of 8 test files")
-
-
-def test_the_shard_run_prints_the_warning_and_still_lists_its_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    """Old times never fail a shard: they fail no pull request in the merge queue."""
-    import io
-
-    durations_file = tmp_path / "durations.json"
-    durations_file.write_text('{"seconds": {"tests/test_a.py": 1.0}}')
-    monkeypatch.setattr("sys.stdin", io.StringIO("tests/test_a.py\ntests/test_b.py\n"))
-
-    assert splitter._main(["--durations", str(durations_file), "--shard", "1", "--total", "1"]) == 0
-
-    out, err = capfd.readouterr()
-    assert out.splitlines() == ["tests/test_a.py", "tests/test_b.py"]
-    assert "::warning title=Old test times::1 of 2 test files" in err
-
-
-@pytest.mark.parametrize(
-    ("files", "durations_file"),
-    [
-        pytest.param(_ci_unit_files, splitter.DURATIONS_FILE, id="unit"),
-        pytest.param(_ci_integration_files, INTEGRATION_DURATIONS, id="integration"),
-    ],
-)
-def test_the_committed_durations_files_load_and_name_real_test_files(
-    files: Any, durations_file: Path
-) -> None:
-    """The committed times load, and they are times of this repo's test files.
-
-    How many files have no time depends on what other pull requests added
-    since the last refresh. That only causes a warning in the shard log (see
-    ``old_measurements_warning``), so this test does not depend on it.
-    """
-    durations = splitter.load_durations(durations_file)
-
-    assert all(name.startswith("tests/") and name.endswith(".py") for name in durations)
-    assert set(durations) & set(files())
+    assert len(unmeasured) < len(files) // 4, (
+        "most unit test files have no measurement; refresh "
+        "tests/_unit_shard_durations.json (see tests/_unit_shard_split.py)"
+    )
 
 
 def test_measure_sums_seconds_per_file(tmp_path: Path) -> None:
@@ -246,6 +202,18 @@ def test_ci_integration_shards_match_the_split_in_the_workflow() -> None:
     assert f"TOTAL={len(shards)}\n" in run
     assert "find tests/integration -name 'test_*.py'" in run
     assert "--durations tests/_integration_shard_durations.json" in run
+
+
+def test_committed_durations_cover_most_ci_integration_files() -> None:
+    files = _ci_integration_files()
+    durations = splitter.load_durations(INTEGRATION_DURATIONS)
+
+    unmeasured = [name for name in files if name not in durations]
+
+    assert len(unmeasured) < len(files) // 4, (
+        "most integration test files have no measurement; refresh "
+        "tests/_integration_shard_durations.json (see tests/_unit_shard_split.py)"
+    )
 
 
 def test_cli_reads_the_given_durations_file(

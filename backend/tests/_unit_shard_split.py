@@ -41,13 +41,6 @@ Integration tests: the ``python-integration-shard`` job passes
 upload ``python-integration-shard-junit-<N>``; refresh that file the
 same way, with those artifacts and ``pytest-integration-shard.xml``.
 
-Old measurements: when a quarter or more of the files have no measured
-time, ``--shard`` prints a GitHub warning ("::warning::") in the job log.
-The split still works (such a file counts as the median), so the job does
-not fail. A failure would hit whichever pull request happens to add the
-file that crosses the limit, also in the merge queue, although that pull
-request did nothing wrong. Refresh the file when you see the warning.
-
 This is CI tooling, not a test (the leading underscore keeps pytest
 from collecting it).
 """
@@ -109,18 +102,6 @@ def predicted_seconds(shards: list[list[str]], durations: dict[str, float]) -> l
 def _seconds(name: str, durations: dict[str, float]) -> float:
     default = statistics.median(durations.values()) if durations else 1.0
     return durations.get(name, default) + FIXED_SECONDS_PER_FILE
-
-
-def old_measurements_warning(files: list[str], durations: dict[str, float]) -> str | None:
-    """Return a warning when a quarter or more of *files* have no measured time, else None."""
-    unique = set(files)
-    unmeasured = sum(1 for name in unique if name not in durations)
-    if not unique or unmeasured * 4 < len(unique):
-        return None
-    return (
-        f"::warning title=Old test times::{unmeasured} of {len(unique)} test files have no "
-        "measured time. Refresh the durations file (see tests/_unit_shard_split.py)."
-    )
 
 
 def measure(junit_xmls: list[Path]) -> dict[str, float]:
@@ -186,10 +167,6 @@ def _main(argv: list[str] | None = None) -> int:
         f"{unmeasured} files without a measurement)",
         file=sys.stderr,
     )
-    warning = old_measurements_warning(files, durations)
-    if warning is not None:
-        # The runner reads workflow commands on stderr too; stdout is the file list.
-        print(warning, file=sys.stderr)
     for name in shards[args.shard - 1]:
         print(name)
     return 0

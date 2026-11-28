@@ -4739,7 +4739,12 @@ async def _dispatch_now(
                 )
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
-            policy_decision_var.set(verdict.value)
+            # The audit table takes only the three known verdicts. An unknown
+            # one is refused below, so its row says ``deny``.
+            known_verdict = isinstance(verdict, PermissionVerdict)
+            policy_decision_var.set(
+                verdict.value if known_verdict else PermissionVerdict.DENY.value
+            )
             # With CUSTOM_POLICY on, the rule that decided this verdict.
             policy_rule_var.set(row_rule(kept_rule, verdict))
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:

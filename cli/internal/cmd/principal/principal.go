@@ -58,7 +58,8 @@ func newBlockCmd() *cobra.Command {
 		Use:   "block <sub> --reason <text>",
 		Short: "Block a person in MEHO (tenant_admin)",
 		Long: "block calls POST /api/v1/principals/blocked. <sub> is the login id " +
-			"of the person. The reason is kept in the audit log and in the " +
+			"of the person. The reason has 1 to 500 characters, with at least one " +
+			"character that is not a blank. It is kept in the audit log and in the " +
 			"block list. The person sees no reason.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
@@ -86,7 +87,7 @@ func newBlockCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "why the person is blocked (required)")
+	cmd.Flags().StringVar(&reason, "reason", "", "why the person is blocked: 1 to 500 characters, at least one that is not a blank (required)")
 	flags.add(cmd)
 	return cmd
 }
@@ -103,7 +104,8 @@ func newUnblockCmd() *cobra.Command {
 			"tenant admin blocked removes that block on their own login, in the tenant " +
 			"of the block. This needs a reason (--reason) and a fresh sign-in in the " +
 			"browser: unblock opens your browser and asks you to sign in again. Your " +
-			"`meho login` token is not enough for it. MEHO writes the reason and the " +
+			"`meho login` token is not enough for it. A reason has 1 to 500 characters, " +
+			"with at least one character that is not a blank. MEHO writes the reason and the " +
 			"sign-in to the audit log.",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
@@ -125,7 +127,8 @@ func newUnblockCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "",
-		"why the block is removed (required on your own login; kept in the audit log)")
+		"why the block is removed: 1 to 500 characters, at least one that is not a blank "+
+			"(required on your own login; kept in the audit log)")
 	flags.add(cmd)
 	return cmd
 }
@@ -148,7 +151,7 @@ func runUnblock(cmd *cobra.Command, authed *api.AuthedClient, url, sub string, r
 		switch {
 		case resp.StatusCode() == http.StatusUnprocessableEntity && strings.HasPrefix(detail, reasonRequired):
 			return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
-				"Removing a block on your own login needs a reason: add --reason <text>."), jsonOut)
+				strings.TrimSpace(strings.TrimPrefix(detail, reasonRequired+":"))), jsonOut)
 		case resp.StatusCode() == statusTokenRejected && strings.HasPrefix(detail, freshSignInRequired):
 			return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(detail), jsonOut)
 		}
@@ -264,9 +267,12 @@ func deleteBlock(ctx context.Context, authed *api.AuthedClient, sub string, reas
 		return resp, nil
 	}
 	if !approvals.NeedsFreshSignIn(resp.HTTPResponse) {
-		return retryOn401(ctx, authed, func(ctx context.Context) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
+		resp, err = retryOn401(ctx, authed, func(ctx context.Context) (*api.UnblockPrincipalRouteApiV1PrincipalsBlockedSubDeleteResponse, error) {
 			return call(ctx)
 		}, statusOf)
+		if err != nil || resp.StatusCode() != statusTokenRejected || !approvals.NeedsFreshSignIn(resp.HTTPResponse) {
+			return resp, err
+		}
 	}
 	src, err := startFreshSignIn(ctx, authed)
 	if err != nil {

@@ -395,6 +395,17 @@ shows, plus one schema rule:
    `api_key`, ...) is masked (`_scrub_secret_param_keys`, the broadcast
    name check).
 3. The connector-boundary value-shape engine runs on the result.
+4. A parameter with a registered **card echo** (`register_card_param_echo`
+   in `_preview.py`) is shown by its echo, in place of the value of
+   steps 1-3. The `manifest` of `k8s.apply` is a list with one entry per
+   document, and each entry holds only the document's identity:
+   `{"kind": ..., "metadata": {"namespace": ..., "name": ...}}`
+   (`_k8s_apply_manifest_identities`). The identity is read from the top
+   of each parsed document, so the rest of the document is not walked; a
+   field that is not a text is left out. The identity texts pass the
+   shared hiding of the approval card, so a name that looks like a secret
+   is the marker. When the echo cannot be built, the value is
+   `***REDACTED***`.
 
 The `preview_hash` still binds every value: the envelope carries
 `params_digest`, the keyed params hash of the approval queue

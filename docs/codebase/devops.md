@@ -2840,6 +2840,14 @@ workflow.
 
 **Tests.** `tests/test_ci_second_runner_site.py`.
 
+### Hosted runner trial (#7187)
+
+For one day, the job `python-unit-shard-hosted-trial` runs unit shard 6 of a
+full pull request run also on a GitHub-hosted runner (`ubuntu-latest`), beside
+the normal shard 6, with no secret and not as a required check, so the wait and
+the run time of the two can be compared. After the trial a small pull request
+removes the job.
+
 ### Runner-CPU rule
 
 **`pytest-xdist -n` must stay below the runner container's usable
@@ -3011,9 +3019,15 @@ The rule:
   name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand. Each version run
   has a fixed test id (`postgres-16`, `mongo-8`). A step before each upload
   of a test report replaces the proxy name in it.
-- The k3s node inside a test container does not pull its busybox image from
-  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it
-  skip.
+- The k3s node inside a test container has its own image store and does not
+  pull through the proxy. So the fixture of `test_connectors_k8s_k3d.py`
+  has the Docker daemon of the tests pull the images its pods need: busybox
+  (`MEHO_TEST_BUSYBOX_IMAGE`) and the pause image that every pod needs
+  before its containers start (`MEHO_TEST_K3S_PAUSE_IMAGE`). It copies both
+  into the node (`tests/integration/_k3s_node_images.py`) and starts k3s
+  with `--pause-image`. The node then pulls nothing for these pods. When a
+  copy fails, the test run gives a warning, and a pod test that cannot
+  start skips with the pod's warning events.
 - Packages that a Dockerfile installs at build time (the bind9 test images
   run `apt-get`) come from the Debian package servers. They are a package
   download, not an image pull, and stay outside the proxy.

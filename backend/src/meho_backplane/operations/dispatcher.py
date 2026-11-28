@@ -569,7 +569,7 @@ from meho_backplane.operations.uncertain_outcome import (
     with_uncertain_outcome,
 )
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
-from meho_backplane.policy.stamp import take_rule
+from meho_backplane.policy.stamp import row_rule, take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -4665,7 +4665,8 @@ async def _dispatch_now(
                 params=params,
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
-            policy_rule_var.set(take_rule())
+            kept_rule = take_rule()
+            policy_rule_var.set(kept_rule)
             console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
@@ -4741,6 +4742,8 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            # With CUSTOM_POLICY on, the rule that decided this verdict.
+            policy_rule_var.set(row_rule(kept_rule, verdict))
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
                 policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
                 structlog.contextvars.bind_contextvars(

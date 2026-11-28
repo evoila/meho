@@ -3985,6 +3985,7 @@ async def _handle_needs_approval(
         IdempotencyKeyConflictError,
         create_pending_request,
         record_approval_step_event,
+        resume_requester_var,
         rights_change_note,
     )
 
@@ -4109,6 +4110,10 @@ async def _handle_needs_approval(
                 preview_hash=preview_hash,
                 idempotency_key=idempotency_key,
                 reveal_secret=reveal_secret,
+                # A child call that waits while an approved run goes on belongs
+                # to the caller who started the run, like a step of the step
+                # gate. ``None`` outside such a run.
+                requester=resume_requester_var.get(),
                 category=descriptor.policy_category,
                 wait_reason=wait_reason,
                 install_category=descriptor.policy_install_category,

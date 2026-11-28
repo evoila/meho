@@ -2055,12 +2055,12 @@ class ResumeRequester(NamedTuple):
 _PERMISSION_PREFLIGHT_KEY = "permission_preflight"
 _REQUESTER_KEY = "requester"
 
-#: The requester of the approval request whose composite is being re-run
+#: The requester of the approval request whose call is being re-run
 #: (#4217). Bound by :func:`composite_resume_binding` on both resume paths
-#: (the reviewer's and the agent's). A composite step that waits again
-#: during the re-run is saved for this requester, so the new request belongs
-#: to whoever started the operation, whoever runs the re-run. ``None``
-#: outside such a re-run.
+#: (the reviewer's and the agent's). A step of the step gate or a child call
+#: (``dispatch_child``) that waits during the re-run is saved for this
+#: requester, so the new request belongs to whoever started the operation,
+#: whoever runs the re-run. ``None`` outside such a re-run.
 resume_requester_var: ContextVar[ResumeRequester | None] = ContextVar(
     "resume_requester",
     default=None,
@@ -3937,15 +3937,20 @@ def composite_resume_binding(
       ran is not sent again
       (:mod:`~meho_backplane.operations.composite_steps`).
     * ``resume_parent`` is ``None`` (a direct park) — yields ``None`` and sets
-      nothing; the caller keeps its generic re-dispatch.
+      no re-entry vars; the caller keeps its generic re-dispatch.
 
     When the park saved a ``state`` (#4217), the block also binds
     :data:`~meho_backplane.operations.composite.composite_resume_state_var`
     with it and the park's ``after_main_effect`` mark, so the re-entered
     composite can continue at the step that waited instead of running from
-    the start. It binds :data:`resume_requester_var` with *requester*, the
-    requester of the request being re-run, so a step that waits again is
-    saved for that requester on both resume paths (#4217).
+    the start.
+
+    For every park, direct or sub-op, the block binds
+    :data:`resume_requester_var` with *requester*, the requester of the
+    request being re-run. So a step of the step gate or a child call
+    (``dispatch_child``) that waits during the run is saved for the caller
+    who started the run, on both resume paths, not for the reviewer
+    who runs it.
 
     For every park, direct or sub-op, the block also binds
     :data:`~meho_backplane.operations._preview.approved_preview_var` with
@@ -3958,6 +3963,7 @@ def composite_resume_binding(
     from meho_backplane.operations._preview import approved_preview_var
 
     preview_token = approved_preview_var.set((subop_op_id, _approved_preview_body(proposed_effect)))
+    requester_token = resume_requester_var.set(requester)
     try:
         if resume_parent is None:
             yield None
@@ -3966,10 +3972,10 @@ def composite_resume_binding(
                 subop_op_id=subop_op_id,
                 subop_params_hash=subop_params_hash,
                 resume_parent=resume_parent,
-                requester=requester,
             ) as parent_call:
                 yield parent_call
     finally:
+        resume_requester_var.reset(requester_token)
         approved_preview_var.reset(preview_token)
 
 
@@ -3985,7 +3991,6 @@ def _composite_parent_binding(
     subop_op_id: str,
     subop_params_hash: str,
     resume_parent: dict[str, Any],
-    requester: ResumeRequester | None,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Bind the composite re-entry vars of :func:`composite_resume_binding`."""
     from meho_backplane.operations.composite import (
@@ -4010,7 +4015,6 @@ def _composite_parent_binding(
         if isinstance(saved_state, dict)
         else None
     )
-    requester_token = resume_requester_var.set(requester)
     try:
         with composite_resume_steps(
             parent_op_id,
@@ -4019,7 +4023,6 @@ def _composite_parent_binding(
         ):
             yield parent_op_id, cast(dict[str, Any], resume_parent["params"])
     finally:
-        resume_requester_var.reset(requester_token)
         composite_resume_state_var.reset(state_token)
         composite_resume_scope_var.reset(scope_token)
         composite_resume_var.reset(resume_token)

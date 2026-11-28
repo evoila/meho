@@ -86,8 +86,19 @@ _NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
     "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
-    f"web console. MEHO found no other admin in this tenant. See {_GUIDE}"
+    f"web console. MEHO found no other platform admin in this tenant. See {_GUIDE}"
 )
+#: The note for a change the person who asked is always refused to approve.
+_NOTE_ASKER_REFUSED = (
+    "A platform admin must approve this change. It is in MEHO's own login realm, in "
+    "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
+    f"MEHO found no other platform admin in this tenant. See {_GUIDE}"
+)
+#: The kinds whose asker is always refused as the approver.
+_ASKER_REFUSED = {
+    "approval-sign-in-flow-change-platform-admin-web",
+    "secret-move-into-own-password-login-realm-platform-admin-web",
+}
 
 #: The refusals, word for word or by the part that names the rule.
 _CONSOLE_ONLY = "Approve this change of rights in the web console."
@@ -356,8 +367,8 @@ def admins(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     monkeypatch.setattr(tenant_admins, "_kept", {})
 
     def _set(ids: frozenset[str] | None) -> None:
-        async def _read(*_args: object) -> frozenset[str] | None:
-            return ids
+        async def _read(*_args: object) -> tenant_admins._Admins | None:
+            return None if ids is None else tenant_admins._Admins(ids, ids)
 
         monkeypatch.setattr(tenant_admins, "_read", _read)
 
@@ -382,7 +393,12 @@ async def test_the_note_of_the_waiting_request(kind: _Kind, count: str, admins: 
 
     note = await rights_change_note(await _load(request_id))
 
-    assert note == (_NOTE if kind.note and count == "one-admin" else None)
+    expected = _NOTE_ASKER_REFUSED if kind.name in _ASKER_REFUSED else _NOTE
+    assert note == (expected if kind.note and count == "one-admin" else None)
+    if note is not None and kind.name in _ASKER_REFUSED:
+        assert "approve it yourself" not in note
+    if note is not None and kind.name not in _ASKER_REFUSED:
+        assert "You can approve it yourself only if you are a platform admin" in note
 
 
 def test_the_note_shows_for_five_kinds() -> None:

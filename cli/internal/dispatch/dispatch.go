@@ -183,9 +183,9 @@ func ParkedApprovalID(extras json.RawMessage) string {
 }
 
 // parkedNote returns extras.approval_note: a sentence the person must read
-// about the wait, for example that a change of rights in MEHO's own login
-// realm needs a platform admin and MEHO found no other admin in the
-// tenant. Empty when there is none.
+// about the wait. It is the note of the rule of rights_change_note: for
+// example that a platform admin must approve a change of rights, and MEHO
+// found no other platform admin in the tenant. Empty when there is none.
 func parkedNote(extras json.RawMessage) string {
 	if len(extras) == 0 || string(extras) == "null" {
 		return ""

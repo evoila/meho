@@ -91,7 +91,7 @@ class _MemoryValkey:
 class _Health:
     """Stands in for ``HealthResponse``; the handler only calls ``model_dump``."""
 
-    def model_dump(self, *, mode: str) -> dict[str, Any]:
+    def model_dump(self, *, mode: str, exclude: Any = None) -> dict[str, Any]:
         return {
             "operator": {"sub": "op-agent", "tenant_role": "operator"},
             "vault": {"reachable": True},

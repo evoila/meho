@@ -47,7 +47,7 @@ from uuid import UUID
 import httpx
 from pydantic import ValidationError
 
-from meho_backplane.auth.tenant_admins import LOGIN_REALM_APPROVER
+from meho_backplane.auth.tenant_admins import LOGIN_REALM_APPROVER, LOGIN_REALM_APPROVER_BASE
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.credential_backend import (
     DEFAULT_CREDENTIAL_BACKEND,
@@ -1359,7 +1359,7 @@ def result_awaiting_approval(
 
     *note* (#6641) is a sentence the person must read about the wait, for
     example that a platform admin must approve a change of rights in MEHO's
-    own login realm and MEHO found no other admin in the tenant
+    own login realm and MEHO found no other platform admin in the tenant
     (:func:`~meho_backplane.auth.tenant_admins.only_admin_note`). It
     is added to ``error`` and kept in ``extras["approval_note"]``; the key is
     absent without a note.
@@ -1367,8 +1367,8 @@ def result_awaiting_approval(
     *already_approved* is ``True`` when a retry with the same key got back a
     request that a person already approved. The ``error`` text then says
     that the request is already approved. A *note* leaves out the part
-    :data:`~meho_backplane.auth.tenant_admins.LOGIN_REALM_APPROVER`, which is
-    about who must approve, and keeps the rest, in ``error`` and in
+    :data:`~meho_backplane.auth.tenant_admins.LOGIN_REALM_APPROVER` (or its
+    shorter form), which is about who must approve, and keeps the rest, in ``error`` and in
     ``extras["approval_note"]``. ``status`` and the ``extras`` keys stay the
     same.
     """
@@ -1382,6 +1382,7 @@ def result_awaiting_approval(
     if already_approved:
         error = f"awaiting_approval: the approval request {approval_request_id} is already approved"
         note = note and note.removeprefix(LOGIN_REALM_APPROVER).lstrip()
+        note = note and note.removeprefix(LOGIN_REALM_APPROVER_BASE).lstrip()
     if note:
         extras["approval_note"] = note
         error = f"{error}. {note}"

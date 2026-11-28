@@ -2208,7 +2208,7 @@ type ApprovalSignInStatus struct {
 // ApprovalSignInStatusState defines model for ApprovalSignInStatus.State.
 type ApprovalSignInStatusState string
 
-// ApprovalsStatus The approval settings in force (#4830).
+// ApprovalsStatus The approval settings in force.
 //
 // “custody“ is the state of the approval key: “configured“,
 // “missing“ or “malformed“. “effective_posture“ says whether a
@@ -2218,29 +2218,35 @@ type ApprovalSignInStatusState string
 // someone else's instruction is allowed. The three values come from
 // :func:`meho_backplane.features.build_features_block`; they are state
 // words only, never a key value. “sign_in“ is the state of the
-// approval client's own login flow in Keycloak (#6280,
-// :mod:`meho_backplane.auth.approval_sign_in_flow`). “sign_in_level“
-// is the value of “APPROVAL_SIGN_IN_LEVEL“ (#6281): “off“,
+// approval client's own login flow in Keycloak
+// (:mod:`meho_backplane.auth.approval_sign_in_flow`). “sign_in_level“
+// is the value of “APPROVAL_SIGN_IN_LEVEL“: “off“,
 // “observe“, “auto“ or “required“. “sign_in_level_in_force“ is
 // what MEHO does now with an approval sign-in that lacks the approval
 // level: “off“, “observe“ or “required“ (“auto“ is “observe“
 // only while “sign_in“ shows for sure that the realm does not give the
 // level, and “required“ when it is “ok“ or its read failed).
 // “web_sign_in“ and “web_sign_in_level_in_force“ are the same for the
-// console's approval client (#6282): “auto“ reads each client's
+// console's approval client: “auto“ reads each client's
 // binding, so the two can differ. “sign_in_level_warning“ is a short
 // sentence whenever the level is not required in practice for either
 // client or a read failed, else “None“.
-// “rights_change_admins“ is how many admins of the caller's tenant could
-// approve a change of rights (#6641,
-// :mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
-// count them. With one admin, some changes of rights in MEHO's own login
-// realm cannot be approved.
+// “rights_change_admins“ is the number of tenant admins and platform
+// admins of the caller's tenant together
+// (:mod:`meho_backplane.auth.tenant_admins`), or “None“ when MEHO cannot
+// count them. “rights_change_platform_admins“ is the number of platform
+// admins among them, or “None“ when MEHO cannot count them. Only a
+// platform admin approves a change of rights in MEHO's own login realm, and
+// never the person who asked with a token, so with fewer than two some
+// changes cannot be approved. “GET /api/v1/health“ reports it; the
+// “meho_status“ tool of an MCP session and of a hosted agent leaves it
+// out (:func:`agent_health_payload`).
 type ApprovalsStatus struct {
-	Custody                  string `json:"custody"`
-	DelegatedDecisionPosture string `json:"delegated_decision_posture"`
-	EffectivePosture         string `json:"effective_posture"`
-	RightsChangeAdmins       *int   `json:"rights_change_admins"`
+	Custody                    string `json:"custody"`
+	DelegatedDecisionPosture   string `json:"delegated_decision_posture"`
+	EffectivePosture           string `json:"effective_posture"`
+	RightsChangeAdmins         *int   `json:"rights_change_admins"`
+	RightsChangePlatformAdmins *int   `json:"rights_change_platform_admins"`
 
 	// SignIn The state of the approval sign-in flow and its binding (#6280).
 	SignIn             *ApprovalSignInStatus `json:"sign_in,omitempty"`
@@ -7339,7 +7345,7 @@ type HealthResponse struct {
 	// the spend limit per login does not limit it.
 	AgentModelSpend *AgentModelSpend `json:"agent_model_spend,omitempty"`
 
-	// Approvals The approval settings in force (#4830).
+	// Approvals The approval settings in force.
 	//
 	// ``custody`` is the state of the approval key: ``configured``,
 	// ``missing`` or ``malformed``. ``effective_posture`` says whether a
@@ -7349,24 +7355,29 @@ type HealthResponse struct {
 	// someone else's instruction is allowed. The three values come from
 	// :func:`meho_backplane.features.build_features_block`; they are state
 	// words only, never a key value. ``sign_in`` is the state of the
-	// approval client's own login flow in Keycloak (#6280,
-	// :mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
-	// is the value of ``APPROVAL_SIGN_IN_LEVEL`` (#6281): ``off``,
+	// approval client's own login flow in Keycloak
+	// (:mod:`meho_backplane.auth.approval_sign_in_flow`). ``sign_in_level``
+	// is the value of ``APPROVAL_SIGN_IN_LEVEL``: ``off``,
 	// ``observe``, ``auto`` or ``required``. ``sign_in_level_in_force`` is
 	// what MEHO does now with an approval sign-in that lacks the approval
 	// level: ``off``, ``observe`` or ``required`` (``auto`` is ``observe``
 	// only while ``sign_in`` shows for sure that the realm does not give the
 	// level, and ``required`` when it is ``ok`` or its read failed).
 	// ``web_sign_in`` and ``web_sign_in_level_in_force`` are the same for the
-	// console's approval client (#6282): ``auto`` reads each client's
+	// console's approval client: ``auto`` reads each client's
 	// binding, so the two can differ. ``sign_in_level_warning`` is a short
 	// sentence whenever the level is not required in practice for either
 	// client or a read failed, else ``None``.
-	// ``rights_change_admins`` is how many admins of the caller's tenant could
-	// approve a change of rights (#6641,
-	// :mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
-	// count them. With one admin, some changes of rights in MEHO's own login
-	// realm cannot be approved.
+	// ``rights_change_admins`` is the number of tenant admins and platform
+	// admins of the caller's tenant together
+	// (:mod:`meho_backplane.auth.tenant_admins`), or ``None`` when MEHO cannot
+	// count them. ``rights_change_platform_admins`` is the number of platform
+	// admins among them, or ``None`` when MEHO cannot count them. Only a
+	// platform admin approves a change of rights in MEHO's own login realm, and
+	// never the person who asked with a token, so with fewer than two some
+	// changes cannot be approved. ``GET /api/v1/health`` reports it; the
+	// ``meho_status`` tool of an MCP session and of a hosted agent leaves it
+	// out (:func:`agent_health_payload`).
 	Approvals         *ApprovalsStatus    `json:"approvals,omitempty"`
 	ConnectorPackages *[]ConnectorPackage `json:"connector_packages,omitempty"`
 

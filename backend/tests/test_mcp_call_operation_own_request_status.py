@@ -942,7 +942,11 @@ async def test_a_waiting_change_of_rights_with_one_admin_has_the_note(
     )
 
     async def _only_one(
-        tenant_id: uuid.UUID, requester_sub: str, *, login_realm: bool
+        tenant_id: uuid.UUID,
+        requester_sub: str,
+        *,
+        login_realm: bool,
+        asker_never_approves: bool = False,
     ) -> str | None:
         return "You are the only admin." if login_realm else None
 

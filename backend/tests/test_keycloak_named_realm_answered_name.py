@@ -368,7 +368,7 @@ _ONE_ADMIN_NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
     "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
-    "web console. MEHO found no other admin in this tenant. See "
+    "web console. MEHO found no other platform admin in this tenant. See "
     "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
     "#changes-of-rights-need-another-admin"
 )
@@ -413,8 +413,8 @@ async def test_a_plain_side_with_an_accented_admin_realm_waits_with_the_one_admi
     _protect_accented(monkeypatch, "admin-realm")
     monkeypatch.setattr(tenant_admins, "_kept", {})
 
-    async def _only_the_asker(*_args: object) -> frozenset[str]:
-        return frozenset({_REQUESTER})
+    async def _only_the_asker(*_args: object) -> tenant_admins._Admins:
+        return tenant_admins._Admins(frozenset({_REQUESTER}), frozenset({_REQUESTER}))
 
     monkeypatch.setattr(tenant_admins, "_read", _only_the_asker)
     vault = install_fake_client(monkeypatch)

@@ -33,6 +33,8 @@ from meho_backplane.auth.tenant_admins import (
     RIGHTS_CHANGE_GUIDE_URL,
     admin_count,
     only_admin_note,
+    platform_admin_count,
+    platform_admin_ids,
     tenant_admin_ids,
 )
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
@@ -57,7 +59,7 @@ _FULL_NOTE = (
     "A platform admin must approve this change. It is in MEHO's own login realm, in "
     "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
     "You can approve it yourself only if you are a platform admin and asked for it in the "
-    "web console. MEHO found no other admin in this tenant. See "
+    "web console. MEHO found no other platform admin in this tenant. See "
     "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
     "#changes-of-rights-need-another-admin"
 )
@@ -316,8 +318,8 @@ async def test_the_count_is_kept_and_not_known_only_briefly(
 
 
 def _known(monkeypatch: pytest.MonkeyPatch, ids: set[str] | None) -> None:
-    async def read(*_args: object) -> frozenset[str] | None:
-        return None if ids is None else frozenset(ids)
+    async def read(*_args: object) -> tenant_admins._Admins | None:
+        return None if ids is None else tenant_admins._Admins(frozenset(ids), frozenset(ids))
 
     monkeypatch.setattr(tenant_admins, "_read", read)
 
@@ -706,3 +708,197 @@ def test_the_classify_page_shows_the_note() -> None:
         error=None, preview=None, form={}, requested=requested | {"approval_note": None}
     )
     assert "data-classify-approval-note" not in plain
+
+
+# --- platform admins on their own -----------------------------------------------------------
+
+_PLATFORM_P = "user-platform-p"
+_PLATFORM_Q = "user-platform-q"
+
+
+def _mount_realm(mock: respx.MockRouter, tenant_admins_: list[str], platform: list[str]) -> None:
+    _mount(
+        mock,
+        [_admins_group(), _platform_group()],
+        {
+            "g-admins": [_user(u) for u in tenant_admins_],
+            "g-platform": [_user(u) for u in platform],
+        },
+    )
+
+
+async def test_platform_admins_are_counted_on_their_own() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
+        assert await tenant_admin_ids(_TENANT) == frozenset({_ADMIN_A, _PLATFORM_P})
+        assert await platform_admin_ids(_TENANT) == frozenset({_PLATFORM_P})
+        assert await admin_count(_TENANT) == 2
+        assert await platform_admin_count(_TENANT) == 1
+
+
+async def test_a_tenant_admin_alone_is_no_platform_admin() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A)]})
+        assert await platform_admin_ids(_TENANT) == frozenset()
+        assert await platform_admin_count(_TENANT) == 0
+
+
+@pytest.mark.parametrize(
+    ("tenant_side", "platform", "asker", "shows"),
+    [
+        ([_ADMIN_A], [_PLATFORM_P], _PLATFORM_P, True),
+        ([_ADMIN_A], [_PLATFORM_P], _PLATFORM_P.upper(), True),
+        ([_ADMIN_A], [_PLATFORM_P, _PLATFORM_Q], _PLATFORM_P, False),
+        ([_ADMIN_A], [_PLATFORM_P], _ADMIN_A, False),
+        ([_ADMIN_A, _ADMIN_B], [], _ADMIN_A, True),
+        ([_ADMIN_A], [], "user-operator", True),
+    ],
+    ids=[
+        "one platform admin asks, a tenant admin is the other admin",
+        "the asker id in upper case",
+        "two platform admins",
+        "a tenant admin asks and a platform admin can approve",
+        "tenant admins only",
+        "an Operator asks and the tenant has no platform admin",
+    ],
+)
+async def test_the_note_counts_platform_admins_only(
+    tenant_side: list[str], platform: list[str], asker: str, shows: bool
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        if platform:
+            _mount_realm(mock, tenant_side, platform)
+        else:
+            _mount(mock, [_admins_group()], {"g-admins": [_user(u) for u in tenant_side]})
+        note = await only_admin_note(_TENANT, asker)
+    assert note == (_FULL_NOTE if shows else None)
+
+
+async def test_no_note_outside_the_login_realm_without_a_platform_admin() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, [_admins_group()], {"g-admins": [_user(_ADMIN_A)]})
+        assert await only_admin_note(_TENANT, _ADMIN_A, login_realm=False) is None
+
+
+async def test_the_note_of_a_change_the_asker_never_approves_has_no_self_approval() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
+        note = await only_admin_note(_TENANT, _PLATFORM_P, asker_never_approves=True)
+    assert note == (
+        "A platform admin must approve this change. It is in MEHO's own login realm, in "
+        "`master` or in the target's admin realm, or MEHO could not make sure that it is not. "
+        f"MEHO found no other platform admin in this tenant. See {RIGHTS_CHANGE_GUIDE_URL}"
+    )
+    assert "approve it yourself" not in note
+
+
+@pytest.mark.parametrize("member", [{"username": "no-id"}, {"id": "", "username": "empty"}])
+async def test_a_platform_admin_with_no_id_makes_the_count_not_known(
+    member: dict[str, Any],
+) -> None:
+    """A tenant admin is found, but one platform admin cannot be counted."""
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(
+            mock,
+            [_admins_group(), _platform_group()],
+            {"g-admins": [_user(_ADMIN_A)], "g-platform": [_user(_PLATFORM_P), member]},
+        )
+        assert await platform_admin_count(_TENANT) is None
+        assert await admin_count(_TENANT) is None
+        assert await only_admin_note(_TENANT, _ADMIN_A) is None
+
+
+async def test_a_realm_with_no_admin_group_member_is_not_known() -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount(mock, [_operators_group()], {"g-operators": [_user("user-op")]})
+        assert await only_admin_note(_TENANT, _PLATFORM_P) is None
+        assert await platform_admin_count(_TENANT) is None
+
+
+async def _health(monkeypatch: pytest.MonkeyPatch, *, with_platform_admins: bool) -> Any:
+    async def vault(*_args: object, **_kwargs: object) -> VaultStatus:
+        return VaultStatus(reachable=True, read_ok=True, detail=None)
+
+    async def sign_in() -> ApprovalSignInStatus:
+        return ApprovalSignInStatus(state="ok", client="meho-cli-approve")
+
+    monkeypatch.setattr("meho_backplane.api.v1.health._probe_federation", vault)
+    monkeypatch.setattr("meho_backplane.api.v1.health.read_approval_sign_in", sign_in)
+    operator = Operator(
+        sub="op-platform-count",
+        raw_jwt="<jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    return await build_health_response(operator, with_platform_admins=with_platform_admins)
+
+
+async def test_health_reports_the_platform_admin_count_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
+        response = await _health(monkeypatch, with_platform_admins=True)
+    assert response.approvals is not None
+    assert response.approvals.rights_change_admins == 2
+    assert response.approvals.rights_change_platform_admins == 1
+
+
+async def test_health_without_the_platform_admin_count_reports_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
+        response = await _health(monkeypatch, with_platform_admins=False)
+    assert response.approvals is not None
+    assert response.approvals.rights_change_admins == 2
+    assert response.approvals.rights_change_platform_admins is None
+
+
+async def _mcp_status(operator: Operator) -> dict[str, Any]:
+    from meho_backplane.mcp.tools import meho_status
+
+    return await meho_status._meho_status_handler(operator, {})
+
+
+async def _hosted_status(operator: Operator) -> dict[str, Any]:
+    from meho_backplane.agent import toolset_discovery
+
+    return await toolset_discovery._hosted_status(operator, {})
+
+
+@pytest.mark.parametrize("status", [_mcp_status, _hosted_status], ids=["mcp", "hosted"])
+async def test_meho_status_leaves_out_the_platform_admin_count(
+    monkeypatch: pytest.MonkeyPatch, status: Any
+) -> None:
+    """Both ``meho_status`` tools leave the field out, also when the count was read."""
+    from meho_backplane.api.v1 import health
+
+    real = health.build_health_response
+
+    async def _build(operator: Operator) -> Any:
+        return await real(operator, with_platform_admins=True)
+
+    monkeypatch.setattr(health, "build_health_response", _build)
+    operator = Operator(
+        sub="op-platform-count",
+        raw_jwt="<jwt>",
+        tenant_id=_TENANT,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+
+    async def vault(*_args: object, **_kwargs: object) -> VaultStatus:
+        return VaultStatus(reachable=True, read_ok=True, detail=None)
+
+    async def sign_in() -> ApprovalSignInStatus:
+        return ApprovalSignInStatus(state="ok", client="meho-cli-approve")
+
+    monkeypatch.setattr("meho_backplane.api.v1.health._probe_federation", vault)
+    monkeypatch.setattr("meho_backplane.api.v1.health.read_approval_sign_in", sign_in)
+    with respx.mock(assert_all_called=False) as mock:
+        _mount_realm(mock, [_ADMIN_A], [_PLATFORM_P])
+        payload = await status(operator)
+    assert payload["approvals"]["rights_change_admins"] == 2
+    assert "rights_change_platform_admins" not in payload["approvals"]

@@ -316,15 +316,16 @@ def keep_allowed_connectors(
 async def _hosted_status(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
     """Return the ``meho_status`` health payload without the MCP-session fields.
 
-    Same payload builder as the MCP tool and ``GET /api/v1/health``.
+    Same payload builder as the MCP tool, so the platform admin count of
+    ``GET /api/v1/health`` is left out here too.
     """
     # Imported here: the health module imports the agent package, so a
     # module-level import would be circular.
-    from meho_backplane.api.v1.health import build_health_response
+    from meho_backplane.api.v1.health import agent_health_payload
 
     if arguments:
         raise ModelRetry(f"{_MEHO_STATUS} takes no arguments.")
-    health = (await build_health_response(operator)).model_dump(mode="json")
+    health = await agent_health_payload(operator)
     return {k: v for k, v in health.items() if k not in _MCP_SESSION_STATUS_FIELDS}
 
 

@@ -107,25 +107,28 @@ const secondAdminCheckName = "second admin"
 // rightsChangeGuide is the guide part that explains who approves a change of rights.
 const rightsChangeGuide = "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
 
-// addSecondAdminCheck adds one line with the number of admins of the tenant
-// (approvals.rights_change_admins in /api/v1/health). One admin is a
-// warning: some changes of rights in MEHO's own login realm need a platform
-// admin other than the person who asked. A backplane that does not report
-// the count, or that cannot count the admins, gets no line.
+// addSecondAdminCheck adds one line with the number of platform admins of
+// the tenant (approvals.rights_change_platform_admins in /api/v1/health).
+// Only a platform admin approves a change of rights in MEHO's own login
+// realm, and never the person who asked with a token. So no platform admin
+// or one is a warning. A backplane that does not report the count, or that
+// cannot count the admins, gets no line.
 func addSecondAdminCheck(r *doctorReport, h *api.HealthResponse) {
-	if h.Approvals == nil || h.Approvals.RightsChangeAdmins == nil {
+	if h.Approvals == nil || h.Approvals.RightsChangePlatformAdmins == nil {
 		return
 	}
-	n := *h.Approvals.RightsChangeAdmins
-	if n == 1 {
+	n := *h.Approvals.RightsChangePlatformAdmins
+	if n <= 1 {
+		detail := "This tenant has only one platform admin."
+		if n == 0 {
+			detail = "This tenant has no platform admin."
+		}
 		r.add(authed(secondAdminCheckName, doctorWarn, "",
-			"This tenant has only one admin. Some changes of rights in MEHO's own login realm "+
+			detail+" Some changes of rights in MEHO's own login realm "+
 				"need a platform admin other than the person who asked.",
-			"add a second platform admin in Keycloak (in MEHO-Platform-Admins); see "+rightsChangeGuide))
+			"add a platform admin other than the person who asks (in MEHO-Platform-Admins); see "+rightsChangeGuide))
 		return
 	}
-	if n > 1 {
-		r.add(authed(secondAdminCheckName, doctorOK, "",
-			fmt.Sprintf("%d admins in this tenant", n), ""))
-	}
+	r.add(authed(secondAdminCheckName, doctorOK, "",
+		fmt.Sprintf("%d platform admins in this tenant", n), ""))
 }

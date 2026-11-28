@@ -131,41 +131,52 @@ func TestDoctor_ReportsAnUnboundApprovalSignIn(t *testing.T) {
 }
 
 func TestSecondAdminCheck(t *testing.T) {
-	count := func(n int) *api.HealthResponse {
-		return &api.HealthResponse{Approvals: &api.ApprovalsStatus{RightsChangeAdmins: &n}}
+	count := func(everyone, platform int) *api.HealthResponse {
+		return &api.HealthResponse{Approvals: &api.ApprovalsStatus{
+			RightsChangeAdmins: &everyone, RightsChangePlatformAdmins: &platform}}
 	}
-	t.Run("one admin warns with the full texts", func(t *testing.T) {
+	hint := "add a platform admin other than the person who asks (in MEHO-Platform-Admins); see " +
+		"https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
+	tail := " Some changes of rights in MEHO's own login realm need a platform admin other than the person who asked."
+	for name, tc := range map[string]struct {
+		h      *api.HealthResponse
+		detail string
+	}{
+		"one platform admin": {count(2, 1), "This tenant has only one platform admin." + tail},
+		"tenant admins only": {count(3, 0), "This tenant has no platform admin." + tail},
+		"no platform admin":  {count(1, 0), "This tenant has no platform admin." + tail},
+	} {
+		t.Run(name+" warns with the full texts", func(t *testing.T) {
+			r := &doctorReport{}
+			addSecondAdminCheck(r, tc.h)
+			c := findCheck(t, r, secondAdminCheckName)
+			if c.Layer != layerAuthed || c.Status != doctorWarn {
+				t.Errorf("layer/status = %s/%s, want %s/%s", c.Layer, c.Status, layerAuthed, doctorWarn)
+			}
+			if c.Detail != tc.detail {
+				t.Errorf("detail = %q, want %q", c.Detail, tc.detail)
+			}
+			if c.Hint != hint {
+				t.Errorf("hint = %q, want %q", c.Hint, hint)
+			}
+			if doctorExitCode(r) != 0 {
+				t.Errorf("exit code = %d, want 0: the line is a warning", doctorExitCode(r))
+			}
+		})
+	}
+	t.Run("two platform admins is ok", func(t *testing.T) {
 		r := &doctorReport{}
-		addSecondAdminCheck(r, count(1))
+		addSecondAdminCheck(r, count(2, 2))
 		c := findCheck(t, r, secondAdminCheckName)
-		if c.Layer != layerAuthed || c.Status != doctorWarn {
-			t.Errorf("layer/status = %s/%s, want %s/%s", c.Layer, c.Status, layerAuthed, doctorWarn)
-		}
-		want := "This tenant has only one admin. Some changes of rights in MEHO's own login realm " +
-			"need a platform admin other than the person who asked."
-		if c.Detail != want {
-			t.Errorf("detail = %q, want %q", c.Detail, want)
-		}
-		wantHint := "add a second platform admin in Keycloak (in MEHO-Platform-Admins); see " +
-			"https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/#changes-of-rights-need-another-admin"
-		if c.Hint != wantHint {
-			t.Errorf("hint = %q, want %q", c.Hint, wantHint)
-		}
-		if doctorExitCode(r) != 0 {
-			t.Errorf("exit code = %d, want 0: the line is a warning", doctorExitCode(r))
+		if c.Status != doctorOK || c.Detail != "2 platform admins in this tenant" || c.Hint != "" {
+			t.Errorf("status/detail/hint = %s/%q/%q, want ok with 2 platform admins", c.Status, c.Detail, c.Hint)
 		}
 	})
-	t.Run("two admins is ok", func(t *testing.T) {
-		r := &doctorReport{}
-		addSecondAdminCheck(r, count(2))
-		c := findCheck(t, r, secondAdminCheckName)
-		if c.Status != doctorOK || c.Detail != "2 admins in this tenant" || c.Hint != "" {
-			t.Errorf("status/detail/hint = %s/%q/%q, want ok with 2 admins", c.Status, c.Detail, c.Hint)
-		}
-	})
+	two := 2
 	for name, h := range map[string]*api.HealthResponse{
 		"older backplane":             {},
 		"count not known (no number)": {Approvals: &api.ApprovalsStatus{}},
+		"only the all-admin count":    {Approvals: &api.ApprovalsStatus{RightsChangeAdmins: &two}},
 	} {
 		t.Run(name+" gives no line", func(t *testing.T) {
 			r := &doctorReport{}

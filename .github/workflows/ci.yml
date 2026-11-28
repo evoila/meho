@@ -767,9 +767,13 @@ jobs:
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
       # not-yet-provisioned repos) the directory does not exist, the
-      # resolver returns None, and the spec-backed lanes pytest.skip
-      # exactly as they did before #2949. When the checkout ran, the
-      # seconds-cheap reconcile lanes run for real in this job.
+      # resolver returns None, and the spec-backed tests skip. The step
+      # "Check the skipped tests of this shard" then takes the
+      # without_secrets numbers of tests/_skip_limits.json, so a run
+      # without the shelf passes, and a test file that skips more tests
+      # than its number fails.
+      # When the checkout ran, the seconds-cheap reconcile lanes run for
+      # real in this job and the check takes the with_secrets numbers.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -862,8 +866,8 @@ jobs:
         #
         # SPEC_SHELF_TOKEN is a fine-grained PAT: Contents read-only on
         # the single private shelf repo, nothing else. Secret absent →
-        # this step skips → the spec lanes pytest.skip exactly as
-        # before this step existed. Fork PRs never reach this step (the
+        # this step skips → the spec lanes skip, and the skip limit check
+        # takes the without_secrets numbers. Fork PRs never reach this step (the
         # job-level fork guard skips the whole job) and would not see
         # the secret anyway (GitHub withholds secrets from fork-PR
         # runs). Dependabot runs read the Dependabot secret store,
@@ -902,7 +906,8 @@ jobs:
         # job — otherwise the resolvers would return None and the spec
         # lanes would silently go back to skipping, undetected (the
         # exact regression #2949 closes). Without the secret this step
-        # skips and lane-skip stays the documented degraded mode.
+        # skips, the spec tests skip, and the skip limit check takes the
+        # without_secrets numbers of tests/_skip_limits.json.
         # Prints file *presence* only — never spec content.
         if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
@@ -1065,6 +1070,18 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: v3.16.4
+
+      - &unit-node
+        name: Install Node
+        # The console script tests (tests/test_ui_*_js.py, test_ui_pwa.py,
+        # test_web_push_service_worker.py and others) run the JavaScript in
+        # node. MEHO_REQUIRE_NODE=1 in the pytest step makes them FAIL, not
+        # skip, when node is missing. Same pinned action and node version as
+        # plugin-test.yml. No package cache: the repo root has no package.json.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
 
       - &unit-php-name
         name: Name the PHP package cache
@@ -1321,6 +1338,8 @@ jobs:
           # Same for the linux.script.run locale test and the Install the
           # GBK locale data step above.
           MEHO_REQUIRE_GBK_LOCALE: "1"
+          # Same for the console script tests and the Install Node step above.
+          MEHO_REQUIRE_NODE: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the
@@ -1503,6 +1522,28 @@ jobs:
             echo "::error title=Unit perf budget exceeded (shard ${SHARD}/${TOTAL})::shard pytest ${dur}s > per-shard budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s (MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py — #793/#827). Amortize the cost or rebalance the shards; do not just bump the budget."
             exit 1
           fi
+
+      - &unit-skip-check
+        name: Check the skipped tests of this shard
+        # A skipped test shows as green. This step fails when a test file
+        # skipped more tests than tests/_skip_limits.json allows for it (0
+        # when it is not listed). The count is per test file, so it holds for
+        # any split and for the short runs. See tests/_skip_limit_check.py.
+        # A run without the spec shelf takes the without_secrets numbers
+        # (the spec tests skip there); this step runs in both kinds of run.
+        # The second-site job has no SPEC_SHELF_READY and no shelf, so it
+        # takes the without_secrets numbers too.
+        # --selection: a file that ran whole and skipped fewer tests gives a
+        # notice to lower its number; a file picked by test id (test map
+        # run) gives none.
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--lane unit --selection "${RUNNER_TEMP}/unit-files.txt")
+          if [ "${SPEC_SHELF_READY:-}" != "true" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-unit-shard.xml
 
       - name: Hide the proxy name in the test reports
         # GitHub hides a secret in the job log only. A test image name starts
@@ -1722,6 +1763,7 @@ jobs:
 
       - *unit-spacy
       - *unit-helm
+      - *unit-node
       - *unit-php-name
       - *unit-php-restore
       - *unit-php-install
@@ -1730,6 +1772,7 @@ jobs:
       - *unit-locale-install
       - *unit-download-picked
       - *unit-pytest
+      - *unit-skip-check
 
       - name: Hide the proxy name in the test reports
         # The same step as in python-unit-shard, with no `env:` block, so it
@@ -1795,10 +1838,20 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Install Node
+        # tests/test_ci_repo_secrets.py runs a script in node. Same pin as
+        # the unit shards; MEHO_REQUIRE_NODE=1 below makes those tests fail,
+        # not skip, when node is missing.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
       - name: Pytest (tests that read files outside backend)
         shell: bash
         env:
           MEHO_REQUIRE_HELM: "1"
+          MEHO_REQUIRE_NODE: "1"
         run: |
           set -euo pipefail
           mapfile -t FILES < <(uv run python tests/_outside_backend_tests.py)
@@ -3171,7 +3224,9 @@ jobs:
         # serves the exact tag the tests ask for. Every other image a test
         # pulls or builds from is named here too (docs/codebase/devops.md,
         # "Test images come through the image proxy");
-        # backend/tests/test_ci_test_images.py pins it.
+        # backend/tests/test_ci_test_images.py pins it. When the live
+        # Keycloak tests skip, the skip limit check takes the
+        # without_secrets numbers of tests/_skip_limits.json.
         env:
           CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
           SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
@@ -3354,6 +3409,22 @@ jobs:
           if [ -r "${RUNNER_TEMP}/memory-sampler.pid" ]; then
             kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
           fi
+
+      - name: Check the skipped tests of this shard
+        # Same check as in python-unit-shard, with the integration numbers
+        # of tests/_skip_limits.json. Some k3s skips depend on how fast pods
+        # start, so a file that skipped fewer tests gives only a notice.
+        # Without the Keycloak test image (empty without the image proxy)
+        # the live Keycloak tests skip, so the check takes the
+        # without_secrets numbers; this step runs in both kinds of run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--lane integration)
+          if [ -z "${MEHO_TEST_KEYCLOAK_IMAGE:-}" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-integration-shard.xml
 
       - name: Hide the proxy name in the test reports
         # GitHub hides a secret in the job log only. A test image name starts

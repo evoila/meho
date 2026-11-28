@@ -25,7 +25,7 @@ REST and MCP call doors:
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -341,6 +341,13 @@ async def test_a_reader_agent_mcp_call_with_no_step_list_keeps_its_answer(
 # --- The guard over the operations the core registers -------------------------------------
 
 
+@pytest.fixture
+def _own_catalog_snapshot() -> Iterator[None]:
+    """Drop the catalog snapshot after the test, so the stand-in operation is not kept in it."""
+    yield
+    clear_typed_op_snapshot()
+
+
 async def _register_the_core(embedding_service: AsyncMock) -> None:
     """Run every registrar for real, so each one registers its step lists again."""
     clear_typed_op_snapshot()
@@ -360,6 +367,7 @@ async def _reads_with_a_step_list() -> list[str]:
     )
 
 
+@pytest.mark.usefixtures("_own_catalog_snapshot")
 async def test_no_operation_of_the_core_with_a_step_list_counts_as_a_read(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -368,6 +376,7 @@ async def test_no_operation_of_the_core_with_a_step_list_counts_as_a_read(
     assert await _reads_with_a_step_list() == []
 
 
+@pytest.mark.usefixtures("_own_catalog_snapshot")
 async def test_the_guard_names_a_read_with_a_step_list(stub_embedding_service: AsyncMock) -> None:
     await _register_the_core(stub_embedding_service)
     async with get_sessionmaker()() as session:

@@ -33,9 +33,18 @@ expected=3
 # The runner label of the second site, and the only workflows that name it.
 site_label="meho-runners-ci-heavy-site2"
 site_workflows=(ci.yml second-site-smoke.yml)
-# A run created earlier than this cannot hold a job that a runner started in
-# the last limit minutes, in practice.
-lookback_hours=3
+# How long ago a run of a workflow can have been created and still hold a job
+# that a runner of the site started in the last limit minutes. GitHub lets a
+# person re-run a run up to 30 days after it was created, and a re-run of the
+# smoke check uses the site again. A re-run of ci.yml uses today's pool (see
+# `runs-on` of python-unit-shard-second-site), so its first attempt is the
+# only one on the site, and that started a few hours after the run at most.
+lookback_hours() {
+  case "$1" in
+    ci.yml) echo 3 ;;
+    *) echo $(( 30 * 24 )) ;;
+  esac
+}
 
 api="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
 
@@ -82,20 +91,24 @@ jq_defs='def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;'
 # busy site costs few API calls.
 site_last_start() {
   local window=$(( limit_minutes * 60 )) created workflow runs ids run jobs newest
-  created="$(jq -nr --argjson s "$(( lookback_hours * 3600 ))" \
-    'now - $s | strftime("%Y-%m-%dT%H:%M:%SZ")')" || return 1
   for workflow in "${site_workflows[@]}"; do
+    created="$(jq -nr --argjson s "$(( $(lookback_hours "${workflow}") * 3600 ))" \
+      'now - $s | strftime("%Y-%m-%dT%H:%M:%SZ")')" || return 1
     runs="$(gh api --paginate \
       "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?per_page=100&created=%3E%3D${created}" \
       2>/dev/null)" || return 1
     # A run that ended before the window cannot hold a job that started in it.
+    # A re-run moves `updated_at` of an old run.
     ids="$(jq -sr --argjson w "${window}" "${jq_defs}"'
       .[].workflow_runs[]
       | select(.status != "completed" or (.updated_at | epoch) >= now - $w)
       | .id' <<<"${runs}" 2>/dev/null)" || return 1
     for run in ${ids}; do
+      # `filter=all` reads every attempt: a site job of the first attempt
+      # counts also when a later attempt ran on today's pool.
       jobs="$(gh api --paginate \
-        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?per_page=100" 2>/dev/null)" || return 1
+        "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?per_page=100&filter=all" \
+        2>/dev/null)" || return 1
       # A queued job has a start time too, but no runner name yet.
       newest="$(jq -sr --arg label "${site_label}" --argjson w "${window}" "${jq_defs}"'
         [.[].jobs[]
@@ -140,25 +153,31 @@ decide() {
 }
 
 # What the loop saw is at least a minute old, and a shard may have started
-# since. So every cancel comes right after a fresh read, and only when that
-# read shows at least one shard that still waits and the site looks down (or
-# its jobs cannot be read, or the busy wait is over). A read of this run that
-# fails, or that shows no waiting shard but not every shard started, never
-# leads to a cancel: it is read again.
+# since. The reads of the site take time too. So once the site looks down (or
+# its jobs cannot be read, or the busy wait is over), this run is read once
+# more, and the cancel comes right after that read, only when it shows at
+# least one shard that still waits. A read of this run that fails, or that
+# shows no waiting shard but not every shard started, never leads to a
+# cancel: it is read again.
 try=1
+stop_reason=""
 while (( try <= last_tries )); do
   if ! result="$(read_shards)"; then
     echo "could not read this run's jobs before stopping it"
   else
     read -r found waiting_now started <<<"${result}"
     if [[ "${waiting_now}" -gt 0 ]]; then
-      if ! decide; then
-        busy_polls_left=$(( busy_polls_left - 1 ))
-        try=1
-        sleep "${interval_seconds}"
+      if [[ -z "${stop_reason}" ]]; then
+        if ! decide; then
+          busy_polls_left=$(( busy_polls_left - 1 ))
+          try=1
+          sleep "${interval_seconds}"
+          continue
+        fi
+        stop_reason="${reason}"
         continue
       fi
-      echo "::error title=Second runner site::${reason} Re-run it: a re-run uses today's runners. If this repeats, set the repository variable MEHO_CI_SECOND_SITE to off."
+      echo "::error title=Second runner site::${stop_reason} Re-run it: a re-run uses today's runners. If this repeats, set the repository variable MEHO_CI_SECOND_SITE to off."
       if gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
         echo "Cancel request accepted."
         exit 0

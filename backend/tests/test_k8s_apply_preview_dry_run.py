@@ -485,6 +485,37 @@ def test_a_refusal_that_quotes_base64_data_with_line_breaks_hides_it(
     assert _SECRET_VALUE not in json.dumps(answer)
 
 
+#: Binary Secret data: not UTF-8 text, so only its base64 form can be quoted.
+_BINARY_SECRET: bytes = bytes(range(0xF0, 0x100)) * 3
+
+
+@pytest.mark.parametrize("raw", [_SECRET_VALUE.encode(), _BINARY_SECRET], ids=["text", "binary"])
+@pytest.mark.parametrize("quoted_as", ["warning", "refusal"])
+def test_a_text_that_quotes_base64_data_on_one_line_hides_it(
+    monkeypatch: pytest.MonkeyPatch, raw: bytes, quoted_as: str
+) -> None:
+    _switch_on(monkeypatch)
+    encoded = base64.b64encode(raw).decode()
+    text = f"the value {encoded} breaks the rule"
+    if quoted_as == "warning":
+        cluster = _StandInCluster(warnings=(text,))
+    else:
+        cluster = _StandInCluster(refused_kinds=frozenset({"Secret"}), refusal=text)
+    _setup(monkeypatch, cluster)
+    manifest = (
+        "apiVersion: v1\nkind: Secret\nmetadata: {name: db, namespace: prod}\n"
+        f"data:\n  password: |\n    {encoded[:16]}\n    {encoded[16:]}\n"
+    )
+
+    answer = _preview(manifest)
+
+    document = answer["proposed_effect"]["preview"]["documents"][0]
+    shown = document["warnings"][0] if quoted_as == "warning" else document["error"]
+    assert "breaks the rule" in shown
+    assert HIDDEN in shown
+    assert encoded not in json.dumps(answer)
+
+
 _HIDDEN_NAME = "hidden-name-b7"
 
 

@@ -372,7 +372,13 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     try:
         body = TargetUpdate(**_update_fields(params))
     except ValidationError as exc:
-        raise ValueError(f"invalid target parameters: {exc}") from exc
+        # The text names the field, the kind and the message, never the input:
+        # the error reaches the answer, the stored result and the audit row.
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'body'}: {e['msg']} ({e['type']})"
+            for e in exc.errors(include_input=False, include_url=False)
+        )
+        raise ValueError(f"invalid target parameters: {problems}") from None
 
     sessionmaker = get_sessionmaker()
     try:

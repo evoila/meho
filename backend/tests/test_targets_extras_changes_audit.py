@@ -13,6 +13,8 @@
 * A realm warning in the answer of an ``extras_changes`` call names the key
   ``managed_realm``, never the realm.
 * The instruction text names every field of the answer.
+* A run that the request model refuses names the field and the rule, never
+  a sent value.
 
 Every test value is made up at run time.
 """
@@ -55,6 +57,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.targets import keycloak_realm_warnings as realm_warnings
+from meho_backplane.targets.extras_limits import EXTRAS_MAX_DEPTH
 from tests._people_behind_helpers import give_known_person
 from tests.test_targets_extras_changes import (
     _KEY,
@@ -74,6 +77,7 @@ from ._targets_helpers import (
     _isolated_jwks_cache,  # noqa: F401
     _settings_env,  # noqa: F401
 )
+from .test_targets_schemas import _VALID_CA_PEM
 
 
 def _app() -> FastAPI:
@@ -436,3 +440,60 @@ async def test_a_full_extras_answer_keeps_the_realm_in_its_warning() -> None:
     assert result.status == "ok", result
     [warning] = result.result["warnings"]
     assert repr(realm) in warning
+
+
+# ---------------------------------------------------------------------------
+# A run that the request model refuses names the field and the rule only
+# ---------------------------------------------------------------------------
+
+
+def _too_deep(value: str) -> dict[str, Any]:
+    nested: dict[str, Any] = {"inner_key": 1}
+    for level in range(EXTRAS_MAX_DEPTH + 1):
+        nested = {f"level_{level}": nested}
+    # The made-up value is the last one of the map: the end of a long input
+    # is what a shortened copy of the input keeps.
+    return {**nested, "made_key": value}
+
+
+@pytest.mark.parametrize("case", ["too-deep-map", "other-model-rule"])
+async def test_a_run_the_model_refuses_holds_no_sent_value(client: TestClient, case: str) -> None:
+    row = await _insert_target(name=_NAME, extras={"a": 1})
+    # Short, so that a shortened copy of the input would still hold it whole.
+    made = f"v{secrets.token_hex(4)}"
+    if case == "too-deep-map":
+        fields: dict[str, Any] = {"extras_changes": _too_deep(made)}
+        reason = f"extras may be at most {EXTRAS_MAX_DEPTH} levels deep"
+    else:
+        fields = {
+            "tls_ca_pin": _VALID_CA_PEM,
+            "verify_tls": False,
+            "extras_changes": {"first_key": 1, "last_key": made},
+        }
+        reason = "tls_ca_pin and verify_tls=false are mutually exclusive"
+
+    waiting = await dispatch(
+        operator=_operator("admin-1"),
+        connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
+        op_id=TARGETS_UPDATE_OP_ID,
+        target=None,
+        params={"target_id": str(row.id), **fields},
+    )
+    assert waiting.status == "awaiting_approval", waiting
+    [request] = await _requests()
+    request_id = str(request.id)
+    result = await _approve_and_run(request.id)
+    assert result.status != "ok", result
+    assert await _extras(row.id) == {"a": 1}
+
+    answer = _call(client, "GET", f"/api/v1/approvals/{request_id}/result")
+    assert answer.status_code == 200, answer.text
+    [request] = await _requests()
+    rows = await _audit_rows()
+    assert rows
+    audit_text = " ".join(_columns(r) for r in rows)
+    for place in (repr(result), answer.text, repr(request.resume_result), audit_text):
+        assert made not in place
+    assert reason in repr(result)
+    if case == "too-deep-map":
+        assert "extras_changes" in repr(result)

@@ -13,6 +13,8 @@ With the repository variable ``MEHO_CI_PR_HOSTED`` set to ``on``, the job
 * never in the merge queue, the nightly run or for a fork;
 * the shard split for every case, and the required check still needs all
   six shards;
+* ``python-unit-shard``, the one job that checks the pinned vendor API
+  files, keeps a shard on our own pool in every switch state;
 * ``scripts/ci/pick_pr_hosted.sh`` picks the hosted runners only when every
   rule holds.
 """
@@ -28,9 +30,10 @@ from typing import Any, cast
 import pytest
 import yaml
 
+from tests import _outside_backend_tests as outside
+from tests.test_ci_backend_python_skip import _detect
 from tests.test_ci_second_runner_site import (
     _CI,
-    _SCRIPTS,
     _assert_ci_outside_jobs_names_no_secret,
     _assert_no_secret_environment_or_id_token,
     _bash_step,
@@ -45,7 +48,8 @@ from tests.test_ci_second_runner_site import (
 _JOB = "python-unit-shard-hosted"
 _SHARD_JOB = "python-unit-shard"
 _SECOND_SITE = "python-unit-shard-second-site"
-_PICK = _SCRIPTS / "pick_pr_hosted.sh"
+# backend/tests/<this> -> parents[2] == repo root
+_PICK = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "pick_pr_hosted.sh"
 _REPO = "example-org/example-repo"
 _HEAVY = "meho-runners-ci-heavy"
 _LEFT_OUT = {
@@ -87,8 +91,11 @@ def _runner(job: str, context: dict[str, Any]) -> str:
     return cast("str", _expression(_ci_jobs()[job]["runs-on"], context))
 
 
-def _shard_matrix(context: dict[str, Any]) -> list[int]:
-    text = str(_ci_jobs()[_SHARD_JOB]["strategy"]["matrix"]["shard"])
+def _shard_matrix(job: str, context: dict[str, Any]) -> list[int]:
+    value = _ci_jobs()[job]["strategy"]["matrix"]["shard"]
+    if isinstance(value, list):
+        return cast("list[int]", value)
+    text = str(value)
     inner = re.fullmatch(r"\$\{\{ fromJSON\((?P<body>.*)\) \}\}", text)
     assert inner is not None, text
     return cast("list[int]", json.loads(_expression("${{ " + inner.group("body") + " }}", context)))
@@ -97,13 +104,9 @@ def _shard_matrix(context: dict[str, Any]) -> list[int]:
 def _placement(context: dict[str, Any]) -> dict[int, str]:
     """Which runner each of the six shards gets in this case."""
     placed: dict[int, str] = {}
-    jobs = _ci_jobs()
-    if _runs(_SHARD_JOB, context):
-        for shard in _shard_matrix(context):
-            placed[shard] = _runner(_SHARD_JOB, context)
-    for job in (_JOB, _SECOND_SITE):
+    for job in (_SHARD_JOB, _JOB, _SECOND_SITE):
         if _runs(job, context):
-            for shard in jobs[job]["strategy"]["matrix"]["shard"]:
+            for shard in _shard_matrix(job, context):
                 assert shard not in placed, f"shard {shard} runs twice"
                 placed[shard] = _runner(job, context)
     return placed
@@ -122,7 +125,7 @@ _SITE2 = "meho-runners-ci-heavy-site2"
         (_context(second_site="on"), {**_POOL, 4: _SITE2, 5: _SITE2, 6: _SITE2}),
         (
             _context(pr_hosted="on", second_site="on"),
-            {**_HOSTED_1_3, 4: _SITE2, 5: _SITE2, 6: _SITE2},
+            {**_HOSTED_1_3, 1: _HEAVY, 4: _SITE2, 5: _SITE2, 6: _SITE2},
         ),
         (_context(event="merge_group"), dict.fromkeys(range(1, 7), "meho-runners-ci-heavy-queue")),
         (_context(event="schedule"), _POOL),
@@ -143,6 +146,39 @@ _SITE2 = "meho-runners-ci-heavy-site2"
 )
 def test_each_shard_gets_its_runner(context: dict[str, Any], expected: dict[int, str]) -> None:
     assert _placement(context) == expected
+
+
+_VERIFY = "Verify spec-shelf provisioned the pinned specs"
+_SWITCH_STATES = [
+    {"pr_hosted": "", "second_site": ""},
+    {"pr_hosted": "", "second_site": "on"},
+    {"pr_hosted": "on", "second_site": ""},
+    {"pr_hosted": "on", "second_site": "on"},
+]
+
+
+@pytest.mark.parametrize(
+    "state", _SWITCH_STATES, ids=lambda s: f"{s['pr_hosted']}-{s['second_site']}"
+)
+def test_the_pool_job_runs_the_spec_shelf_check_in_every_switch_state(
+    state: dict[str, str],
+) -> None:
+    context = _context(**state)
+    placement = _placement(context)
+    assert sorted(placement) == [1, 2, 3, 4, 5, 6]
+    assert _runs(_SHARD_JOB, context)
+    pool_shards = _shard_matrix(_SHARD_JOB, context)
+    assert pool_shards
+    assert all(placement[shard] == _HEAVY for shard in pool_shards)
+    # The verify step is only in python-unit-shard.
+    jobs = _ci_jobs()
+    holders = [
+        name
+        for name, job in jobs.items()
+        if any(s.get("name") == _VERIFY for s in job.get("steps", []))
+    ]
+    assert _SHARD_JOB in holders
+    assert not {_JOB, _SECOND_SITE} & set(holders)
 
 
 @pytest.mark.parametrize("event", ["merge_group", "schedule", "push", "workflow_dispatch"])
@@ -173,7 +209,9 @@ def test_job_shape() -> None:
     jobs = _ci_jobs()
     job = jobs[_JOB]
     assert job["name"] == "Python unit shard ${{ matrix.shard }}/6"
-    assert job["strategy"]["matrix"] == {"shard": [1, 2, 3]}
+    assert set(job["strategy"]["matrix"]) == {"shard"}
+    assert _shard_matrix(_JOB, _context(pr_hosted="on")) == [1, 2, 3]
+    assert _shard_matrix(_JOB, _context(pr_hosted="on", second_site="on")) == [2, 3]
     assert job["needs"] == "changes"
     assert job["permissions"] == {"contents": "read"}
     assert job["cache-mode"] == "read"
@@ -252,12 +290,12 @@ def _fan_in(
         ("on", "", "failure", "skipped", "success", False),
         ("on", "", "skipped", "skipped", "success", False),
         ("on", "", "success", "success", "success", False),
-        # Switch on, site on: python-unit-shard has no shard and must skip.
-        ("on", "on", "skipped", "success", "success", True),
-        ("on", "on", "skipped", "failure", "success", False),
-        ("on", "on", "skipped", "success", "failure", False),
-        ("on", "on", "success", "success", "success", False),
-        ("on", "on", "skipped", "skipped", "success", False),
+        # Switch on, site on: python-unit-shard runs shard 1 and must pass.
+        ("on", "on", "success", "success", "success", True),
+        ("on", "on", "success", "failure", "success", False),
+        ("on", "on", "success", "success", "failure", False),
+        ("on", "on", "skipped", "success", "success", False),
+        ("on", "on", "success", "skipped", "success", False),
         # Switch off: the hosted job must be skipped.
         ("", "", "success", "skipped", "skipped", True),
         ("", "", "success", "skipped", "success", False),
@@ -284,6 +322,26 @@ def test_the_required_check_needs_all_six_shards(
         hosted=hosted,
     )
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "state", _SWITCH_STATES, ids=lambda s: f"{s['pr_hosted']}-{s['second_site']}"
+)
+@pytest.mark.parametrize("pool", ["skipped", "", "failure", "cancelled", "success"])
+def test_the_required_check_needs_the_spec_shelf_job(
+    tmp_path: Path, state: dict[str, str], pool: str
+) -> None:
+    result = _fan_in(
+        tmp_path,
+        pr_hosted=state["pr_hosted"],
+        second_site=state["second_site"],
+        shards=pool,
+        site2="success" if state["second_site"] == "on" else "skipped",
+        hosted="success" if state["pr_hosted"] == "on" else "skipped",
+    )
+    assert (result.returncode == 0) is (pool == "success"), result.stdout + result.stderr
+    if pool != "success":
+        assert "no job checked the pinned vendor API files" in result.stdout
 
 
 def test_the_required_check_keeps_its_name_and_needs_the_hosted_job() -> None:
@@ -365,3 +423,15 @@ def test_pick_step_can_never_break_the_changes_job() -> None:
     assert step["run"] == "bash scripts/ci/pick_pr_hosted.sh"
     assert step["env"]["MEHO_CI_PR_HOSTED"] == "${{ vars.MEHO_CI_PR_HOSTED }}"
     assert changes["outputs"]["pr_hosted"] == "${{ steps.pr-hosted.outputs.pr_hosted }}"
+
+
+# --- A change of only the pick script runs these tests ------------------------
+
+
+def test_a_change_of_only_the_pick_script_runs_these_tests(tmp_path: Path) -> None:
+    outputs = _detect(tmp_path, "pull_request", ["scripts/ci/pick_pr_hosted.sh"])
+    # No backend change: only python-outside-backend runs, with this list.
+    assert outputs["backend_python"] == "false"
+    this_file = "tests/test_ci_pr_hosted_unit_shards.py"
+    assert this_file in outside.OUTSIDE_BACKEND_TESTS
+    assert this_file in outside.scan()

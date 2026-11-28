@@ -3313,8 +3313,10 @@ jobs:
         # the digest that the chart pins, because a tag can move. With an
         # empty core variable the core tests use the chart's own image. The
         # k3s image uses the tag of the fixture's own default, so the proxy
-        # serves the exact tag the tests ask for. Every other image a test
-        # pulls or builds from is named here too (docs/codebase/devops.md,
+        # serves the exact tag the tests ask for. The k3s node does not pull
+        # through the proxy, so the k3d tests copy the busybox and pause
+        # images from this Docker daemon into the node. Every other image a
+        # test pulls or builds from is named here too (docs/codebase/devops.md,
         # "Test images come through the image proxy");
         # backend/tests/test_ci_test_images.py pins it. When the live
         # Keycloak tests skip, the skip limit check takes the
@@ -3346,6 +3348,7 @@ jobs:
           MEHO_TEST_HARBOR_REDIS_IMAGE: PROXY/library/redis:7-alpine
           MEHO_TEST_LDAP_IMAGE: PROXY/osixia/openldap:1.5.0
           MEHO_TEST_BUSYBOX_IMAGE: PROXY/rancher/mirrored-library-busybox:1.36.1
+          MEHO_TEST_K3S_PAUSE_IMAGE: PROXY/rancher/mirrored-pause:3.6
           IMAGES
 
       - name: Start memory sampling

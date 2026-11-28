@@ -10,11 +10,8 @@ secret (a token, a key). So :class:`ManifestValues` knows every value that
 the preview hides in its echo of this manifest
 (``ops_write_preview.apply_manifest_echo``): Secret values, ``env`` and
 ``httpHeaders`` values, command lines and the last-applied annotation, and
-each value the shared params redaction hides. The redaction runs over the
-whole list of documents, as for the echo, so a rule for one place in the
-list (such as ``manifest.1.metadata.name``) counts too. For a Secret's
-``data`` it also knows the decoded text; line breaks in the base64 text
-are skipped, as the API server skips them.
+each value the shared params redaction hides. For a Secret's ``data`` it
+also knows the decoded text.
 
 In a text of the cluster or of MEHO:
 
@@ -93,16 +90,11 @@ def _hidden_leaves(raw: Any, shown: Any, out: set[str]) -> None:
 
 
 def _decoded(value: Any) -> str | None:
-    """The text that the base64 *value* holds, or ``None``.
-
-    The API server skips line breaks in base64 text (a YAML block value
-    ends with one), so they are taken out first.
-    """
+    """The text that the base64 *value* holds, or ``None``."""
     if not isinstance(value, str):
         return None
     try:
-        plain = value.replace("\r", "").replace("\n", "")
-        return base64.b64decode(plain, validate=True).decode("utf-8") or None
+        return base64.b64decode(value, validate=True).decode("utf-8") or None
     except (binascii.Error, ValueError):
         return None
 
@@ -145,17 +137,11 @@ class ManifestValues:
         docs: list[dict[str, Any]],
         redact: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
     ) -> ManifestValues:
-        """The values of *docs* (made plain) that the echo hides, also after *redact*.
-
-        *redact* runs once over the whole list, in its order, as for the
-        echo. When it does not give back one document for each, MEHO cannot
-        tell which hidden copy is which, so every value counts as hidden.
-        """
+        """The values of *docs* (made plain) that the echo hides, also after *redact*."""
         out: set[str] = set()
-        hidden = redact([_hide_values(doc) for doc in docs])
-        shown: list[Any] = hidden if len(hidden) == len(docs) else [_GONE] * len(docs)
-        for doc, shown_doc in zip(docs, shown, strict=True):
-            _hidden_leaves(doc, shown_doc, out)
+        for doc in docs:
+            hidden = redact([_hide_values(doc)])
+            _hidden_leaves(doc, hidden[0] if len(hidden) == 1 else _GONE, out)
             _decoded_secret_data(doc, out)
         return cls(out)
 

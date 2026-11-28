@@ -141,28 +141,8 @@ _PLAN_NOT_COMPLETE_NOTE: Final[str] = (
     "and the `reason` of each part that was not checked."
 )
 
-#: Added to the note when the list of parts that were not checked is cut.
-_NOT_CHECKED_CUT_NOTE: Final[str] = (
-    "`not_checked` holds only the first numbers and `not_checked_count` "
-    "counts them all; `result_query` on the handle in "
-    "`proposed_effect.preview.documents` gives every part with its `change`."
-)
-
-#: The note when the result store did not keep every part of the plan.
-_PLAN_NOT_STORED_NOTE: Final[str] = (
-    "MEHO could not store every part of the dry run, so `result_query` "
-    "cannot give the whole plan, and this preview does not show the whole "
-    "plan. `proposed_effect.preview.not_stored` counts the missing parts."
-)
-
 #: The key of a preview that lists the parts the dry run could not check.
 _NOT_CHECKED_KEY: Final[str] = "not_checked"
-
-#: The key of a preview that counts all parts that were not checked, when the list is cut.
-_NOT_CHECKED_COUNT_KEY: Final[str] = "not_checked_count"
-
-#: The key of a preview that counts the parts the result store did not keep.
-_NOT_STORED_KEY: Final[str] = "not_stored"
 
 #: The class name of the error at the start of a stored builder reason.
 _CLASS_NAME_PREFIX: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:: |$)")
@@ -231,24 +211,11 @@ async def _read_target_effect(ctx: PreviewContext) -> tuple[dict[str, Any] | Non
     """Build the plan with the target's connector, and record the read in one audit row.
 
     The build has :data:`TARGET_READ_TIMEOUT_SECONDS`. The row is written
-    also when the target does not answer in time, the build fails, or the
-    caller is cancelled while it waits (the target may already have the
-    request; the cancel goes on after the row is written)
+    also when the target does not answer in time or the build fails
     (:func:`~meho_backplane.operations._preview_audit.write_target_read_row`).
     Returns the effect and the note that says why there is no whole plan.
     """
     started = time.monotonic()
-
-    async def _record(status: str) -> None:
-        await write_target_read_row(
-            operator=ctx.operator,
-            descriptor=ctx.descriptor,
-            target=ctx.target,
-            result_status=status,
-            duration_ms=(time.monotonic() - started) * 1000,
-            fields=preview_target_read_audit_fields(ctx.descriptor.op_id, ctx.params),
-        )
-
     effect: dict[str, Any] | None = None
     try:
         async with asyncio.timeout(TARGET_READ_TIMEOUT_SECONDS):
@@ -257,13 +224,17 @@ async def _read_target_effect(ctx: PreviewContext) -> tuple[dict[str, Any] | Non
         _log.warning("preview_target_read_timeout", op_id=ctx.descriptor.op_id)
         note: str | None = TARGET_READ_TIMEOUT_NOTE
         status = "timeout"
-    except asyncio.CancelledError:
-        await _record("cancelled")
-        raise
     else:
         note = _failed_read_note(effect)
         status = "ok" if note is None else "error"
-    await _record(status)
+    await write_target_read_row(
+        operator=ctx.operator,
+        descriptor=ctx.descriptor,
+        target=ctx.target,
+        result_status=status,
+        duration_ms=(time.monotonic() - started) * 1000,
+        fields=preview_target_read_audit_fields(ctx.descriptor.op_id, ctx.params),
+    )
     return effect, note
 
 
@@ -325,23 +296,10 @@ async def _synthetic_proposed_effect(
     return (proposed_effect, None) if populated else (None, note)
 
 
-def _plan_not_complete_note(proposed_effect: dict[str, Any]) -> str | None:
-    """Why the plan is not whole, or ``None`` when it is.
-
-    The plan is not whole when the dry run did not check every part, or
-    when the result store did not keep every part.
-    """
+def _plan_complete(proposed_effect: dict[str, Any]) -> bool:
+    """False when the builder says that the dry run did not check every part."""
     preview = proposed_effect.get("preview")
-    if not isinstance(preview, dict):
-        return None
-    notes: list[str] = []
-    if preview.get(_NOT_CHECKED_KEY):
-        notes.append(_PLAN_NOT_COMPLETE_NOTE)
-        if preview.get(_NOT_CHECKED_COUNT_KEY):
-            notes.append(_NOT_CHECKED_CUT_NOTE)
-    if preview.get(_NOT_STORED_KEY):
-        notes.append(_PLAN_NOT_STORED_NOTE)
-    return " ".join(notes) or None
+    return not (isinstance(preview, dict) and preview.get(_NOT_CHECKED_KEY))
 
 
 def _hide_free_form_map_values(value: Any, schema: Any) -> Any:
@@ -478,10 +436,9 @@ async def build_composite_preview(
     )
     if proposed_effect is not None:
         envelope["proposed_effect"] = proposed_effect
-        not_complete = _plan_not_complete_note(proposed_effect)
-        envelope["plan_shown"] = not_complete is None
-        if not_complete is not None:
-            envelope["plan_note"] = not_complete
+        envelope["plan_shown"] = _plan_complete(proposed_effect)
+        if not envelope["plan_shown"]:
+            envelope["plan_note"] = _PLAN_NOT_COMPLETE_NOTE
     else:
         envelope["plan_shown"] = False
         envelope["plan_note"] = note or PLAN_NOT_SHOWN_NOTE

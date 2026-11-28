@@ -36,12 +36,7 @@ safely is not sent and is ``not_checked``.
 ``not_checked`` lists the documents that were not checked. The preview then
 says that it does not show the whole plan. A list of documents longer than
 the limit for a list in an answer (more than 50 entries or 4 KB) is stored
-behind a result handle; ``result_query`` reads every entry. ``not_checked``
-then keeps at most :data:`NOT_CHECKED_INLINE_MAX` numbers, and
-``not_checked_count`` counts them all. When the result store keeps fewer
-entries than the preview checked (the store is not reachable, or its row
-limit is reached), ``not_stored`` counts the missing entries, and the
-preview says that it does not show the whole plan.
+behind a result handle; ``result_query`` reads every entry.
 
 Unlike the dry run of the approval request, this one does not stop at the
 first refused document: the agent sees the answer for each one. The
@@ -78,28 +73,12 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
-__all__ = [
-    "NOT_CHECKED_COUNT_KEY",
-    "NOT_CHECKED_INLINE_MAX",
-    "NOT_CHECKED_KEY",
-    "NOT_STORED_KEY",
-    "DryRunSetupError",
-    "k8s_apply_agent_dry_run",
-]
+__all__ = ["NOT_CHECKED_KEY", "DryRunSetupError", "k8s_apply_agent_dry_run"]
 
 _log = structlog.get_logger(__name__)
 
 #: The key of the preview that lists the documents the dry run could not check.
 NOT_CHECKED_KEY: Final[str] = "not_checked"
-
-#: At most this many numbers of documents that were not checked stay in the answer.
-NOT_CHECKED_INLINE_MAX: Final[int] = 50
-
-#: The key that counts all documents that were not checked, when ``not_checked`` is cut.
-NOT_CHECKED_COUNT_KEY: Final[str] = "not_checked_count"
-
-#: The key that counts the entries the result store did not keep.
-NOT_STORED_KEY: Final[str] = "not_stored"
 
 #: The answers that are not a decision of the cluster about the document.
 _NOT_DECIDED_STATUSES: Final[frozenset[int]] = frozenset({401, 408, 429})
@@ -209,11 +188,9 @@ def _identities(
     if len(shown) == len(plain_docs):
         return [_identity(doc) for doc in shown]
     identities: list[dict[str, Any] | None] = []
-    for index, doc in enumerate(plain_docs):
-        # Empty stand-ins keep the place of the document in the list, so a
-        # rule for one place (such as ``manifest.1.metadata.name``) counts.
-        one = redact([{} for _ in range(index)] + [doc])
-        identities.append(_identity(one[-1]) if len(one) == index + 1 else None)
+    for doc in plain_docs:
+        one = redact([doc])
+        identities.append(_identity(one[0]) if len(one) == 1 else None)
     return identities
 
 
@@ -263,15 +240,8 @@ async def _discovery_error(
     )
 
 
-async def _reduced_documents(
-    ctx: PreviewContext, documents: list[dict[str, Any]]
-) -> tuple[Any, int]:
-    """*documents*, or its summary with a result handle when the list is too long.
-
-    The second value counts the entries that ``result_query`` cannot read:
-    all of them when the store did not keep the list, the rest when it kept
-    only the first rows.
-    """
+async def _reduced_documents(ctx: PreviewContext, documents: list[dict[str, Any]]) -> Any:
+    """*documents*, or its summary with a result handle when the list is too long."""
     context = {
         "op_id": ctx.descriptor.op_id,
         "tenant_id": str(ctx.operator.tenant_id),
@@ -279,10 +249,8 @@ async def _reduced_documents(
     }
     summary, handle = await _DOCUMENTS_REDUCER.reduce({"documents": documents}, None, context)
     if handle is None:
-        return documents, 0
-    drill_in = handle.fetch_more.drill_in if handle.fetch_more is not None else None
-    stored = (drill_in.stored_rows or 0) if drill_in is not None and drill_in.available else 0
-    return {**summary, "handle": handle.model_dump(mode="json")}, max(len(documents) - stored, 0)
+        return documents
+    return {**summary, "handle": handle.model_dump(mode="json")}
 
 
 async def k8s_apply_agent_dry_run(ctx: PreviewContext) -> dict[str, Any]:
@@ -326,14 +294,12 @@ async def k8s_apply_agent_dry_run(ctx: PreviewContext) -> dict[str, Any]:
         not_checked=len(not_checked),
         tenant_id=str(ctx.operator.tenant_id),
     )
-    shown_documents, not_stored = await _reduced_documents(ctx, documents)
-    preview: dict[str, Any] = {"dry_run": True, "documents": shown_documents}
+    preview: dict[str, Any] = {
+        "dry_run": True,
+        "documents": await _reduced_documents(ctx, documents),
+    }
     if not_checked:
-        preview[NOT_CHECKED_KEY] = not_checked[:NOT_CHECKED_INLINE_MAX]
-        if len(not_checked) > NOT_CHECKED_INLINE_MAX:
-            preview[NOT_CHECKED_COUNT_KEY] = len(not_checked)
-    if not_stored:
-        preview[NOT_STORED_KEY] = not_stored
+        preview[NOT_CHECKED_KEY] = not_checked
     shown = [identity for identity in identities if identity is not None]
     preview.update(_k8s_apply_manifest_echo(ctx, {"applied": shown}))
     return preview

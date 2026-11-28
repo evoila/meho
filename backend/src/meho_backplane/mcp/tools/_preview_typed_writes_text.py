@@ -114,10 +114,8 @@ K8S_APPLY_DRY_RUN_SCHEMA_TEXTS: Final[dict[str, str]] = {
         "Typed/composite preview only: true when the whole plan is in "
         "`proposed_effect`. False with no `proposed_effect`: the plan is "
         "shown only on the approval request. False next to a "
-        "`proposed_effect`: the dry run did not check every part, or MEHO "
-        "could not store every part for `result_query` (see `plan_note`, "
-        "`proposed_effect.preview.not_checked` and "
-        "`proposed_effect.preview.not_stored`)."
+        "`proposed_effect`: the dry run did not check every part (see "
+        "`plan_note` and `proposed_effect.preview.not_checked`)."
     ),
     "plan_note": ("Plain reason the plan is not shown, or not whole (when plan_shown is false)."),
 }

@@ -104,11 +104,28 @@ _CONTENT_POLICY: Final[RedactionPolicy] = RedactionPolicy.model_validate(
                 "action": "redact",
                 "reason": "user part and signature / credential / token query values of a URL",
             },
+            # Before api_key: this rule reads a value the way a shell does
+            # (quotes, escaped spaces); the api_key rule stops at the first
+            # space or quote and would leave the tail.
+            {
+                "name": "fr-command-line-secret",
+                "pattern": "command_line_secret",
+                "action": "redact",
+                "reason": "password or token on a command line",
+            },
             {
                 "name": "fr-api-key",
                 "pattern": "api_key",
                 "action": "redact",
                 "reason": "API key / access / refresh / session token / secret id",
+            },
+            # After api_key: a command line value that the api_key rule did
+            # not hide, such as one that a ``;`` follows.
+            {
+                "name": "fr-command-line-secret-rest",
+                "pattern": "command_line_secret_rest",
+                "action": "redact",
+                "reason": "password or token on a command line that the api_key rule did not hide",
             },
             {
                 "name": "fr-kubeconfig",

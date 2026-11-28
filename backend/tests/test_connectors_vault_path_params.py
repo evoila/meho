@@ -57,9 +57,9 @@ from meho_backplane.settings import get_settings
 _TENANT = UUID(int=7)
 _VAULT = "http://vault.test.invalid"
 
-#: Name values that would leave their place in the path.
+#: Name values the check refuses.
 BAD_NAMES = [
-    "../../../secret/data/meho",
+    "../x",
     "..",
     ".",
     "a/b",
@@ -69,8 +69,8 @@ BAD_NAMES = [
     "a\\b",
     "a\nb",
 ]
-#: Mount values that would leave their place in the path.
-BAD_MOUNTS = ["userpass/../../sys", "..", "a//b", "a?x=1", "%2e%2e/x", "a#b", "a\\b", "a\x00b"]
+#: Mount values the check refuses.
+BAD_MOUNTS = ["a/../b", "..", "a//b", "a?x=1", "%2e%2e/x", "a#b", "a\\b", "a\x00b"]
 
 #: The other params each operation needs, so only the path value is wrong.
 _OTHER_PARAMS: dict[str, dict[str, Any]] = {
@@ -79,7 +79,7 @@ _OTHER_PARAMS: dict[str, dict[str, Any]] = {
     "vault.sys.policy.write": {"policy": 'path "secret/x" { capabilities = ["read"] }'},
     "vault.sys.auth.enable": {"method_type": "userpass"},
     "vault.sys.mounts.enable": {"backend_type": "kv"},
-    "vault.token.create_and_store": {"store": {"path": "tenants/x/token"}},
+    "vault.token.create_and_store": {"store": {"vault_kv": {"path": "x"}}},
 }
 
 _NAME_LIKE = re.compile(r"^(mount|path|name|username|accessor)$|_(name|id|mount|ref|accessor)$")
@@ -174,6 +174,12 @@ def _refused(result: Any) -> bool:
     return result.status == "error" and (result.extras or {}).get("error_code") == "invalid_params"
 
 
+def _refused_for(result: Any, field: str) -> bool:
+    """The call is refused, and a validation error names ``field``."""
+    errors = (result.extras or {}).get("validation_errors") or []
+    return _refused(result) and any(e.get("path") in (field, f"$.{field}") for e in errors)
+
+
 async def _approval_rows() -> list[ApprovalRequest]:
     async with get_sessionmaker()() as session:
         return list((await session.execute(select(ApprovalRequest))).scalars().all())
@@ -235,7 +241,7 @@ def test_the_message_never_holds_the_value() -> None:
 async def test_a_read_with_dot_dot_sends_nothing(
     vault: _RecordingVault, op_id: str, field: str
 ) -> None:
-    result = await _dispatch(op_id, {field: "../../../secret/data/meho/x"})
+    result = await _dispatch(op_id, {field: "../x"})
     assert _refused(result), result
     assert result.extras["validation_errors"][0]["path"] in (field, f"$.{field}")
     assert vault.requests == []
@@ -243,7 +249,7 @@ async def test_a_read_with_dot_dot_sends_nothing(
 
 @pytest.mark.usefixtures("registered")
 async def test_a_delete_with_dot_dot_stores_no_approval_request(vault: _RecordingVault) -> None:
-    result = await _dispatch("vault.auth.userpass.delete", {"username": "../../sys/policy/x"})
+    result = await _dispatch("vault.auth.userpass.delete", {"username": "a/../b"})
     assert _refused(result), result
     assert await _approval_rows() == []
     assert vault.requests == []
@@ -263,7 +269,7 @@ async def test_every_path_value_is_refused_before_anything_is_stored_or_sent(
 ) -> None:
     for value in BAD_NAMES if kind == NAME else BAD_MOUNTS:
         result = await _dispatch(op_id, _base_params(op_id) | {field: value})
-        assert _refused(result), (value, result)
+        assert _refused_for(result, field), (value, result)
     assert vault.requests == []
     assert await _approval_rows() == []
 

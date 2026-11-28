@@ -3456,7 +3456,7 @@ tests and its <code>pyproject.toml</code>.</p>
 <p>Your package imports MEHO only through one module:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">meho_connector_kit</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">kit</span>
 </code></pre></div>
-<p>The kit version this page describes: <strong>1.7</strong>.</p>
+<p>The kit version this page describes: <strong>1.8</strong>.</p>
 <p>The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
 part that starts with an underscore is private by its name too.</p>
@@ -3670,6 +3670,16 @@ part that starts with an underscore is private by its name too.</p>
 <td>Mark the operations that change a host by running a command or script as root, for example over SSH with <code>sudo</code>. A run approval of an automation run never covers them: a person approves each call.</td>
 </tr>
 <tr>
+<td>Requests</td>
+<td><code>check_before_send</code></td>
+<td>The check of a caller's block right before a request goes out. Use it in every client your package builds itself. See "A client your package builds" below. Needs kit 1.8 or higher.</td>
+</tr>
+<tr>
+<td>Requests</td>
+<td><code>PrincipalBlockedStepError</code></td>
+<td>The refusal that <code>check_before_send</code> raises when the caller is blocked. Let it pass: do not retry it and do not turn it into a vendor error. Needs kit 1.8 or higher.</td>
+</tr>
+<tr>
 <td>Audit</td>
 <td><code>compute_audit_digest_hash</code></td>
 <td>A hash made with a secret key of MEHO, for a value that lands in an audit or approval row.</td>
@@ -3740,6 +3750,27 @@ operations you register, not <code>execute</code>.</p>
   (kit 1.6 or higher).</li>
 <li><strong>Caches.</strong> Key a cache you keep across calls, for example a login
   token, with <code>kit.target_cache_key(target)</code>.</li>
+<li><strong>Clients your package builds.</strong> Every client your package builds itself
+  carries the check of the caller's block. An <code>httpx.AsyncClient</code> gets it as
+  a request hook:
+  <code>httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})</code>.
+  <code>httpx</code> runs the hook before every request, also before each redirect hop
+  and each retry that your package sends again through the client. The kit
+  supports this way for <code>httpx</code>. The template's test
+  <code>tests/test_httpx_clients_have_the_check.py</code> reports every other <code>httpx</code>
+  client it finds, also a synchronous <code>httpx.Client</code>. A file that uses another
+  client goes into <code>EXCEPTIONS</code> in that test file, with one line that says
+  where the file calls <code>kit.check_before_send()</code>. Such a client (a vendor
+  library, a database driver, an SSH connection, an <code>httpx.Client</code>) calls
+  <code>await kit.check_before_send()</code> right before each call that sends something:
+  each statement, each command, each request. A blocking library that runs in
+  a thread (<code>asyncio.to_thread</code>) is checked in the event loop, right before the
+  thread starts, not inside the thread. A check before the thread starts does
+  not cover the redirects that the library follows by itself: turn them off
+  and check before each request, or use <code>httpx.AsyncClient</code> with the hook.
+  A client that MEHO builds (the one of <code>HttpConnector</code>) needs nothing. Outside
+  a running call the check does nothing. The template's test cannot see
+  clients that are not <code>httpx</code>: cover those with a test that runs them.</li>
 </ul>
 <p>The steps, with code, are in
 <a href="https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#writing-the-connector">connector-packages.md, "Writing the connector"</a>.

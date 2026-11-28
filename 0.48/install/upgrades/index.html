@@ -4222,6 +4222,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>A policy file import that waits for approval at the upgrade may need to be asked again, when the tenant's stored bindings use an earlier kind name (<code>SA-Operators</code>, <code>Approvers</code>) and the policy file import is on. Its approval then answers "The policy changed after this import was planned. Run the preview again.", and nothing is stored.</td>
+<td>Run the preview of such an import again and ask for it again. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>A login with the Reader role that asks for a change gets one plain sentence next to the code <code>insufficient_role</code>: "You have the Reader role. A Reader cannot ask for changes, so MEHO did not store or run this call. Ask an admin for a role that may make this change." MEHO stores no approval request and runs nothing. The sentence comes from these places: the policy gate; the REST call route <code>POST /api/v1/operations/call</code> and the MCP tool <code>call_operation</code>, for an operation that asks for a change; the console call form, for an operation that asks for a change; the REST routes, the console routes and the MCP tools that need the Operator role and do not only read; and the write tools of a hosted agent run. REST and the web console answer <code>403</code> with <code>{"detail": "insufficient_role", "message": "&lt;the sentence&gt;"}</code>; MCP answers with the error message <code>insufficient_role: &lt;the sentence&gt;</code>. A re-run of an approved request by a caller whose role is now Reader is refused the same way. A login with the Reader role changes nothing in the knowledge store, with or without the approver flag. A preview and the pages that only read keep their answer. See https://github.com/evoila/meho/blob/main/docs/codebase/agent-permission-model.md.</td>
 <td>Scripts that check a refused change of a Reader read the code <code>insufficient_role</code> (in <code>detail</code> on REST and in the console, at the start of the MCP error message). Give a person the role that the change needs: Operator, or Admin for an operation that needs the Admin role. No schema action.</td>
 </tr>

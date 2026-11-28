@@ -970,6 +970,12 @@ With the switch on, a step keeps its own approval when one of these holds:
   the web console after a fresh sign-in.
 - No run approval covers it (`never_covered_reason`, plus the root shell
   mark).
+- An override row or a classification entry raised its level above the
+  code's own level, and the person who approved the run may not approve
+  that level (`run_approver_may_approve` in
+  `operations/approved_run_rights.py`, read off the decision of the run's
+  approval). For example: an Operator approved the run, and an override
+  raised a `safe` step to `dangerous`.
 
 The step gate asks these rules with the stored facts of the step's
 operation, when a row is stored (`step_rule_rows`): its parameter schema,
@@ -1010,8 +1016,8 @@ changes. The reason MEHO stores for such a wait (the `wait_reason` of the
 step's `approval.request` audit row) names the rule:
 `run_step_keeps_own_approval: a step of a run after an approval keeps its
 own approval (floor:rights_change_waits)`. A fixed rule is named as
-`floor:<rule id>`; otherwise the reason ends in `(requires_approval)` or
-`(no_run_approval_covers_it)`.
+`floor:<rule id>`; otherwise the reason ends in `(requires_approval)`,
+`(no_run_approval_covers_it)` or `(approver_may_not_approve_raised_level)`.
 
 One exception: a credential read that the run sent at once before the
 wait, and that a resume sends again, is sent again with no new wait, so
@@ -1023,7 +1029,8 @@ Tests: `backend/tests/test_custom_policy_run_steps.py`,
 `backend/tests/test_custom_policy_run_steps_console_rights.py`,
 `backend/tests/test_custom_policy_run_steps_resend.py`,
 `backend/tests/test_custom_policy_run_steps_stored_level.py`,
-`backend/tests/test_custom_policy_run_steps_hard_to_undo.py` and
+`backend/tests/test_custom_policy_run_steps_hard_to_undo.py`,
+`backend/tests/test_custom_policy_run_steps_raised_level.py` and
 `backend/tests/test_custom_policy_run_steps_own_recheck.py`. The switch-off
 answers in these tests are fixed values recorded from a run on main.
 

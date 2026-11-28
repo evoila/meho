@@ -117,12 +117,15 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("UI_KEYCLOAK_CLIENT_SECRET", "test-client-secret")
     allow_ui_operator_role(monkeypatch)
     install_fake_vault(monkeypatch)
+    saved_overrides = dict(app.dependency_overrides)
     _reset()
     register_connector_v2(
         product=_TARGET_PRODUCT, version="1.0", impl_id=_TARGET_PRODUCT, cls=_FakeConnector
     )
     yield
     deregister_connector_v2(product=_TARGET_PRODUCT, version="1.0", impl_id=_TARGET_PRODUCT)
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(saved_overrides)
     _reset()
 
 
@@ -371,6 +374,13 @@ class Console:
             headers=self.headers,
         )
 
+    def switch(self, tenant_id: uuid.UUID) -> Any:
+        return self.client.post(
+            "/ui/tenant/switch",
+            data={"tenant": str(tenant_id)},
+            headers=self.headers,
+        )
+
     def policy(self) -> Any:
         return self.client.patch(
             f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}",
@@ -494,14 +504,48 @@ def test_every_row_of_the_write_carries_the_note(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("retired", [False, True], ids=["wrapper-rows", "wrapper-rows-retired"])
 @pytest.mark.parametrize("login", [INSIDE, PLAIN], ids=["platform-admin-in-own-tenant", "plain"])
 @pytest.mark.parametrize("write", _WRITES)
 @pytest.mark.parametrize("way", _WAY_NAMES)
 def test_no_note_with_a_role_group_or_without_platform_admin(
-    key: Any, way: str, write: str, login: Login
+    monkeypatch: pytest.MonkeyPatch, key: Any, way: str, write: str, login: Login, retired: bool
 ) -> None:
+    _audit_mode(monkeypatch, retired=retired)
     rows, _ = _write_and_read_rows(key, login, way, write)
     _assert_rows(rows, login, write)
+
+
+# ---------------------------------------------------------------------------
+# A console tenant switch: the note follows the tenant switched to
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("start", "to_tenant", "expect_note"),
+    [(OUTSIDE, _TENANT_A, False), (INSIDE, _TENANT_C, True)],
+    ids=["c-to-a-no-note", "a-to-c-note"],
+)
+def test_the_switch_row_has_the_note_only_without_a_role_group(
+    key: Any, start: Login, to_tenant: uuid.UUID, expect_note: bool
+) -> None:
+    _seed_world()
+    console = Console(key, start)
+    before = {row.id for row in _all_rows()}
+    response = console.switch(to_tenant)
+    assert response.status_code == 303, response.text
+    rows = [
+        row
+        for row in _all_rows()
+        if row.id not in before and (row.payload or {}).get("op_id") == "meho.ui.tenant.switch"
+    ]
+    assert len(rows) == 1, [(row.path, row.payload) for row in _all_rows()]
+    row = rows[0]
+    assert row.tenant_id == to_tenant
+    if expect_note:
+        assert (row.payload or {}).get(_NOTE) == _NOTE_VALUE
+    else:
+        assert _NOTE not in (row.payload or {})
 
 
 # ---------------------------------------------------------------------------

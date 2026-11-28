@@ -75,5 +75,8 @@ def load_into_node(container: Any, images: list[str]) -> None:
             warnings.warn(f"k3s node image copy failed ({type(exc).__name__})", stacklevel=2)
             continue
         if result.exit_code != 0:
-            output = result.output.decode(errors="replace")[-300:]
-            warnings.warn(f"k3s node image import failed: {output}", stacklevel=2)
+            # The last whole line: a cut inside a line could split the proxy
+            # name, which the CI report step then no longer hides.
+            lines = result.output.decode(errors="replace").strip().splitlines()
+            last = lines[-1] if lines else ""
+            warnings.warn(f"k3s node image import failed: {last}", stacklevel=2)

@@ -1250,14 +1250,18 @@ def _busybox_image() -> str:
 
 
 async def _pod_warnings(api_client: Any, namespace: str, pod_name: str) -> list[str]:
-    """The last three warning events of the pod (for example a failed image pull)."""
+    """The last three warning events of the pod (for example a failed image pull).
+
+    Each message stays whole: the step that hides the proxy name in the CI
+    test reports matches only a whole name, so a message is never cut.
+    """
     from kubernetes_asyncio import client as _client
 
     events = await _client.CoreV1Api(api_client).list_namespaced_event(
         namespace=namespace, field_selector=f"involvedObject.name={pod_name}"
     )
     return [
-        f"{event.reason}: {(event.message or '')[:200]}"
+        f"{event.reason}: {event.message or ''}"
         for event in events.items
         if event.type == "Warning"
     ][-3:]
@@ -1467,7 +1471,8 @@ class _FakeNode:
     def exec_run(self, cmd: list[str]) -> Any:
         self.commands.append(cmd)
         failed = self._import_exit_code if "import" in cmd else 0
-        return SimpleNamespace(exit_code=failed, output=b"ctr: import refused")
+        output = b"unpacking layers\nctr: import refused " + b"x" * 400 + b"\n"
+        return SimpleNamespace(exit_code=failed, output=output)
 
 
 class _FakeK3s:
@@ -1521,7 +1526,8 @@ def test_load_into_node_copies_and_imports_each_image() -> None:
 
 def test_load_into_node_warns_when_the_node_refuses_the_import() -> None:
     node = _FakeNode(import_exit_code=1)
-    with pytest.warns(UserWarning, match="import failed: ctr: import refused"):
+    # The last whole line, never cut: a cut could split the proxy name.
+    with pytest.warns(UserWarning, match=r"import failed: ctr: import refused x{400}$"):
         load_into_node(_FakeK3s(node), ["image-a"])
 
 

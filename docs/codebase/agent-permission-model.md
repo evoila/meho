@@ -742,7 +742,9 @@ less.
   and this code does not change it. The tool name comes from
   `clientInfo.name` of the MCP `initialize`, cleaned by
   `clean_client_text`. With `CUSTOM_POLICY` on, the `initialize` writes the
-  `mcp.session_open` row (also with `AUDIT_CLIENT_IDENTITY` off), and each
+  `mcp.session_open` row (also with `AUDIT_CLIENT_IDENTITY` off; then the
+  row keeps only `client_name`, and the client version, the `User-Agent`
+  and the e-mail stay with `AUDIT_CLIENT_IDENTITY`), and each
   later MCP request of a personal agent reads the name from that row of
   its session, same tenant and same login
   (`mcp/caller_tool.py::bind_tool_name`). MEHO never decides anything on
@@ -752,13 +754,20 @@ less.
   person approves on a console, CLI or REST surface, the agent when MEHO's
   own agent resumes its run. The requester's kind stays on the waiting
   request and on its `approval.request` row.
+- **Rows with no login bound for the request** take the kind from the
+  login the writer holds: the auto-approval row of a standing grant or a
+  run approval (`caller_columns(operator)`), and the "unfinished" row of a
+  call that MEHO stopped at shutdown (`track_operation` saves the kind
+  when the call starts).
 - **A waiting request** stores the requester's kind in
   `proposed_effect["caller_kind"]` (`_with_caller_kind`). A re-park for an
   earlier requester keeps that requester's kind (`ResumeRequester.caller_kind`).
   The approval card shows it (`ui/routes/approvals/render.py::caller_line`):
   "Your personal agent asked." only for the person behind it, "The
   personal agent of <person> asked." for another approver, and "The
-  service agent `agent:<name>` asked." for an agent.
+  service agent `agent:<name>` asked." for an agent: the acting agent of
+  a run for a person, else the client id of the stored requester record,
+  else the login.
 - **The audit API** (`AuditEntry.caller_kind`) sends the kind for a row
   that has one, and leaves the field out for a row without one.
 

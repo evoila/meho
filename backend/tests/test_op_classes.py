@@ -242,6 +242,9 @@ _ALLOWED_CLASS_LISTS: dict[tuple[str, str], str] = {
     ("ui/routes/broadcast/aggregate_gate.py", "AGGREGATE_ONLY_OP_CLASSES"): (
         "the audit drawer's own list for rows that carry no recorded detail"
     ),
+    ("operations/role_floors.py", "_CHANGE_CLASSES"): (
+        "the classes that count as a change for a Reader, like the write sets"
+    ),
 }
 
 

@@ -65,6 +65,7 @@ from meho_backplane.connectors.vault.ops_identity_schemas import (
     VAULT_IDENTITY_LIST_PARAMETER_SCHEMA,
     VAULT_IDENTITY_LIST_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 
 __all__ = [
@@ -217,7 +218,7 @@ async def vault_identity_group_delete(
     success). Removes the group's policy bindings from every member --
     an irreversible privilege change.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
 
     async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.secrets.identity.delete_group_by_name, name=name)
@@ -239,7 +240,7 @@ async def vault_identity_entity_read(
     aliases, disabled). A missing id surfaces as the underlying
     :class:`hvac.exceptions.InvalidPath` (read-phase failure).
     """
-    entity_id: str = str(params["entity_id"]).strip()
+    entity_id: str = path_param(params, "entity_id", NAME)
 
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_entity, entity_id=entity_id)
@@ -258,7 +259,7 @@ async def vault_identity_group_read(
     entity/group ids). A missing group surfaces as the underlying
     :class:`hvac.exceptions.InvalidPath`.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
 
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_group_by_name, name=name)

@@ -10,7 +10,7 @@ lifecycle the consumer's ``/vault-admin`` wrapper exercises:
 * ``vault.auth.userpass.write`` -- ``create_or_update_user`` (dangerous;
   password in params -> ``credential_write``; binds ``token_policies``).
 * ``vault.auth.userpass.update_password`` -- ``update_password_on_user``
-  (caution; password in params -> ``credential_write``).
+  (dangerous; password in params -> ``credential_write``).
 * ``vault.auth.userpass.delete`` -- ``delete_user`` (dangerous).
 * ``vault.auth.approle.write`` -- ``create_or_update_approle`` (dangerous).
 * ``vault.auth.approle.delete`` -- ``delete_role`` (dangerous).
@@ -87,6 +87,7 @@ from meho_backplane.connectors.vault.ops_userpass_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import MOUNT, NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.connectors.vault.userpass_password import (
@@ -134,8 +135,8 @@ async def vault_auth_userpass_write(
     any Vault call: read access for ``password_secret_ref``, write access
     for ``generate_password``.
     """
-    username: str = str(params["username"]).strip()
-    mount: str = str(params.get("mount", "userpass")).strip()
+    username: str = path_param(params, "username", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="userpass")
     token_policies = params.get("token_policies")
     plan = select_credential_source(params)
     inline = str(params["password"]) if plan.source == "request" else None
@@ -195,9 +196,9 @@ async def vault_auth_userpass_update_password(
     reclassified to :class:`VaultAuthBackendNotMountedError` (the read
     handlers' probe contract).
     """
-    username: str = str(params["username"]).strip()
+    username: str = path_param(params, "username", NAME)
     password: str = str(params["password"])
-    mount: str = str(params.get("mount", "userpass")).strip()
+    mount: str = path_param(params, "mount", MOUNT, default="userpass")
 
     async with vault_client_for_target(operator, target) as client:
         try:
@@ -225,8 +226,8 @@ async def vault_auth_userpass_delete(
     is not mounted -- reclassified to
     :class:`VaultAuthBackendNotMountedError`.
     """
-    username: str = str(params["username"]).strip()
-    mount: str = str(params.get("mount", "userpass")).strip()
+    username: str = path_param(params, "username", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="userpass")
 
     async with vault_client_for_target(operator, target) as client:
         try:
@@ -270,8 +271,8 @@ async def vault_auth_approle_write(
     supplied are forwarded (each is optional on the Vault side). Mints no
     SecretID -- that is ``generate_secret_id``.
     """
-    role_name: str = str(params["role_name"]).strip()
-    mount: str = str(params.get("mount", "approle")).strip()
+    role_name: str = path_param(params, "role_name", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="approle")
 
     kwargs: dict[str, Any] = {"role_name": role_name, "mount_point": mount}
     for field in _APPROLE_WRITE_FIELDS:
@@ -299,8 +300,8 @@ async def vault_auth_approle_delete(
     Idempotent like userpass delete; a ``404`` only means the backend is
     not mounted.
     """
-    role_name: str = str(params["role_name"]).strip()
-    mount: str = str(params.get("mount", "approle")).strip()
+    role_name: str = path_param(params, "role_name", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="approle")
 
     async with vault_client_for_target(operator, target) as client:
         try:
@@ -338,8 +339,8 @@ async def vault_auth_approle_generate_secret_id(
     :class:`hvac.exceptions.InvalidPath`; only the backend-absent case is
     reclassified to :class:`VaultAuthBackendNotMountedError`.
     """
-    role_name: str = str(params["role_name"]).strip()
-    mount: str = str(params.get("mount", "approle")).strip()
+    role_name: str = path_param(params, "role_name", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="approle")
 
     kwargs: dict[str, Any] = {"role_name": role_name, "mount_point": mount}
     for field in ("metadata", "cidr_list", "token_bound_cidrs"):
@@ -409,7 +410,7 @@ _AUTH_WRITE_OP_SPECS: tuple[dict[str, Any], ...] = (
             "/v1/auth/<mount>/users/<user>/password). The new password "
             "rides in the request params and is classified "
             "credential_write: redacted from the audit row and the "
-            "broadcast feed. safety_level=caution, requires_approval=True. "
+            "broadcast feed. safety_level=dangerous, requires_approval=True. "
             "The response is value-free. A missing user under a mounted "
             "backend surfaces as InvalidPath; userpass not enabled raises "
             "VaultAuthBackendNotMountedError."
@@ -419,7 +420,7 @@ _AUTH_WRITE_OP_SPECS: tuple[dict[str, Any], ...] = (
         "hard_to_undo": "overwrites",
         "changes_rights": True,
         "tags": ["write", "credential-write", "auth", "identity"],
-        "safety_level": "caution",
+        "safety_level": "dangerous",
         "llm_instructions": VAULT_AUTH_USERPASS_UPDATE_PASSWORD_LLM_INSTRUCTIONS,
     },
     {

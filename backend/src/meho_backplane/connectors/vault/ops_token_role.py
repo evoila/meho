@@ -59,6 +59,7 @@ from meho_backplane.connectors.vault.ops_token_role_schemas import (
     VAULT_TOKEN_ROLE_WRITE_PARAMETER_SCHEMA,
     VAULT_TOKEN_ROLE_WRITE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 
@@ -118,7 +119,7 @@ async def vault_token_role_write(
     module docstring for why this bypasses hvac's helper). Returns the
     settings sent; no token is made.
     """
-    role_name: str = str(params["role_name"]).strip()
+    role_name: str = path_param(params, "role_name", NAME)
     settings: dict[str, Any] = {
         field: params[field] for field in _TOKEN_ROLE_WRITE_FIELDS if params.get(field) is not None
     }
@@ -140,7 +141,7 @@ async def vault_token_role_read(
     case, so the underlying :class:`hvac.exceptions.InvalidPath` surfaces
     as a read-phase ``connector_error`` (like ``vault.token.lookup_accessor``).
     """
-    role_name: str = str(params["role_name"]).strip()
+    role_name: str = path_param(params, "role_name", NAME)
 
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.auth.token.read_role, role_name=role_name)

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from meho_backplane.connectors.vault.path_params import NAME_PATTERN
+
 __all__ = [
     "VAULT_IDENTITY_ENTITY_ALIAS_WRITE_LLM_INSTRUCTIONS",
     "VAULT_IDENTITY_ENTITY_ALIAS_WRITE_PARAMETER_SCHEMA",
@@ -311,7 +313,7 @@ VAULT_IDENTITY_GROUP_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
         "name": {
             "type": "string",
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": NAME_PATTERN,
             "description": "Group name to delete. Forwarded verbatim to hvac's name= argument.",
         },
     },
@@ -354,7 +356,7 @@ VAULT_IDENTITY_ENTITY_READ_PARAMETER_SCHEMA: dict[str, Any] = {
         "entity_id": {
             "type": "string",
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": NAME_PATTERN,
             "description": "The entity id to read (from a create response or a list).",
         },
     },
@@ -397,7 +399,7 @@ VAULT_IDENTITY_GROUP_READ_PARAMETER_SCHEMA: dict[str, Any] = {
         "name": {
             "type": "string",
             "minLength": 1,
-            "pattern": "\\S",
+            "pattern": NAME_PATTERN,
             "description": "The group name to read.",
         },
     },

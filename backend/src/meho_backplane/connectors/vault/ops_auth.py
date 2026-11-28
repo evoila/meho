@@ -95,6 +95,7 @@ from meho_backplane.connectors.vault.ops_auth_schemas import (
     VAULT_AUTH_USERPASS_READ_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_READ_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import MOUNT, NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations import register_plain_fields
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -157,7 +158,7 @@ async def vault_auth_userpass_list(
         Any other hvac-side error; the dispatcher's ``connector_error``
         branch surfaces ``extras["exception_class"]``.
     """
-    mount: str = str(params.get("mount", "userpass")).strip()
+    mount: str = path_param(params, "mount", MOUNT, default="userpass")
     async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.userpass.list_user, mount_point=mount)
@@ -187,8 +188,8 @@ async def vault_auth_userpass_read(
     reclassifying -- if the list succeeds the backend is mounted and
     the original ``InvalidPath`` (missing user) is re-raised.
     """
-    username: str = str(params["username"]).strip()
-    mount: str = str(params.get("mount", "userpass")).strip()
+    username: str = path_param(params, "username", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="userpass")
     async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(
@@ -218,7 +219,7 @@ async def vault_auth_approle_list(
     meho_backplane.auth.vault.VaultClientError
         Login-side failure (Vault unreachable, role denied).
     """
-    mount: str = str(params.get("mount", "approle")).strip()
+    mount: str = path_param(params, "mount", MOUNT, default="approle")
     async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.approle.list_roles, mount_point=mount)
@@ -245,8 +246,8 @@ async def vault_auth_approle_read(
     backend-absent case is translated to
     :class:`VaultAuthBackendNotMountedError`.
     """
-    role_name: str = str(params["role_name"]).strip()
-    mount: str = str(params.get("mount", "approle")).strip()
+    role_name: str = path_param(params, "role_name", NAME)
+    mount: str = path_param(params, "mount", MOUNT, default="approle")
     async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(

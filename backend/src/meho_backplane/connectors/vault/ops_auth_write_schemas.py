@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from meho_backplane.connectors.vault.path_params import MOUNT_PATTERN, NAME_PATTERN
+
 __all__ = [
     "VAULT_AUTH_APPROLE_DELETE_LLM_INSTRUCTIONS",
     "VAULT_AUTH_APPROLE_DELETE_PARAMETER_SCHEMA",
@@ -55,8 +57,9 @@ def _mount_property(default: str) -> dict[str, Any]:
     """Build the shared optional ``mount`` schema property.
 
     ``mount`` is optional with a per-op default so non-default mounts
-    (``auth/userpass-prod``) work without a code change. ``pattern="\\S"``
-    rejects a whitespace-only override; the enclosing schema's
+    (``auth/userpass-prod``) work without a code change. The pattern
+    (:data:`~meho_backplane.connectors.vault.path_params.MOUNT_PATTERN`)
+    keeps it one plain mount path; the enclosing schema's
     ``additionalProperties=False`` turns a typo (``{"moutn": "x"}``)
     into a clear validation error instead of a silent default-mount
     dispatch. Identical to the read-side helper -- kept local rather
@@ -66,12 +69,14 @@ def _mount_property(default: str) -> dict[str, Any]:
     return {
         "type": "string",
         "minLength": 1,
-        "pattern": "\\S",
+        "pattern": MOUNT_PATTERN,
         "default": default,
         "description": (
             f"Auth-method mount path (no leading slash, no 'auth/' prefix), "
             f"default {default!r}. Override only when the backend was "
-            f"enabled at a non-default path (vault auth enable -path=...)."
+            f"enabled at a non-default path (vault auth enable -path=...). "
+            f"Parts split by '/'; no empty, '.' or '..' part, and no '?', '#', "
+            f"'%' or backslash."
         ),
     }
 
@@ -83,7 +88,7 @@ def _mount_hint(default: str) -> str:
 _USERNAME_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "pattern": "\\S",
+    "pattern": NAME_PATTERN,
     "description": (
         "userpass username (no mount prefix). Forwarded verbatim to hvac's username= argument."
     ),
@@ -104,7 +109,7 @@ _PASSWORD_PROPERTY: dict[str, Any] = {
 _ROLE_NAME_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "pattern": "\\S",
+    "pattern": NAME_PATTERN,
     "description": (
         "AppRole role name (no mount prefix). Forwarded verbatim to hvac's role_name= argument."
     ),

@@ -33,6 +33,7 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.auth.caller_record import apply_caller_block
 from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS, Operator
@@ -184,6 +185,7 @@ def _first_problem(
             return AuditRowProblem(name, reason)
     payload = _build_audit_payload(descriptor, params_hash, "ok")
     apply_client_block(payload, operator)
+    apply_caller_block(payload, operator)
     # The name that ``_apply_principal_name`` stores (``principal_display_name``):
     # the token's name, else the client id of a machine login. The registered
     # agent name needs the database, so only the token's own values are checked.

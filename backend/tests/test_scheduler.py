@@ -66,7 +66,7 @@ from meho_backplane.agent.run import (
 )
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
 from meho_backplane.agents.service import AgentDefinitionService
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -815,6 +815,49 @@ async def test_dispatched_run_audit_rows_inherit_trigger_work_ref(
     audit_rows = await _wait_for_run_audit_rows(run_id, expected=1)
     assert audit_rows, "expected at least one audit_log row for the dispatched run"
     assert all(row.work_ref == work_ref for row in audit_rows)
+
+
+@pytest.mark.asyncio
+async def test_dispatched_run_audit_rows_name_a_service_agent(
+    _reset_connector_state: None,
+    _stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``CUSTOM_POLICY`` on, a scheduled run's rows are ``service_agent``.
+
+    The run uses the agent's own login (a client credentials grant), so its
+    tool call rows name the kind of an agent login.
+    """
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
+    # The shared token check reads an agent's client credentials token as
+    # an agent login (``test_token_checked_whole_path.py``).
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(
+            return_value=Operator(
+                sub=f"agent-{_TENANT_A.hex[:8]}",
+                raw_jwt="agent-token",
+                tenant_id=_TENANT_A,
+                tenant_role=TenantRole.OPERATOR,
+                principal_kind=PrincipalKind.AGENT,
+                client_id="agent:reporter",
+            ),
+        ),
+    )
+    await _seed_echo_op(_stub_embedding_service)
+    agent_id = await _seed_tenant_and_agent(toolset={"meta_tools": ["call_operation"]})
+    trigger = await _create_cron(
+        agent_definition_id=agent_id, base=datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    )
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert await run_one_tick(invoker=_make_tool_calling_invoker()) == 1
+
+    runs = await _wait_for_agent_runs(1, trigger=AgentRunTrigger.SCHEDULED)
+    audit_rows = await _wait_for_run_audit_rows(runs[0].id, expected=1)
+    assert any(row.path == "vault.kv.read" for row in audit_rows)
+    assert {row.caller_kind for row in audit_rows} == {"service_agent"}
 
 
 # ---------------------------------------------------------------------------

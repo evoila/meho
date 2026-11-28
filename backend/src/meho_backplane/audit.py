@@ -149,6 +149,7 @@ from meho_backplane.audit_cutover import (
     rest_request_is_routine,
     wrapper_row_class,
 )
+from meho_backplane.auth.caller_record import reset_request_caller
 from meho_backplane.auth.client_identity import (
     CLIENT_PAYLOAD_KEY,
     request_client_block,
@@ -1018,6 +1019,8 @@ class AuditMiddleware:
         # The ``client`` block of an earlier request on this task must not
         # reach this request's row (AUDIT_CLIENT_IDENTITY).
         reset_request_client()
+        # Nor the login of an earlier request (the kind of caller, CUSTOM_POLICY).
+        reset_request_caller()
 
         # work_ref I1-T2 (#1657), widened by #3804: bind the inbound
         # ``Meho-Work-Ref`` header onto :data:`work_ref_var` for the WHOLE

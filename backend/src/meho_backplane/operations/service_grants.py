@@ -91,6 +91,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.caller_record import caller_columns
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import resolve_op_class
@@ -2050,6 +2051,7 @@ async def _record_grant_use(
             duration_ms=Decimal("0.00"),
             payload=payload,
             work_ref=work_ref_var.get(),
+            **caller_columns(operator),
         )
         session.add(row)
         await session.commit()

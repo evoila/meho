@@ -123,6 +123,12 @@ class RunningOperation:
     step_id: str | None = None
     work_ref: str | None = None
     recorded: bool = False
+    #: The ``caller_kind`` column of the call's login (``CUSTOM_POLICY``),
+    #: from :func:`~meho_backplane.auth.caller_record.caller_columns`.
+    caller: dict[str, Any] = field(default_factory=dict)
+    #: The payload block ``caller`` of a ``personal_agent`` call, saved when
+    #: the call starts (:func:`~meho_backplane.auth.caller_record.apply_caller_block`).
+    caller_payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -204,6 +210,8 @@ async def track_operation(
     operator_sub: str,
     tenant_id: uuid.UUID | None,
     approved_run: bool,
+    caller: dict[str, Any] | None = None,
+    caller_payload: dict[str, Any] | None = None,
 ) -> AsyncIterator[None]:
     """Keep one top-level operation call in the list of running calls.
 
@@ -226,6 +234,8 @@ async def track_operation(
         run_id=run_id_var.get(),
         step_id=step_id_var.get(),
         work_ref=work_ref_var.get(),
+        caller=dict(caller or {}),
+        caller_payload=dict(caller_payload or {}),
     )
     state = _state
     state.running[key] = entry
@@ -303,6 +313,7 @@ def _audit_row(entry: RunningOperation, stopped_at: datetime) -> AuditLog:
             "MEHO stopped before this operation finished. It may have reached "
             "the target. Check the target before you run it again."
         ),
+        **entry.caller_payload,
     }
     # The same mirrors a finished call's row carries in its payload.
     if entry.parent_audit_id is not None:
@@ -329,6 +340,7 @@ def _audit_row(entry: RunningOperation, stopped_at: datetime) -> AuditLog:
         request_id=entry.request_id,
         duration_ms=Decimal(str(round(duration_ms, 2))),
         payload=payload,
+        **entry.caller,
     )
 
 

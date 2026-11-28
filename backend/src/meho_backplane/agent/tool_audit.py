@@ -83,6 +83,7 @@ from meho_backplane.audit_cutover import (
     open_classified_record_scope,
     wrapper_rows_retired,
 )
+from meho_backplane.auth.caller_record import caller_columns
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
@@ -241,6 +242,8 @@ async def write_agent_tool_row(
                 status_code=status_code,
                 duration_ms=Decimal(str(round(duration_ms, 3))),
                 payload=payload,
+                # The kind of caller (CUSTOM_POLICY): a hosted run's agent acts.
+                **caller_columns(operator),
             )
         )
         await session.commit()

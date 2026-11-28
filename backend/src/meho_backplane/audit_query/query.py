@@ -636,6 +636,7 @@ def _build_audit_entry(
         actor_sub=row.actor_sub,
         actor_name=_actor_name(row.actor_sub),
         secret_read_as=row.secret_read_as,
+        caller_kind=row.caller_kind,
         broadcast_event_id=None,
     )
 

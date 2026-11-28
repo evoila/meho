@@ -50,6 +50,7 @@ from __future__ import annotations
 import structlog
 from fastapi import Depends, Header, HTTPException, status
 
+from meho_backplane.auth.caller_record import bind_request_caller
 from meho_backplane.auth.conventions_drift_login import (
     SCOPE_VIOLATION as CONVENTIONS_DRIFT_SCOPE_VIOLATION,
 )
@@ -281,6 +282,7 @@ async def verify_mcp_jwt_and_bind(
         tenant_id=str(operator.tenant_id),
     )
     bind_tenant_role_source(operator)
+    bind_request_caller(operator)
     if not is_human_principal(operator):
         # A machine login never counts as a person behind another login.
         async with get_sessionmaker()() as session, session.begin():

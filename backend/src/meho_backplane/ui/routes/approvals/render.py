@@ -18,8 +18,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.auth.caller_record import CALLER_KIND_KEY, caller_record_on
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations._preview import stored_requester_record
 from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
 __all__ = [
     "RESULT_STATE_PILL",
     "STATUS_PILL_CLASS",
+    "caller_line",
     "parked_request_chain",
     "project_outcome",
     "project_request_to_view",
@@ -235,6 +238,8 @@ def project_request_to_view(
 
     ``proposed_effect``: the card as *reader* reads it (:func:`card_for_reader`,
     without the platform admin parts when *reader* is ``None``).
+
+    ``caller_line`` names the kind of caller who asked (:func:`caller_line`).
     """
     result_state = approval_result_state(row)
     return {
@@ -267,7 +272,48 @@ def project_request_to_view(
         **_project_policy_rule(row),
         **_project_target_and_run_start(row, target_name),
         **_project_outcome_check(row),
+        "caller_line": caller_line(row, reader),
     }
+
+
+def caller_line(row: ApprovalRequest, reader: Operator | None) -> str | None:
+    """The line that names the kind of caller who asked, or ``None``.
+
+    Read from ``proposed_effect["caller_kind"]``, stored when the call
+    started to wait with ``CUSTOM_POLICY`` on. ``None`` with the switch off
+    and for a request with no kind. "Your personal agent asked" only for
+    the person behind it (*reader*); another reader sees that person named.
+    """
+    if not caller_record_on():
+        return None
+    kind = (row.proposed_effect or {}).get(CALLER_KIND_KEY)
+    if kind == "personal_agent" and reader is not None and reader.sub == row.principal_sub:
+        return "Your personal agent asked."
+    who = row.principal_name or row.principal_sub
+    lines = {
+        "personal_agent": f"The personal agent of {who} asked.",
+        "service_agent": f"The service agent {_service_agent_name(row)} asked.",
+        "person": f"{who} asked in the web console.",
+        "runner": f"The runner {row.principal_sub} asked.",
+        "system": "MEHO itself asked.",
+    }
+    return lines.get(kind) if isinstance(kind, str) else None
+
+
+def _service_agent_name(row: ApprovalRequest) -> str:
+    """The agent of a ``service_agent`` request: ``agent:<name>`` when known.
+
+    The acting agent of a delegated call, else the client id of the stored
+    requester record (a direct agent token's ``sub`` is an account id),
+    else the stored name of the login, else the login.
+    """
+    if row.principal_act:
+        return row.principal_act
+    record = stored_requester_record(row.proposed_effect)
+    client_id = record.get("client_id") if isinstance(record, dict) else None
+    if isinstance(client_id, str) and client_id:
+        return client_id
+    return row.principal_name or row.principal_sub
 
 
 def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:

@@ -128,6 +128,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_in_code_logins_have_a_kind.py",
     # Direct reads of the policy switches, read from every module in the package.
     "tests/test_custom_policy_switch.py",
+    # Core inserts into the audit table, read from every module in the package.
+    "tests/test_audit_rows_are_orm_objects.py",
     # Log calls that hold a web address, read from every module in the package.
     "tests/test_log_lines_hold_scheme_and_host.py",
 )

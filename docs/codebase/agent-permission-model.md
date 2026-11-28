@@ -649,7 +649,9 @@ itself. See [policy-evaluator.md](policy-evaluator.md).
 ## The kind of caller (`auth/caller_kind.py`)
 
 `caller_kind(operator, actor_sub)` names who is calling. It reads no
-database and no settings. Nothing decides on it yet. The guide page
+database and no settings. No check decides on it yet; with `CUSTOM_POLICY`
+on, the audit row records it (see "The kind of caller on the audit row"
+below). The guide page
 `docs-site/guides/who-is-calling.md` says what each kind may do today.
 
 The checks run in this order; the first one that fits gives the kind.
@@ -705,7 +707,7 @@ Two fields of `Operator` feed it:
 
 The audit row has a column for the kind: `audit_log.caller_kind`
 (migration `0191`). A database CHECK allows only the five kinds, or
-empty. Nothing writes or reads it yet, so every row keeps it empty. The
+empty. Only the code below writes it, and only with `CUSTOM_POLICY` on. The
 five kinds are listed once in the code, as `CALLER_KINDS` in
 `meho_backplane/caller_kinds.py`. That module imports nothing from MEHO,
 so `db/models.py` builds its CHECK from it, and `auth/caller_kind.py`
@@ -717,6 +719,70 @@ when the migration and the model differ, or differ from `CALLER_KINDS`.
 The evaluator's `AskerKind` (`policy/evaluate.py`) is not the same: there
 `person` is any human login, by web or by token, and `Asker.via` tells
 them apart. `tests/test_caller_kind.py` pins how the two line up.
+
+### The kind of caller on the audit row (`auth/caller_record.py`)
+
+With `CUSTOM_POLICY` on (`custom_policy_on`), every audit row of a call
+gets `caller_kind`. With it off, nothing changes: the column stays empty,
+no row gets the `caller` block, and a waiting request stores no kind. The
+kind only records who called. No check reads it, so nothing waits more or
+less.
+
+- **Writers with the login at hand** call `caller_columns(operator)` and
+  `apply_caller_block(payload, operator)`: the operation row
+  (`operations/_audit.py::write_audit_row`, also its short row), the MCP
+  row (`mcp/audit.py`), the approval rows
+  (`operations/approval_queue.py::_write_audit_row`) and the hosted agent's
+  tool rows (`agent/tool_audit.py`). The kind is of that login, with the
+  acting agent (`resolve_actor_sub`) counted first.
+- **Every other row** gets its kind from one `AuditLog` `init` listener
+  (`_fill_caller_kind`), when its writer left the kind out. A row under
+  MEHO's own name (`system` or `system:<job>`) gets `system`. A row under
+  the name of the login of the current request gets that login's kind,
+  or `service_agent` when the row has an `actor_sub`. The token checks
+  bind the login with `bind_request_caller` (`middleware._bind_operator`,
+  `mcp/auth.py::verify_mcp_jwt_and_bind`, and the web session check in
+  `ui/auth/refresh.py`); the audit middleware forgets it at the start of
+  each request. So the REST request row and the rows of other writers
+  get a kind too. A writer with another name of its own (the event
+  intake's `__ingest__`) passes `system_columns()`.
+  `tests/test_audit_caller_kind.py` fails when code writes `audit_log`
+  with a Core insert, which would skip the listener.
+- **The `caller` block** is on a `personal_agent` row only:
+  `{"azp": <login client>, "tool": <MCP client name or null>}`. It is
+  written whenever `CUSTOM_POLICY` is on, also with
+  `AUDIT_CLIENT_IDENTITY` off; that setting keeps its own `client` block
+  and this code does not change it. The tool name comes from
+  `clientInfo.name` of the MCP `initialize`, cleaned by
+  `clean_client_text`. With `CUSTOM_POLICY` on, the `initialize` writes the
+  `mcp.session_open` row (also with `AUDIT_CLIENT_IDENTITY` off; then the
+  row keeps only `client_name`, and the client version, the `User-Agent`
+  and the e-mail stay with `AUDIT_CLIENT_IDENTITY`), and each
+  later MCP request of a personal agent reads the name from that row of
+  its session, same tenant and same login
+  (`mcp/caller_tool.py::bind_tool_name`). MEHO never decides anything on
+  the tool name.
+- **A call that runs after an approval** writes the kind of the login that
+  runs it, the same login as the row's `operator_sub`: the approver when a
+  person approves on a console, CLI or REST surface, the agent when MEHO's
+  own agent resumes its run. The requester's kind stays on the waiting
+  request and on its `approval.request` row.
+- **Rows with no login bound for the request** take the kind from the
+  login the writer holds: the auto-approval row of a standing grant or a
+  run approval (`caller_columns(operator)`), and the "unfinished" row of a
+  call that MEHO stopped at shutdown (`track_operation` saves the kind,
+  and the `caller` block of a personal agent, when the call starts).
+- **A waiting request** stores the requester's kind in
+  `proposed_effect["caller_kind"]` (`_with_caller_kind`). A re-park for an
+  earlier requester keeps that requester's kind (`ResumeRequester.caller_kind`).
+  The approval card shows it (`ui/routes/approvals/render.py::caller_line`):
+  "Your personal agent asked." only for the person behind it, "The
+  personal agent of <person> asked." for another approver, and "The
+  service agent `agent:<name>` asked." for an agent: the acting agent of
+  a run for a person, else the client id of the stored requester record,
+  else the stored name of the login (`principal_name`), else the login.
+- **The audit API** (`AuditEntry.caller_kind`) sends the kind for a row
+  that has one, and leaves the field out for a row without one.
 
 ## Who stands behind an agent's request
 
@@ -731,6 +797,7 @@ knows nobody behind the agent, only an admin may approve. See
 
 - `meho_backplane/auth/operator.py` — `Operator`, `TenantRole`, `PrincipalKind`
 - `meho_backplane/auth/caller_kind.py` — `caller_kind`, `CallerKind`
+- `meho_backplane/auth/caller_record.py` — the kind of caller on the audit row
 - `meho_backplane/caller_kinds.py` — `CALLER_KINDS`, the one list of kinds
 - `meho_backplane/db/engine.py` — `get_sessionmaker`
 - `meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`

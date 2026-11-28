@@ -165,6 +165,8 @@ class AuditEntry(BaseModel):
       ``None`` when nobody acted for another login.
     * ``actor_name`` — the agent's name, read from ``actor_sub``
       (``agent:<name>``). ``None`` when ``actor_sub`` is not of that form.
+    * ``caller_kind`` ← ``audit_log.caller_kind`` (the kind of caller,
+      ``CUSTOM_POLICY``). Left out of the answer when the row has none.
     * ``broadcast_event_id`` — v0.2 placeholder, always None (FK direction
       is reversed: ``BroadcastEvent.audit_id`` points at the audit row).
     """
@@ -228,16 +230,23 @@ class AuditEntry(BaseModel):
     # read a secret for this call. An answer carries the field only
     # while ``AUDIT_SECRET_READ_AS`` is on (see ``_hide_secret_read_as``).
     secret_read_as: str | None = None
+    # The kind of caller (``person``, ``personal_agent``, ``service_agent``,
+    # ``runner`` or ``system``), from ``audit_log.caller_kind``. Written only
+    # while ``CUSTOM_POLICY`` is on. An answer leaves the field out for a row
+    # with no kind (an older row, or the switch was off); it never sends ``null``.
+    caller_kind: str | None = None
     broadcast_event_id: uuid.UUID | None
 
     @model_serializer(mode="wrap")
     def _hide_secret_read_as(self, handler):  # type: ignore[no-untyped-def]
-        """Leave ``secret_read_as`` out of an answer while the switch is off."""
+        """Leave ``secret_read_as`` out while its switch is off, and an empty ``caller_kind``."""
         # No annotations on purpose: a return type would replace the answer's
         # schema in the API file with a plain object.
         data = handler(self)
         if not get_settings().audit_secret_read_as:
             data.pop("secret_read_as", None)
+        if data.get("caller_kind") is None:
+            data.pop("caller_kind", None)
         return data
 
 

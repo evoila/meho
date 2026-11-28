@@ -38,6 +38,7 @@ import structlog
 from sqlalchemy import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.caller_record import apply_caller_block, caller_columns
 from meho_backplane.auth.client_identity import apply_client_block
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
@@ -928,6 +929,9 @@ async def write_audit_row(
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
     runbook_kwargs.update(policy_rule_columns(result_status))
+    # The kind of caller (CUSTOM_POLICY): of the login that runs the call, the
+    # same login as ``operator_sub``. On an approved run that is who runs it.
+    runbook_kwargs.update(caller_columns(operator))
     row_fields: dict[str, Any] = {
         "id": audit_id,
         "occurred_at": datetime.now(UTC),
@@ -1005,6 +1009,8 @@ async def _store_row(
             await _apply_principal_name(session, operator, core, payload)
             apply_client_block(core, operator)
             apply_client_block(payload, operator)
+            apply_caller_block(core, operator)
+            apply_caller_block(payload, operator)
             columns, changed = _storable_columns(payload, raw_payload, redaction_manifest)
             session.add(AuditLog(**row_fields, event_class=event_class, **columns))
             await session.commit()

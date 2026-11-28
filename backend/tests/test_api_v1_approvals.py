@@ -648,10 +648,11 @@ async def test_the_approver_claim_does_not_open_the_approvals_list() -> None:
 def test_approve_only_principal_denied_call_operation_dispatch(client: TestClient) -> None:
     """The decoupling contract, end-to-end: the approver cannot dispatch.
 
-    ``POST /api/v1/operations/call`` stays ``Depends(require_role(OPERATOR))``,
-    so a ``read_only`` + ``approver`` token is refused 403 ``insufficient_role``
+    ``POST /api/v1/operations/call`` needs the ``operator`` role, so a
+    ``read_only`` + ``approver`` token is refused 403 ``insufficient_role``
     — the orthogonal capability never leaks into the dispatch gate (#3243). A
     valid body is sent so the role gate, not body validation, owns the 403.
+    The operation is not registered here, so the answer is the plain one.
     """
     key = make_rsa_keypair("kid-appr-dispatch")
     with respx.mock as r:

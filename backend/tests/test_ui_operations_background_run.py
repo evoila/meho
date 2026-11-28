@@ -26,6 +26,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationRun, OperationRunOrigin, OperationRunStatus
+from meho_backplane.operations.operation_run import TERMINAL_STATUSES
 from tests.test_ui_operations import (
     _OP_ADMIN,
     _OP_OPERATOR,
@@ -56,23 +57,30 @@ _OK = {
     "handle": None,
     "extras": {},
 }
+#: Far longer than the route's short wait, also on a slow machine.
+_RELEASE_CAP_SECONDS = 30.0
 
 
 class _SlowDispatcher:
-    """The dispatcher: runs until the test releases it, then answers *envelope*."""
+    """The dispatcher: runs until the test releases it, then answers *envelope*.
+
+    ``ended`` turns true only when the call returns, so a test can check
+    the order of events instead of how fast the machine is.
+    """
 
     def __init__(self, envelope: dict[str, Any]) -> None:
         self.envelope = envelope
         self.release = threading.Event()
         self.calls = 0
+        self.ended = False
 
     async def __call__(self, operator: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         self.calls += 1
         # The cap keeps a route that waits for this call from hanging the test.
-        for _ in range(250):
-            if self.release.is_set():
-                break
+        deadline = time.monotonic() + _RELEASE_CAP_SECONDS
+        while not self.release.is_set() and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
+        self.ended = True
         return self.envelope
 
 
@@ -104,12 +112,8 @@ def _runs(client: TestClient) -> list[OperationRun]:
     return _in_loop(client, _read)
 
 
-def _run(client: TestClient, csrf: str, **form: str) -> tuple[Any, float]:
-    started = time.monotonic()
-    response = client.post(
-        "/ui/operations/call", headers=_csrf_headers(csrf), data={**_FORM, **form}
-    )
-    return response, time.monotonic() - started
+def _run(client: TestClient, csrf: str, **form: str) -> Any:
+    return client.post("/ui/operations/call", headers=_csrf_headers(csrf), data={**_FORM, **form})
 
 
 def _ask_until_ended(client: TestClient, run_id: str) -> str:
@@ -135,16 +139,18 @@ def test_slow_operation_answers_at_once_then_shows_the_result(
     dispatcher = _SlowDispatcher(_OK)
     _use(monkeypatch, dispatcher)
     with mock, client:
-        response, seconds = _run(client, csrf)
+        response = _run(client, csrf)
+        ended_before_the_answer = dispatcher.ended
         run_id = _run_id_of(client)
         running = response.text
-        final = ""
-        # The dispatcher waits for the test, so the run cannot have ended yet.
-        assert response.status_code == 200
         dispatcher.release.set()
         final = _ask_until_ended(client, run_id)
 
-    assert seconds < 2.0 + 1.0  # the short wait, plus the slow test machine
+    # The order of events, not a time limit: the answer came while the
+    # operation was still running, as it waits for the test to release it.
+    assert response.status_code == 200
+    assert dispatcher.calls == 1
+    assert not ended_before_the_answer
     assert "The operation is running." in running
     assert "Closing does not stop the operation" in running
     assert f'hx-get="/ui/operations/runs/{run_id}"' in running
@@ -167,7 +173,7 @@ def test_a_quick_operation_shows_its_result_at_once(monkeypatch: pytest.MonkeyPa
     dispatcher.release.set()
     _use(monkeypatch, dispatcher)
     with mock, client:
-        response, _ = _run(client, csrf)
+        response = _run(client, csrf)
     assert 'data-run-status="ok"' in response.text
     assert "data-run-lock" not in response.text
 
@@ -183,7 +189,7 @@ def test_failing_operation_shows_the_error_and_its_code(monkeypatch: pytest.Monk
     )
     _use(monkeypatch, dispatcher)
     with mock, client:
-        response, _ = _run(client, csrf)
+        response = _run(client, csrf)
         run_id = _run_id_of(client)
         assert "The operation is running." in response.text
         dispatcher.release.set()
@@ -216,7 +222,7 @@ def test_bad_params_json_stays_a_form_error_and_starts_no_run(
     dispatcher = _SlowDispatcher(_OK)
     _use(monkeypatch, dispatcher)
     with mock, client:
-        response, _ = _run(client, csrf, params="{not valid json")
+        response = _run(client, csrf, params="{not valid json")
         runs = _runs(client)
     assert response.status_code == 400
     assert 'data-run-status="form_error"' in response.text
@@ -235,7 +241,7 @@ def test_a_target_that_did_not_resolve_stays_a_form_error(
     )
     _use(monkeypatch, dispatcher)
     with mock, client:
-        late, _ = _run(client, csrf)
+        late = _run(client, csrf)
         assert "The operation is running." in late.text
         run_id = _run_id_of(client)
         dispatcher.release.set()
@@ -244,7 +250,7 @@ def test_a_target_that_did_not_resolve_stays_a_form_error(
         while poll.status_code == 200 and time.monotonic() < deadline:
             time.sleep(0.05)
             poll = client.get(f"/ui/operations/runs/{run_id}")
-        quick, _ = _run(client, csrf)
+        quick = _run(client, csrf)
     for response in (poll, quick):
         assert response.status_code == 400
         assert 'data-run-status="form_error"' in response.text
@@ -254,11 +260,22 @@ def test_a_target_that_did_not_resolve_stays_a_form_error(
     assert f'data-meho-run-seen="{run_id}"' in poll.text
 
 
-def test_an_unknown_target_by_name_stays_a_form_error() -> None:
-    """The real dispatcher: a target name that does not exist."""
+def test_an_unknown_target_by_name_stays_a_form_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real dispatcher: a target name that does not exist.
+
+    The route's short wait is made long, so the run always ends before
+    the first answer, also on a slow machine. The wait ends as soon as
+    the run ends, so the test does not take longer.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.ui.routes.operations.routes.ANSWER_WAIT_SECONDS", _RELEASE_CAP_SECONDS
+    )
     client, mock, csrf = _seed()
     with mock, client:
-        response, _ = _run(client, csrf, target="no-such-target")
+        response = _run(client, csrf, target="no-such-target")
+        (run,) = _runs(client)
+    # The order of events: the run had ended when the route answered.
+    assert run.status in {s.value for s in TERMINAL_STATUSES}
     assert response.status_code == 400
     assert 'data-run-status="form_error"' in response.text
 
@@ -291,7 +308,7 @@ def test_one_click_is_one_run_and_the_view_locks_the_button(
     dispatcher = _SlowDispatcher(_OK)
     _use(monkeypatch, dispatcher)
     with mock, client:
-        response, _ = _run(client, csrf)
+        response = _run(client, csrf)
         run_id = _run_id_of(client)
         again = client.get(f"/ui/operations/runs/{run_id}").text
         dispatcher.release.set()
@@ -316,7 +333,7 @@ def test_a_call_that_reveals_secrets_runs_inline_with_no_run(
     inline.release.set()
     monkeypatch.setattr("meho_backplane.ui.routes.operations.routes.call_operation", inline)
     with mock, client:
-        response, _ = _run(client, csrf, params='{"reveal_secret": true}')
+        response = _run(client, csrf, params='{"reveal_secret": true}')
         runs = _runs(client)
     assert 'data-run-status="ok"' in response.text
     assert runs == []

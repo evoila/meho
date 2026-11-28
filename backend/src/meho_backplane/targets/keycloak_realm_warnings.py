@@ -13,27 +13,71 @@ card by the dispatcher).
 MEHO's own sign-in realm comes from its settings: the realm in
 ``keycloak_issuer_url`` and in ``keycloak_admin_url``
 (:func:`backplane_login_realms`).
+
+A probe made while the switch ``KEYCLOAK_ANSWER_REALM`` is on can save the
+line :data:`REALM_NAME_DIFFERS` in the probe's ``extras``.
+:func:`shown_fingerprint` leaves it out of a saved Keycloak probe while the
+switch is off, so a target read shows it only while the switch is on. The
+probe's own ``product`` decides this, not the target's current product: an
+operator can change the product of a target after its probe was saved. A
+probe of another product is shown as it is.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Final
 from urllib.parse import unquote, urlsplit
 
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.targets.required_extras import KEYCLOAK_PRODUCT, realm_name_problem
 
 __all__ = [
+    "REALM_NAME_DIFFERS",
+    "answer_realm_on",
     "backplane_login_realms",
     "keycloak_realm_warnings",
     "realm_from_url",
+    "shown_fingerprint",
     "target_managed_realm",
     "target_warnings",
 ]
 
 #: The admin realm a Keycloak target logs in to when it names none.
 _DEFAULT_ADMIN_REALM = "master"
+
+#: The probe ``extras`` key that says Keycloak answered with another realm name.
+REALM_NAME_DIFFERS: Final = "realm_name_differs"
+
+
+def answer_realm_on() -> bool:
+    """Return the state of the ``KEYCLOAK_ANSWER_REALM`` switch.
+
+    Read from the env name, with the same parser as
+    :attr:`~meho_backplane.settings.Settings.keycloak_answer_realm`.
+    """
+    return parse_bool_env(os.environ.get("KEYCLOAK_ANSWER_REALM"))
+
+
+def shown_fingerprint(fingerprint: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """Return a saved probe as a target read shows it.
+
+    While the switch is off, a probe whose own ``product`` is Keycloak loses
+    :data:`REALM_NAME_DIFFERS` from its ``extras``. The ``extras`` of a probe
+    belong to the connector that made it, so a probe of another product is
+    returned as it is, also when it has a key of the same name.
+    """
+    if fingerprint is None or answer_realm_on():
+        return fingerprint
+    product = fingerprint.get("product")
+    if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
+        return fingerprint
+    extras = fingerprint.get("extras")
+    if not isinstance(extras, Mapping) or REALM_NAME_DIFFERS not in extras:
+        return fingerprint
+    kept = {key: value for key, value in extras.items() if key != REALM_NAME_DIFFERS}
+    return {**fingerprint, "extras": kept}
 
 
 def realm_from_url(url: str) -> str | None:
@@ -64,11 +108,15 @@ def backplane_login_realms() -> set[str]:
     return realms
 
 
-def keycloak_realm_warnings(product: str | None, extras: Any) -> list[str]:
+def keycloak_realm_warnings(
+    product: str | None, extras: Any, *, name_realm: bool = True
+) -> list[str]:
     """The warnings for a Keycloak target's managed realm; empty when there are none.
 
     Other products, and a target whose realms do not pass the realm check,
-    get no warning: that check refuses them on its own.
+    get no warning: that check refuses them on its own. With
+    ``name_realm=False`` a line names the key ``managed_realm``, never its
+    value, for an answer that holds no value of the extras.
     """
     if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
         return []
@@ -79,15 +127,16 @@ def keycloak_realm_warnings(product: str | None, extras: Any) -> list[str]:
         return []
     admin = extras.get("admin_realm") or _DEFAULT_ADMIN_REALM
     wanted = str(managed).casefold()
+    subject = f"The managed realm {managed!r}" if name_realm else "The realm in `managed_realm`"
     warnings: list[str] = []
     if isinstance(admin, str) and wanted == admin.casefold():
         warnings.append(
-            f"The managed realm {managed!r} is the admin realm of this Keycloak. "
+            f"{subject} is the admin realm of this Keycloak. "
             "MEHO writes on this target change the realm the target logs in to."
         )
     if wanted in {name.casefold() for name in backplane_login_realms()}:
         warnings.append(
-            f"The managed realm {managed!r} is the realm MEHO itself signs in with. "
+            f"{subject} is the realm MEHO itself signs in with. "
             "MEHO writes on this target change MEHO's own sign-in."
         )
     return warnings

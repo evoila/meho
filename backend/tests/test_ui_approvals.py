@@ -593,6 +593,34 @@ def test_detail_modal_shows_the_realm_in_the_opening_summary(with_summary: bool)
     assert ("Update a realm." in body[box:realm]) is with_summary
 
 
+def test_detail_modal_shows_the_realm_of_a_write_that_takes_no_realm_value() -> None:
+    """``keycloak.user.create`` has no ``realm`` value; its card still shows the managed realm."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(
+        tenant_id=_TENANT_A,
+        op_id="keycloak.user.create",
+        connector_id="keycloak-admin-26.x",
+        proposed_effect={
+            "op_id": "keycloak.user.create",
+            "safety_level": "dangerous",
+            "target_realm": "example-realm",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert body.count('data-testid="approval-target-realm"') == 1
+    realm = body.index('data-testid="approval-target-realm"')
+    assert "example-realm" in body[realm : body.index(">Operation</dt>")]
+
+
 def _seed_target_sync(
     *,
     tenant_id: uuid.UUID,

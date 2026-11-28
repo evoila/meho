@@ -19,6 +19,8 @@ text.
   step, so it refuses the call before it starts (#6298).
 * ``role_insufficient`` — the caller's role is below what the operation
   or tool needs.
+* ``insufficient_role`` — a caller with the Reader role asked for a
+  change. REST sends the same code for its role refusals.
 * ``read_scope_denied`` — a service login's read scope does not cover the
   target.
 * ``connector_not_allowed`` — the agent may not use this connector.
@@ -40,6 +42,7 @@ __all__ = [
     "AGENT_REVEAL_REFUSED",
     "AGENT_STEPS_NOT_DECLARED",
     "CONNECTOR_NOT_ALLOWED",
+    "INSUFFICIENT_ROLE",
     "POLICY_DENIED",
     "READ_SCOPE_DENIED",
     "ROLE_INSUFFICIENT",
@@ -51,6 +54,7 @@ AGENT_GRANT_DENIED: Final[str] = "agent_grant_denied"
 AGENT_NO_GRANT: Final[str] = "agent_no_grant"
 AGENT_STEPS_NOT_DECLARED: Final[str] = "agent_steps_not_declared"
 ROLE_INSUFFICIENT: Final[str] = "role_insufficient"
+INSUFFICIENT_ROLE: Final[str] = "insufficient_role"
 READ_SCOPE_DENIED: Final[str] = "read_scope_denied"
 CONNECTOR_NOT_ALLOWED: Final[str] = "connector_not_allowed"
 AGENT_REVEAL_REFUSED: Final[str] = "agent_reveal_refused"
@@ -82,6 +86,8 @@ def deny_reason_code(reason: str) -> str:
     """
     if reason.startswith(f"{READ_SCOPE_DENIED}:"):
         return READ_SCOPE_DENIED
+    if reason.startswith(f"{INSUFFICIENT_ROLE}:"):
+        return INSUFFICIENT_ROLE
     if reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
         return AGENT_STEPS_NOT_DECLARED
     if is_agent_no_grant(reason):

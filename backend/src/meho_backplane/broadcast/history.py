@@ -105,6 +105,7 @@ OP_CLASS_ENUM: Final[tuple[str, ...]] = (
     "credential_read",
     "credential_write",
     "credential_mint",
+    "credential_use",
     "audit_query",
     "approval",
     "checks",

@@ -146,7 +146,7 @@ router = APIRouter(prefix="/api/v1", tags=["docs"])
 #: once at import time (rather than inline) to satisfy ruff's B008 rule,
 #: matching the convention :mod:`meho_backplane.api.v1.retrieve`
 #: established.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 
 class SearchDocsRequest(BaseModel):

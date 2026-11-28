@@ -20,7 +20,7 @@ __all__ = ["OP_CLASS_BADGE_CLASSES", "OP_CLASS_FILTER_OPTIONS"]
 #: (:func:`meho_backplane.broadcast.classify_op`) to DaisyUI badge
 #: variant classes, covering every :data:`OP_CLASS_ENUM` member. The
 #: secret-material classes -- ``credential_read`` / ``credential_write``
-#: / ``credential_mint`` -- get the warning palette so an operator reads
+#: / ``credential_mint`` / ``credential_use`` -- get the warning palette so an operator reads
 #: the sensitivity at a glance; ``audit_query`` and ``approval`` are
 #: informational (info); ``checks`` is primary; ``write`` is accent
 #: (mutation); ``read`` and ``other`` are the neutral ghost. A class not
@@ -31,6 +31,7 @@ OP_CLASS_BADGE_CLASSES: Final[dict[str, str]] = {
     "credential_read": "badge-warning",
     "credential_write": "badge-warning",
     "credential_mint": "badge-warning",
+    "credential_use": "badge-warning",
     "audit_query": "badge-info",
     "approval": "badge-info",
     "checks": "badge-primary",

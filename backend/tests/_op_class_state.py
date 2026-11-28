@@ -37,6 +37,7 @@ OP_CLASS_MARKS: tuple[str, ...] = (
     "_CREDENTIAL_CHECKS",
     "_DELETE_CHECKS",
     "_HIDDEN_STORED_PARAMS",
+    "_HIDDEN_STORED_MAP_VALUES",
 )
 
 

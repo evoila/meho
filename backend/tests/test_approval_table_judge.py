@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "approval_table_judge.py"
 _spec = importlib.util.spec_from_file_location("approval_table_judge_script", _SCRIPT)
 assert _spec is not None and _spec.loader is not None
@@ -88,6 +90,20 @@ def test_each_kind_fails_and_names_the_row(
     out = capfd.readouterr().out
     assert f"vault.kv.put (vault-1.x): {kind}" in out
     assert "1 change(s), 1 not approved" in out
+
+
+def test_a_credential_use_row_that_becomes_a_read_left_credential(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    base = _row("standin.notes.fetch", **{"class": "credential_use"})
+    head = _row("standin.notes.fetch", **{"class": "read"})
+
+    assert _judge(tmp_path, [base], [head]) == 1
+    assert "standin.notes.fetch (vault-1.x): left_credential" in capfd.readouterr().out
+
+
+def test_the_judge_knows_every_credential_class() -> None:
+    assert judge_module.CREDENTIAL_CLASSES == CREDENTIAL_OP_CLASSES
 
 
 def test_a_removed_row_fails(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:

@@ -523,6 +523,7 @@ GROUP_OPS: tuple[MsadOp, ...] = (
         tags=("write", "group", "create"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call to make a new AD group, for example a group that may join "

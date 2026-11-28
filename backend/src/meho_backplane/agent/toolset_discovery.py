@@ -101,6 +101,7 @@ from meho_backplane.mcp.registry import (
     capability_satisfied,
     get_tool,
     role_at_least,
+    tool_role_refusal,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
@@ -259,7 +260,9 @@ def _governed_handler(definition: ToolDefinition, handler: _MetaToolHandler) -> 
 
     async def _wrapped(operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
         if not role_at_least(operator.tenant_role, definition.required_role):
-            raise ModelRetry(f"forbidden: {name!r} requires a higher role. Do not retry it.")
+            # A Reader at a write tool gets the code and the Reader sentence.
+            refusal = tool_role_refusal(name, definition, operator).removesuffix(".")
+            raise ModelRetry(f"{refusal}. Do not retry it.")
         if not capability_satisfied(operator, definition.required_capability):
             raise ModelRetry(
                 f"forbidden: {name!r} requires a capability this tenant does not have. "

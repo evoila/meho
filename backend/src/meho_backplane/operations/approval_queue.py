@@ -123,7 +123,11 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
-from meho_backplane.op_classes import hidden_stored_param
+from meho_backplane.op_classes import (
+    SECRET_REQUEST_OP_CLASSES,
+    hidden_stored_map_values,
+    hidden_stored_param,
+)
 from meho_backplane.operations._audit import (
     SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
@@ -2333,12 +2337,18 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    # A credential write, and a call whose param a connector hides (the
+    # A credential write or use, a step of a multi-step operation that is a
+    # credential write or use, and a call whose param a connector hides (the
     # manifest of a k8s.apply of a Secret), keep their params and the
     # parent's params only in the encrypted one-time handoff: the row never
     # holds them, also not when the request is approved and never runs.
-    if classify_op(op_id) == "credential_write" or (
-        params is not None and hidden_stored_param(op_id, params) is not None
+    parent_op_id = resume_parent.get("op_id") if resume_parent is not None else None
+    if (
+        classify_op(op_id) in SECRET_REQUEST_OP_CLASSES
+        or (
+            isinstance(parent_op_id, str) and classify_op(parent_op_id) in SECRET_REQUEST_OP_CLASSES
+        )
+        or (params is not None and hidden_stored_param(op_id, params) is not None)
     ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
@@ -3014,8 +3024,12 @@ def params_with_secret_fields_hidden(
     *op_id* declared with
     :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
     replaced too, when its check flags the params (the manifest of a
-    ``k8s.apply`` that holds a Secret). The other fields keep their value,
-    as in the audit row's raw copy.
+    ``k8s.apply`` that holds a Secret). Each value of the map param that
+    *op_id* named with
+    :func:`~meho_backplane.op_classes.declare_hidden_stored_map_values` is
+    replaced too; its key names stay (the ``extras_changes`` of
+    ``targets.update``). The other fields keep their value, as in the audit
+    row's raw copy.
     """
     if params is None:
         return None
@@ -3024,6 +3038,16 @@ def params_with_secret_fields_hidden(
     if name is not None:
         hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
         found = True
+    map_name = hidden_stored_map_values(op_id)
+    values = hidden.get(map_name) if map_name is not None else None
+    if map_name is not None and isinstance(values, dict) and values:
+        hidden = {
+            **hidden,
+            map_name: {
+                key: None if value is None else HIDDEN_PARAM_MARKER for key, value in values.items()
+            },
+        }
+        found = found or any(value is not None for value in values.values())
     if not found:
         return None
     return cast(dict[str, Any], hidden)

@@ -953,7 +953,12 @@ def _new_approval_field(
     if requested:
         turned_off = any(o.requires_approval is False for o in others)
         needed_by_a_tenant = any(
-            not effective_policy(t.code_safety, t.code_approval, t.own).requires_approval
+            not effective_policy(
+                t.code_safety,
+                t.code_approval,
+                t.own,
+                plain_mark=t.copy_row is not None and plain_mark_counts_as_level(t.copy_row),
+            ).requires_approval
             for t in tenants
         )
         code_flag = row.requires_approval and not plain_mark_counts_as_level(row)

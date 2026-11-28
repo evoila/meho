@@ -400,25 +400,34 @@ async def test_a_step_an_override_raised_to_destructive_is_denied(
     assert [r.payload["result_status"] for r in step_rows] == ["denied"]
 
 
-async def _admin_turns_approval_on(step: Step) -> OperationPolicyOverride | None:
-    """A tenant admin turns approval on for *step*; returns the stored override row."""
+async def _admin_turns_approval_on(
+    step: Step, *, install_wide: bool = False
+) -> OperationPolicyOverride | None:
+    """An admin turns approval on for *step*; returns the stored override row.
+
+    A tenant admin edits for the tenant; with *install_wide* a platform admin
+    edits for the whole install.
+    """
     admin = Operator(
         sub="admin-a",
         raw_jwt="header.payload.signature",
         tenant_id=h.TENANT_ID,
         tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=install_wide,
         principal_kind=PrincipalKind.USER,
     )
     async with get_sessionmaker()() as s, s.begin():
         row = (
             await s.execute(
-                select(EndpointDescriptor).where(EndpointDescriptor.op_id == step.op_id)
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == step.op_id, EndpointDescriptor.tenant_id.is_(None)
+                )
             )
         ).scalar_one()
         await apply_policy_edit(
             s,
             row=row,
-            scope_tenant_id=h.TENANT_ID,
+            scope_tenant_id=None if install_wide else h.TENANT_ID,
             operator=admin,
             safety_level=None,
             requires_approval=True,
@@ -459,6 +468,57 @@ async def test_an_admin_s_approval_on_for_a_plain_mark_step_makes_the_step_wait(
         assert stored is None
     result = await _start_and_resume(child=child, approver_role=TenantRole.TENANT_ADMIN)
     await _waits(result, _PLAIN_CAUTION, child=child)
+
+
+@_BOTH_STATES
+@_BOTH_PATHS
+async def test_an_install_wide_approval_on_reaches_a_tenant_copy_with_the_plain_mark(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+    child: bool,
+) -> None:
+    """The built-in row is ``destructive``; the tenant's own copy has the plain mark.
+
+    With the switch on the platform admin's edit is stored, so the tenant's
+    child call waits under an Admin's run approval. With the switch off the
+    copy's mark already makes it wait, so the edit stores nothing.
+    """
+    c.switch(monkeypatch, on=on)
+    stored: list[OperationPolicyOverride | None] = []
+
+    async def _edit() -> None:
+        stored.append(await _admin_turns_approval_on(_PLAIN_CAUTION, install_wide=True))
+
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        _PLAIN_CAUTION,
+        {"level": "destructive", "typed": True},
+        {"typed": True},
+        child=child,
+        approver_role=TenantRole.TENANT_ADMIN,
+        before_start=_edit,
+    )
+    [override] = stored
+    if on:
+        assert override is not None
+        assert (override.tenant_id, override.requires_approval) == (None, True)
+    else:
+        assert override is None
+    if on and not child:
+        # The step gate also reads the built-in row's stored destructive level,
+        # which refuses the step without a preview: the step does not run either.
+        assert result.status == "denied", result
+        assert result.extras["error_code"] == "preview_binding_required"
+        assert c.ran == [h.STEP_A]
+        return
+    assert result.status == "awaiting_approval", result.error
+    own = await c.assert_waits(
+        _PLAIN_CAUTION, child=child, run_op_id=r.REMOTE_CHILD_RUN if child else r.REMOTE_RUN
+    )
+    assert str(own.id) == result.extras["approval_request_id"]
 
 
 # -- a built-in row and the tenant's own row of a step-gate step ------------------

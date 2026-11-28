@@ -17,6 +17,7 @@ All names and values are made up.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -184,6 +185,7 @@ async def run_remote(
     child: bool = False,
     params: dict[str, Any] | None = None,
     approver_role: TenantRole = TenantRole.OPERATOR,
+    before_start: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
     """Store the rows, start the run as a service login, approve with a token, go on.
 
@@ -191,6 +193,7 @@ async def run_remote(
     (:data:`REMOTE_CHILD_RUN`), else through the step gate (:data:`REMOTE_RUN`).
     *params* are the params of the step under test (by default none).
     *approver_role* is the role of the person who approves the run.
+    *before_start* runs after the rows are stored and before the run starts.
     """
     _step_params.clear()
     _step_params.update(params or {})
@@ -208,6 +211,8 @@ async def run_remote(
     session.add(_composite_row(run_op_id, "remote_child" if child else "remote_steps"))
     await session.commit()
     c.current.append(step)
+    if before_start is not None:
+        await before_start()
     service = h.operator(sub=c.SERVICE_SUB, principal_kind=PrincipalKind.SERVICE)
     await give_service_a_known_person(h.TENANT_ID, c.SERVICE_SUB)
     first = await dispatch(

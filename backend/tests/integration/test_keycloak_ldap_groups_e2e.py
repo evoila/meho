@@ -179,7 +179,10 @@ def ldap(network: Network) -> Iterator[_Ldap]:  # noqa: F811 -- fixture
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"OpenLDAP container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"OpenLDAP container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(container, "slapd starting", timeout=120)
         directory = _Ldap(container, admin_password)

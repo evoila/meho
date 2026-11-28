@@ -16,7 +16,7 @@ Skip conditions:
 * k3s container start fails (privileged not allowed, cgroup v1 host
   refusing the v2 mount, etc.) — surfaces as a clean skip rather than
   a hard failure so a Docker-having-but-not-k3s-having sandbox isn't
-  flagged red.
+  flagged red. Under CI (``GITHUB_ACTIONS`` set) it fails instead.
 
 CI side: the runner provisions Docker; the integration job (when the
 Initiative's CI wiring lands under T6) sets
@@ -171,7 +171,10 @@ def k3s_kubeconfig_and_target(request: pytest.FixtureRequest) -> Any:
         container = K3SContainer(image=image)
         container.start()
     except Exception as exc:
-        pytest.skip(f"k3s container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         kubeconfig_text = container.config_yaml()

@@ -491,7 +491,10 @@ def site(network: Network) -> Iterator[_OurSite]:
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(container, "Listening on:", timeout=240)
         host = container.get_container_host_ip()
@@ -551,7 +554,10 @@ def customer(site: _OurSite, network: Network) -> Iterator[_Customer]:
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"customer Keycloak container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"customer Keycloak container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(container, "Listening on:", timeout=240)
         base_url = f"http://{container.get_container_host_ip()}:{container.get_exposed_port(8080)}"

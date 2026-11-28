@@ -18,7 +18,8 @@ form ``"<impl_id>-<version>"`` and resolves it into the
   share, so they always agree on which rows a tenant can use.
 * :func:`installed_owner_clause` / :func:`package_visible_group_clause`
   -- hide the rows (and groups) of a connector package that is not
-  installed (#5037). The lookups below apply it, except
+  installed (#5037), and the row of an operation that registration left
+  out (:mod:`meho_backplane.operations._left_out`). The lookups below apply it, except
   :func:`count_known_ops` (see there).
 * :func:`find_uninstalled_package_owner` -- names the missing package
   for the ``connector_package_not_installed`` error.
@@ -63,6 +64,7 @@ from meho_backplane.connectors.base import shim_kind
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, TenantOperationSetting
+from meho_backplane.operations._left_out import left_out_row_clause
 from meho_backplane.operations.op_policy import apply_effective_policy
 
 __all__ = [
@@ -79,6 +81,7 @@ __all__ = [
     "group_visible_for_tenant_clause",
     "installed_owner_clause",
     "lookup_descriptor",
+    "package_missing_clause",
     "package_visible_group_clause",
     "parse_connector_id",
     "shipped_profile_triples",
@@ -189,15 +192,28 @@ def visible_scope_clause(
 
 
 def installed_owner_clause() -> ColumnElement[bool]:
-    """Return the predicate for descriptor rows whose owner package is installed.
+    """Return the predicate for descriptor rows whose code is here and not left out.
 
-    A row with ``owner_package IS NULL`` is built in and always passes. A
-    row written by a connector package passes only while that package is
+    A row with ``owner_package IS NULL`` is built in and passes. A row
+    written by a connector package passes only while that package is
     installed in this process
     (:func:`~meho_backplane.connector_packages.installed_connector_package_names`).
     The rows of a removed package are hidden, not deleted, so the
     operator's settings on them come back with the package (#5037).
+
+    The built-in row of an operation that registration left out in this
+    start is hidden the same way (:func:`left_out_row_clause`): only the
+    row of the code that registered it, under that key and kind.
     """
+    return _package_installed_clause() & left_out_row_clause()
+
+
+def package_missing_clause() -> ColumnElement[bool]:
+    """Return the predicate for descriptor rows of a connector package that is not installed."""
+    return ~_package_installed_clause()
+
+
+def _package_installed_clause() -> ColumnElement[bool]:
     return EndpointDescriptor.owner_package.is_(None) | EndpointDescriptor.owner_package.in_(
         sorted(installed_connector_package_names())
     )
@@ -249,7 +265,7 @@ async def find_uninstalled_package_owner(
                 EndpointDescriptor.impl_id == impl_id,
                 EndpointDescriptor.op_id == op_id,
                 enabled_for_tenant_clause(tenant_id=tenant_id),
-                ~installed_owner_clause(),
+                package_missing_clause(),
             )
             .limit(1)
         )

@@ -11,13 +11,16 @@ one thing. The script needs ``jq``.
 
 from __future__ import annotations
 
+import ast
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from custom_policy_check_fixture import (
     ALWAYS_SKIPPED,
@@ -64,7 +67,7 @@ class DryRunTestCase(unittest.TestCase):
         self.answers = good_answers()
         self.baseline = self.dir / "baseline.tsv"
 
-    def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         write_answers(self.dir, self.answers)
         if not self.baseline.exists():
             self.baseline.write_text(baseline_text())
@@ -73,6 +76,7 @@ class DryRunTestCase(unittest.TestCase):
         env.update(PARAMS)
         env["CPC_SENSOR_ID"] = SENSOR_ID
         env["CPC_CUSTOM_ROLE"] = "Approvers-VMW"
+        env.update(extra)
         return subprocess.run(
             ["bash", str(SCRIPT), "--dry-run", str(self.dir), *args],
             capture_output=True,
@@ -110,7 +114,10 @@ class FullRunTest(DryRunTestCase):
         for line in lines:
             if line.startswith("[ok]") and "risk level" not in line:
                 self.assertRegex(line, r"rows? [0-9a-f-]{36}", line)
-        self.assertIn("passed, 0 failed, 6 not run, 2 not taken back", result.stdout)
+        self.assertIn(
+            "passed, 0 failed, 6 not run, 2 not taken back, caller kind not proven: 0",
+            result.stdout,
+        )
 
     def test_runs_the_checks_in_order_and_ends_with_the_switch_off(self) -> None:
         result = self.run_script()
@@ -383,7 +390,7 @@ class Check7Test(DryRunTestCase):
             ],
         )
         baseline = [line.split("\t")[0] for line in baseline_text().splitlines()]
-        self.assertTrue(set(policy) <= set(baseline))
+        self.assertLessEqual(set(policy), set(baseline))
 
     def test_check_7_compares_the_preview_with_the_params(self) -> None:
         step = f"c7-{PROBE_KEYS.index('6 PERSON_TOKEN CREDENTIAL_WRITE token') + 1}-preview"
@@ -776,9 +783,23 @@ class Check11Test(DryRunTestCase):
     def test_waits_for_the_caller_kind_on_the_audit_row(self) -> None:
         self.answers["c11-row"] = self.sensor_row(None)
         result = self.run_script()
-        self.assertIn("[skip] check 11: not run: waits for #7073", result.stdout)
-        self.assertNotRegex(result.stdout, r"\[ok\]\s+check 11")
+        self.assertIn(
+            "[skip] check 11 (the check runner, a sensor run started over REST, the caller "
+            "kind): not run: waits for #6962",
+            result.stdout,
+        )
+        self.assertNotIn("[ok]   check 11 (the check runner", result.stdout)
+        self.assertIn("caller kind not proven: 1", result.stdout)
+        self.assertEqual(self.fails(result), [])
         self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_a_row_without_its_caller_kind_and_no_fresh_result_fails(self) -> None:
+        self.answers["c11-row"] = self.sensor_row(None)
+        self.answers["c11-results"] = {"code": 200, "body": {"items": []}}
+        result = self.run_script()
+        self.assert_one_fail(result, "check 11 (the check runner", "no fresh result")
+        self.assertNotIn("check 11 (the check runner, a sensor run started over REST, the "
+                         "caller kind)", result.stdout)  # fmt: skip
 
     def test_the_check_runner_needs_the_kind_system_on_the_row_of_its_run(self) -> None:
         self.assertIn("[ok]   check 11 (the check runner", self.run_script().stdout)
@@ -1057,7 +1078,7 @@ class TakeBackTest(DryRunTestCase):
             self.assertNotIn(op, question)
         self.assertEqual(self.left_lines(result), REMOVAL_NOT_CONFIRMED)
 
-    def test_a_rule_left_in_the_policy_file_is_named_although_explain_is_the_same(self) -> None:
+    def test_only_the_agent_rule_is_not_confirmed_when_only_check_4_was_done(self) -> None:
         del self.answers["p5-role"]
         result = self.run_script()
         self.assertEqual(
@@ -1066,7 +1087,7 @@ class TakeBackTest(DryRunTestCase):
         )
         self.assertEqual(result.returncode, NOT_COMPLETE)
 
-    def test_a_role_that_cannot_be_read_is_not_confirmed_as_removed(self) -> None:
+    def test_only_the_role_is_not_confirmed_when_only_check_5_was_done(self) -> None:
         del self.answers["p4"]
         result = self.run_script()
         self.assertEqual(
@@ -1074,7 +1095,7 @@ class TakeBackTest(DryRunTestCase):
             ["[left] the custom role Approvers-VMW of check 5: removal not confirmed"],
         )
 
-    def test_a_policy_file_that_cannot_be_read_at_the_start_is_not_confirmed(self) -> None:
+    def test_the_agent_rule_and_the_role_are_never_confirmed_as_removed(self) -> None:
         result = self.run_script()
         left = self.left_lines(result)
         self.assertEqual(len(left), 2, left)
@@ -1166,9 +1187,7 @@ class TakeBackTest(DryRunTestCase):
 class RemovalReadBackTest(DryRunTestCase):
     """The agent rule and the custom role are read back only from where MEHO keeps them."""
 
-    def test_an_unchanged_policy_file_is_no_proof_that_they_are_gone(self) -> None:
-        self.answers["before-policy-file"] = {"code": 200, "body": "policy: v1\n"}
-        self.answers["takeback-policy-file"] = {"code": 200, "body": "policy: v1\n"}
+    def test_the_script_reads_no_policy_file_to_confirm_a_removal(self) -> None:
         result = self.run_script()
         left = [line for line in result.stdout.splitlines() if line.startswith("[left]")]
         self.assertEqual(left, REMOVAL_NOT_CONFIRMED)
@@ -1509,15 +1528,421 @@ class UnknownSenderTest(DryRunTestCase):
         )
 
 
+class CallerKindWaitsTest(DryRunTestCase):
+    """While the audit row has no caller kind, that part is [skip] and the rest is checked."""
+
+    def without_kind(self, answer: dict[str, Any]) -> dict[str, Any]:
+        body = answer["body"]
+        for entry in body.get("rows", [body]):
+            del entry["caller_kind"]
+        return answer
+
+    def test_a_call_line_checks_the_rest_and_skips_the_caller_kind(self) -> None:
+        self.answers["c6-rights-row"] = self.without_kind(self.answers["c6-rights-row"])
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        self.assertNotRegex(result.stdout, r"\[ok\]\s+check 6 change of rights")
+        skips = [
+            line
+            for line in result_lines(result.stdout)
+            if line.startswith("[skip] check 6 change of rights")
+        ]
+        self.assertEqual(
+            skips,
+            [
+                "[skip] check 6 change of rights (an Operator's token, a personal agent, REST, "
+                "the caller kind): not run: waits for #6962, "
+                f"audit row {audit_id('c6-rights')}"
+            ],
+        )
+        self.assertIn("caller kind not proven: 1", result.stdout)
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_the_rest_of_the_line_still_fails(self) -> None:
+        answer = self.without_kind(self.answers["c6-rights-row"])
+        answer["body"]["policy_rule"] = "default:person.caution"
+        self.answers["c6-rights-row"] = answer
+        result = self.run_script()
+        self.assert_one_fail(result, "check 6 change of rights", "expected rule")
+        self.assertNotIn("[skip] check 6 change of rights", result.stdout)
+
+    def test_a_row_that_was_not_found_still_fails_on_the_caller_kind(self) -> None:
+        del self.answers["c6-rights-row"]
+        result = self.run_script()
+        self.assert_one_fail(result, "check 6 change of rights", "no audit row", "caller kind")
+        self.assertNotIn("check 6 change of rights (an Operator's token, a personal agent, REST, "
+                         "the caller kind)", result.stdout)  # fmt: skip
+
+    def test_a_row_without_its_caller_kind_that_was_not_found_still_fails(self) -> None:
+        self.answers["c6-rights-row"] = self.without_kind(self.answers["c6-rights-row"])
+        self.answers["c6-rights-row"]["code"] = 404
+        result = self.run_script()
+        self.assert_one_fail(result, "check 6 change of rights", "no audit row")
+        self.assertNotIn("[skip] check 6 change of rights", result.stdout)
+
+    def test_check_1_and_the_web_console_reader_skip_the_caller_kind(self) -> None:
+        self.answers["c1-row"] = self.without_kind(self.answers["c1-row"])
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        for start in (
+            "check 1 (the Operator, a person, web console",
+            "check 11 (the web console reader, the console run of check 1",
+        ):
+            self.assertIn(
+                f"[skip] {start}, the caller kind): not run: waits for #6962, "
+                f"audit row {audit_id('c1')}",
+                result.stdout,
+            )
+            self.assertNotIn(f"[ok]   {start}", result.stdout)
+        self.assertIn("caller kind not proven: 2", result.stdout)
+
+    def test_a_caller_kind_of_null_still_fails(self) -> None:
+        answer = self.answers["c6-rights-row"]
+        answer["body"]["caller_kind"] = None
+        self.assert_one_fail(
+            self.run_script(), "check 6 change of rights", "expected caller kind personal_agent"
+        )
+
+    def test_a_run_without_any_caller_kind_proves_none(self) -> None:
+        for answer in self.answers.values():
+            body = answer.get("body")
+            entries = body.get("rows", [body]) if isinstance(body, dict) else []
+            for entry in entries:
+                if isinstance(entry, dict):
+                    entry.pop("caller_kind", None)
+        result = self.run_script()
+        self.assertEqual(self.fails(result), [])
+        for line in result_lines(result.stdout):
+            self.assertFalse(line.startswith("[ok]") and "caller kind none" in line, line)
+        self.assertIn("caller kind not proven: 24", result.stdout)
+        kind_skips = [
+            line for line in result_lines(result.stdout)
+            if line.startswith("[skip]") and "the caller kind): not run" in line
+        ]  # fmt: skip
+        self.assertEqual(len(kind_skips), 24)
+        for line in kind_skips:
+            self.assertRegex(line, r", audit row [0-9a-f-]{36}$")
+        self.assertEqual(result.returncode, NOT_COMPLETE)
+
+    def test_a_wrong_caller_kind_still_fails(self) -> None:
+        self.answers["c6-rights-row"] = row("c6-rights", "floor:rights_change_waits", "person")
+        self.assert_one_fail(
+            self.run_script(), "check 6 change of rights", "expected caller kind personal_agent"
+        )
+
+
+class Check1StartTest(DryRunTestCase):
+    """Check 1 starts at the Admin's edit on its connector that changed the level to caution."""
+
+    def test_a_later_edit_of_another_connector_or_field_is_not_the_start(self) -> None:
+        later = "2026-01-01T00:00:30.000000+00:00"
+        cases = {
+            "another connector": edit_row(
+                "c1-other", "k8s.scale", level="caution", ts=later, connector="k9s"
+            ),
+            "another field": edit_row("c1-other", "k8s.scale", ts=later),
+            "a removal": edit_row("c1-other", "k8s.scale", removed=True, ts=later),
+        }
+        for name, other in cases.items():
+            with self.subTest(case=name):
+                self.answers = good_answers()
+                self.answers["c1-edits"] = rows(
+                    edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous"), other
+                )
+                result = self.run_script()
+                self.assertRegex(result.stdout, r"\[ok\]\s+check 1 \(the Operator", result.stdout)
+
+    def test_fails_without_an_edit_to_caution_on_its_connector(self) -> None:
+        self.answers["c1-edits"] = rows(
+            edit_row("c1-edit", "k8s.scale", level="caution", old="dangerous", connector="k9s")
+        )
+        self.assertRegex(
+            self.run_script().stdout,
+            r"\[FAIL\] check 1 \(the Operator.*no edit row of the Admin on k8s lowered "
+            r"the risk level to caution",
+        )
+
+    def test_passes_on_the_lowering_from_dangerous(self) -> None:
+        edit = self.answers["c1-edits"]["body"]["rows"][0]
+        self.assertEqual(
+            edit["payload"]["changes"]["safety_level"], {"old": "dangerous", "new": "caution"}
+        )
+        self.assertRegex(self.run_script().stdout, r"\[ok\]\s+check 1 \(the Operator")
+
+    def test_an_edit_that_does_not_lower_to_caution_is_not_the_start(self) -> None:
+        for old in ("caution", "safe"):
+            with self.subTest(old=old):
+                self.answers["c1-edits"] = rows(
+                    edit_row("c1-edit", "k8s.scale", level="caution", old=old)
+                )
+                self.assertRegex(
+                    self.run_script().stdout,
+                    r"\[FAIL\] check 1 \(the Operator.*no edit row of the Admin on k8s "
+                    r"lowered the risk level to caution",
+                )
+
+    def test_the_edit_rows_of_check_9_keep_their_own_levels(self) -> None:
+        levels = [
+            entry["payload"]["changes"].get("safety_level")
+            for entry in self.answers["c9-rows"]["body"]["rows"]
+        ]
+        self.assertIn({"old": "caution", "new": "dangerous"}, levels)
+
+
+class NoResultHistoryTest(DryRunTestCase):
+    """With CPC_NO_RESULT_HISTORY=1, check 11 takes the sensor's last_evaluated_at."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.answers["c11-results"] = {"code": 200, "body": {"items": [], "next_cursor": None}}
+
+    def run_script(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        extra.setdefault("CPC_NO_RESULT_HISTORY", "1")
+        return super().run_script(*args, **extra)
+
+    def test_without_the_setting_an_empty_list_is_no_fresh_result(self) -> None:
+        self.answers["c11-sensors-now"] = self.sensors_now("2026-01-01T00:00:05.500000+00:00")
+        for result in (DryRunTestCase.run_script(self), self.run_script(CPC_NO_RESULT_HISTORY="")):
+            self.assert_one_fail(result, "check 11 (the check runner", "no fresh result")
+
+    def test_a_fresh_result_row_counts_without_the_setting(self) -> None:
+        self.answers = good_answers()
+        result = DryRunTestCase.run_script(self)
+        self.assertRegex(result.stdout, r"\[ok\]\s+check 11 \(the check runner")
+
+    def test_another_value_stops_before_any_check(self) -> None:
+        result = self.run_script(CPC_NO_RESULT_HISTORY="yes")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("CPC_NO_RESULT_HISTORY must be 1 or not set", result.stderr)
+        self.assertEqual(result_lines(result.stdout), [])
+
+    def sensors_now(self, evaluated_at: str | None) -> dict[str, Any]:
+        sensor = dict(self.answers["c11-sensors"]["body"]["items"][1])
+        sensor["last_evaluated_at"] = evaluated_at
+        return {"code": 200, "body": {"items": [sensor], "next_cursor": None}}
+
+    def test_a_fresh_last_evaluated_at_counts(self) -> None:
+        self.answers["c11-sensors-now"] = self.sensors_now("2026-01-01T00:00:05.500000+00:00")
+        result = self.run_script()
+        self.assertRegex(
+            result.stdout,
+            r"\[ok\]\s+check 11 \(the check runner.*result at 2026-01-01T00:00:05.500000",
+        )
+
+    def test_an_older_last_evaluated_at_does_not_count(self) -> None:
+        for evaluated_at in ("2026-01-01T00:00:05.000001Z", None):
+            with self.subTest(evaluated_at=evaluated_at):
+                self.answers["c11-sensors-now"] = self.sensors_now(evaluated_at)
+                self.assert_one_fail(
+                    self.run_script(), "check 11 (the check runner", "no fresh result"
+                )
+
+    def test_it_still_needs_the_audit_row_of_the_run(self) -> None:
+        self.answers["c11-sensors-now"] = self.sensors_now("2026-01-01T00:00:06Z")
+        self.answers["c11-row"] = rows()
+        self.assert_one_fail(self.run_script(), "check 11 (the check runner", "no audit row")
+
+    def test_a_result_of_another_sensor_is_not_no_history(self) -> None:
+        other = {"sensor_id": "x", "evaluated_at": "2026-01-01T00:00:09Z", "state": "ok"}
+        self.answers["c11-results"] = {"code": 200, "body": {"items": [other]}}
+        self.answers["c11-sensors-now"] = self.sensors_now("2026-01-01T00:00:06Z")
+        self.assert_one_fail(self.run_script(), "check 11 (the check runner", "no fresh result")
+
+
+def help_text() -> str:
+    return subprocess.run(
+        ["bash", str(SCRIPT), "--help"], capture_output=True, text=True, check=True, timeout=60
+    ).stdout
+
+
+class HelpAndDocsTest(unittest.TestCase):
+    """The help text and the docs page say what a person must know before a run."""
+
+    docs = " ".join(
+        (ROOT / "docs/acceptance/custom-policy-check.md").read_text().replace("`", "").split()
+    )
+
+    def test_they_name_the_params_of_the_policy_import(self) -> None:
+        for text in (" ".join(help_text().split()), self.docs):
+            self.assertIn("CPC_PARAMS_POLICY_CHANGE", text)
+            for name in ("scope", "file", "file_sha256", "based_on"):
+                self.assertIn(name, text)
+            self.assertIn("POST /api/v1/policy/import?preview=true", text)
+        self.assertIn("policy-registry-1.x", self.docs)
+
+    def test_they_name_the_retry_key_that_the_script_never_sends(self) -> None:
+        for text in (" ".join(help_text().split()), self.docs):
+            self.assertIn("a retry with the same idempotency_key", text)
+            self.assertIn("The script sends no idempotency_key, on REST, MCP or the meho", text)
+        code = SCRIPT.read_text().split("\nHELP\n}\n", 1)[1]
+        sent = [
+            line for line in code.splitlines()
+            if "idempotency" in line and not line.strip().startswith("#")
+        ]  # fmt: skip
+        self.assertEqual(sent, [])
+
+    def test_a_baseline_of_an_earlier_version_is_recorded_again(self) -> None:
+        self.assertIn(
+            "Record it again with this version of the script", " ".join(help_text().split())
+        )
+        self.assertIn(
+            "A baseline file recorded with an earlier version of the script must be recorded again",
+            self.docs,
+        )
+
+    def test_the_write_rule_skip_of_check_8_needs_the_person_step(self) -> None:
+        self.assertIn("This line prints only when the person step of check 8 was done.", self.docs)
+
+    def test_the_caller_kind_waits_for_6962(self) -> None:
+        self.assertIn("the caller kind): not run: waits for #6962", self.docs)
+        self.assertNotIn("`check 11: not run: waits for #7073`", self.docs)
+
+    def test_the_help_says_check_4_needs_a_caution_write(self) -> None:
+        text = " ".join(help_text().split())
+        start = text.index("CPC_OP_AGENT_RULE check 4:")
+        line = text[start : text.index("CPC_OP_APPROVER", start)]
+        self.assertIn("a caution write", line)
+        self.assertIn("default:service.caution_write", line)
+
+    def test_check_11_without_result_history(self) -> None:
+        self.assertIn("CHECKS_EVIDENCE_RETENTION_DAYS=0", self.docs)
+        self.assertIn("last_evaluated_at", self.docs)
+
+
+def expected_floor_rules() -> set[str]:
+    """The floor ids the script expects: the rule argument of each expect line."""
+    text = re.sub(r"\\\n\s*", " ", SCRIPT.read_text())
+    ids: set[str] = set()
+    for line in text.splitlines():
+        # A call may stand in an if: "if expect_previewed ...; then".
+        line = re.sub(r"^\s*if !?\s*", "", line)
+        if line.split()[:1] not in (["expect"], ["expect_previewed"]):
+            continue
+        words = shlex.split(line.split(";", 1)[0], comments=True)
+        # The rule is argument 6 of expect and argument 9 of expect_previewed.
+        rule = words[6] if words[0] == "expect" else words[9]
+        if rule.startswith("floor:"):
+            ids.add(rule.removeprefix("floor:"))
+    return ids
+
+
+def fixed_rule_table() -> set[str]:
+    """The ids of the fixed rule table ("The fixed rules") of policy-evaluator.md."""
+    text = (ROOT / "docs/codebase/policy-evaluator.md").read_text()
+    part = text.split("### The fixed rules", 1)[1].split("\n#", 1)[0]
+    return set(re.findall(r"^\| `([a-z_]+)` \|", part, re.M))
+
+
+def floor_rule_ids() -> set[str]:
+    """The rule id of each FloorHit in policy/floors.py, a text or a name of fixed_rules.py."""
+    policy = ROOT / "backend/src/meho_backplane/policy"
+    names: dict[str, str] = {}
+    for node in ast.walk(ast.parse((policy / "fixed_rules.py").read_text())):
+        if (
+            isinstance(node, ast.AnnAssign | ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names[target.id] = node.value.value
+    ids: set[str] = set()
+    for node in ast.walk(ast.parse((policy / "floors.py").read_text())):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "FloorHit"):
+            continue
+        rule = node.args[1]
+        if isinstance(rule, ast.Constant) and isinstance(rule.value, str):
+            ids.add(rule.value)
+        elif isinstance(rule, ast.Name) and rule.id in names:
+            ids.add(names[rule.id])
+    return ids
+
+
 class RuleIdTest(unittest.TestCase):
     def test_each_expected_floor_rule_is_named_by_the_rule_table_or_floors_py(self) -> None:
-        table = (ROOT / "docs/codebase/policy-evaluator.md").read_text()
-        floors = (ROOT / "backend/src/meho_backplane/policy/floors.py").read_text()
-        named = set(re.findall(r"^\| `([a-z_]+)` \|", table, re.M))
-        named |= set(re.findall(r'"([a-z_]+)"', floors))
-        expected = set(re.findall(r'"floor:([a-z_]+)"', SCRIPT.read_text()))
+        expected = expected_floor_rules()
         self.assertTrue(expected)
-        self.assertEqual(expected - named, set())
+        self.assertEqual(expected - (fixed_rule_table() | floor_rule_ids()), set())
+
+    def test_reads_the_ids_from_the_expect_lines_only(self) -> None:
+        with mock.patch.object(Path, "read_text", return_value=(
+            '    if expect_previewed s rest T OP "6 x" \\\n'
+            '        "who" REST waits "floor:only_in_an_if" personal_agent; then\n'
+            '# expect s 1 who REST waits "floor:in_a_comment" person\n'
+        )):  # fmt: skip
+            self.assertEqual(expected_floor_rules(), {"only_in_an_if"})
+        self.assertIn("token_runs_only_safe", expected_floor_rules())
+        self.assertIn("delete_waits", expected_floor_rules())
+        self.assertNotIn("sandbox_delete_grant", floor_rule_ids())
+        self.assertNotIn("floor", fixed_rule_table())
+        self.assertIn("destructive_waits", floor_rule_ids())
+
+    def test_token_runs_only_safe_is_a_floor_not_a_fixed_rule(self) -> None:
+        # The fixed rule table names the fixed rules of policy/fixed_rules.py.
+        # token_runs_only_safe is a floor of policy/floors.py (a call made with
+        # a token runs only safe operations at once), not a fixed rule, so the
+        # table does not name it, and floors.py does.
+        self.assertNotIn("token_runs_only_safe", fixed_rule_table())
+        self.assertIn("token_runs_only_safe", floor_rule_ids())
+
+
+def service_caution_write_rule() -> str:
+    """The rule id that _service_ladder of policy/evaluate.py gives a service login's caution write."""
+    tree = ast.parse((ROOT / "backend/src/meho_backplane/policy/evaluate.py").read_text())
+    ladder = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_service_ladder"
+    )
+    for node in ast.walk(ladder):
+        test = ast.unparse(node.test) if isinstance(node, ast.If) else ""
+        if "'caution'" in test and "mutating" in test:
+            call = next(
+                c
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call) and getattr(c.func, "id", "") == "_default"
+            )
+            assert isinstance(call.args[0], ast.Constant)
+            return f"default:{call.args[0].value}"
+    raise AssertionError("no caution write in _service_ladder")
+
+
+def check_4_service_rule() -> str:
+    """The rule argument of the expect line of check 4's service login."""
+    for line in SCRIPT.read_text().splitlines():
+        if line.strip().startswith("expect c4-service-row "):
+            return shlex.split(line, comments=True)[6]
+    raise AssertionError("no expect line for c4-service-row")
+
+
+class Check4ServiceRuleTest(DryRunTestCase):
+    """Check 4's service login passes only on the full rule id of _service_ladder."""
+
+    def test_the_script_expects_the_rule_id_of_evaluate_py(self) -> None:
+        self.assertEqual(service_caution_write_rule(), "default:service.caution_write")
+        self.assertEqual(check_4_service_rule(), service_caution_write_rule())
+
+    def test_the_fixture_answer_passes(self) -> None:
+        self.assertRegex(
+            self.run_script().stdout,
+            r"\[ok\]\s+check 4 \(a service login without a grant, a service agent, REST\)",
+        )
+
+    def test_another_default_rule_fails(self) -> None:
+        for rule in ("default:person.token.caution", "default:service.dangerous"):
+            for kind in ("service_agent", None):
+                with self.subTest(rule=rule, kind=kind):
+                    answer = row("c4s", rule, kind or "")
+                    if kind is None:
+                        del answer["body"]["caller_kind"]
+                    self.answers = good_answers()
+                    self.answers["c4-service-row"] = answer
+                    self.assert_one_fail(
+                        self.run_script(),
+                        "check 4 (a service login without a grant, a service agent, REST)",
+                        f"expected rule {service_caution_write_rule()}",
+                    )
 
 
 class DocsPageTest(unittest.TestCase):
@@ -1565,6 +1990,16 @@ class NoSecretsInTheScriptTest(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\s*meho\s+approvals")
         self.assertEqual(
             len(re.findall(r"rest [\w-]+ POST \"/api/v1/approvals/[^\"]*/approve\"", text)), 1
+        )
+        decide = [
+            line.strip()
+            for line in text.splitlines()
+            if "/decide" in line and not line.strip().startswith("#")
+        ]
+        self.assertEqual(len(decide), 1, decide)
+        self.assertTrue(
+            decide[0].startswith('rows="$(jq -c --arg p "/api/v1/approvals/$request_cli/decide" '),
+            decide[0],
         )
 
 

@@ -55,7 +55,7 @@ from meho_backplane.policy.limits import (
     install_personal_agent_limit,
 )
 from meho_backplane.policy.service import NO_CHANGE
-from meho_backplane.policy.store import load_classification
+from meho_backplane.policy.store import connector_id_of, load_classification
 from meho_backplane.settings import get_settings
 from tests.approval_table import build_rows, register_all_descriptors
 
@@ -429,9 +429,22 @@ async def test_with_no_limits_part_the_limit_is_safe_and_the_table_is_the_same(
     try:
         await h.store_install({"description": "No limits"})
         assert await h.limit() == "safe"
-        rows = build_rows(await register_all_descriptors())
+        descriptors = await register_all_descriptors()
+        rows = build_rows(descriptors)
     finally:
         clear_typed_op_snapshot()
         get_settings.cache_clear()
     table = Path(__file__).parent / "snapshots" / "approval_table.json"
-    assert rows == json.loads(table.read_text(encoding="utf-8"))
+    expected = json.loads(table.read_text(encoding="utf-8"))
+    # With the switch on, an operation that is hard to undo has a delete sign;
+    # the snapshot is made with the switch off.
+    hard_to_undo = {
+        (d.op_id, connector_id_of(d))
+        for d in descriptors
+        if d.tenant_id is None and d.hard_to_undo is not None
+    }
+    assert hard_to_undo
+    for row in expected:
+        if (row["op_id"], row["connector_id"]) in hard_to_undo and row["never_covered"] is None:
+            row["never_covered"] = "delete_shaped"
+    assert rows == expected

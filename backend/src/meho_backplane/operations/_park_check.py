@@ -13,7 +13,9 @@ An op turns the check on with :func:`register_park_check`. The check gets
 the same :class:`~meho_backplane.operations._preview.PreviewContext` the
 preview hooks get and answers with the reason it refuses the call, or
 ``None``. The reason is shown to the caller, so it must name no param
-value.
+value, except a value that the check first finds to have a fixed safe
+shape, for example the ``apiVersion`` and ``kind`` of a ``k8s.apply``
+manifest (see ``connectors/kubernetes/_apply_manifest.py``).
 
 :func:`park_check_refusal` runs it at every point where a call would wait
 for approval, before anything is stored:

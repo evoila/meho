@@ -525,6 +525,7 @@ USER_OPS: tuple[MsadOp, ...] = (
         tags=("write", "user", "create"),
         safety_level="caution",
         requires_approval=False,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Create an AD user account (created disabled + passwordless — set "
@@ -583,6 +584,7 @@ USER_OPS: tuple[MsadOp, ...] = (
         "Enable-ADAccount",
         safety_level="caution",
         requires_approval=False,
+        changes_rights=True,
     ),
     _account_action_op(
         "msad.user.disable",
@@ -591,6 +593,7 @@ USER_OPS: tuple[MsadOp, ...] = (
         "Disable-ADAccount",
         safety_level="caution",
         requires_approval=False,
+        changes_rights=True,
     ),
     _account_action_op(
         "msad.user.delete",

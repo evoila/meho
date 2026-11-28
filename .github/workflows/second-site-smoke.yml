@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Smoke check of the second runner site. Start it by hand, or let the
+# schedule run it twice an hour once the site is switched on.
+#
+# A pass does two things. It proves the site is set up safely: the runner has
+# MEHO_CI_SITE=site2, it reaches what a unit test shard needs, it pulls a test
+# image, and every address in the private pod env MEHO_CI_DENY_PROBE_HOSTS
+# ends in a timeout. And it tells CI the site is online: the `changes` job of
+# ci.yml reads this workflow's run history and sends unit test shards 4-6 to
+# the site only after its smoke job passed in the last 45 minutes. So no
+# pass means today's pool.
+#
+# On a dead site the job just waits for a runner. `cancel-in-progress` keeps
+# that to one waiting run: the next scheduled run replaces it.
+#
+# No `pull_request` and no `pull_request_target` trigger: code from a pull
+# request must never start this job. This file names no secret, no
+# `environment` and no `id-token` (backend/tests/test_ci_second_runner_site.py).
+#
+# Do not copy MEHO_CI_DENY_PROBE_HOSTS into an `env:` block here: the runner
+# prints a step's `env:` block in the log, and the logs of this repository
+# are public.
+
+name: Second runner site smoke
+
+on:
+  workflow_dispatch:
+  # Minutes 7 and 37: GitHub delays scheduled runs at the start of an hour.
+  schedule:
+    - cron: '7,37 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: second-site-smoke
+  cancel-in-progress: true
+
+jobs:
+  switch:
+    name: Check the switch of the second runner site
+    # The schedule runs only when a person has switched the site on, so no
+    # run waits for a site that does not exist. A run started by hand is how
+    # a person tests the site before switching it on.
+    #
+    # GitHub compares strings without regard to case, so `ON` would pass
+    # this `if`. The step below checks the exact value `on`, the same way
+    # scripts/ci/pick_second_site.sh does. The `if` only saves a job when
+    # the variable is unset or clearly off.
+    if: github.event_name != 'schedule' || vars.MEHO_CI_SECOND_SITE == 'on'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      run: ${{ steps.switch.outputs.run }}
+    steps:
+      - name: Check the exact value of MEHO_CI_SECOND_SITE
+        id: switch
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
+        run: |
+          if [[ "${EVENT_NAME}" != "schedule" || "${MEHO_CI_SECOND_SITE}" == "on" ]]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice title=Second runner site smoke::Not switched on: only the exact value 'on' of MEHO_CI_SECOND_SITE counts."
+          fi
+
+  smoke:
+    name: Smoke check of the second runner site
+    needs: switch
+    # When this job is skipped, GitHub may still mark the run as a success.
+    # So scripts/ci/pick_second_site.sh checks that this job itself passed,
+    # by its name: change both together.
+    if: needs.switch.outputs.run == 'true'
+    runs-on: meho-runners-ci-heavy-site2
+    # No cache access: the job has no cache step.
+    cache-mode: none
+    # Starts when a runner takes the job, so it does not limit the wait.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check what this runner can and cannot reach
+        # The image is one of the test images of the unit shards (ci.yml).
+        # github.com, and the other hosts a unit test shard stops without:
+        # Python packages (uv sync), Helm (setup-helm), the embedding model
+        # (on a cache miss) and Ubuntu packages (PHP for the pfSense tests).
+        # Each URL names a file that exists, because the check needs a 2xx
+        # answer: the root of some of these hosts answers 404. The Helm file
+        # is of the Helm version that ci.yml pins.
+        # If the site gets these through a mirror, change this list.
+        run: >-
+          bash scripts/ci/second_site_smoke.sh
+          --image docker.io/valkey/valkey:8
+          https://github.com
+          https://pypi.org/simple/pip/
+          https://files.pythonhosted.org/packages/8a/6a/19e9fe04fca059ccf770861c7d5721ab4c2aebc539889e97c7977528a53b/pip-24.0-py3-none-any.whl
+          https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz.sha256sum
+          https://huggingface.co
+          http://archive.ubuntu.com/ubuntu/

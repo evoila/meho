@@ -55,6 +55,7 @@ from tests.test_k8s_apply_card_through_dispatch import (
     _kubernetes_registry,
     _login,
     _park,
+    _refuse,
     _setup,
     _StandInServer,
     _Target,
@@ -127,7 +128,7 @@ def _deployment_with_env(name: str, value: str) -> str:
     return (
         "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: web, namespace: prod}\n"
         "spec: {template: {spec: {containers: [{name: app, image: web:1, "
-        f"env: [{{name: {name}, value: '{value}'}}]}}]}}}}\n"
+        f"env: [{{name: {name}, value: '{value}'}}]}}]}}}}}}\n"
     )
 
 
@@ -315,22 +316,24 @@ def test_the_refusal_text_says_what_to_set() -> None:
     )
 
 
-def test_an_unreadable_manifest_is_refused_without_the_key_and_waits_with_it(
+def test_an_unreadable_manifest_is_refused_before_the_wait_with_and_without_the_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
     manifest = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: c}\ndata: {a: *nowhere}\n"
+    expected = (
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(an alias or anchor YAML refuses, line 4, column 11). "
+    )
 
-    row = _park(_login("person-token"), manifest)
-    assert row.params is None
-    assert row.execution_handle is not None
+    assert _refuse(_login("person-token"), manifest).extras["reason"].startswith(expected)
 
     monkeypatch.delenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", raising=False)
     get_settings.cache_clear()
-    result = _refused_without_the_key(manifest)
-    assert result.status == "denied"
-    assert result.extras["reason"] == HANDOFF_KEY_REFUSAL
+    result = _refuse(_login("person-token"), manifest)
+    assert result.extras["reason"].startswith(expected)
+    assert server.requests == []
 
 
 def test_without_the_key_a_secret_create_keeps_its_own_refusal(
@@ -470,17 +473,17 @@ def test_a_null_character_in_a_refusal_is_stored_escaped() -> None:
     assert reason == "RuntimeError: admission check refused 'a\\0b'"
 
 
-def test_the_agent_reads_the_fixed_text_of_the_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_agent_reads_the_fixed_phrase_of_meho(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _StandInServer()
     _setup(monkeypatch, server)
 
-    row = _park(_login("person-token"), "%YAML 1\n---\na: b\n")
-    run = _approve_and_run(monkeypatch, row)
+    result = _refuse(_login("person-token"), "%YAML 1\n---\na: b\n")
 
-    fixed_text = "expected a digit or '.', but found '…'"
-    for view in ("rest-agent", "mcp"):
-        assert fixed_text in _views(row)[view]["preview_error"], view
-    assert fixed_text in json.dumps(run.model_dump(mode="json"), ensure_ascii=False)
+    assert result.extras["reason"].startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(a token YAML refuses, line 1, column 8). "
+    )
+    assert "expected" not in result.extras["reason"]
 
 
 @pytest.mark.parametrize("escape", ["%FF", "%C3%28"])
@@ -490,11 +493,12 @@ def test_a_tag_escape_that_is_not_utf8_names_no_byte(
     server = _StandInServer()
     _setup(monkeypatch, server)
 
-    row = _park(_login("person-token"), f"a: !<tag:{escape}> x\n")
+    result = _refuse(_login("person-token"), f"a: !<tag:{escape}> x\n")
 
-    error = row.proposed_effect["preview_error"]
-    assert error == (
-        "ApplyManifestError: manifest is not valid YAML/JSON: while scanning a tag "
-        "(line 1, column 4); a %-escape in a tag is not valid UTF-8 (line 1, column 10)"
+    reason = result.extras["reason"]
+    assert reason.startswith(
+        "The manifest cannot be applied: document 1 is not valid YAML or JSON "
+        "(a token YAML refuses, line 1, column 10). "
     )
-    assert "0x" not in error.lower()
+    assert "0x" not in reason.lower()
+    assert escape not in reason

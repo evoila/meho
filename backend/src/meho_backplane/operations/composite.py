@@ -125,7 +125,9 @@ from meho_backplane.settings import get_settings
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - imports for type checking only
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
+
+    from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
     "COMPOSITE_DEPTH_TOP_LEVEL",
@@ -248,11 +250,14 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: ``None`` for every ordinary dispatch.
 #:
 #: Correctness contract (#3351 review B1, #3980): this var clears exactly one
-#: sub-op. Every other governed sub-op that is not ``destructive`` and not
-#: marked ``requires_approval`` goes ahead because a person approved the run
-#: (:func:`_covered_by_approved_run`), whoever runs the resume and however
-#: the approval was given (web click or command line). A later sub-op that is
-#: ``destructive`` or ``requires_approval=True`` waits for its own approval.
+#: sub-op. Every other governed sub-op goes ahead because a person approved
+#: the run (:func:`_covered_by_approved_run`), whoever runs the resume and
+#: however the approval was given (web click or command line), unless it
+#: keeps its own approval: a ``destructive`` step, an "always wait" step, a
+#: credential call, and the steps of
+#: :func:`~meho_backplane.operations.run_step_rules.step_keeps_own_approval`
+#: (with ``CUSTOM_POLICY`` off a ``requires_approval`` step; with it on the
+#: rules of that module). Such a later sub-op waits for its own approval.
 #: The steps the earlier runs did are stored on the request
 #: (:mod:`~meho_backplane.operations.composite_steps`), so no resume sends
 #: one of them again. While this var is still set the run has not reached
@@ -282,8 +287,8 @@ composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
 #: ContextVar set to ``True`` while the dispatcher runs an approved call
 #: (``dispatch(..., _approved=True)``) (#3980). A person approved this run,
 #: so :func:`enforce_subop_policy` lets its internal steps go ahead without a
-#: second approval, unless a step is ``destructive`` or marked
-#: ``requires_approval`` (:func:`_covered_by_approved_run`). One approval
+#: second approval, unless a step keeps its own approval
+#: (:func:`_covered_by_approved_run`). One approval
 #: still completes one run, now that a call made with a token (and a
 #: ``dangerous`` step in the web interface) waits for approval. ``False`` for
 #: every ordinary dispatch.
@@ -646,8 +651,8 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     sub-op cannot clear twice in one re-entry. Matching on
     the params-hash (not op_id alone) pins the clear to the exact entity
     approved. This clears **exactly one** sub-op. Every other governed sub-op
-    that is not ``destructive`` and not ``requires_approval`` goes ahead under
-    the approval of the run (:func:`_covered_by_approved_run`). A
+    goes ahead under the approval of the run, unless it keeps its own
+    approval (:func:`_covered_by_approved_run`). A
     governed sub-op that needs its own approval waits for it; the steps this
     run did are stored with that request, so its resume does not send them
     again (:mod:`~meho_backplane.operations.composite_steps`).
@@ -662,31 +667,37 @@ def _subop_resume_cleared(*, op_id: str, params: dict[str, Any]) -> bool:
     return False
 
 
-def _covered_by_approved_run(
-    *,
-    op_id: str,
-    safety_level: str,
-    requires_approval: bool,
-    always_wait: bool = False,
-    stored_op_class: str | None = None,
-) -> bool:
+async def _covered_by_approved_run(rows: Sequence[EndpointDescriptor], caller: Operator) -> bool:
     """True when a person's approval of this run covers this waiting step (#3980).
 
     The run is approved when the dispatcher runs it with ``_approved=True``
     (:data:`approved_run_var`) or when it is the re-entry of an approved step
     (:data:`composite_resume_scope_var`). Such an approval covers every other
-    internal step, except a ``destructive`` step, a step marked
-    ``requires_approval``, a step a classification entry makes always
-    wait and a step that reads, writes or makes a credential
-    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`):
-    those keep their own approval.
+    internal step, except a ``destructive`` step, a step a classification
+    entry makes always wait, a step that reads, writes or makes a credential
+    (:func:`~meho_backplane.operations.service_grants.credential_call_waits`)
+    and a step that keeps its own approval
+    (:func:`~meho_backplane.operations.run_step_rules.step_keeps_own_approval`:
+    with ``CUSTOM_POLICY`` off a ``requires_approval`` step, with it on the
+    rules of that module). Those keep their own approval.
+
+    It takes the step's rows and the caller, not single values, because the
+    fixed rules (:func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`)
+    read the whole row and who calls. The step gate passes the rows of
+    :func:`~meho_backplane.operations.run_step_rules.step_rule_rows`: one row
+    with the switch off, and with it on one row for each stored row of the
+    step's operation. The approval covers the step only when it covers each row.
     """
+    from meho_backplane.operations.run_step_rules import step_keeps_own_approval
     from meho_backplane.operations.service_grants import credential_call_waits
 
-    if safety_level == "destructive" or requires_approval or always_wait:
-        return False
-    if credential_call_waits(op_id, stored_op_class):
-        return False
+    for row in rows:
+        if row.safety_level == "destructive" or row.policy_always_wait:
+            return False
+        if credential_call_waits(row.op_id, row.op_class):
+            return False
+        if await step_keeps_own_approval(row, caller):
+            return False
     return runs_after_approval()
 
 
@@ -1223,6 +1234,10 @@ async def _gate_subop(
         _preflight_denied_refusal,
     )
     from meho_backplane.operations.op_policy import apply_step_policy
+    from meho_backplane.operations.run_step_rules import (
+        step_rule_rows,
+        step_wait_reason_after_approval,
+    )
     from meho_backplane.operations.service_grants import _sandbox_delete_exception
     from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
     from meho_backplane.policy.stamp import take_rule
@@ -1299,9 +1314,15 @@ async def _gate_subop(
     if cleared:
         # The approved step is checked again, as a single call is: its risk
         # level now against its card, and the agent that asked
-        # (:mod:`.approved_run_rights`).
+        # (:mod:`.approved_run_rights`). With CUSTOM_POLICY on, the stored
+        # level of the step's operation counts too (``step_rule_rows``), as
+        # for a child call; with it off nothing more is read.
         step_refusal = await approved_step_refusal_now(
-            operator=operator, descriptor=descriptor, connector_id=connector_id, target=target
+            operator=operator,
+            descriptor=descriptor,
+            connector_id=connector_id,
+            target=target,
+            level_rows=await step_rule_rows(descriptor, operator.tenant_id),
         )
         if step_refusal is None:
             return _GoAhead.PERSON
@@ -1331,23 +1352,30 @@ async def _gate_subop(
         params=params,
     )
     step_rule = take_rule()
+    # The rows the step rule reads: with CUSTOM_POLICY on, a copy for each
+    # stored row of the step's operation; with it off, the step's row.
+    rule_rows = await step_rule_rows(descriptor, operator.tenant_id)
+    # With CUSTOM_POLICY on, the reason MEHO stores when the step rule makes
+    # the step wait; ``None`` for every other wait, as with the switch off.
+    wait_reason: str | None = None
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         # A step marked for a sandbox delete grant is cleared here only by
         # that grant: no other grant covers it.
-        if not credential_step_waits_after_approval(op_id) and (
-            not descriptor.credential_call
-            or _sandbox_delete_exception(op_id, None, descriptor, params)
+        if credential_step_waits_after_approval(op_id) or (
+            descriptor.credential_call
+            and not _sandbox_delete_exception(op_id, None, descriptor, params)
         ):
+            _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
+            verdict = PermissionVerdict.NEEDS_APPROVAL
+        elif wait_reason := await step_wait_reason_after_approval(rule_rows, operator):
+            _log.info("composite_step_keeps_own_approval_after_approval", op_id=op_id)
+            verdict = PermissionVerdict.NEEDS_APPROVAL
+        else:
             return _GoAhead.NO_PERSON
-        _log.info("composite_credential_step_waits_after_approval", op_id=op_id)
-        verdict = PermissionVerdict.NEEDS_APPROVAL
     # #3980: a person approved this run, so a step that would only wait goes
     # ahead. A ``deny`` stays a deny.
-    if verdict is PermissionVerdict.NEEDS_APPROVAL and _covered_by_approved_run(
-        op_id=op_id,
-        safety_level=descriptor.safety_level,
-        requires_approval=descriptor.requires_approval,
-        always_wait=descriptor.policy_always_wait,
+    if verdict is PermissionVerdict.NEEDS_APPROVAL and await _covered_by_approved_run(
+        rule_rows, operator
     ):
         _log.info("composite_subop_covered_by_approved_run", op_id=op_id)
         return _GoAhead.PERSON
@@ -1416,8 +1444,10 @@ async def _gate_subop(
             # caller passes ``destructive`` today, but the seam must never write a
             # weaker row than the dispatcher would for the same tier. #4647: the
             # refusal is audited as a ``denied`` row on the sub-op's path, linked
-            # to the parent's audit id, like the preflight refusal below.
-            if descriptor.safety_level == "destructive":
+            # to the parent's audit id, like the preflight refusal below. With
+            # CUSTOM_POLICY on, a stored ``destructive`` level of the step's
+            # operation counts too (``step_rule_rows``), as for a child call.
+            if any(row.safety_level == "destructive" for row in (descriptor, *rule_rows)):
                 refusal = await _destructive_binding_refusal(
                     op_id=op_id,
                     connector_id=connector_id,
@@ -1496,6 +1526,7 @@ async def _gate_subop(
                     install_category=descriptor.policy_install_category,
                     # A step always gets its own request.
                     allow_same_call_reuse=False,
+                    wait_reason=wait_reason,
                 )
                 await session.commit()
             # Record AFTER commit so a step event can never outlive a failed

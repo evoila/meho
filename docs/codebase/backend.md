@@ -995,7 +995,7 @@ PYTHONPATH-leak imports.
 
 ### Log levels and HTTP calls
 
-For each call through httpx, MEHO's per-call line holds only the method, the scheme and host, and the status, at every log level.
+For each call through httpx, MEHO's per-call line holds only the method, the scheme and host, and the status code with its standard phrase from Python's `http.HTTPStatus` table, at every log level. The reason phrase that the vendor system sent in its status line is not in the line. One filter does both: `_HttpxUrlFilter` in `src/meho_backplane/logging.py`.
 
 `configure_logging()` holds the logger of each HTTP client library, and every child logger, at the level in the table, whatever the root level is.
 
@@ -1042,6 +1042,8 @@ For each row with a line of MEHO's own, MEHO writes a short WARNING line instead
 `tests/test_logging_http_safe_lines.py` sends a record of each of the five message patterns with made-up values and a made-up exception, and makes a real retry with `requests`, at the root levels NOTSET, DEBUG, INFO and WARNING. It checks that MEHO's output holds the line once and no made-up value. It checks that another WARNING text of a held logger is dropped, and that a handler on the root logger and one on `urllib3` get no made-up value with `urllib3` at DEBUG.
 
 `tests/test_logging_http_stack_quiet.py` reads MEHO's own log output. It makes real calls with httpx, `httpx2`, `requests` and the Anthropic and OpenAI SDKs to a local server, at the root levels NOTSET, DEBUG, INFO and WARNING. It also calls a server that sends a malformed header block, and one that closes the connection so `urllib3` retries. It imports the Anthropic SDK after the setup with `ANTHROPIC_LOG` set. It checks that no header value, path, query or prompt text of these calls reaches a log line. It also checks that a line below the held level of each listed logger and some child loggers is dropped, also when the logger's level was lowered after the setup, and that a line at the held level is kept. At the end of the module it checks that each logger the tests change has its level from before.
+
+One test there applies uvicorn's own logging settings first, as a server does, and then `configure_logging(INFO)`. It follows a redirect to an answer whose status lines hold a made-up reason phrase, and checks that each per-call line holds the method, the host, the code and the standard phrase, and no part of the made-up phrase. The redirect tests (`tests/_http_redirect_harness.py`) turn the `httpx` logger on with this filter, as in a server, and put its state back after each test. The test database set-up runs alembic, which turns off every logger that exists; in a server the migrations run in a separate job.
 
 ## Control flow
 

@@ -26,6 +26,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixtures
     _START,
     _agent_trace_store,
     _assert_absent,
+    _httpx_logger_on,
     _made_up,
     _reset_module_state,
     _run,

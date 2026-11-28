@@ -46,6 +46,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 from structlog.tracebacks import ExceptionDictTransformer
 
+from meho_backplane.logging import _HTTP_STACK_LOGGERS
 from meho_backplane.main import app
 from meho_backplane.middleware import UNMATCHED_ROUTE_LABEL, RequestContextMiddleware
 from meho_backplane.settings import get_settings
@@ -442,6 +443,30 @@ def test_http_requests_total_increments_per_request(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 # stdlib logging bridge (#2887)
 # ---------------------------------------------------------------------------
+
+
+#: The loggers whose level or on/off state a test of this module can change.
+_LOGGERS = (
+    "",
+    "httpx",
+    "sqlalchemy.engine",
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    *_HTTP_STACK_LOGGERS,
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_loggers() -> Iterator[None]:
+    """Put back the level and the on/off state of each changed logger after a test."""
+    saved = {n: (logging.getLogger(n).level, logging.getLogger(n).disabled) for n in _LOGGERS}
+    try:
+        yield
+    finally:
+        for n, (level, disabled) in saved.items():
+            logging.getLogger(n).setLevel(level)
+            logging.getLogger(n).disabled = disabled
 
 
 def _reset_logging_tree() -> None:

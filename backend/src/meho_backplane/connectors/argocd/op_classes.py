@@ -13,6 +13,7 @@ from typing import Any
 from meho_backplane.op_classes import (
     declare_credential_capable,
     declare_credential_check,
+    declare_delete_check,
     declare_op_classes,
 )
 
@@ -65,3 +66,38 @@ def sync_sets_a_revision(params: Mapping[str, Any]) -> bool:
 # sync without one starts what the Application already defines and keeps
 # the rules of argocd.app.sync.
 declare_credential_check("argocd.app.sync", sync_sets_a_revision)
+
+
+#: The card line of a sync that deletes, and of a rollback that deletes.
+SYNC_PRUNE_LINE = "This sync deletes the resources that are no longer in Git."
+ROLLBACK_PRUNE_LINE = (
+    "This rollback deletes the resources that are not in the revision it goes back to."
+)
+
+
+def sync_prunes(params: Mapping[str, Any]) -> str | None:
+    """The card line when the ``argocd.app.sync`` call in *params* deletes, else ``None``.
+
+    The handler sends ``prune`` when the value is not ``None``, as
+    ``bool(value)``, so the same test is used here. A sync with ``prune``
+    ``false`` or without ``prune`` deletes nothing.
+    """
+    return SYNC_PRUNE_LINE if bool(params.get("prune")) else None
+
+
+def rollback_prunes(params: Mapping[str, Any]) -> str | None:
+    """The card line when the ``argocd.app.rollback`` call in *params* deletes, else ``None``.
+
+    The same test as :func:`sync_prunes`.
+    """
+    return ROLLBACK_PRUNE_LINE if bool(params.get("prune")) else None
+
+
+# With CUSTOM_POLICY on, a sync or a rollback with prune deletes the
+# resources that the revision no longer holds, so the call waits for a
+# person. Without prune it keeps the rules of its operation. A refresh
+# deletes nothing; what an app deletes later by its own automatic sync is
+# decided when that setting is written, by argocd.app.set, which waits on
+# every call.
+declare_delete_check("argocd.app.sync", sync_prunes)
+declare_delete_check("argocd.app.rollback", rollback_prunes)

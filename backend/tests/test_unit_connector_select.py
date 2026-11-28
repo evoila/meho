@@ -160,7 +160,12 @@ def test_select_refuses_a_missing_contract_file(repo: Path) -> None:
 def test_every_contract_test_file_exists() -> None:
     missing = [name for name in picker.CONTRACT_TESTS if not (BACKEND_DIR / name).is_file()]
 
-    assert missing == []
+    assert not missing, "\n".join(
+        f"{name} is in CONTRACT_TESTS but does not exist: remove the line "
+        f"'    \"{name}\",' from backend/tests/_unit_connector_select.py, "
+        "or put in the new name of the file."
+        for name in missing
+    )
 
 
 # Unit test files that walk a folder tree, but not the backend package or
@@ -203,7 +208,27 @@ def test_every_tree_walking_test_is_in_the_contract_set() -> None:
         if rel not in known and any(marker in text for marker in walk):
             unlisted.append(rel)
 
-    assert unlisted == []
+    assert not unlisted, "\n".join(_where_to_add(name) for name in unlisted)
+
+
+def _where_to_add(name: str) -> str:
+    """One sentence: which list a new tree-walking test belongs in, and the line."""
+    return (
+        f"{name} walks a folder tree, so add it to one list: when it reads the "
+        "backend package or the docs, add the line "
+        f"'    \"{name}\",' to CONTRACT_TESTS in backend/tests/_unit_connector_select.py; "
+        "when it walks something else, add the line "
+        f'\'    "{name}": "<what it walks>",\' to WALKS_SOMETHING_ELSE in '
+        "backend/tests/test_unit_connector_select.py."
+    )
+
+
+def test_unlisted_tree_walk_names_the_file_the_lists_and_the_lines() -> None:
+    message = _where_to_add("tests/test_new.py")
+
+    assert "tests/test_new.py walks a folder tree" in message
+    assert "'    \"tests/test_new.py\",' to CONTRACT_TESTS" in message
+    assert '\'    "tests/test_new.py": "<what it walks>",\' to WALKS_SOMETHING_ELSE' in message
 
 
 def test_real_tree_core_change_gives_the_full_run() -> None:

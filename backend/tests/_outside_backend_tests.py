@@ -9,13 +9,12 @@ chart under ``deploy/``, the Go CLI under ``cli/``, the workflows under
 under ``backend/`` can still break them.
 
 CI skips the six unit shards on such a pull request (#5296). It runs only
-the files in ``OUTSIDE_BACKEND_TESTS``, in the job
-``python-outside-backend`` of ``.github/workflows/ci.yml``. The merge queue
-always runs every test.
+the files that ``scan()`` finds, in the job ``python-outside-backend`` of
+``.github/workflows/ci.yml``. The merge queue always runs every test.
 
-``test_outside_backend_tests.py`` keeps the list correct: it fails when
-``scan()`` finds a file that is not on the list, or when the list holds a
-file that ``scan()`` does not find.
+There is no hand-kept list: ``scan()`` works the files out from their
+source, so a new test file needs no edit here.
+``test_outside_backend_tests.py`` checks the scan itself.
 
 What ``scan()`` counts as "reads outside ``backend/``":
 
@@ -46,121 +45,6 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = TESTS_DIR.parent
-
-# Paths are relative to backend/, sorted.
-OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
-    "tests/retrieval_eval/test_ci_run_eval_gate.py",
-    "tests/test_agent_toolset_working_surface.py",
-    "tests/test_api_v1_operations_preview_response.py",
-    "tests/test_api_v1_settings.py",
-    "tests/test_approval_table_judge.py",
-    "tests/test_auth_old_groups_read_as_new_roles.py",
-    "tests/test_broadcast_person_guidance.py",
-    "tests/test_chart_approval_handoff.py",
-    "tests/test_chart_bring_your_own_render.py",
-    "tests/test_chart_broadcast_hardening.py",
-    "tests/test_chart_core_bootstrap.py",
-    "tests/test_chart_core_keycloak.py",
-    "tests/test_chart_core_keycloak_own_postgres.py",
-    "tests/test_chart_core_keycloak_role_check.py",
-    "tests/test_chart_core_openbao.py",
-    "tests/test_chart_core_postgres.py",
-    "tests/test_chart_core_secrets.py",
-    "tests/test_chart_core_wiring.py",
-    "tests/test_chart_dispatch_limits.py",
-    "tests/test_chart_image_digest_pin.py",
-    "tests/test_chart_image_registry.py",
-    "tests/test_chart_k3s.py",
-    "tests/test_chart_knowledge_settings_values.py",
-    "tests/test_chart_mcp_resource_uri.py",
-    "tests/test_chart_migrate_init_container.py",
-    "tests/test_chart_migrate_job_no_sa.py",
-    "tests/test_chart_network_policy_extra_egress.py",
-    "tests/test_chart_observability_scrape.py",
-    "tests/test_chart_openai_endpoint.py",
-    "tests/test_chart_progress_deadline.py",
-    "tests/test_chart_result_cache.py",
-    "tests/test_chart_runtime_database_login.py",
-    "tests/test_chart_safe_updates.py",
-    "tests/test_chart_sandbox_mode.py",
-    "tests/test_chart_session_store_values.py",
-    "tests/test_chart_update_strategy_job.py",
-    "tests/test_chart_vault_addr_optional.py",
-    "tests/test_check_install_secrets.py",
-    "tests/test_check_tested_live_claims.py",
-    "tests/test_ci_backend_python_skip.py",
-    "tests/test_ci_check_chart_namespace_scope.py",
-    "tests/test_ci_check_connector_kit_release.py",
-    "tests/test_ci_check_contract_compat.py",
-    "tests/test_ci_check_plugin_version.py",
-    "tests/test_ci_check_private_names.py",
-    "tests/test_ci_check_release_body_paths.py",
-    "tests/test_ci_coverage_shards.py",
-    "tests/test_ci_dockerhub_login_soft_fail.py",
-    "tests/test_ci_docs_deploy.py",
-    "tests/test_ci_fork_runner_isolation.py",
-    "tests/test_ci_helm_golden.py",
-    "tests/test_ci_install_node_step.py",
-    "tests/test_ci_install_php_cli_step.py",
-    "tests/test_ci_main_push.py",
-    "tests/test_ci_measure_test_map.py",
-    "tests/test_ci_memory_sampler.py",
-    "tests/test_ci_merge_queue_cleanup.py",
-    "tests/test_ci_redaction_compare_summary_only.py",
-    "tests/test_ci_repo_secrets.py",
-    "tests/test_ci_runner_allow_list.py",
-    "tests/test_ci_second_runner_site.py",
-    "tests/test_ci_security_weekly_issue.py",
-    "tests/test_ci_spec_shelf_lists.py",
-    "tests/test_ci_test_images.py",
-    "tests/test_ci_upgrade_release_lookup.py",
-    "tests/test_connector_kit.py",
-    "tests/test_connector_overlay_build.py",
-    "tests/test_connector_overlay_review.py",
-    "tests/test_connectors_keycloak_authflow_touch.py",
-    "tests/test_connectors_linux_day0_recipe.py",
-    "tests/test_connectors_no_phantom_readback_tool.py",
-    "tests/test_consumer_doc_tool_names.py",
-    "tests/test_consumer_routing_render.py",
-    "tests/test_core_company_login.py",
-    "tests/test_core_keycloak_realm.py",
-    "tests/test_core_keycloak_stage.py",
-    "tests/test_core_vault_init.py",
-    "tests/test_db_engine.py",
-    "tests/test_examples_r1_tiered_triage.py",
-    "tests/test_examples_r2_approval_gate.py",
-    "tests/test_examples_r4_local_claude.py",
-    "tests/test_features_doc_consistency.py",
-    "tests/test_hard_to_undo_upgrade_query.py",
-    "tests/test_inventory_shapes.py",
-    "tests/test_live_test_cells.py",
-    "tests/test_live_tests_record.py",
-    "tests/test_maturity_surface_drift.py",
-    "tests/test_mcp_surface_conformance.py",
-    "tests/test_operations_connector_auth_failed.py",
-    "tests/test_operations_meta_tools.py",
-    "tests/test_people_behind_docs.py",
-    "tests/test_policy_routing.py",
-    "tests/test_policy_routing_old_kinds.py",
-    "tests/test_policy_rule_sources_doc.py",
-    "tests/test_policy_small_team_parity.py",
-    "tests/test_policy_switch_texts.py",
-    "tests/test_proxy_headers.py",
-    "tests/test_redaction_compare_judge.py",
-    "tests/test_reference_docs_drift.py",
-    "tests/test_release_security_sheet.py",
-    "tests/test_shared_lists_only_shrink.py",
-    "tests/test_skip_limit_check.py",
-    "tests/test_soak_harness_driver.py",
-    "tests/test_soak_harness_host_detach_from_vds.py",
-    "tests/test_ssh_host_key_pins_script.py",
-    "tests/test_targets_file_schema.py",
-    "tests/test_ui_principal_blocks.py",
-    "tests/test_upgrade_rows.py",
-    "tests/test_vault_tenant_admin_policy_doc.py",
-    "tests/test_vcf_api_contract_manifest.py",
-    "tests/test_work_ref_rule.py",
-)
 
 # `Path(__file__)`, an optional `.resolve()`, then `.parents[N]` or `.parent`s.
 _FILE_PARENTS = re.compile(
@@ -218,4 +102,4 @@ def scan(tests_dir: Path = TESTS_DIR) -> set[str]:
 
 
 if __name__ == "__main__":
-    print("\n".join(OUTSIDE_BACKEND_TESTS))
+    print("\n".join(sorted(scan())))

@@ -441,7 +441,7 @@ def files_of_job(job: dict[str, Any]) -> set[Path] | None:
     step whose files it cannot read raises ``ValueError``, so a new form of
     step makes the check fail instead of going unread.
     """
-    from tests._outside_backend_tests import OUTSIDE_BACKEND_TESTS
+    from tests._outside_backend_tests import scan as outside_backend_scan
 
     copies: dict[str, Path] = {}
     files: set[Path] | None = None
@@ -458,7 +458,7 @@ def files_of_job(job: dict[str, Any]) -> set[Path] | None:
         for pattern, needle, root in _GREP.findall(text):
             found |= {p for p in _found(folder, root, pattern, []) if needle in p.read_text()}
         if _LIST_SCRIPT.search(text):
-            found |= {BACKEND / name for name in OUTSIDE_BACKEND_TESTS}
+            found |= {BACKEND / name for name in outside_backend_scan()}
         if not found:
             raise ValueError(f"cannot tell which test files this step runs: {step.get('name')}")
         files = (files or set()) | found

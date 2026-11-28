@@ -244,6 +244,39 @@ async def test_the_approve_path_names_the_rule_for_a_machine_login(
     assert RUNS == []
 
 
+@pytest.mark.asyncio
+async def test_a_runner_token_on_the_approve_path_is_refused_and_the_request_stays_pending(
+    client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    """The runner fence refuses the token before the approve route runs."""
+    await _seed(_PLAIN)
+    waiting = await call_as(client, _PLAIN, kind="service", sub=SERVICE)
+    assert waiting["status"] == "awaiting_approval", waiting
+    request_id = waiting["extras"]["approval_request_id"]
+
+    ac, key = client
+    token = mint_token(
+        key,
+        sub="runner:approver",
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(TENANT),
+        principal_kind="runner",
+        runner_id=str(uuid.uuid4()),
+    )
+    response = await ac.post(
+        f"/api/v1/approvals/{request_id}/approve",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "runner_scope_violation"}
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, uuid.UUID(request_id))
+    assert row is not None and row.status == ApprovalRequestStatus.PENDING.value
+    assert RUNS == []
+
+
 @pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER])
 def test_the_service_layer_check_names_the_rule(kind: PrincipalKind) -> None:
     """The check behind every approve path; a runner token never reaches the REST route."""

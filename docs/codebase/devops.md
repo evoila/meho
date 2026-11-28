@@ -2774,12 +2774,16 @@ the exit code of each address, never the address. The smoke job sets
 `cache-mode: none`, so GitHub gives it no cache access.
 
 **When the site dies.** The job `second-site-watchdog` runs on a
-GitHub-hosted runner when the site was picked. After 30 minutes, if a
-shard of the second-site job still has no runner, it reads the jobs again.
-It cancels the run only when that fresh read shows at least one shard with a
-waiting status (queued, waiting, requested or pending). A failed read, or a
-shard with no status, never leads to a cancel. Only this job
-and `merge-queue-watchdog` have `actions: write`.
+GitHub-hosted runner when the site was picked. It stops the run only when a
+shard of the second-site job waited 30 minutes for a runner and the site
+started no job at all in those 30 minutes, in any run of the workflows that
+use it, or when it cannot read the jobs of those runs. When the site did
+start a job, it is busy, not down: the watchdog keeps waiting, at most 35
+minutes more (the time limit of a shard). Each cancel comes right after a
+fresh read that shows at least one shard with a waiting status (queued,
+waiting, requested or pending). A failed read of the run itself, or a shard
+with no status, never leads to a cancel. Only this job and
+`merge-queue-watchdog` have `actions: write`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check
 that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to

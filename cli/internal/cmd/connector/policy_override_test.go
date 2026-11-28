@@ -5,6 +5,8 @@ package connector
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -243,5 +245,83 @@ func TestPrintOverridesTableWithClassification(t *testing.T) {
 	printOverridesTable(&plain, false, rows)
 	if strings.Contains(plain.String(), "source") {
 		t.Errorf("without classification the table keeps its columns:\n%s", plain.String())
+	}
+}
+
+const reasonHoldsSecretSentence = "The reason looks like a secret. A reason never holds a secret, " +
+	"so MEHO did not store it and wrote nothing. Write the reason again in plain words."
+
+// madeUpKey builds a key-shaped text at run time, so no literal value is in the repo.
+func madeUpKey(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("random bytes: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// TestRunEditOpShowsTheRefusalOfASecretReason: the backplane answers 400 for
+// a reason that looks like a secret. The command shows the sentence, exits
+// with an error and never prints the reason.
+func TestRunEditOpShowsTheRefusalOfASecretReason(t *testing.T) {
+	key := madeUpKey(t)
+	srv := mockBackplane(t, map[string]mockHandler{
+		"PATCH /api/v1/connectors/vault-1.x/operations/vault.kv.delete": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusBadRequest, map[string]any{
+				"detail": "reason_looks_like_secret: " + reasonHoldsSecretSentence,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd, stdout, stderr := newIngestStatusTestCmd()
+	err := runEditOp(cmd, editOpOptions{
+		ConnectorID:       "vault-1.x",
+		OpID:              "vault.kv.delete",
+		ClearApproval:     true,
+		Reason:            key,
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("a refused reason must fail")
+	}
+	if !strings.Contains(stderr.String(), reasonHoldsSecretSentence) {
+		t.Errorf("the refusal sentence is missing:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String()+stdout.String()+err.Error(), key) {
+		t.Error("the output repeats the reason")
+	}
+}
+
+// TestRunRemoveOverrideShowsTheRefusalOfASecretReason is the same for remove-override.
+func TestRunRemoveOverrideShowsTheRefusalOfASecretReason(t *testing.T) {
+	key := madeUpKey(t)
+	srv := mockBackplane(t, map[string]mockHandler{
+		"DELETE /api/v1/connectors/vault-1.x/operation-overrides/vault.kv.delete": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(t, w, http.StatusBadRequest, map[string]any{
+				"detail": "reason_looks_like_secret: " + reasonHoldsSecretSentence,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	cmd, stdout, stderr := newIngestStatusTestCmd()
+	err := runRemoveOverride(cmd, removeOverrideOptions{
+		ConnectorID:       "vault-1.x",
+		OpID:              "vault.kv.delete",
+		Reason:            key,
+		BackplaneOverride: srv.URL,
+	})
+	if err == nil {
+		t.Fatal("a refused reason must fail")
+	}
+	if !strings.Contains(stderr.String(), reasonHoldsSecretSentence) {
+		t.Errorf("the refusal sentence is missing:\n%s", stderr.String())
+	}
+	if strings.Contains(stderr.String()+stdout.String()+err.Error(), key) {
+		t.Error("the output repeats the reason")
 	}
 }

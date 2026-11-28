@@ -43,7 +43,7 @@ from meho_backplane import audit as audit_module
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.audit_query.query import query_audit
 from meho_backplane.audit_query.schemas import AuditQueryFilters
-from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -53,11 +53,13 @@ from meho_backplane.db.models import (
     TenantConvention,
 )
 from meho_backplane.instance_settings import service as settings_service
+from meho_backplane.operations.change_reason import REASON_HOLDS_SECRET
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.reason import MAX_REASON_CHARS
 from meho_backplane.ui.routes import settings as settings_routes
 from tests import test_ui_agent_grants
 from tests._oidc_jwt_helpers import mint_token
+from tests._secret_reason import assert_no_trace, made_up_key
 from tests._vault_fakes import install_fake_vault
 from tests.test_ui_agent_grants import (
     _TENANT_A,
@@ -1096,3 +1098,71 @@ def test_a_file_in_the_reason_field_is_no_reason() -> None:
 
     _assert_refused_for_reason(applied, [_KINDS, _GATE])
     assert _state() == _UNCHANGED
+
+
+# ---------------------------------------------------------------------------
+# A reason that looks like a secret is refused
+# ---------------------------------------------------------------------------
+
+
+def test_a_reason_that_looks_like_a_secret_is_refused_and_writes_nothing(
+    caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
+) -> None:
+    key = made_up_key()
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        with caplog.at_level("DEBUG"):
+            applied = _apply(client, csrf, _file({"announce_gate_enabled": False}), f"CHG-1 {key}")
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 403, applied.text
+    assert REASON_HOLDS_SECRET in applied.text
+    assert _state() == _UNCHANGED
+    rows = asyncio.run(_all(AuditLog))
+    assert_no_trace(
+        key, applied.text, [row.payload for row in rows], caplog.text, capfd.readouterr().out
+    )
+    assert all("reason" not in row.payload for row in rows)
+
+
+def test_a_plain_reason_is_still_stored_in_the_audit_row() -> None:
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        applied = _apply(client, csrf, _file({"announce_gate_enabled": False}), "ticket CHG-1234")
+    finally:
+        mock.stop()
+
+    assert applied.status_code == 200, applied.text
+    (row,) = _audit_rows("settings.import")
+    assert row.payload["reason"] == "ticket CHG-1234"
+
+
+def test_apply_import_refuses_a_reason_that_looks_like_a_secret(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    key = made_up_key()
+    _seed_tenants()
+
+    async def _do() -> str:
+        operator = Operator(
+            sub="admin-sub",
+            raw_jwt="header.payload.signature",
+            tenant_id=_TENANT_A,
+            tenant_role=TenantRole.TENANT_ADMIN,
+            platform_admin=True,
+        )
+        async with get_sessionmaker()() as session:
+            with pytest.raises(settings_service.SettingsForbiddenError) as caught:
+                await settings_service.apply_import(
+                    session, operator, _file({"announce_gate_enabled": False}), reason=key
+                )
+            await session.rollback()
+        return str(caught.value)
+
+    message = asyncio.run(_do())
+    assert message == REASON_HOLDS_SECRET
+    assert _state() == _UNCHANGED
+    assert_no_trace(key, message, capfd.readouterr().out)

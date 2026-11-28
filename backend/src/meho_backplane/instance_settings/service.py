@@ -91,6 +91,7 @@ from meho_backplane.instance_settings.schema import (
     format_validation_errors,
     parse_settings_file,
 )
+from meho_backplane.operations.change_reason import reason_refusal
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.schemas import TargetCreate, TargetUpdate
 from meho_backplane.targets.secret_field_map import merge_secret_field_map
@@ -987,6 +988,8 @@ async def apply_import(
     of the two policy changes without a *reason*. The caller's session
     dependency commits the one transaction after the route returns.
     """
+    if (secret_refusal := reason_refusal(reason)) is not None:
+        raise SettingsForbiddenError(secret_refusal)
     plan = await build_plan(session, operator, content, lock=True)
     refusal = None if plan.mistakes else loosening_refusal(operator, plan.console_only, reason)
     if refusal is not None:

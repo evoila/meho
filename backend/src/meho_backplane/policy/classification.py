@@ -556,9 +556,9 @@ def _product_risk_text(
     them, and how many more there are. It gives a fix for every one of
     them (:func:`_fix_text`): ``risk`` on the tenant entry that already
     matches exactly that operation (:func:`_exact_entry`), or a new
-    entry, each fix once. It
-    suggests a change of *entry* only when *entry* matches that one
-    operation alone, because *entry* can also match the operation of
+    entry, each fix once. It suggests a change of *entry* only when
+    *entry* matches that one operation alone, because *entry* can also
+    match the operation of
     another product that shares the form with the dash. ``None`` when
     *entry* lowers the level of no operation named by its product.
     """
@@ -636,7 +636,9 @@ def _fix_text(
     one operation in different groups can each have their own exact
     entry. When the new entries do not fit into the file
     (:data:`MAX_CLASSIFICATIONS`), the fix is one entry per connector
-    (:func:`_per_connector`), else a higher level in *entry* itself.
+    (:func:`_per_connector`). When even those do not fit, it says how
+    many new entries the fix needs and how many the file can take, and
+    names no entry to change.
     """
     with_group = entry.group is not None
     on_entry: dict[str, str] = {}
@@ -659,9 +661,13 @@ def _fix_text(
     if len(new) > room:
         per_connector = _per_connector(entry, new_one, new_level, entries)
         if per_connector is None or len(per_connector[1]) > room:
-            top = max((level for _, _, level in found), key=RISK_LEVELS.index)
-            raised = "This also raises the other operations it matches."
-            return f"{_SET_RISK_HERE.format(level=top)} {raised}"
+            needed = len(new) if per_connector is None else len(per_connector[1])
+            entries_word = "entry" if needed == 1 else "entries"
+            return (
+                f"The fix needs {needed} new tenant {entries_word}, but the file can take only "
+                f"{max(room, 0)} more (at most {MAX_CLASSIFICATIONS:,} entries). Remove entries "
+                "the file does not need, then send it again."
+            )
         more, new = per_connector
         for ref, level in more.items():
             _higher(on_entry, ref, level)

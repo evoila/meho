@@ -178,10 +178,12 @@ The rules are in `policy/classification.py` (`classify`, no database):
    do not fit into the file (`MAX_CLASSIFICATIONS`, 2,000 entries), it
    suggests one entry per connector instead (`_per_connector`): the
    refused entry's match with the connector's own id. When even that does
-   not fit, or the refused entry already names that connector, it says to
-   raise the level of the refused entry itself. A suggested entry quotes
-   each value (`_entry_text`), so it parses as written. It suggests a change of the refused entry only when
-   the entry matches that one operation alone, because two products
+   not fit, or the refused entry already names that connector, it says
+   how many new entries the fix needs and how many more the file can
+   take, and names no entry to change. A suggested entry quotes each
+   value (`_entry_text`), so it parses as written. It suggests a change
+   of the refused entry only when the entry matches that one operation
+   alone, because two products
    share the form with the dash. The single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for

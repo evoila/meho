@@ -1166,6 +1166,35 @@ async def test_the_suggested_fix_fits_into_the_file_when_many_operations_are_low
     assert _explain(client, key, "cowy", RUN)["risk_level"] == "caution"
 
 
+@pytest.mark.asyncio
+async def test_a_fix_that_does_not_fit_into_the_file_names_no_entry_to_change(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    for product in PRODUCTS:
+        await _register_op(embedding, product, "", RUN)
+    await _register_op(embedding, "bullapi", "1.x", RUN)
+    await policy(None, [_BY_PRODUCT])
+    key = make_rsa_keypair("kid-cpf-follow-full-file")
+    full = [_ALL_CAUTION] + [
+        {"match": {"connector": "cowy", "op": f"wild.other.{n}"}, "category": "network"}
+        for n in range(MAX_CLASSIFICATIONS - 1)
+    ]
+
+    answers = [_send_entries(client, key, path, full) for path in ("validate", "import")]
+
+    for answer in answers:
+        assert answer["ok"] is False, answer
+        (sentence,) = answer["mistakes"]
+        assert sentence.startswith(_ONE_COWX), sentence
+        assert sentence.endswith(
+            "The fix needs 1 new tenant entry, but the file can take only 0 more "
+            f"(at most {MAX_CLASSIFICATIONS:,} entries). Remove entries the file does not need, "
+            "then send it again."
+        ), sentence
+        assert "Set `risk:" not in sentence, sentence
+        assert "`classifications[0]`" not in sentence.removeprefix(_HEAD), sentence
+
+
 SIX = tuple(f"wild.thing.run{n}" for n in range(1, 7))
 
 

@@ -305,7 +305,7 @@ async def test_a_target_outside_the_tenant_is_not_found(case: str) -> None:
     ("fields", "needle"),
     [
         ({"secret_ref": _NEW_REF, "host": "169.254.169.254"}, "invalid target parameters"),
-        ({"secret_ref": _NEW_REF, "tls_ca_pin": "not a pem"}, "invalid target parameters"),
+        ({"secret_ref": _NEW_REF, "tls_ca_pin": "not a pem"}, "tls_ca_pin"),
         ({"secret_ref": "secret/meho/other-team/login"}, "secret_ref"),
         ({}, "at least one field"),
         ({"secret_ref": _NEW_REF, "product": None}, ""),
@@ -331,7 +331,11 @@ async def test_a_refused_change_is_an_error_and_changes_nothing(
     result = await _run(_admin(), row.id, **fields)
 
     assert result.status in {"error", "invalid_params"}, result
-    message = str(result.extras.get("exception_message") or result.error)
+    message = str(
+        result.extras.get("exception_message")
+        or result.extras.get("validation_errors")
+        or result.error
+    )
     assert needle in message
     after = await _row(row.id)
     assert after.secret_ref == _OLD_REF

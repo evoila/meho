@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import Target as TargetORM
 
 __all__ = [
+    "NO_DESTINATION_SCREEN",
     "SECRET_FIELD_MAP_MAX_ENTRIES",
     "AuthModel",
     "SecretFieldName",
@@ -82,6 +83,18 @@ __all__ = [
     "project_target_to_summary",
     "validate_ca_pin_pem",
 ]
+
+#: Validation context key. With ``{NO_DESTINATION_SCREEN: True}`` the models
+#: skip the destination screen with the port, which can do a DNS lookup. The
+#: params check of ``targets.register`` and ``targets.update`` uses it, because
+#: that check must not do I/O. The handler of each op checks the model again
+#: without it, so the screen still runs before anything is stored.
+NO_DESTINATION_SCREEN = "no_destination_screen"
+
+
+def _screens_destination(info: ValidationInfo) -> bool:
+    return not (info.context or {}).get(NO_DESTINATION_SCREEN)
+
 
 #: One field name in a ``secret_field_map`` (#3711): a key in the target's
 #: secret. Names only, never a value.
@@ -499,13 +512,16 @@ class TargetCreate(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _reject_non_public_destination_with_port(self) -> TargetCreate:
+    def _reject_non_public_destination_with_port(self, info: ValidationInfo) -> TargetCreate:
         """Run the SSRF guard with the target's port.
 
         A ``host:port`` allowlist entry admits a host on that port only,
         so the guard needs the port. It runs here, after every field is
         parsed, and screens ``host`` and ``fqdn`` with ``self.port``.
+        Skipped under :data:`NO_DESTINATION_SCREEN`.
         """
+        if not _screens_destination(info):
+            return self
         for value in (self.host, self.fqdn):
             if value is not None:
                 assert_public_destination(value, self.port)
@@ -685,16 +701,17 @@ class TargetUpdate(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _reject_non_public_destination_with_port(self) -> TargetUpdate:
+    def _reject_non_public_destination_with_port(self, info: ValidationInfo) -> TargetUpdate:
         """Run the SSRF guard when the body carries its own port.
 
         A ``host:port`` allowlist entry admits a host on that port only.
         When the body sends ``port``, the sent ``host`` / ``fqdn`` are
         screened with it here. When it does not, the port is the stored
         one, which only the route handler knows, so it screens them in
-        ``_validate_update_body_fields``.
+        ``_validate_update_body_fields``. Skipped under
+        :data:`NO_DESTINATION_SCREEN`.
         """
-        if self.port is not None:
+        if self.port is not None and _screens_destination(info):
             for value in (self.host, self.fqdn):
                 if value is not None:
                     assert_public_destination(value, self.port)

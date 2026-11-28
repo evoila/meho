@@ -86,7 +86,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 
 from meho_backplane.api.v1.targets import (
@@ -107,13 +107,15 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations._audit import policy_decision_var
+from meho_backplane.operations._errors import validation_error_text
 from meho_backplane.operations._preview import _redact_echoed_params
+from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
-from meho_backplane.targets.schemas import TargetCreate
+from meho_backplane.targets.schemas import NO_DESTINATION_SCREEN, TargetCreate
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -200,6 +202,42 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+def model_refusal(exc: ValidationError) -> str:
+    """The text of a refused model check: each field, message and kind, never the input.
+
+    The text reaches the answer, the stored result and the audit row, and
+    the input can hold a value of ``extras``.
+    """
+    return f"invalid target parameters: {validation_error_text(exc)}"
+
+
+def model_params_problem(model: type[BaseModel], fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Check *fields* with *model* before a call can wait for approval.
+
+    Returns the :func:`params_problem` entry of the first error, without
+    the input, or ``None``. The destination screen with the port is skipped
+    (:data:`~meho_backplane.targets.schemas.NO_DESTINATION_SCREEN`), because
+    it can do a DNS lookup; the handler runs it.
+    """
+    try:
+        model.model_validate(fields, context={NO_DESTINATION_SCREEN: True})
+    except ValidationError as exc:
+        first = exc.errors(include_input=False, include_url=False)[0]
+        return params_problem(
+            ".".join(map(str, first["loc"])) or "params",
+            f"{first['msg']} ({first['type']})",
+            "Fix this field and send the call again. Nothing was stored.",
+        )
+    return None
+
+
+def _register_model_check(params: dict[str, Any]) -> dict[str, Any] | None:
+    return model_params_problem(TargetCreate, params)
+
+
+register_params_check(TARGETS_REGISTER_OP_ID, _register_model_check)
+
+
 async def targets_register(
     operator: Operator, target: Any, params: dict[str, Any]
 ) -> dict[str, Any]:
@@ -227,7 +265,7 @@ async def targets_register(
     try:
         body = TargetCreate(**params)
     except ValidationError as exc:
-        raise ValueError(f"invalid target parameters: {exc}") from exc
+        raise ValueError(model_refusal(exc)) from None
 
     sessionmaker = get_sessionmaker()
     try:

@@ -57,6 +57,8 @@ from meho_backplane.connectors.targets.ops import (
     _GROUP_WHEN_TO_USE,
     _http_exception_message,
     _parse_target_id,
+    model_params_problem,
+    model_refusal,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.op_classes import declare_hidden_stored_map_values
@@ -320,8 +322,11 @@ register_role_floor(TARGETS_UPDATE_OP_ID, TenantRole.TENANT_ADMIN)
 declare_hidden_stored_map_values(TARGETS_UPDATE_OP_ID, "extras_changes")
 
 
-def _extras_or_extras_changes(params: dict[str, Any]) -> dict[str, Any] | None:
-    """Refuse ``extras`` with ``extras_changes`` before a call can wait for approval."""
+def _update_params_problem(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse fields the model refuses before a call can wait for approval.
+
+    ``extras`` together with ``extras_changes`` gets its own plain answer.
+    """
     if "extras" in params and "extras_changes" in params:
         return params_problem(
             "extras_changes",
@@ -329,10 +334,10 @@ def _extras_or_extras_changes(params: dict[str, Any]) -> dict[str, Any] | None:
             "Send extras_changes to change single keys, or extras to replace "
             "the whole map. Nothing was changed.",
         )
-    return None
+    return model_params_problem(TargetUpdate, {k: v for k, v in params.items() if k != "target_id"})
 
 
-register_params_check(TARGETS_UPDATE_OP_ID, _extras_or_extras_changes)
+register_params_check(TARGETS_UPDATE_OP_ID, _update_params_problem)
 
 
 def _update_fields(params: dict[str, Any]) -> dict[str, Any]:
@@ -372,13 +377,7 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     try:
         body = TargetUpdate(**_update_fields(params))
     except ValidationError as exc:
-        # The text names the field, the kind and the message, never the input:
-        # the error reaches the answer, the stored result and the audit row.
-        problems = "; ".join(
-            f"{'.'.join(map(str, e['loc'])) or 'body'}: {e['msg']} ({e['type']})"
-            for e in exc.errors(include_input=False, include_url=False)
-        )
-        raise ValueError(f"invalid target parameters: {problems}") from None
+        raise ValueError(model_refusal(exc)) from None
 
     sessionmaker = get_sessionmaker()
     try:

@@ -711,6 +711,73 @@ async def test_export_refuses_stored_secrets(
     assert "plain-text-key" not in resp.text
 
 
+#: Normal text that looks like a shape the redaction engine hides but the
+#: settings check does not refuse: a manifest that is not a kubeconfig, a
+#: link with a user and no password, and a placeholder after a label.
+_NOT_REFUSED = [
+    pytest.param(
+        "apiVersion: v1\nkind: Config" + "Map\nmetadata:\n  name: app\ndata:\n  color: blue\n",
+        id="configmap",
+    ),
+    pytest.param("https://" + "deploy@git.example.invalid/r.git", id="link-with-a-user"),
+    pytest.param("pass" + "word: <from-openbao>", id="placeholder-after-a-label"),
+]
+_PLACES = ["convention", "notes", "extras"]
+
+
+def _settings_with(place: str, text: str) -> dict[str, Any]:
+    tenant: dict[str, Any] = {"id": str(_TENANT)}
+    if place == "convention":
+        tenant["conventions"] = [
+            {"slug": "naming", "title": "Naming", "kind": "reference", "body": text}
+        ]
+    else:
+        field = {"notes": text} if place == "notes" else {"extras": {"hint": text}}
+        tenant["targets"] = [{"name": "x", "product": "ssh", "host": "10.0.0.5", **field}]
+    return {"apiVersion": "meho.evoila.com/v1", "kind": "Settings", "spec": {"tenants": [tenant]}}
+
+
+@pytest.mark.parametrize("place", _PLACES)
+@pytest.mark.parametrize("text", _NOT_REFUSED)
+def test_import_accepts_text_that_is_only_hidden(place: str, text: str) -> None:
+    from meho_backplane.instance_settings.schema import parse_settings_file
+
+    parsed = parse_settings_file(yaml.safe_dump(_settings_with(place, text)).encode())
+    assert parsed.mistakes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("place", _PLACES)
+@pytest.mark.parametrize("text", _NOT_REFUSED)
+async def test_export_works_for_stored_text_that_is_only_hidden(
+    client: TestClient, place: str, text: str
+) -> None:
+    await _seed()
+    if place == "convention":
+        async with get_sessionmaker()() as session:
+            session.add(
+                TenantConvention(
+                    id=uuid.uuid4(),
+                    tenant_id=_TENANT,
+                    slug="naming",
+                    title="Naming",
+                    body=text,
+                    kind=ConventionKind.REFERENCE.value,
+                    priority=5,
+                    created_by_sub="seed",
+                )
+            )
+            await session.commit()
+    else:
+        field = {"notes": text} if place == "notes" else {"extras": {"hint": text}}
+        await _insert_target(tenant_id=_TENANT, name="x", product="ssh", **field)
+    key = make_rsa_keypair("kid-export-hidden-only")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get("/api/v1/settings/export", headers=_auth(_token(key)))
+    assert resp.status_code == 200, resp.text
+
+
 @pytest.mark.asyncio
 async def test_stored_secret_stops_preview_apply_and_history(client: TestClient) -> None:
     """A diff shows "before" values and a revision keeps them, so a stored secret stops both."""

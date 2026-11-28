@@ -276,10 +276,14 @@ them at once.
   tenant, are mistakes.
 - `tenants[].id` must be a UUID. Booleans must be `true` / `false`, numbers
   must be whole numbers (no `"yes"`, no `"14"`).
-- Every string, and every key under `extras`, is checked for a full
-  `PRIVATE KEY` PEM block, a JWT, the same after one base64 decode, and
-  base64 that decodes to a raw or DER key. A `CERTIFICATE` block passes, so
-  `tls_ca_pin` works.
+- Every string, and every key under `extras`, is checked with the free-text
+  check of the one list of secret shapes (`redaction/secret_shapes.py`). It
+  refuses only a shape that is surely a secret: a vendor access token with a
+  clear prefix, a link that holds a password, a full `PRIVATE KEY` block
+  (begin and end line), a JWT whose first part decodes to JSON, the same
+  after one base64 decode, and base64 that decodes to a raw or DER key. Every
+  other shape of the list is hidden in results but not refused here. A
+  `CERTIFICATE` block passes, so `tls_ca_pin` works.
 - Under `extras`, a key named like a credential (`password`, `api_key`,
   `clientSecret`, `token`, ...) is refused whatever its value: an ordinary
   password has no shape to find. A key that only names something about a

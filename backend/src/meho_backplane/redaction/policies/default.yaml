@@ -78,6 +78,14 @@ rules:
     action: redact
     reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
+  # After the api_key rule, so a ``token=ghp_...`` pair keeps its
+  # api_key label. This rule hides a vendor token with a clear prefix
+  # where no label stands in front of it.
+  - name: strip-vendor-token
+    pattern: vendor_token
+    action: redact
+    reason: "vendor access token with a clear prefix (GitHub, cloud access key id, chat bot, payment key)"
+
   - name: strip-kubeconfig
     pattern: kubeconfig
     action: redact

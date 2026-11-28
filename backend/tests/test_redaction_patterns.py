@@ -43,6 +43,7 @@ _EXPECTED_NAMES = {
     "bearer_token",
     "jwt",
     "api_key",
+    "vendor_token",
     "kubeconfig",
     "pem_private_key",
     "password_hash",
@@ -67,6 +68,7 @@ _AUTH_HEADER_FIXTURE = "Authorization: Bearer " + _JWT_FIXTURE_POS
 _CLIENT_SECRET_FIXTURE_POS = "client_secret" + " = " + "ABCDEFGHIJKL" + "12345"
 # New label fixtures for the Task #94 extension. Assembled from fragments
 # for the same gitleaks-avoidance reason as the fixtures above.
+_VENDOR_TOKEN_FIXTURE_POS = "gh" + "p_" + "a1B2c3D4e5" * 4
 _TOKEN_FIXTURE_POS = "token" + ": " + "ghp_abcdefgh" + "1234"
 _REFRESH_TOKEN_FIXTURE_POS = "refresh_token" + ": " + "rt_abcdefgh" + "1234"
 _AUTH_TOKEN_FIXTURE_POS = "auth_token" + ": " + "at_abcdefgh" + "1234"
@@ -753,6 +755,9 @@ def test_get_pattern_unknown_raises() -> None:
         ("ceph_key", "ssl_certificate_key = /etc/ssl/private/server.pem", False),
         ("ceph_key", "key = AQshort==", False),
         ("ceph_key", "key = " + _CEPH_KEY_VALUE_FIXTURE[2:], False),
+        # vendor_token: a clear vendor prefix, alone or in a sentence
+        ("vendor_token", "deployed with " + _VENDOR_TOKEN_FIXTURE_POS + " yesterday", True),
+        ("vendor_token", "commit " + "0123456789abcdef" * 4 + " is the checksum", False),
         # ipv4: dotted quad with valid 0-255 octets
         (
             "ipv4",
@@ -855,6 +860,8 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("api_key", _SECRET_ID_FIXTURE_POS, True),
     ("api_key", _PRIVATE_KEY_FIXTURE_POS, True),
     ("api_key", "the token machine is broken", False),
+    ("vendor_token", _VENDOR_TOKEN_FIXTURE_POS, True),
+    ("vendor_token", "ghp_short and xoxb- are only prefixes", False),
     ("kubeconfig", "apiVersion: v1\nkind: Config\n", True),
     ("kubeconfig", "apiVersion: v1\nkind: Pod\n", False),
     ("pem_private_key", _PEM_PRIVATE_KEY_FIXTURE_POS, True),
@@ -876,6 +883,49 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
     ("fqdn", "vcenter.lab.example.com", True),
     ("fqdn", "version 1.2.3", False),
 ]
+
+
+def _top_level_branches(pattern: str) -> list[str]:
+    """Split the outer ``(?:...)`` group of *pattern* at its own ``|`` signs."""
+    branches: list[str] = []
+    current = ""
+    depth = 0
+    in_class = False
+    escaped = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 1:
+            branches.append(current)
+            current = ""
+            continue
+        current += char
+    branches.append(current)
+    return branches
+
+
+def test_the_chat_token_branches_read_a_bounded_text() -> None:
+    pattern = get_pattern("vendor_token")
+    assert isinstance(pattern, re.Pattern)
+    chat = [b for b in _top_level_branches(pattern.pattern) if "xox" in b]
+    assert len(chat) == 2
+    for branch in chat:
+        after_prefix = branch[branch.index("xox") :]
+        assert "*" not in after_prefix
+        assert "+" not in after_prefix
+        assert re.search(r"\{\d*,\}", after_prefix) is None
+        assert "(?=" not in after_prefix
+        assert "(?!" not in after_prefix
 
 
 # ---------------------------------------------------------------------------

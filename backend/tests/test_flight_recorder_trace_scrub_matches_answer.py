@@ -58,6 +58,7 @@ _PEM_PRIVATE_KEY = (
 _PASSWORD_HASH = "$" + "6$" + "saltsalt$" + "abcdefghijklmnopqrstuvwxyz0123456789./ABCD"
 _CEPH_KEY = "AQ" + "AAAAAAAAAAAAAAAAAAAA" + "bbbbbbbbbbbbbbbb" + "=="
 _BIND_SECRET = "exampleTsig" + "Value=="
+_VENDOR_TOKEN = "gh" + "p_" + "q7W2e9R4t6Y1u3I5o8P0" + "a2S4d6F8g1H3j5K7"
 _NUMERIC_PASSWORD = 73519046
 _NUMERIC_PAIR_VALUE = 60418273
 
@@ -83,6 +84,7 @@ def _vendor_answer() -> dict[str, Any]:
         "tls_key": _PEM_PRIVATE_KEY,
         "shadow_line": "root:" + _PASSWORD_HASH + ":19000:0:99999:7:::",
         "keyring": "[client.admin]\n\tkey = " + _CEPH_KEY + "\n",
+        "deploy_note": "deployed with " + _VENDOR_TOKEN + " at noon",
         "named_conf": 'key "rndc-key" { algorithm hmac-sha256; secret "' + _BIND_SECRET + '"; };',
         "password": _NUMERIC_PASSWORD,
         "settings": [{"name": "PASSWORD", "value": _NUMERIC_PAIR_VALUE}],
@@ -95,6 +97,7 @@ _SECRET_NEEDLES = (
     _PASSWORD_HASH,
     _CEPH_KEY,
     _BIND_SECRET,
+    _VENDOR_TOKEN,
     str(_NUMERIC_PASSWORD),
     str(_NUMERIC_PAIR_VALUE),
 )

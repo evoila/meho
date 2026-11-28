@@ -28,10 +28,14 @@ For each document the preview shows:
 * ``note`` when the namespace of a refused object is made by a document of
   the same manifest: a dry run cannot see that namespace yet.
 
-Each text of the cluster is shown with secret-shaped text hidden, and with
-every value hidden that the preview hides in its echo of the manifest
-(:mod:`.ops_write_apply_dry_run_text`). A document the preview cannot name
-safely is not sent and is ``not_checked``.
+Each text of the cluster is shown with secret-shaped text hidden. A
+document holds hidden values when the preview hides a value of it in its
+echo of the manifest (``ops_write_preview.apply_manifest_echo``, then the
+shared params redaction). For such a document, ``warnings``, ``error`` and
+``reason`` hold one fixed sentence (:data:`HIDDEN_VALUES_TEXT`) in place of
+the cluster's text; ``warnings`` holds it only when the cluster sent a
+warning. A document the preview cannot name safely is not sent and is
+``not_checked``.
 
 ``not_checked`` lists the documents that were not checked. The preview then
 says that it does not show the whole plan. A list of documents longer than
@@ -53,7 +57,6 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from kubernetes_asyncio.dynamic import DynamicClient
 
 from meho_backplane.connectors.kubernetes._apply_manifest import parse_numbered_manifest
-from meho_backplane.connectors.kubernetes.ops_write_apply_dry_run_text import ManifestValues
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
     _reject,
     _response_warnings,
@@ -61,7 +64,7 @@ from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
     _status_message,
     error_subject,
 )
-from meho_backplane.connectors.kubernetes.ops_write_preview import card_documents
+from meho_backplane.connectors.kubernetes.ops_write_preview import _hide_values, card_documents
 from meho_backplane.operations._preview import (
     _PREVIEW_ERROR_MAX_LEN,
     PreviewContext,
@@ -73,12 +76,17 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 
-__all__ = ["NOT_CHECKED_KEY", "DryRunSetupError", "k8s_apply_agent_dry_run"]
+__all__ = ["HIDDEN_VALUES_TEXT", "NOT_CHECKED_KEY", "DryRunSetupError", "k8s_apply_agent_dry_run"]
 
 _log = structlog.get_logger(__name__)
 
 #: The key of the preview that lists the documents the dry run could not check.
 NOT_CHECKED_KEY: Final[str] = "not_checked"
+
+#: The text shown in place of the cluster's text for a document that holds hidden values.
+HIDDEN_VALUES_TEXT: Final[str] = (
+    "MEHO does not pass on the cluster's text for a document that holds hidden values."
+)
 
 #: The answers that are not a decision of the cluster about the document.
 _NOT_DECIDED_STATUSES: Final[frozenset[int]] = frozenset({401, 408, 429})
@@ -107,11 +115,11 @@ class _NotDecidedError(Exception):
     """The cluster answered the apply of one document without a decision."""
 
 
-def _safe_text(ctx: PreviewContext, exc: Exception, values: ManifestValues) -> str:
-    """The text of *exc* for the agent: names as on the card, secret values hidden."""
+def _safe_text(ctx: PreviewContext, exc: Exception) -> str:
+    """The text of *exc* for the agent: names as on the card, secret-shaped text hidden."""
     _name_objects_as_on_card(ctx, exc)
     message = str(exc) or "the request to the cluster failed"
-    text = values.hide(_redact_preview_message(message).replace("\x00", "\\0"))
+    text = _redact_preview_message(message).replace("\x00", "\\0")
     if len(text) > _PREVIEW_ERROR_MAX_LEN:
         text = text[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"
     return text
@@ -138,17 +146,26 @@ async def _dry_run_one(
     *,
     force_conflicts: bool,
     made_namespaces: set[str],
-    values: ManifestValues,
+    holds_hidden: bool,
 ) -> dict[str, Any]:
-    """Ask the cluster what the apply of *doc* would do; never raises for a cluster fault."""
+    """Ask the cluster what the apply of *doc* would do; never raises for a cluster fault.
+
+    With *holds_hidden*, each text of the cluster is :data:`HIDDEN_VALUES_TEXT`.
+    """
+
+    def text_of(exc: Exception) -> str:
+        return HIDDEN_VALUES_TEXT if holds_hidden else _safe_text(ctx, exc)
+
     try:
         resource = await dyn.resources.get(api_version=doc["apiVersion"], kind=doc["kind"])
         response, body = await _send_apply(
             dyn, resource, doc, dry_run=True, force_conflicts=force_conflicts
         )
     except Exception as exc:
-        return {"change": "not_checked", "reason": _safe_text(ctx, exc, values)}
-    warnings = [values.hide(text) for text in _response_warnings(response)]
+        return {"change": "not_checked", "reason": text_of(exc)}
+    warnings = _response_warnings(response)
+    if holds_hidden and warnings:
+        warnings = [HIDDEN_VALUES_TEXT]
     if 200 <= response.status <= 299:
         return {"change": "create" if response.status == 201 else "change", "warnings": warnings}
     if not _decided(response.status):
@@ -161,13 +178,13 @@ async def _dry_run_one(
         return {
             "change": "not_checked",
             "warnings": warnings,
-            "reason": _safe_text(ctx, not_decided, values),
+            "reason": text_of(not_decided),
         }
     error = _reject(response, body, error_subject(doc), force_conflicts=force_conflicts)
     entry: dict[str, Any] = {
         "change": "refused",
         "warnings": warnings,
-        "error": _safe_text(ctx, error, values),
+        "error": text_of(error),
     }
     namespace = (doc.get("metadata") or {}).get("namespace")
     if response.status == 404 and namespace in made_namespaces:
@@ -194,23 +211,38 @@ def _identities(
     return identities
 
 
-async def _cluster_client(ctx: PreviewContext, values: ManifestValues) -> DynamicClient:
+def _holds_hidden(ctx: PreviewContext, plain_docs: list[dict[str, Any]]) -> list[bool]:
+    """For each document, whether the manifest echo hides a value of it.
+
+    The same hiding as the echo: the connector's own (secret values, ``env``
+    and ``httpHeaders`` values, command lines, the last-applied annotation),
+    then the shared params redaction over the whole list, so a rule for one
+    place in the list counts. When the redaction does not give back one
+    document for each, every document counts as one with hidden values.
+    """
+    shown = _k8s_apply_redactor(ctx)([_hide_values(doc) for doc in plain_docs])
+    if len(shown) != len(plain_docs):
+        return [True] * len(plain_docs)
+    return [hidden != doc for hidden, doc in zip(shown, plain_docs, strict=True)]
+
+
+async def _cluster_client(ctx: PreviewContext) -> DynamicClient:
     """The dynamic client of the target; raise :class:`DryRunSetupError` with a plain reason."""
     connector: Any = ctx.connector_instance
     try:
         api_client = await connector._get_api_client(ctx.target, ctx.operator)
     except Exception as exc:
-        reason = _safe_text(ctx, exc, values)
+        reason = _safe_text(ctx, exc)
         raise DryRunSetupError(f"MEHO could not sign in to the cluster: {reason}") from None
     try:
         dyn: DynamicClient = await DynamicClient(api_client)
     except Exception as exc:
-        raise await _discovery_error(ctx, api_client, exc, values) from None
+        raise await _discovery_error(ctx, api_client, exc) from None
     return dyn
 
 
 async def _discovery_error(
-    ctx: PreviewContext, api_client: Any, exc: Exception, values: ManifestValues
+    ctx: PreviewContext, api_client: Any, exc: Exception
 ) -> DryRunSetupError:
     """Why the read of the cluster's API list failed, in a plain sentence.
 
@@ -236,7 +268,7 @@ async def _discovery_error(
     except Exception as failure:
         exc = failure
     return DryRunSetupError(
-        f"MEHO could not read the API list of the cluster: {_safe_text(ctx, exc, values)}"
+        f"MEHO could not read the API list of the cluster: {_safe_text(ctx, exc)}"
     )
 
 
@@ -266,13 +298,13 @@ async def k8s_apply_agent_dry_run(ctx: PreviewContext) -> dict[str, Any]:
     manifest: str = ctx.params["manifest"]
     numbered = parse_numbered_manifest(manifest)
     plain_docs = card_documents(manifest)
-    values = ManifestValues.of(plain_docs, _k8s_apply_redactor(ctx))
     identities = _identities(ctx, plain_docs)
+    holds_hidden = _holds_hidden(ctx, plain_docs)
     force_conflicts = ctx.params.get("force_conflicts") is True
-    dyn = await _cluster_client(ctx, values)
+    dyn = await _cluster_client(ctx)
     made_namespaces = _made_namespaces([doc for _, doc in numbered])
     documents: list[dict[str, Any]] = []
-    for (number, doc), identity in zip(numbered, identities, strict=True):
+    for (number, doc), identity, hidden in zip(numbered, identities, holds_hidden, strict=True):
         if identity is None:
             documents.append(
                 {"document": number, "change": "not_checked", "reason": _NOT_NAMED_REASON}
@@ -284,7 +316,7 @@ async def k8s_apply_agent_dry_run(ctx: PreviewContext) -> dict[str, Any]:
             doc,
             force_conflicts=force_conflicts,
             made_namespaces=made_namespaces,
-            values=values,
+            holds_hidden=hidden,
         )
         documents.append({"document": number, **identity, **answer})
     not_checked = [entry["document"] for entry in documents if entry["change"] == "not_checked"]

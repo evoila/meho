@@ -13,7 +13,8 @@ Kubernetes client over an HTTP stand-in server are in
   ``plan_shown: true``. Every apply carries ``dryRun=All``, and the preview
   makes no approval request and one audit row of the class read.
 * A Secret value of the manifest is not in the dry-run result of the
-  preview, also when the cluster quotes it in a warning or a refusal.
+  preview. The fixed sentence for the texts of a document with hidden
+  values is tested in ``test_k8s_apply_preview_dry_run_hidden.py``.
 * ``document`` is the place in the manifest, also across empty documents.
 * Each entry is made for its own document; a document the preview cannot
   name safely is not sent and is ``not_checked``.
@@ -45,7 +46,6 @@ import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes import ops_write_apply_dry_run as dry_run_module
-from meho_backplane.connectors.kubernetes.ops_write_apply_dry_run_text import WITHHELD
 from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog
@@ -68,7 +68,6 @@ from tests.test_ui_approvals import _bff_env, _seed_tenant
 __all__ = ["_bff_env", "_kubernetes_registry"]
 
 _SWITCH = "K8S_APPLY_PREVIEW_DRY_RUN"
-_SECRET_VALUE = "made-up-value-7Qx2Lp9Vw"
 
 
 class _WarningResponse(_Response):
@@ -373,67 +372,6 @@ def test_a_failed_cluster_login_says_the_dry_run_did_not_work(
     assert "RuntimeError" not in answer["plan_note"]
     assert "proposed_effect" not in answer
     assert cluster.requests == []
-
-
-def _secret_manifest(extra: str = "") -> str:
-    secret = yaml.safe_dump(
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {"name": "db", "namespace": "prod"},
-            "stringData": {"password": _SECRET_VALUE},
-        }
-    )
-    return secret + extra
-
-
-def test_a_warning_that_quotes_a_secret_value_hides_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    _switch_on(monkeypatch)
-    cluster = _StandInCluster(warnings=(f"the value {_SECRET_VALUE} is weak",))
-    _setup(monkeypatch, cluster)
-
-    answer = _preview(_secret_manifest())
-
-    assert _changes(answer) == [(1, "Secret", "create")]
-    warnings = answer["proposed_effect"]["preview"]["documents"][0]["warnings"]
-    assert warnings and "is weak" in warnings[0]
-    assert _SECRET_VALUE not in json.dumps(answer)
-
-
-def test_a_refusal_that_quotes_a_secret_value_hides_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    _switch_on(monkeypatch)
-    cluster = _StandInCluster(
-        refused_kinds=frozenset({"Secret"}),
-        refusal=f"the password {_SECRET_VALUE} breaks the rule of the admission check",
-    )
-    _setup(monkeypatch, cluster)
-
-    answer = _preview(_secret_manifest())
-
-    assert _changes(answer) == [(1, "Secret", "refused")]
-    error = answer["proposed_effect"]["preview"]["documents"][0]["error"]
-    assert "breaks the rule of the admission check" in error
-    assert _SECRET_VALUE not in json.dumps(answer)
-
-
-def test_a_text_that_quotes_a_short_secret_value_is_withheld(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _switch_on(monkeypatch)
-    cluster = _StandInCluster(warnings=("the pin q7 is too short",))
-    _setup(monkeypatch, cluster)
-    manifest = yaml.safe_dump(
-        {
-            "apiVersion": "v1",
-            "kind": "Secret",
-            "metadata": {"name": "pin", "namespace": "prod"},
-            "stringData": {"pin": "q7"},
-        }
-    )
-
-    answer = _preview(manifest)
-
-    assert answer["proposed_effect"]["preview"]["documents"][0]["warnings"] == [WITHHELD]
 
 
 def test_document_counts_the_place_across_empty_documents(

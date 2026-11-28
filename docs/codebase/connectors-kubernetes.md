@@ -935,12 +935,13 @@ gives the preview builder the target's connector. The builder then calls
 - Each document of the manifest has exactly one entry, made for that
   document. A document whose name the preview cannot show safely is not
   sent and is `not_checked`.
-- In `warnings`, `error` and `reason`, secret-shaped text is hidden, and so
-  is every value that the echo of the manifest hides: Secret values (also
-  the decoded text of `data`), `env` and `httpHeaders` values, command
-  lines and the last-applied annotation (`ops_write_apply_dry_run_text.py`).
-  A text that may quote a hidden value of fewer than four characters is not
-  shown at all.
+- For a document that holds a value the echo of the manifest hides (Secret
+  values, `env` and `httpHeaders` values, command lines, the last-applied
+  annotation, or a value of a redaction setting), `warnings`, `error` and
+  `reason` hold one fixed sentence in place of the cluster's text: "MEHO
+  does not pass on the cluster's text for a document that holds hidden
+  values."; other documents keep the cluster's text with secret-shaped text
+  hidden.
 - A refused object whose namespace is made by the same manifest gets a
   `note`: the dry run cannot see that namespace yet.
 - `preview.not_checked` lists the documents that were not checked. Then

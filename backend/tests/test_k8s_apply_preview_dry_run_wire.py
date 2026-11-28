@@ -3,7 +3,8 @@
 
 """The dry run of ``preview_operation`` for ``k8s.apply``, on the wire.
 
-Each test runs the real ``preview_dispatch`` with the real Kubernetes client
+Each test runs ``preview_operation``, the entry point that the MCP tool and
+the REST route share, with the real Kubernetes client
 (``kubernetes_asyncio``) against an HTTP stand-in server that records the
 method, path, query and login of every request. The client starts cold: no
 cached list of the cluster's API.
@@ -15,13 +16,17 @@ cached list of the cluster's API.
   document ``not_checked``; a refusal (422) stays ``refused``.
 * When the cluster refuses the login on the first request, the note says
   that the cluster login failed, in a plain sentence.
+* When the caller is cancelled after the cluster got the dry run, MEHO still
+  writes the one audit row of the read.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import tempfile
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,10 +36,13 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohttp import web
 from kubernetes_asyncio import config
+from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.kubernetes import KubernetesConnector
-from meho_backplane.operations._request_preview import preview_dispatch
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
+from meho_backplane.operations import meta_tools
 from meho_backplane.settings import get_settings
 from tests.test_k8s_apply_card_through_dispatch import (
     _CONNECTOR_ID,
@@ -49,6 +57,7 @@ from tests.test_ui_approvals import _bff_env, _seed_tenant
 __all__ = ["_bff_env", "_kubernetes_registry"]
 
 _TARGET_TOKEN = "target-account-token-for-tests"
+_TARGET = _Target(id=uuid.UUID("00000000-0000-0000-0000-0000000a7a12"))
 
 #: The paths of the cluster's API list that the client reads.
 _API_LIST_PATH = re.compile(r"^/(version|api|api/v1|apis|apis/[a-z0-9.-]+/v1)$")
@@ -83,11 +92,14 @@ class _StandInServer:
 
     An apply answers with the status in the name of the object (``cm-503``
     gets 503); any other name gets 201. With *refuse_login* every request
-    gets 401.
+    gets 401. With *hang* an apply waits until it is cancelled; ``applied``
+    is set when the first apply arrives.
     """
 
-    def __init__(self, *, refuse_login: bool = False) -> None:
+    def __init__(self, *, refuse_login: bool = False, hang: bool = False) -> None:
         self.refuse_login = refuse_login
+        self.hang = hang
+        self.applied = asyncio.Event()
         self.requests: list[dict[str, Any]] = []
 
     async def handle(self, request: web.Request) -> web.Response:
@@ -103,6 +115,9 @@ class _StandInServer:
             return _status(401, "the login was refused")
         if request.method == "GET":
             return self._api_list(request.path)
+        self.applied.set()
+        if self.hang:
+            await asyncio.Event().wait()
         name = request.path.rsplit("/", 1)[-1]
         code = int(name[-3:]) if name[-3:].isdigit() else 201
         if code >= 300:
@@ -163,6 +178,9 @@ def _kubeconfig(host: str) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def _switch_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.setenv("K8S_APPLY_PREVIEW_DRY_RUN", "true")
+    monkeypatch.setattr(
+        meta_tools, "_resolve_target_or_error", AsyncMock(return_value=(_TARGET, None))
+    )
     # The client keeps its list of the cluster's API in the temp folder; a
     # new folder for each test keeps the client cold.
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -171,6 +189,15 @@ def _switch_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None
     asyncio.run(_register_ops())
     yield
     get_settings.cache_clear()
+
+
+def _arguments(manifest: str) -> dict[str, Any]:
+    return {
+        "connector_id": _CONNECTOR_ID,
+        "op_id": "k8s.apply",
+        "target": _TARGET.name,
+        "params": {"manifest": manifest},
+    }
 
 
 def _preview(
@@ -183,17 +210,24 @@ def _preview(
                 KubernetesConnector, "_get_api_client", AsyncMock(return_value=api_client)
             )
             try:
-                return await preview_dispatch(
-                    operator=caller,
-                    connector_id=_CONNECTOR_ID,
-                    op_id="k8s.apply",
-                    target=_Target(),
-                    params={"manifest": manifest},
-                )
+                return await meta_tools.preview_operation(caller, _arguments(manifest))
             finally:
                 await api_client.close()
 
     return asyncio.run(_run())
+
+
+def _read_rows(caller: Operator) -> list[AuditLog]:
+    async def _do() -> list[AuditLog]:
+        async with get_sessionmaker()() as session:
+            result = await session.execute(
+                select(AuditLog).where(
+                    AuditLog.operator_sub == caller.sub, AuditLog.method == "PREVIEW"
+                )
+            )
+            return list(result.scalars().all())
+
+    return asyncio.run(_do())
 
 
 def _doc(api_version: str, kind: str, name: str) -> str:
@@ -215,6 +249,7 @@ def test_every_request_that_can_change_something_is_a_dry_run(
 
     answer = _preview(monkeypatch, server, manifest, caller)
 
+    assert answer["status"] == "ok", answer
     assert answer["plan_shown"] is True, answer
     changes = [doc["change"] for doc in answer["proposed_effect"]["preview"]["documents"]]
     assert changes == ["create", "create", "create"]
@@ -271,3 +306,40 @@ def test_a_refused_cluster_login_gives_a_plain_note(monkeypatch: pytest.MonkeyPa
     assert "HTTP 401" in note
     assert not re.search(r"\b[A-Z][A-Za-z]*(Error|Exception)\b", note), note
     assert all(r["method"] == "GET" for r in server.requests)
+
+
+def test_a_cancelled_preview_still_writes_its_read_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _StandInServer(hang=True)
+    caller = _login("writer-cancelled")
+
+    async def _run() -> None:
+        async with _serve(server) as host:
+            api_client = await config.new_client_from_config_dict(_kubeconfig(host))
+            monkeypatch.setattr(
+                KubernetesConnector, "_get_api_client", AsyncMock(return_value=api_client)
+            )
+            try:
+                task = asyncio.ensure_future(
+                    meta_tools.preview_operation(
+                        caller, _arguments(_doc("v1", "ConfigMap", "settings"))
+                    )
+                )
+                await asyncio.wait_for(server.applied.wait(), timeout=5)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                assert task.cancelled()
+            finally:
+                await api_client.close()
+
+    asyncio.run(_run())
+
+    applies = [r for r in server.requests if r["method"] != "GET"]
+    assert len(applies) == 1
+    assert applies[0]["query"].get("dryRun") == "All"
+    rows = _read_rows(caller)
+    assert len(rows) == 1
+    assert rows[0].payload["op_class"] == "read"
+    assert rows[0].payload["result_status"] == "cancelled"
+    assert rows[0].payload["documents"] == 1
+    assert rows[0].target_id == _TARGET.id

@@ -1505,7 +1505,16 @@ def test_load_into_node_copies_and_imports_each_image() -> None:
             assert member.read() == f"saved:image-{'ab'[index]}".encode()
     imports = [cmd for cmd in node.commands if "import" in cmd]
     assert imports == [
-        ["k3s", "ctr", "-n", "k8s.io", "images", "import", f"/meho-node-image-{i}.tar"]
+        [
+            "ctr",
+            "--address",
+            "/run/k3s/containerd/containerd.sock",
+            "-n",
+            "k8s.io",
+            "images",
+            "import",
+            f"/meho-node-image-{i}.tar",
+        ]
         for i in range(2)
     ]
 

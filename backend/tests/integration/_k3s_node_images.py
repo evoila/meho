@@ -25,6 +25,19 @@ import docker
 
 _DEFAULT_PAUSE_IMAGE = "rancher/mirrored-pause:3.6"
 
+# The rancher/k3s image has ``ctr`` as its own command (``k3s ctr`` is not
+# one). The address is the containerd socket of k3s, and ``k8s.io`` is the
+# namespace where the node looks for pod images.
+_IMPORT = (
+    "ctr",
+    "--address",
+    "/run/k3s/containerd/containerd.sock",
+    "-n",
+    "k8s.io",
+    "images",
+    "import",
+)
+
 
 def pause_image() -> str:
     """The pause image of the k3s node: ``MEHO_TEST_K3S_PAUSE_IMAGE``, else the public one."""
@@ -56,7 +69,7 @@ def load_into_node(container: Any, images: list[str]) -> None:
         name = f"meho-node-image-{index}.tar"
         try:
             node.put_archive("/", _image_archive(client, image, name))
-            result = node.exec_run(["k3s", "ctr", "-n", "k8s.io", "images", "import", f"/{name}"])
+            result = node.exec_run([*_IMPORT, f"/{name}"])
             node.exec_run(["rm", "-f", f"/{name}"])
         except docker.errors.DockerException as exc:
             warnings.warn(f"k3s node image copy failed ({type(exc).__name__})", stacklevel=2)

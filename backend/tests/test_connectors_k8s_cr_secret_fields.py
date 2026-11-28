@@ -140,7 +140,7 @@ def _shown_fakes(row: Any) -> list[str]:
 def _api_client_patches() -> Any:
     return (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

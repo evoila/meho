@@ -93,7 +93,7 @@ def _make_operator() -> Operator:
 
 def _patch_client(api_client: MagicMock) -> Any:
     return patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=api_client,
     )

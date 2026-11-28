@@ -323,7 +323,7 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
 
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client_mock,
         ) as config_factory,
@@ -397,7 +397,7 @@ async def test_credread_chain_never_leaks_kubeconfig_in_result_or_logs(
     with (
         capture_logs() as captured,
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client_mock,
         ),

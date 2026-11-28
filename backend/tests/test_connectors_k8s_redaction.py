@@ -344,7 +344,7 @@ async def test_cr_info_of_secret_returns_no_bytes_but_keeps_keys() -> None:
     connector = _make_connector()
     api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=_make_secret()))
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=api_client,
     ):
@@ -381,7 +381,7 @@ async def test_cr_list_of_secrets_returns_no_bytes_in_envelope() -> None:
     list_resp = {"apiVersion": "v1", "kind": "SecretList", "items": items}
     api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=list_resp))
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=api_client,
     ):
@@ -564,7 +564,7 @@ async def test_cr_info_of_helm_chart_returns_no_values_text() -> None:
     api_client = MagicMock(close=AsyncMock())
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),
@@ -599,7 +599,7 @@ async def test_cr_list_of_helm_charts_returns_no_values_text_in_envelope() -> No
     api_client = MagicMock(close=AsyncMock())
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),

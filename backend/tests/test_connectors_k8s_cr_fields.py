@@ -243,7 +243,7 @@ async def test_handlers_pass_fields_through(op: str) -> None:
     cj = _cronjob()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

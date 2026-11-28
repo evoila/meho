@@ -38,6 +38,7 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
 from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
     UnsupportedKubeconfigError,
     enforce_passive_kubeconfig,
+    new_passive_api_client,
 )
 from meho_backplane.settings import get_settings
 
@@ -182,6 +183,25 @@ def test_rejects_token_file_reference() -> None:
     config["users"][0]["user"] = {"tokenFile": "/var/run/secrets/token"}
     with pytest.raises(UnsupportedKubeconfigError, match="tokenFile"):
         enforce_passive_kubeconfig(config)
+
+
+@pytest.mark.parametrize("section", ["clusters", "users", "contexts"])
+def test_error_names_the_entry_by_index_not_by_name(section: str) -> None:
+    config = _passive_config()
+    entry = config[section][0]
+    entry["name"] = "sample-login-name"
+    entry.pop(section[:-1])
+    with pytest.raises(UnsupportedKubeconfigError, match=f"{section} entry #0") as excinfo:
+        enforce_passive_kubeconfig(config)
+    assert "sample-login-name" not in str(excinfo.value)
+
+
+def test_rejected_user_field_error_leaves_out_the_entry_name() -> None:
+    config = _passive_config()
+    config["users"][0] = {"name": "sample-login-name", "user": {"tokenFile": "/tmp/t"}}
+    with pytest.raises(UnsupportedKubeconfigError, match="tokenFile") as excinfo:
+        enforce_passive_kubeconfig(config)
+    assert "sample-login-name" not in str(excinfo.value)
 
 
 @pytest.mark.parametrize("file_key", ["client-certificate", "client-key"])
@@ -404,11 +424,28 @@ def test_exec_config_never_reaches_library_client_build(
 
     async def _check() -> None:
         with patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
         ) as client_factory:
             with pytest.raises(UnsupportedKubeconfigError):
                 await connector._get_api_client(_TARGET, _make_operator())
+            client_factory.assert_not_awaited()
+
+    asyncio.run(_check())
+
+
+def test_new_passive_api_client_refuses_exec_before_the_library_builds() -> None:
+    """``new_passive_api_client`` runs the check before the library client build."""
+    config = _passive_config()
+    config["users"][0]["user"] = {"exec": {"command": "/bin/plugin"}}
+
+    async def _check() -> None:
+        with patch(
+            "kubernetes_asyncio.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+        ) as client_factory:
+            with pytest.raises(UnsupportedKubeconfigError, match="exec"):
+                await new_passive_api_client(config)
             client_factory.assert_not_awaited()
 
     asyncio.run(_check())

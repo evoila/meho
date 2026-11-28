@@ -270,7 +270,7 @@ async def _run(
     core.list_namespaced_pod = _raise_or(cluster.pods)
     stack = [
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

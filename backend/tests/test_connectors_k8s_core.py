@@ -462,7 +462,7 @@ async def test_k8s_namespace_list_returns_rows_and_total() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -487,7 +487,7 @@ async def test_k8s_namespace_list_empty_cluster() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -515,7 +515,7 @@ async def test_k8s_node_list_returns_rows_and_total() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -549,7 +549,7 @@ async def test_k8s_ls_root_returns_namespaces_and_cluster_kinds() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -572,7 +572,7 @@ async def test_k8s_ls_default_path_is_root() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -627,7 +627,7 @@ async def test_k8s_ls_namespace_counts_via_remaining_item_count() -> None:
         setattr(core_v1_instance, method_name, mock)
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -666,7 +666,7 @@ async def test_k8s_ls_namespace_kind_with_rbac_403_records_error() -> None:
             setattr(core_v1_instance, method_name, AsyncMock(return_value=resp))
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -845,7 +845,7 @@ async def test_k8s_ls_namespace_kind_forwards_under_the_callers_operator(
     operator = _make_operator()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -996,7 +996,7 @@ async def test_namespace_list_via_dispatcher_shim_returns_ok() -> None:
     namespaces = [_make_namespace(name="default"), _make_namespace(name="argocd")]
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1033,7 +1033,7 @@ async def test_node_list_via_dispatcher_shim_returns_ok() -> None:
     nodes = [_make_node(name="cp-01", roles=["control-plane"])]
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

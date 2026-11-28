@@ -53,9 +53,14 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlsplit
 
+from kubernetes_asyncio import config as kube_config_lib
+from kubernetes_asyncio.client import ApiClient, Configuration
+
 __all__ = [
     "UnsupportedKubeconfigError",
     "enforce_passive_kubeconfig",
+    "load_passive_kubeconfig",
+    "new_passive_api_client",
 ]
 
 
@@ -179,6 +184,35 @@ def enforce_passive_kubeconfig(config: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+async def load_passive_kubeconfig(
+    config: dict[str, Any], client_configuration: Configuration
+) -> None:
+    """Check *config* with :func:`enforce_passive_kubeconfig`, then load it.
+
+    The one place in ``backend/src`` that hands a kubeconfig mapping to
+    ``kubernetes_asyncio``'s loader into an existing ``Configuration``.
+    Only the checked, rebuilt mapping reaches the library. Raises
+    :exc:`UnsupportedKubeconfigError` before anything is loaded.
+    """
+    await kube_config_lib.load_kube_config_from_dict(
+        config_dict=enforce_passive_kubeconfig(config),
+        client_configuration=client_configuration,
+    )
+
+
+async def new_passive_api_client(config: dict[str, Any]) -> ApiClient:
+    """Check *config* with :func:`enforce_passive_kubeconfig`, then build a client.
+
+    The ``ApiClient`` twin of :func:`load_passive_kubeconfig`: the one
+    place that calls ``new_client_from_config_dict``. Raises
+    :exc:`UnsupportedKubeconfigError` before anything is loaded.
+    """
+    client: ApiClient = await kube_config_lib.new_client_from_config_dict(
+        enforce_passive_kubeconfig(config)
+    )
+    return client
+
+
 def _require_list(value: Any, section: str) -> list[Any]:
     if not isinstance(value, list):
         raise UnsupportedKubeconfigError(
@@ -187,16 +221,12 @@ def _require_list(value: Any, section: str) -> list[Any]:
     return value
 
 
-def _entry_label(entry: dict[str, Any], section: str, index: int) -> str:
-    """A value-free label for error messages: the entry ``name`` or index.
+def _entry_label(section: str, index: int) -> str:
+    """A value-free label for error messages: the section and the entry index.
 
-    ``name`` is operator-chosen metadata (never a credential), so it is
-    safe to surface; the fallback index avoids leaking anything when a
-    malformed entry has no usable name.
+    The entry ``name`` stays out of the message: it can be an account or
+    cluster name.
     """
-    name = entry.get("name")
-    if isinstance(name, str) and name:
-        return f"{section} entry {name!r}"
     return f"{section} entry #{index}"
 
 
@@ -218,7 +248,7 @@ def _require_str(value: Any, label: str, field: str) -> str:
 def _clean_cluster_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig clusters entry #{index} must be a mapping")
-    label = _entry_label(entry, "clusters", index)
+    label = _entry_label("clusters", index)
     inner = entry.get("cluster")
     if not isinstance(inner, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig {label} is missing a 'cluster' mapping")
@@ -258,7 +288,7 @@ def _clean_cluster_entry(entry: Any, index: int) -> dict[str, Any]:
 def _clean_user_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig users entry #{index} must be a mapping")
-    label = _entry_label(entry, "users", index)
+    label = _entry_label("users", index)
     inner = entry.get("user")
     if not isinstance(inner, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig {label} is missing a 'user' mapping")
@@ -285,7 +315,7 @@ def _clean_user_entry(entry: Any, index: int) -> dict[str, Any]:
 def _clean_context_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig contexts entry #{index} must be a mapping")
-    label = _entry_label(entry, "contexts", index)
+    label = _entry_label("contexts", index)
     inner = entry.get("context")
     if not isinstance(inner, dict):
         raise UnsupportedKubeconfigError(f"kubeconfig {label} is missing a 'context' mapping")

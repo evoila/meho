@@ -829,7 +829,7 @@ async def test_k8s_service_list_returns_rows_and_total() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -860,7 +860,7 @@ async def test_k8s_service_list_empty_namespace() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -894,7 +894,7 @@ async def test_k8s_ingress_list_returns_hosts_and_tls() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -939,7 +939,7 @@ async def test_k8s_configmap_list_keys_only_data_absent() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -979,7 +979,7 @@ async def test_k8s_configmap_info_returns_full_data_and_binary_data() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1017,7 +1017,7 @@ async def test_k8s_event_list_field_selector_forwarded() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1071,7 +1071,7 @@ async def test_k8s_event_list_default_limit() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1129,7 +1129,7 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1197,7 +1197,7 @@ async def test_k8s_event_list_fetches_max_then_sorts_client_side() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1226,7 +1226,7 @@ async def test_k8s_event_list_limit_clamps_at_max() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1318,7 +1318,7 @@ async def test_k8s_event_list_all_namespaces_uses_for_all_namespaces() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1345,7 +1345,7 @@ async def test_k8s_event_list_label_selector_flows_through() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1373,7 +1373,7 @@ async def test_k8s_service_list_all_namespaces_uses_for_all_namespaces() -> None
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1402,7 +1402,7 @@ async def test_k8s_service_list_label_selector_flows_through() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1436,7 +1436,7 @@ async def test_k8s_ingress_list_all_namespaces_uses_for_all_namespaces() -> None
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1467,7 +1467,7 @@ async def test_k8s_ingress_list_label_selector_flows_through() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1502,7 +1502,7 @@ async def test_k8s_configmap_list_all_namespaces_uses_for_all_namespaces() -> No
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -1535,7 +1535,7 @@ async def test_k8s_configmap_list_label_selector_flows_through() -> None:
     connector = _make_connector()
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

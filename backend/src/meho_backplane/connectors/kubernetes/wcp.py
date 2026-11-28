@@ -87,10 +87,10 @@ import httpx
 import structlog
 import yaml
 from kubernetes_asyncio.client.configuration import Configuration
-from kubernetes_asyncio.config import load_kube_config_from_dict
 
 from meho_backplane.connectors._shared.dial_guard import screen_dial_addresses
 from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
+from meho_backplane.connectors.kubernetes.kubeconfig_schema import load_passive_kubeconfig
 
 __all__ = [
     "DEFAULT_WCP_LOGIN_TIMEOUT_SECONDS",
@@ -515,8 +515,10 @@ async def build_wcp_api_configuration(
     cfg: Configuration = type.__call__(Configuration)
     # Reuse the kubeconfig loader purely to lift the Supervisor CA (and
     # write it to the temp CA file ``ssl_ca_cert`` points at); host and
-    # bearer are overridden immediately below.
-    await load_kube_config_from_dict(config_dict=kube_config, client_configuration=cfg)
+    # bearer are overridden immediately below. The mapping comes from the
+    # Supervisor's answer, so it passes the passive-only check first, the
+    # same check a stored kubeconfig passes.
+    await load_passive_kubeconfig(kube_config, cfg)
 
     cfg.host = f"https://{host}:{api_port}"
     if not verify_tls:

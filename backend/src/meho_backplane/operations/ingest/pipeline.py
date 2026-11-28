@@ -112,6 +112,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     GroupingResultModel,
     GroupSummaryModel,
     IngestionResultModel,
+    RefusedOpModel,
     SafetyChangeModel,
     SpecSource,
 )
@@ -142,6 +143,7 @@ from meho_backplane.operations.ingest.openapi import (
 )
 from meho_backplane.operations.ingest.register_ingested import (
     IngestionResult,
+    RefusedOp,
     SafetyChange,
     register_ingested_operations,
 )
@@ -465,6 +467,10 @@ class IngestionPipelineResult:
                 for dropped in self.ingestion.dropped_ops
             ],
             login_setup=self.ingestion.login_setup,
+            refused_ops=[
+                RefusedOpModel(op_id=refused.op_id, reason=refused.reason)
+                for refused in self.ingestion.refused_ops
+            ],
         )
         grouping_model: GroupingResultModel | None = None
         if self.grouping is not None:
@@ -1170,6 +1176,7 @@ class IngestionPipelineService:
         aggregated_skipped = 0
         aggregated_safety_changes: list[SafetyChange] = []
         aggregated_dropped: list[DroppedOp] = []
+        aggregated_refused: list[RefusedOp] = []
         connector_registered = False
         login_setup: LoginSetupOutcome | None = None
 
@@ -1189,6 +1196,7 @@ class IngestionPipelineService:
             aggregated_skipped += partial.skipped_count
             aggregated_safety_changes.extend(partial.safety_changes)
             aggregated_dropped.extend(partial.dropped_ops)
+            aggregated_refused.extend(partial.refused_ops)
             connector_registered = connector_registered or partial.connector_registered
 
         if execution_profile is not None:
@@ -1213,6 +1221,7 @@ class IngestionPipelineService:
             dropped_count=len(aggregated_dropped),
             dropped_ops=tuple(aggregated_dropped),
             login_setup=login_setup,
+            refused_ops=tuple(aggregated_refused),
         )
 
     async def _register_one_spec(

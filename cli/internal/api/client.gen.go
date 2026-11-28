@@ -7844,9 +7844,12 @@ type IngestionResultModel struct {
 	// LoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
 	LoginSetup        *IngestionResultModelLoginSetup `json:"login_setup"`
 	OperationsGrouped bool                            `json:"operations_grouped"`
-	SafetyChanges     *[]SafetyChangeModel            `json:"safety_changes,omitempty"`
-	SkippedCount      int                             `json:"skipped_count"`
-	UpdatedCount      int                             `json:"updated_count"`
+
+	// RefusedOps Operations of the spec that were not written, because a typed operation of this connector already has the same id. The typed operation is left as it is. Empty in the common case.
+	RefusedOps    *[]RefusedOpModel    `json:"refused_ops,omitempty"`
+	SafetyChanges *[]SafetyChangeModel `json:"safety_changes,omitempty"`
+	SkippedCount  int                  `json:"skipped_count"`
+	UpdatedCount  int                  `json:"updated_count"`
 }
 
 // IngestionResultModelLoginSetup What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type.
@@ -9762,6 +9765,16 @@ type RefreshResult struct {
 	TargetId          openapi_types.UUID `json:"target_id"`
 	UpdatedEdges      int                `json:"updated_edges"`
 	UpdatedNodes      int                `json:"updated_nodes"`
+}
+
+// RefusedOpModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.register_ingested.RefusedOp`.
+//
+// One imported operation that was not written, because a typed operation
+// of the connector already has its id.
+type RefusedOpModel struct {
+	OpId   string `json:"op_id"`
+	Reason string `json:"reason"`
 }
 
 // RefusedResult A result MEHO refused, named in the answer to a result batch.

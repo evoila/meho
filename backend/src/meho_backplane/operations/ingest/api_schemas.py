@@ -671,6 +671,20 @@ class DroppedOpModel(BaseModel):
     path: str
 
 
+class RefusedOpModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.register_ingested.RefusedOp`.
+
+    One imported operation that was not written, because a typed operation
+    of the connector already has its id.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op_id: str
+    reason: str
+
+
 class IngestionResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
@@ -709,6 +723,14 @@ class IngestionResultModel(BaseModel):
             "connector for every tenant, so this login setup is saved but not used. "
             "A tenant's login setup applies only to that tenant's calls. Null for an "
             "ingest without a login type."
+        ),
+    )
+    refused_ops: list[RefusedOpModel] = Field(
+        default_factory=list,
+        description=(
+            "Operations of the spec that were not written, because a typed "
+            "operation of this connector already has the same id. The typed "
+            "operation is left as it is. Empty in the common case."
         ),
     )
 

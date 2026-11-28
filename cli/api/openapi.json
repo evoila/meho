@@ -38806,6 +38806,14 @@
             "nullable": true,
             "title": "Login Setup",
             "description": "What happened to the login setup of an ingest with a login type. registered: the scope's calls use it now. replaced: it replaced a different login setup of the same scope (audited with the old and the new login type). unchanged: the same login setup was already in place. served_by_connector_code / served_by_builtin_login_setup: hand-written connector code or a shipped or built-in login setup serves this connector for every tenant, so this login setup is saved but not used. A tenant's login setup applies only to that tenant's calls. Null for an ingest without a login type."
+          },
+          "refused_ops": {
+            "items": {
+              "$ref": "#/components/schemas/RefusedOpModel"
+            },
+            "type": "array",
+            "title": "Refused Ops",
+            "description": "Operations of the spec that were not written, because a typed operation of this connector already has the same id. The typed operation is left as it is. Empty in the common case."
           }
         },
         "type": "object",
@@ -42318,6 +42326,25 @@
         ],
         "title": "RefreshResult",
         "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle.\n\n``no_populator_for_product`` discriminates the two all-zero-count\nno-op classes (#2093): ``None`` means the resolved connector ships a\ntopology populator (a ``discover_topology`` override) and the counts\nreflect a real reconcile \u2014 all-zero is \"populator ran clean, nothing\nchanged\". A product slug means the connector inherits the base-class\nno-op default, so the refresh was a no-op **by coverage gap**, not by\ngraph convergence; ``populated_products`` then lists the registered\nproducts that DO ship a populator so a consumer can identify the gap\nwithout reading meho source."
+      },
+      "RefusedOpModel": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "reason"
+        ],
+        "title": "RefusedOpModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.RefusedOp`.\n\nOne imported operation that was not written, because a typed operation\nof the connector already has its id."
       },
       "RefusedResult": {
         "properties": {

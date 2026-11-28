@@ -436,10 +436,15 @@ def test_wait_seconds_above_the_limit_names_the_limit(
 ) -> None:
     client, _op = client_with_operator
     arguments = {"connector_id": _CONNECTOR, "op_id": _OP, "run_id": str(uuid.uuid4())}
-    response = _call(client, {**arguments, "wait_seconds": MAX_RUN_WAIT_SECONDS + 1})
+    refused = MAX_RUN_WAIT_SECONDS + 1
+    response = _call(client, {**arguments, "wait_seconds": refused})
     body = response.json()
     assert body["error"]["code"] == -32602, body
-    assert f"maximum of {MAX_RUN_WAIT_SECONDS}" in body["error"]["message"]
+    message = body["error"]["message"]
+    assert "wait_seconds" in message
+    assert f"<= {MAX_RUN_WAIT_SECONDS}" in message
+    assert "(maximum)" in message
+    assert str(refused) not in message
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

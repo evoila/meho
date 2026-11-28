@@ -554,7 +554,10 @@ it.
   plans again, so the floors and conflict checks still use the policy of
   that moment; only the diff the approver saw can be out of date.
 - The same file twice, or a file with the same meaning, is "No change.":
-  nothing waits, and no version is written.
+  nothing waits, and no version is written. So is the file that
+  `export_policy` wrote, for each scope and each switch: a tenant's file
+  writes the shipped bindings only as a comment when the tenant has no
+  stored bindings (see `policy-bindings.md`).
 - An import is a change of rights. `POST /api/v1/policy/import` calls the
   typed operation `policy.apply` (`connectors/policy/apply.py`, connector
   `policy-registry-1.x`) through the dispatcher. It is `dangerous`, waits

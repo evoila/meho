@@ -270,7 +270,7 @@ bindings:
   by their full path. They count only for a person whose token has no
   tenant list (`meho_tenants`, the older login setup). With a tenant list,
   the person's entry for the tenant decides, as without bindings.
-  `meho policy export` shows them.
+  `meho policy export` shows them as a comment (see below).
 - A shipped binding counts only when it agrees with the login. MEHO does
   not read an `approver` claim, and no shipped group gives that right.
   So a shipped binding on its own gives or takes no right to approve.
@@ -286,20 +286,31 @@ bindings:
 - A binding in your file (a stored binding) is your own choice. There the
   group alone gives the flags of the kind: a group bound to `Readers`
   or `Operators` gives no right to approve, whatever the token says.
-- `meho policy export` with the setting on writes the shipped bindings into
-  your file. After an import they are stored bindings, and then they count
-  for every person, also for a person with a tenant list, whose groups may
-  belong to another tenant. In a setup with tenant lists, remove the
-  shipped bindings from the exported file before you import it.
+- What `meho policy export` writes for the bindings:
+    - Your tenant has stored bindings: the `bindings` part, as stored.
+    - Your tenant has no stored bindings and the setting is on: a comment
+      that lists the shipped bindings in force. The file has no `bindings`
+      part. An import reads no comment, so the import keeps the shipped
+      bindings.
+    - Your tenant has no stored bindings and the setting is off: nothing
+      about bindings.
+
+    In each case the exported file imports again with "No change.".
+- To make the shipped bindings your own, remove the `# ` in front of the
+  listed lines and import the file. They are then stored bindings, and
+  they count for every person, also for a person with a tenant list,
+  whose groups may belong to another tenant. In a setup with tenant lists,
+  do not do this.
 - A shipped binding takes its kind from the **end** of the group name:
   `Corp-Operators` gives `Operators`. If your site renamed the groups,
   check that each name ends with its kind. Run `meho policy export` and
-  read `bindings`. A group whose name ends with no kind (for example
-  `Corp-Read-Only`) is not there: write its binding yourself.
+  read the comment about the shipped bindings. A group whose name ends
+  with no kind (for example `Corp-Read-Only`) is not there: write its
+  binding yourself.
 - `meho policy diff` and the import compare your file with the **stored**
-  bindings, not the shipped ones. So the first import of an exported file
-  lists the shipped bindings as added. A file without `bindings` removes
-  the stored ones, and the shipped bindings count again.
+  bindings, not the shipped ones. So a file with the shipped bindings
+  written out lists them as added. A file without `bindings` removes the
+  stored ones, and the shipped bindings count again.
 - A binding can name any group of the login setup, also a group of
   another tenant. Who is in that group is then decided by whoever manages
   it. Bind only groups that your tenant manages. An admin of the tenant
@@ -433,8 +444,8 @@ agents:
   window, and it runs at once. With a token it waits until an Admin
   approves it in the web console. An agent, a service login or a hosted
   agent run cannot ask for it.
-- `meho policy export` writes the `agents` part. For a tenant with stored
-  bindings, an exported file imports again with "No change.".
+- `meho policy export` writes the `agents` part. An exported file imports
+  again with "No change.", with or without stored bindings.
 - `meho policy diff` prints each rule the file adds, changes or removes,
   by name, and for each role the operations that start to run at once.
 - The install's file never holds `agents`. When a platform admin lowers

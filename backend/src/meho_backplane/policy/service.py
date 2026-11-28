@@ -698,9 +698,11 @@ async def export_policy(
     wider:`` comment: the install's routing is a floor.
 
     A tenant's file holds its stored bindings. When it has none and the
-    ``POLICY_APPROVER_ROUTING`` switch is on, it holds the shipped bindings
-    (:func:`~meho_backplane.policy.bindings.shipped_binding_documents`),
-    the ones that are in effect.
+    ``POLICY_APPROVER_ROUTING`` switch is on, it shows the shipped bindings
+    (:func:`~meho_backplane.policy.bindings.shipped_binding_documents`), the
+    ones that are in force, as a comment where the ``bindings`` part would
+    be (:func:`_shipped_bindings_note`). So the file imports again with
+    "No change." and stores no binding.
     """
     document = normalise_document(await _stored_document(session, scope, tenant_id))
     head: dict[str, Any] = {"policy": POLICY_VERSION}
@@ -709,10 +711,11 @@ async def export_policy(
             head[key] = document[key]
     routes = list(document.get("routing") or [])
     end: dict[str, Any] = {}
+    note = ""
     if document.get("bindings"):
         end["bindings"] = list(document["bindings"])
     elif scope == "tenant" and routing_enabled():
-        end["bindings"] = shipped_binding_documents(get_settings())
+        note = _shipped_bindings_note(shipped_binding_documents(get_settings()))
     if custom_policy and document.get("agents"):
         end["agents"] = document["agents"]
     edits = (
@@ -728,15 +731,32 @@ async def export_policy(
     )
     if not entries and not route_notes:
         tail = {"routing": routes} if routes else {}
-        return _dump({**head, "classifications": [], **tail, **end})
+        return _dump({**head, "classifications": [], **tail}) + note + (_dump(end) if end else "")
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
     parts = [_dump(head)]
     parts.append(_noted("classifications", entries, notes, "Has no effect"))
     if routes:
         parts.append(_noted("routing", routes, route_notes, "Has no effect where wider"))
+    parts.append(note)
     if end:
         parts.append(_dump(end))
     return "".join(parts)
+
+
+def _shipped_bindings_note(shipped: list[dict[str, Any]]) -> str:
+    """The shipped bindings *shipped* as a comment block, or ``""`` when there are none.
+
+    The import reads no comment, so the file stores no binding and the
+    tenant keeps the shipped bindings.
+    """
+    if not shipped:
+        return ""
+    lines = [
+        "No bindings are stored for this tenant, so these shipped bindings are in force.",
+        'To store them as your own, remove the "# " at the start of the lines below.',
+        *_dump({"bindings": shipped}).splitlines(),
+    ]
+    return "".join(f"# {line}\n" for line in lines)
 
 
 def _noted(key: str, items: list[Any], notes: dict[int, list[str]], label: str) -> str:

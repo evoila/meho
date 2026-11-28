@@ -715,10 +715,12 @@ async def test_export_shows_the_bindings_in_effect(monkeypatch: pytest.MonkeyPat
     async with get_sessionmaker()() as session:
         shipped = await export_policy(session, scope="tenant", tenant_id=_TENANT)
         install = await export_policy(session, scope="install", tenant_id=None)
-    assert "group: /MEHO-SA-Operators" in shipped
+    assert "# No bindings are stored for this tenant" in shipped
+    assert "#     group: /MEHO-SA-Operators\n" in shipped
     assert "bindings" not in install
     reimported = parse_policy_file(shipped.encode())
-    assert reimported.mistakes == []
+    assert reimported.mistakes == [] and reimported.model is not None
+    assert "bindings" not in document_of(reimported.model)
     _switch_off(monkeypatch)
     async with get_sessionmaker()() as session:
         assert "bindings" not in await export_policy(session, scope="tenant", tenant_id=_TENANT)

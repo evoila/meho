@@ -18,7 +18,7 @@ any MEHO release.
    | Made-up name | Where |
    |---|---|
    | `example-connectors` (the wheel's name) | `pyproject.toml` |
-   | `example_widget` (the folder) | the folder name, `pyproject.toml`, `PACKAGE` in `tests/test_kit_imports.py` and `tests/test_version_range.py`, the imports in `tests/test_example_widget.py` |
+   | `example_widget` (the folder) | the folder name, `pyproject.toml`, `PACKAGE` in `tests/test_kit_imports.py`, `tests/test_version_range.py` and `tests/test_httpx_clients_have_the_check.py`, the imports in `tests/test_example_widget.py` |
    | `example`, `example-widget`, `1.x` (product, implementation id, version) | `connector.py`. The product must be the first part of the implementation id. The connector id is `<implementation id>-<version>`, here `example-widget-1.x`. |
    | `ExampleWidgetConnector` | `connector.py`, `operations.py`, `__init__.py`, the tests |
    | `example.widget.list`, `example.widget.rename` (operation ids) | `operations.py` |

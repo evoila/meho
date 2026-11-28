@@ -25,6 +25,11 @@ from pathlib import Path
 #: The package's own folder, as a module name. Rename it with the folder.
 PACKAGE = "meho_backplane.connectors.example_widget"
 
+#: Files that build another client than an ``httpx.AsyncClient`` with the request
+#: hook. The key is the file's path inside the package folder. The value is one
+#: line that says where the file calls ``await kit.check_before_send()``.
+EXCEPTIONS: dict[str, str] = {}
+
 _CLIENT_NAMES = {"AsyncClient", "Client"}
 #: ``httpx.Client`` calls a hook without ``await``, so the async check never runs.
 _SYNC_CLIENT = "Client"
@@ -94,20 +99,37 @@ def clients_without_the_check(source: str) -> list[int]:
     )
 
 
-def test_every_httpx_client_of_the_package_has_the_check() -> None:
-    """No file of the package builds an ``httpx`` client without the request hook."""
-    folder = _package_folder()
+def files_without_the_check(folder: Path, exceptions: dict[str, str]) -> dict[str, list[int]]:
+    """The lines of each file in *folder*, not in *exceptions*, with a client without the check."""
     files = sorted(folder.rglob("*.py"))
     assert files, f"no Python files in {folder}"
-    found = {
-        path.relative_to(folder).as_posix(): lines
+    return {
+        name: lines
         for path in files
-        if (lines := clients_without_the_check(path.read_text(encoding="utf-8")))
+        if (name := path.relative_to(folder).as_posix()) not in exceptions
+        and (lines := clients_without_the_check(path.read_text(encoding="utf-8")))
     }
+
+
+def test_every_httpx_client_of_the_package_has_the_check() -> None:
+    """No file of the package builds an ``httpx`` client without the request hook."""
+    found = files_without_the_check(_package_folder(), EXCEPTIONS)
     assert found == {}, (
-        "These files build an httpx client without the check of the caller's block. Add "
-        f'event_hooks={{"request": [kit.check_before_send]}} (file: lines): {found}'
+        "These files build an httpx client without the check of the caller's block "
+        f"(file: lines): {found}. Use an httpx.AsyncClient with "
+        'event_hooks={"request": [kit.check_before_send]}, or list the file in EXCEPTIONS '
+        "with one line that says where it calls await kit.check_before_send()."
     )
+
+
+def test_a_file_in_exceptions_is_left_out(tmp_path: Path) -> None:
+    """A file with another client is found, and left out once it is in the exceptions."""
+    (tmp_path / "fetch.py").write_text(
+        "import httpx\nclient = httpx.Client(base_url='https://t')\n", encoding="utf-8"
+    )
+    assert files_without_the_check(tmp_path, {}) == {"fetch.py": [2]}
+    listed = {"fetch.py": "fetch() calls the check right before asyncio.to_thread"}
+    assert files_without_the_check(tmp_path, listed) == {}
 
 
 def test_check_finds_a_client_without_the_hook() -> None:

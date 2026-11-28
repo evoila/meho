@@ -189,17 +189,21 @@ operations you register, not `execute`.
   a request hook:
   `httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})`.
   `httpx` runs the hook before every request, also before each redirect hop
-  and each retry that your package sends again through the client. A
-  synchronous client (`httpx.Client`) calls `await kit.check_before_send()` in
-  the event loop, right before the thread that sends starts, as for any
-  blocking library. Every other client (a vendor library, a database driver, an
-  SSH connection) calls `await kit.check_before_send()` right before each call
-  that sends something: each statement, each command, each request. A
-  blocking library that runs in a thread (`asyncio.to_thread`) is checked in
-  the event loop, right before the thread starts, not inside the thread.
+  and each retry that your package sends again through the client. The kit
+  supports this way for `httpx`. The template's test
+  `tests/test_httpx_clients_have_the_check.py` reports every other `httpx`
+  client it finds, also a synchronous `httpx.Client`. A file that uses another
+  client goes into `EXCEPTIONS` in that test file, with one line that says
+  where the file calls `kit.check_before_send()`. Such a client (a vendor
+  library, a database driver, an SSH connection, an `httpx.Client`) calls
+  `await kit.check_before_send()` right before each call that sends something:
+  each statement, each command, each request. A blocking library that runs in
+  a thread (`asyncio.to_thread`) is checked in the event loop, right before the
+  thread starts, not inside the thread. A check before the thread starts does
+  not cover the redirects that the library follows by itself: turn them off
+  and check before each request, or use `httpx.AsyncClient` with the hook.
   A client that MEHO builds (the one of `HttpConnector`) needs nothing. Outside
-  a running call the check does nothing. The template has a test that fails
-  when a package builds an `httpx.AsyncClient` without the hook. It cannot see
+  a running call the check does nothing. The template's test cannot see
   clients that are not `httpx`: cover those with a test that runs them.
 
 The steps, with code, are in

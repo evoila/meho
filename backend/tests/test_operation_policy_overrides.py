@@ -1237,15 +1237,18 @@ async def test_the_service_refuses_an_edit_whose_reason_looks_like_a_secret(
 
 
 @pytest.mark.asyncio
-async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(embedding: AsyncMock) -> None:
+async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
     key = made_up_key()
     await _register_typed(embedding, requires_approval=True)
     fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}
-    response, report = _patch(fresh, {"requires_approval": False, "reason": key})
+    with caplog.at_level("DEBUG"):
+        response, report = _patch(fresh, {"requires_approval": False, "reason": key})
     assert response.status_code == 400, response.text
     assert REASON_HOLDS_SECRET in response.json()["detail"]
     assert report.json() == {"overrides": []}
-    assert_no_trace(key, response.text, await _everything_stored())
+    assert_no_trace(key, response.text, await _everything_stored(), caplog.text)
 
     plain, report = _patch(fresh, {"requires_approval": False, "reason": "ticket CHG-1234"})
     assert plain.status_code == 200, plain.text
@@ -1268,7 +1271,7 @@ async def test_rest_enable_only_edit_refuses_a_reason_that_looks_like_a_secret(
 
 @pytest.mark.asyncio
 async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
-    embedding: AsyncMock,
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     key = made_up_key()
     tenant_id = uuid.uuid4()
@@ -1277,11 +1280,12 @@ async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
         _TYPED_CONNECTOR, "typedpets.pet.update", tenant_id=tenant_id, requires_approval=True
     )
     fresh = {"platform_admin": True, "extra_claims": {"auth_time": int(time.time()) - 5}}
-    refused = _delete_override(fresh, override_tenant_id=tenant_id, reason=key)
+    with caplog.at_level("DEBUG"):
+        refused = _delete_override(fresh, override_tenant_id=tenant_id, reason=key)
     assert refused.status_code == 400, refused.text
     assert REASON_HOLDS_SECRET in refused.json()["detail"]
     assert await _effective(tenant_id) == ("caution", True)
-    assert_no_trace(key, refused.text, await _everything_stored())
+    assert_no_trace(key, refused.text, await _everything_stored(), caplog.text)
 
     removed = _delete_override(fresh, override_tenant_id=tenant_id, reason="ticket CHG-1234")
     assert removed.status_code == 204, removed.text
@@ -1309,3 +1313,9 @@ async def test_mcp_edit_tool_refuses_a_reason_that_looks_like_a_secret(
     assert REASON_HOLDS_SECRET in str(caught.value)
     assert await _effective(uuid.uuid4()) == ("caution", True)
     assert_no_trace(key, str(caught.value), await _everything_stored())
+
+    # A permitted edit with a plain reason is stored in the audit row.
+    plain = {**args, "requires_approval": None, "safety_level": "dangerous"}
+    result = await ca_mod._edit_op_handler(admin, {**plain, "reason": "ticket CHG-1234"})
+    assert result["ok"] is True
+    assert (await _last_edit_audit())["reason"] == "ticket CHG-1234"

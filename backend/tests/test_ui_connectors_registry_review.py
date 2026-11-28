@@ -684,6 +684,21 @@ def test_op_edit_platform_admin_turns_approval_off_with_reason() -> None:
     assert with_reason.status_code == 200, with_reason.text
     assert _read_op_governance() == ("caution", False, False)
 
+    async def _last_edit_reason() -> Any:
+        async with get_sessionmaker()() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLog).where(AuditLog.path == "meho_connector_edit_op")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return sorted(rows, key=lambda r: r.occurred_at)[-1].payload["reason"]
+
+    assert asyncio.run(_last_edit_reason()) == "read-only in practice"
+
 
 def test_op_edit_refuses_a_reason_that_looks_like_a_secret(
     caplog: pytest.LogCaptureFixture,

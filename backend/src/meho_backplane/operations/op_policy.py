@@ -131,6 +131,7 @@ __all__ = [
     "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
+    "writes_a_credential",
 ]
 
 #: Order of the four risk levels, lowest first.
@@ -146,6 +147,11 @@ CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 _CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
     {"credential_write", "credential_mint"}
 )
+
+
+def writes_a_credential(op_id: str, declared: str | None = None) -> bool:
+    """True when *op_id* writes or makes a credential (its resolved class)."""
+    return resolve_op_class(op_id, declared) in _CREDENTIAL_CHANGE_CLASSES
 
 
 def hidden_classification_fields() -> set[str]:
@@ -493,7 +499,7 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES or (
+    if writes_a_credential(row.op_id, stored_op_class) or (
         row.requires_approval and is_credential_capable(row.op_id)
     ):
         requires_approval = True
@@ -590,7 +596,7 @@ async def apply_step_policy(
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
-    if resolve_op_class(step.op_id, getattr(step, "op_class", None)) in _CREDENTIAL_CHANGE_CLASSES:
+    if writes_a_credential(step.op_id, getattr(step, "op_class", None)):
         policy = replace(policy, requires_approval=True)
     _keep_code_values(step)
     step.safety_level = policy.safety_level

@@ -17,6 +17,9 @@ the real ``dispatch``:
 * A plain step keeps its answers: at ``safe`` it is sent for every caller;
   at ``caution`` it is sent for a person in the web console and waits for
   every other caller.
+* A ``GET`` step declared as a credential write or mint is the only listed
+  step of the operation: ``preview_operation`` says the call waits, and the
+  call then waits at that step.
 """
 
 from __future__ import annotations
@@ -42,6 +45,8 @@ from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.op_classes import _DECLARED, declare_op_classes
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import approve_request, resume_dispatch_after_approval
+from meho_backplane.operations.governed_subops import _REGISTRY, register_governed_subops
+from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.settings import get_settings
 
 from . import _credential_step_always_waits_helpers as s
@@ -248,3 +253,50 @@ async def test_a_plain_caution_step_keeps_its_answer(caller: str) -> None:
         assert await _requests() == []
     else:
         await _assert_waits_for_the_step(result, s.PLAIN_STEP)
+
+
+_GET_STEPS = {
+    "credential_write": "GET:/standin/secret/write",
+    "credential_mint": "GET:/standin/token",
+}
+
+
+@pytest.fixture
+def _get_step_listed(request: pytest.FixtureRequest) -> Iterator[str]:
+    op_class: str = request.param
+    step = _GET_STEPS[op_class]
+    declare_op_classes(**{op_class: (step,)})
+    register_governed_subops(
+        composite_op_id=s.COMPOSITE_OP_ID, connector_id=s.CONNECTOR_ID, sub_op_ids=(step,)
+    )
+    yield step
+    _REGISTRY.pop(s.COMPOSITE_OP_ID, None)
+    _DECLARED.pop(step, None)
+
+
+@pytest.mark.parametrize("_get_step_listed", list(_GET_STEPS), indirect=True)
+@pytest.mark.parametrize("web_session", [False, True], ids=["token", "web-console"])
+async def test_the_preview_and_the_call_both_wait_for_a_credential_get_step(
+    _get_step_listed: str, web_session: bool
+) -> None:
+    step = _get_step_listed
+    person = _login(web_session=web_session)
+
+    preview = await preview_operation(
+        person,
+        {
+            "connector_id": s.CONNECTOR_ID,
+            "op_id": s.COMPOSITE_OP_ID,
+            "target": None,
+            "params": {"step": step, "level": "safe"},
+        },
+    )
+
+    assert preview["policy_verdict"] == "needs-approval", preview
+    assert step in preview["policy_reason"]
+    assert s.sent == []
+    assert await _requests() == []
+
+    result = await _run(person, step, "safe")
+
+    await _assert_waits_for_the_step(result, step)

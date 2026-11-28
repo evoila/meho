@@ -308,7 +308,7 @@ func patchOp(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
 	body api.EditOpBody,
-) (*api.EditOpResponse, *api.PolicyEditRequestResponse, error) {
+) (*api.EditOpResponse, *api.ClassificationRequestResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, nil, err

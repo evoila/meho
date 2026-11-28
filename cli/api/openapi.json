@@ -5865,19 +5865,11 @@
             }
           },
           "202": {
-            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console. With CUSTOM_POLICY on, safety_level / requires_approval were sent: the change waits until an admin approves it in the web console, and the body has only status, approval_request_id and message.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console. With CUSTOM_POLICY on, safety_level / requires_approval were sent: the change waits until an admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/ClassificationRequestResponse"
-                    },
-                    {
-                      "$ref": "#/components/schemas/PolicyEditRequestResponse"
-                    }
-                  ],
-                  "title": "Response 202 Edit Op Endpoint Api V1 Connectors  Connector Id  Operations  Op Id  Patch"
+                  "$ref": "#/components/schemas/ClassificationRequestResponse"
                 }
               }
             }
@@ -5970,7 +5962,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PolicyEditRequestResponse"
+                  "$ref": "#/components/schemas/ClassificationRequestResponse"
                 }
               }
             }
@@ -41386,31 +41378,6 @@
         ],
         "title": "PersonBehindView",
         "description": "One person behind the agent, service or runner login that asked."
-      },
-      "PolicyEditRequestResponse": {
-        "properties": {
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "approval_request_id": {
-            "type": "string",
-            "nullable": true,
-            "title": "Approval Request Id"
-          },
-          "message": {
-            "type": "string",
-            "title": "Message"
-          }
-        },
-        "type": "object",
-        "required": [
-          "status",
-          "approval_request_id",
-          "message"
-        ],
-        "title": "PolicyEditRequestResponse",
-        "description": "The answer when an edit of a risk level or approval waits for an admin's click."
       },
       "PolicyExplainBody": {
         "properties": {

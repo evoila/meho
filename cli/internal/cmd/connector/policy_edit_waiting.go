@@ -17,8 +17,8 @@ import (
 // edit or of an override removal. With CUSTOM_POLICY on, the backplane
 // answers 202 and the change waits until an admin approves it in the web
 // console. Returns nil when the body is not that answer.
-func decodePolicyEditWaiting(body []byte) *api.PolicyEditRequestResponse {
-	var waiting api.PolicyEditRequestResponse
+func decodePolicyEditWaiting(body []byte) *api.ClassificationRequestResponse {
+	var waiting api.ClassificationRequestResponse
 	if err := json.Unmarshal(body, &waiting); err != nil || waiting.Status == "" {
 		return nil
 	}
@@ -28,7 +28,7 @@ func decodePolicyEditWaiting(body []byte) *api.PolicyEditRequestResponse {
 // printPolicyEditWaiting prints the request that waits: the backplane's
 // sentence that says who approves it, and the approval request id.
 func printPolicyEditWaiting(
-	cmd *cobra.Command, connectorID, opID string, waiting *api.PolicyEditRequestResponse, jsonOut bool,
+	cmd *cobra.Command, connectorID, opID string, waiting *api.ClassificationRequestResponse, jsonOut bool,
 ) error {
 	if jsonOut {
 		return output.PrintJSON(cmd.OutOrStdout(), waiting)

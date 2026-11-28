@@ -5,7 +5,6 @@ package connector
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -342,15 +341,7 @@ func patchOpClassification(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	// The 202 body of this route has two shapes; a category / labels change answers this one.
-	var accepted *api.ClassificationRequestResponse
-	if resp.StatusCode() == http.StatusAccepted {
-		var decoded api.ClassificationRequestResponse
-		if json.Unmarshal(resp.Body, &decoded) == nil {
-			accepted = &decoded
-		}
-	}
-	return renderClassificationRequest(cmd, backplaneURL, resp.StatusCode(), resp.Body, accepted, jsonOut)
+	return renderClassificationRequest(cmd, backplaneURL, resp.StatusCode(), resp.Body, resp.JSON202, jsonOut)
 }
 
 // patchGroupClassification asks for a category / labels change of one group.

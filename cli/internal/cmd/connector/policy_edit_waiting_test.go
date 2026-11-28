@@ -21,6 +21,8 @@ func TestRunEditOpPrintsTheWaitingRequest(t *testing.T) {
 				"status":              "awaiting_approval",
 				"approval_request_id": waitingRequestID,
 				"message":             "The edit waits for approval. A platform admin approves it in the web console.",
+				"matched_operations":  1,
+				"changed_operations":  0,
 			})
 		},
 	})
@@ -61,6 +63,8 @@ func TestRunRemoveOverridePrintsTheWaitingRequest(t *testing.T) {
 				"status":              "awaiting_approval",
 				"approval_request_id": waitingRequestID,
 				"message":             "The edit waits for approval. An Admin approves it in the web console.",
+				"matched_operations":  1,
+				"changed_operations":  0,
 			})
 		},
 	})

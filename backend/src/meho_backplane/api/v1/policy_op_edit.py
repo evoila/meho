@@ -7,7 +7,8 @@ With the ``CUSTOM_POLICY`` switch on, a PATCH that sets ``safety_level``
 or ``requires_approval``, and the DELETE of an override, ask for the
 edit with ``policy.op_edit`` / ``policy.op_remove_override``
 (:mod:`meho_backplane.connectors.policy.op_edit`). The route answers
-``202`` with :class:`PolicyEditRequestResponse` while the request waits
+``202`` with :class:`ClassificationRequestResponse`, the one answer shape
+of the PATCH route, while the request waits
 for an admin's click in the web console, and ``403`` when the call is
 refused. With the switch off, nothing here runs.
 """
@@ -17,7 +18,6 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 from meho_backplane.api.v1.policy_classification import ClassificationRequestResponse
 from meho_backplane.auth.operator import Operator
@@ -29,7 +29,6 @@ from meho_backplane.settings import get_settings
 __all__ = [
     "OP_PATCH_RESPONSES",
     "POLICY_EDIT_RESPONSES",
-    "PolicyEditRequestResponse",
     "edit_waits",
     "op_edit_params",
     "policy_edit_answer",
@@ -37,34 +36,25 @@ __all__ = [
 ]
 
 
-class PolicyEditRequestResponse(BaseModel):
-    """The answer when an edit of a risk level or approval waits for an admin's click."""
-
-    status: str
-    approval_request_id: str | None
-    message: str
-
-
 #: The extra answer of the DELETE route of an override.
 POLICY_EDIT_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
-        "model": PolicyEditRequestResponse,
+        "model": ClassificationRequestResponse,
         "description": (
             "With CUSTOM_POLICY on: the change waits until an admin approves it in the web console."
         ),
     },
 }
 
-#: The extra answer of the operation PATCH route: the body of a category /
-#: labels change, or with CUSTOM_POLICY on the one of a risk level / approval edit.
+#: The extra answer of the operation PATCH route: a category / labels change,
+#: or with CUSTOM_POLICY on a risk level / approval edit. One body shape.
 OP_PATCH_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
-        "model": ClassificationRequestResponse | PolicyEditRequestResponse,
+        "model": ClassificationRequestResponse,
         "description": (
             "category / labels were sent: the change waits until a tenant admin approves "
             "it in the web console. With CUSTOM_POLICY on, safety_level / requires_approval "
-            "were sent: the change waits until an admin approves it in the web console, and "
-            "the body has only status, approval_request_id and message."
+            "were sent: the change waits until an admin approves it in the web console."
         ),
     },
 }
@@ -123,10 +113,12 @@ def policy_edit_answer(result: dict[str, Any], card: dict[str, Any]) -> JSONResp
         if status == "awaiting_approval"
         else str(result.get("error") or "The change is stored.")
     )
-    body = PolicyEditRequestResponse(
+    body = ClassificationRequestResponse(
         status=status,
         approval_request_id=extras.get("approval_request_id"),
         message=message,
+        matched_operations=1,
+        changed_operations=1 if status == "ok" else 0,
     )
     return JSONResponse(
         status_code=_STATUS_CODES.get(status, 400), content=body.model_dump(mode="json")

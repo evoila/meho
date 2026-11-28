@@ -162,7 +162,7 @@ func deleteOverride(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
 	params *api.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams,
-) (*api.PolicyEditRequestResponse, error) {
+) (*api.ClassificationRequestResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
 		return nil, err

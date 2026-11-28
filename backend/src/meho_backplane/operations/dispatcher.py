@@ -3644,8 +3644,12 @@ async def _build_proposed_effect(
         base.update(approval_classification(descriptor))
         # #3980: a person's ``caution`` call that waits only because it came
         # with a token says so on the request. The same person may then
-        # approve it with a click in the web interface.
-        if waits_only_for_token_call(operator, descriptor):
+        # approve it with a click in the web interface. Not in the re-run of
+        # an approved call: *operator* then runs the re-run, and the request
+        # belongs to the caller who started the run.
+        from meho_backplane.operations.approval_queue import resume_requester_var
+
+        if resume_requester_var.get() is None and waits_only_for_token_call(operator, descriptor):
             base["waits_because"] = TOKEN_CALL_WAIT
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):

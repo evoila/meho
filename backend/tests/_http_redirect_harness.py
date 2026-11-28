@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 import meho_backplane.flight_recorder.agent_read as agent_read_mod
+import meho_backplane.logging as meho_logging
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -177,6 +178,25 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _httpx_logger_on() -> Iterator[None]:
+    """Turn the ``httpx`` logger on with MEHO's filter, as in a server, and put it back after.
+
+    The database set-up of the tests runs alembic, which turns off every
+    logger that exists. In a server the migrations run in a separate job,
+    so the ``httpx`` request line reaches the log.
+    """
+    logger = logging.getLogger("httpx")
+    saved = (logger.level, logger.disabled, logger.filters[:])
+    logger.disabled = False
+    logger.setLevel(logging.NOTSET)
+    logger.addFilter(meho_logging._HTTPX_URL_FILTER)
+    try:
+        yield
+    finally:
+        logger.level, logger.disabled, logger.filters = saved[0], saved[1], saved[2]
 
 
 @pytest.fixture(autouse=True)

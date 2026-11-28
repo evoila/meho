@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.config
 import os
 import secrets
 import socket
@@ -25,6 +26,7 @@ import httpx2
 import openai
 import pytest
 import requests
+import uvicorn.config
 from requests.adapters import HTTPAdapter
 
 from meho_backplane.logging import _HTTP_STACK_LOGGERS, configure_logging
@@ -72,6 +74,8 @@ def values() -> dict[str, str]:
         "cookie": f"c{secrets.token_hex(6)}",
         "header": f"h{secrets.token_hex(6)}",
         "prompt": f"m{secrets.token_hex(6)}",
+        "phrase_start": f"r{secrets.token_hex(6)}",
+        "phrase_end": f"s{secrets.token_hex(6)}",
     }
 
 
@@ -79,6 +83,14 @@ def values() -> dict[str, str]:
 def server(values: dict[str, str]) -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            phrase = f"{values['phrase_start']} {values['phrase_end']}".encode()
+            if self.path.startswith("/phrase"):
+                # A status line with a made-up reason phrase; the first hop redirects.
+                head = b"HTTP/1.1 404 " if self.path == "/phrase/end" else b"HTTP/1.1 307 "
+                self.wfile.write(
+                    head + phrase + b"\r\nLocation: /phrase/end\r\nContent-Length: 0\r\n\r\n"
+                )
+                return
             if self.path.startswith("/broken"):
                 # A header line without a colon, then a cookie header.
                 self.wfile.write(
@@ -325,3 +337,35 @@ def test_stack_logger_level_lowered_after_setup_is_still_held(
     assert values["path"] not in out
     assert values["query"] not in out
     assert values["header"] in out
+
+
+@pytest.fixture
+def _uvicorn_logging() -> Iterator[None]:
+    """Apply uvicorn's own logging settings, as a server does before MEHO's set-up."""
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {n: (logging.getLogger(n).handlers[:], logging.getLogger(n).propagate) for n in names}
+    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+    try:
+        yield
+    finally:
+        for n, (handlers, propagate) in saved.items():
+            logging.getLogger(n).handlers = handlers
+            logging.getLogger(n).propagate = propagate
+
+
+@pytest.mark.usefixtures("_uvicorn_logging")
+def test_request_line_logs_the_standard_phrase_not_the_vendor_phrase(
+    server: str, values: dict[str, str], capfd: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(logging.INFO)
+    assert not logging.getLogger("httpx").disabled
+    with httpx.Client(follow_redirects=True) as client:
+        response = client.get(f"{server}/phrase/start")
+    assert response.status_code == 404
+    out = capfd.readouterr().out
+    _assert_clean(out, values)
+    events = [json.loads(line)["event"] for line in out.splitlines() if line.startswith("{")]
+    assert [e for e in events if e.startswith("HTTP Request:")] == [
+        f'HTTP Request: GET {server} "HTTP/1.1 307 Temporary Redirect"',
+        f'HTTP Request: GET {server} "HTTP/1.1 404 Not Found"',
+    ]

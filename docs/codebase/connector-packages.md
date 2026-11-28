@@ -817,9 +817,12 @@ The kit also has `check_before_send` and `PrincipalBlockedStepError` (kit
 1.8). `check_before_send` is the check of the caller's block that the core's
 own clients run before each request (`auth/principal_block.py`); it also
 notes that the call sends a request. The rule for a package: every client it
-builds itself carries the check. An `httpx` client gets it as a request hook
-(`event_hooks={"request": [kit.check_before_send]}`, which also covers
-redirect hops and retries). Every other client calls
+builds itself carries the check. An `httpx.AsyncClient` gets it as a request
+hook (`event_hooks={"request": [kit.check_before_send]}`, which also covers
+redirect hops and each retry that the package sends again through the
+client). A synchronous client (`httpx.Client`) calls
+`await kit.check_before_send()` in the event loop, right before the thread
+that sends starts, as for any blocking library. Every other client calls
 `await kit.check_before_send()` right before each call that sends. A blocking
 library that runs in a thread is checked in the event loop, right before the
 thread starts. A client from the core needs nothing. The template's

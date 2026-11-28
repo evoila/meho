@@ -185,11 +185,14 @@ operations you register, not `execute`.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 - **Clients your package builds.** Every client your package builds itself
-  carries the check of the caller's block. An `httpx` client gets it as a
-  request hook:
+  carries the check of the caller's block. An `httpx.AsyncClient` gets it as
+  a request hook:
   `httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})`.
   `httpx` runs the hook before every request, also before each redirect hop
-  and each retry. Every other client (a vendor library, a database driver, an
+  and each retry that your package sends again through the client. A
+  synchronous client (`httpx.Client`) calls `await kit.check_before_send()` in
+  the event loop, right before the thread that sends starts, as for any
+  blocking library. Every other client (a vendor library, a database driver, an
   SSH connection) calls `await kit.check_before_send()` right before each call
   that sends something: each statement, each command, each request. A
   blocking library that runs in a thread (`asyncio.to_thread`) is checked in

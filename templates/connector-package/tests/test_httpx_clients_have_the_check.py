@@ -4,12 +4,13 @@
 """Every ``httpx`` client the package builds itself carries the kit's check.
 
 The check of the caller's block runs right before each request. An
-``httpx`` client gets it as a request hook:
+``httpx.AsyncClient`` gets it as a request hook:
 ``httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})``.
 
 The test reads every file of the package with :mod:`ast`. It does not run
-them. It finds a call of ``AsyncClient`` or ``Client`` that does not name
-``check_before_send`` in its ``event_hooks``. It cannot see the sends of a
+them. It finds a call of ``AsyncClient`` that does not name
+``check_before_send`` under the ``"request"`` key of its ``event_hooks``,
+and every call of the synchronous ``Client``. It cannot see the sends of a
 client that is not ``httpx`` (a vendor library, a database driver, an SSH
 connection): those call ``await kit.check_before_send()`` right before each
 call that sends, and each needs a test that runs it.
@@ -25,6 +26,8 @@ from pathlib import Path
 PACKAGE = "meho_backplane.connectors.example_widget"
 
 _CLIENT_NAMES = {"AsyncClient", "Client"}
+#: ``httpx.Client`` calls a hook without ``await``, so the async check never runs.
+_SYNC_CLIENT = "Client"
 
 
 def _package_folder() -> Path:
@@ -33,15 +36,17 @@ def _package_folder() -> Path:
     return Path(next(iter(spec.submodule_search_locations)))
 
 
-def _is_httpx_client(call: ast.Call) -> bool:
+def _client_name(call: ast.Call) -> str | None:
+    """``AsyncClient`` or ``Client`` when *call* builds an ``httpx`` client."""
     func = call.func
     if isinstance(func, ast.Attribute):
-        return (
+        is_client = (
             func.attr in _CLIENT_NAMES
             and isinstance(func.value, ast.Name)
             and func.value.id == "httpx"
         )
-    return isinstance(func, ast.Name) and func.id in _CLIENT_NAMES
+        return func.attr if is_client else None
+    return func.id if isinstance(func, ast.Name) and func.id in _CLIENT_NAMES else None
 
 
 def _has_the_check(node: ast.AST) -> bool:
@@ -52,12 +57,20 @@ def _has_the_check(node: ast.AST) -> bool:
     )
 
 
+def _is_dict_call(call: ast.Call) -> bool:
+    return isinstance(call.func, ast.Name) and call.func.id == "dict"
+
+
 def _names_the_check(call: ast.Call) -> bool:
     """Whether ``event_hooks`` has the check under its ``"request"`` key."""
     for keyword in call.keywords:
         if keyword.arg != "event_hooks":
             continue
         hooks = keyword.value
+        if isinstance(hooks, ast.Call) and _is_dict_call(hooks):
+            return any(
+                item.arg == "request" and _has_the_check(item.value) for item in hooks.keywords
+            )
         if not isinstance(hooks, ast.Dict):
             return _has_the_check(hooks)
         return any(
@@ -68,11 +81,16 @@ def _names_the_check(call: ast.Call) -> bool:
 
 
 def clients_without_the_check(source: str) -> list[int]:
-    """The line of every ``httpx`` client in *source* that has no check hook."""
+    """The line of every ``httpx`` client in *source* where the check does not run.
+
+    A synchronous ``Client`` is always on the list, also with the hook.
+    """
     return sorted(
         node.lineno
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and _is_httpx_client(node) and not _names_the_check(node)
+        if isinstance(node, ast.Call)
+        and (name := _client_name(node)) is not None
+        and (name == _SYNC_CLIENT or not _names_the_check(node))
     )
 
 
@@ -103,6 +121,14 @@ def test_check_finds_a_client_without_the_hook() -> None:
         'import httpx\nc = httpx.AsyncClient(event_hooks={"response": [kit.check_before_send]})\n'
     )
     assert clients_without_the_check(response_only) == [2]
+    sync_client = (
+        'import httpx\nc = httpx.Client(event_hooks={"request": [kit.check_before_send]})\n'
+    )
+    assert clients_without_the_check(sync_client) == [2]
+    response_by_call = (
+        "import httpx\nc = httpx.AsyncClient(event_hooks=dict(response=[kit.check_before_send]))\n"
+    )
+    assert clients_without_the_check(response_by_call) == [2]
 
 
 def test_check_passes_a_client_with_the_hook() -> None:

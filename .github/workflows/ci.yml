@@ -1383,6 +1383,21 @@ jobs:
           name: unit-test-selection
           path: ${{ runner.temp }}/unit-test-selection
 
+      - &unit-pull-images
+        name: Pull the test images
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
+        # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
+        timeout-minutes: 3
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
+
       - &unit-pytest
         name: Pytest (unit shard ${{ matrix.shard }}/6)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
@@ -1845,6 +1860,7 @@ jobs:
       - *unit-locale-restore
       - *unit-locale-install
       - *unit-download-picked
+      - *unit-pull-images
       - *unit-pytest
       - *unit-skip-check
 
@@ -1922,6 +1938,7 @@ jobs:
       - *unit-locale-restore
       - *unit-locale-install
       - *unit-download-picked
+      - *unit-pull-images
       - *unit-pytest
       - *unit-skip-check
       - *unit-peak-memory
@@ -1952,6 +1969,10 @@ jobs:
     runs-on: ubuntu-latest
     # About 2 minutes of pytest plus setup; the cap is a hang backstop.
     timeout-minutes: 20
+    env:
+      # The cleanup container that testcontainers starts first. The pull
+      # step and pytest read the same value.
+      RYUK_CONTAINER_IMAGE: testcontainers/ryuk:0.8.1
     defaults:
       run:
         working-directory: backend
@@ -1986,6 +2007,19 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+
+      - name: Pull the test images
+        # The one test image of this job: the chart's PostgreSQL image that
+        # tests/test_db_engine.py starts. Same script and rules as the
+        # step of the same name in python-unit-shard.
+        env:
+          PULL_TIME_LIMIT: 50
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$(uv run python -c 'from tests._pgvector_image import pgvector_test_image; print(pgvector_test_image())')"
+          bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh" "$image"
 
       - name: Pytest (tests that read files outside backend)
         shell: bash
@@ -2698,25 +2732,25 @@ jobs:
     #      item starts, or a GIL-locked C call that never returns to the main
     #      thread). A step timeout is a step FAILURE, absorbed by whole-job
     #      continue-on-error → run conclusion stays `success`.
-    #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
+    #   3. JOB `timeout-minutes: 58` — outer backstop for a wedged NON-pytest
     #      step (checkout / uv sync / model warm — never observed). Every
     #      post-pytest step in this shard job is step-capped too (#3172:
     #      shard-data upload 2, log upload 2, memory print 1 — the v0.31.0
     #      cut proved a hang CAN escape into a post-pytest step via the
     #      pytest step's debris), so the bounded-step worst case is
-    #      1 + 45 + 2 + 2 + 1 = 51 min + pre-pytest setup (35–75 s observed)
-    #      ≈ 52 — the step caps always fire before
+    #      3 (image pull) + 1 + 45 + 2 + 2 + 1 = 54 min + pre-pytest setup
+    #      (35–75 s observed) ≈ 55 — the step caps always fire before
     #      this job cap for any hang under a bounded step, and a job-level
     #      expiry (which CANCELS the job; `cancelled` leaks past
     #      continue-on-error into the run conclusion — the exact
     #      #2800/#2865/#3172 failure) is reserved for the never-observed
-    #      wedged setup step. 55 also sits below the ~60-min external pod
+    #      wedged setup step. 58 also sits below the ~60-min external pod
     #      reap seen on the heavy pool, so GitHub's job timeout wins that
     #      race. (The combine + coverage.xml upload moved to the
     #      python-coverage-combine fan-in job below, with its own budget.)
     # Neither runner cap is a perf budget: the job is nightly and non-blocking,
     # so a long wall never gates a PR.
-    timeout-minutes: 55
+    timeout-minutes: 58
     continue-on-error: true
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
@@ -2827,6 +2861,20 @@ jobs:
           "${GITHUB_WORKSPACE}/scripts/ci/install_spacy_model.sh" en_core_web_sm "${SPACY_MODEL_VER}" "${SPACY_MODEL_SHA}"
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
+
+      - name: Pull the test images
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
+        # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
+        timeout-minutes: 3
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
 
       - name: Pytest (unit) with offline coverage data
         # Runner-enforced STEP backstop (#2800/#2806) — layer 2 of the
@@ -3519,6 +3567,20 @@ jobs:
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
 
+      - name: Pull the test images
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
+        # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 150
+        timeout-minutes: 10
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
+
       - name: Pytest (integration testcontainers, one shard)
         # The tests/integration/ subtree, split over the shards. No --cov
         # here: coverage is emitted
@@ -3692,6 +3754,20 @@ jobs:
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
 
+      - name: Pull the test images
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
+        # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
+        timeout-minutes: 3
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
+
       - name: Pytest (timing tests only)
         shell: bash
         run: |
@@ -3856,6 +3932,20 @@ jobs:
 
       - name: Sync Python environment (locked)
         run: uv sync --locked --all-groups
+
+      - name: Pull the test images
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
+        # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
+        timeout-minutes: 3
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
 
       - name: Pytest (database migrations)
         run: uv run pytest tests/migrations/

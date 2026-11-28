@@ -155,9 +155,12 @@ def vault_dev_addr() -> Iterator[str]:
     try:
         container.start()
     except Exception as exc:
-        # Any boot failure → clean skip, not a red suite — same stance
-        # the other container fixtures take.
-        pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
+        # Any boot failure → clean skip on a laptop. Under CI the test
+        # fails instead, the same as the other container fixtures.
+        reason = f"vault dev container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         wait_for_log_message(container, "Vault server started!", timeout=60)

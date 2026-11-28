@@ -2817,11 +2817,18 @@ shard of the second-site job waited 30 minutes for a runner and the site
 started no job at all in those 30 minutes, in any run of the workflows that
 use it, or when it cannot read the jobs of those runs. When the site did
 start a job, it is busy, not down: the watchdog keeps waiting, at most 35
-minutes more (the time limit of a shard). Each cancel comes right after a
-fresh read that shows at least one shard with a waiting status (queued,
-waiting, requested or pending). A failed read of the run itself, or a shard
-with no status, never leads to a cancel. Only this job
-has `actions: write` in `ci.yml`.
+minutes more (the time limit of a shard). The run list of the smoke check
+covers 30 days and is read in parts of 5 days, because GitHub returns at
+most 1,000 runs for a search by creation time. Each of these cancels comes
+right after a fresh read that shows at least one shard with a waiting status
+(queued, waiting, requested or pending). For "the site looks down", that
+read must also show that no shard of this run has started: a started shard
+shows the site is up, so the watchdog keeps waiting. When three fresh reads
+of the run in a row fail, or do not show the state of every shard (for
+example a shard with no status), the watchdog cannot decide. Then it cancels the run anyway, so that
+the run does not wait on the site until GitHub ends it after 24 hours. Only
+when every cancel try fails does the job end red, with a line that asks for
+a cancel by hand. Only this job has `actions: write` in `ci.yml`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check
 that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to

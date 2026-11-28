@@ -48,6 +48,10 @@ func newRemoveOverrideCmd() *cobra.Command {
 			"minutes. That is the same rule as turning approval off.\n\n" +
 			"A reason never holds a secret. MEHO refuses a --reason that looks\n" +
 			"like a secret and writes nothing.\n\n" +
+			"When the backplane runs with CUSTOM_POLICY on, the removal does not\n" +
+			"run at once. It waits until an admin approves it in the web console;\n" +
+			"a platform admin approves a removal that ends approval. The command\n" +
+			"prints the approval request id.\n\n" +
 			"Role: tenant_admin.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
@@ -119,7 +123,8 @@ func runRemoveOverride(cmd *cobra.Command, opts removeOverrideOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	if err := deleteOverride(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, params); err != nil {
+	waiting, err := deleteOverride(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, params)
+	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
 			if he.statusCode == http.StatusUnauthorized && isFreshSignInRequired(he.body) {
@@ -135,6 +140,9 @@ func runRemoveOverride(cmd *cobra.Command, opts removeOverrideOptions) error {
 		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	if waiting != nil {
+		return printPolicyEditWaiting(cmd, opts.ConnectorID, opts.OpID, waiting, opts.JSONOut)
+	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
@@ -148,16 +156,18 @@ func runRemoveOverride(cmd *cobra.Command, opts removeOverrideOptions) error {
 }
 
 // deleteOverride drives the typed-client remove-override endpoint with
-// a one-shot 401-retry. The route returns 204 No Content; any other
+// a one-shot 401-retry. The route returns 204 No Content. With
+// CUSTOM_POLICY on it returns 202: the removal waits for an admin's click
+// in the web console, and the decoded answer is returned. Any other
 // status surfaces as *httpResponseError.
 func deleteOverride(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
 	params *api.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteParams,
-) error {
+) (*api.ClassificationRequestResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse, error) {
@@ -170,10 +180,13 @@ func deleteOverride(
 		},
 	)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if resp.StatusCode() == http.StatusAccepted && resp.JSON202 != nil {
+		return resp.JSON202, nil
 	}
 	if resp.StatusCode() != http.StatusNoContent {
-		return &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
-	return nil
+	return nil, nil
 }

@@ -22,6 +22,12 @@ it is the way to replace that policy. The card of an install import names
 the tenants whose stored policy the file affects. Only a platform admin
 reads those parts
 (:mod:`meho_backplane.connectors.policy.apply_card_readers`).
+
+With the ``CUSTOM_POLICY`` switch on, ``policy.op_edit`` and
+``policy.op_remove_override`` change the risk level or approval of one
+operation (:mod:`meho_backplane.connectors.policy.op_edit`). They follow
+the same rules as ``policy.classify``. Only a platform admin approves one
+that ends approval or changes the whole install.
 """
 
 from meho_backplane.auth.operator import TenantRole
@@ -40,16 +46,31 @@ from meho_backplane.connectors.policy.classify import (
     policy_classify_requester_refusal,
     register_policy_classify_operation,
 )
+from meho_backplane.connectors.policy.op_edit import (
+    POLICY_OP_EDIT_OP_ID,
+    POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+    build_op_edit_preview,
+    build_remove_override_preview,
+    op_edit_park_check,
+    op_edit_requester_refusal,
+    platform_admin_approves,
+    register_policy_op_edit_operations,
+    remove_override_park_check,
+)
 from meho_backplane.connectors.policy.preview import (
     POLICY_CLASSIFY_PREVIEW_OP_ID,
     register_policy_classify_preview_operation,
 )
 from meho_backplane.op_classes import declare_per_call_approval
+from meho_backplane.operations._park_check import register_park_check
 from meho_backplane.operations._preview import (
     register_permission_preflight,
     register_preview_builder,
 )
-from meho_backplane.operations.grant_approval import register_rights_change_op
+from meho_backplane.operations.grant_approval import (
+    register_platform_admin_approves,
+    register_rights_change_op,
+)
 from meho_backplane.operations.op_policy import register_policy_repair_op
 from meho_backplane.operations.platform_admin_card import (
     register_card_view,
@@ -81,6 +102,21 @@ register_card_view(POLICY_APPLY_OP_ID, policy_card_as_read)
 register_permission_preflight(POLICY_APPLY_OP_ID, record_policy_apply_requester)
 register_platform_admin_card_filter(POLICY_APPLY_OP_ID, card_without_tenant_parts)
 register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)
+
+register_typed_op_registrar(register_policy_op_edit_operations)
+for _op_id, _card, _park_check in (
+    (POLICY_OP_EDIT_OP_ID, build_op_edit_preview, op_edit_park_check),
+    (POLICY_OP_REMOVE_OVERRIDE_OP_ID, build_remove_override_preview, remove_override_park_check),
+):
+    register_role_floor(_op_id, TenantRole.TENANT_ADMIN)
+    register_rights_change_op(_op_id)
+    register_no_login_realm_op(_op_id)
+    declare_per_call_approval([_op_id])
+    register_requester_check(_op_id, op_edit_requester_refusal)
+    register_preview_builder(_op_id, _card)
+    register_permission_preflight(_op_id, record_policy_apply_requester)
+    register_park_check(_op_id, _park_check)
+    register_platform_admin_approves(_op_id, platform_admin_approves)
 
 __all__ = [
     "register_policy_apply_operation",

@@ -645,6 +645,56 @@ it.
 - The install's policy (`scope: install`) can only be imported by a
   platform admin, and runs only when a platform admin approves it.
 
+## Risk level and approval edits with `CUSTOM_POLICY` on
+
+With `CUSTOM_POLICY` on, an edit of an operation's risk level or approval
+with a token waits for an Admin's click in the web console. The removal of
+such an edit (an override) waits too, because removing a raise lowers the
+level. With the switch off, all of this is off and the routes work as
+before.
+
+- The edit is the operation `policy.op_edit`, the removal is
+  `policy.op_remove_override`, on `policy-registry-1.x`
+  (`connectors/policy/op_edit.py`). They follow the rules of
+  `policy.classify`: role `tenant_admin`, a change of rights, a person
+  approves each call. Both are in `POLICY_CHANGE_OPS`, so a waiting request
+  gets the fixed rule `policy_change_waits`.
+- `PATCH /api/v1/connectors/{id}/operations/{op_id}` with `safety_level` or
+  `requires_approval` waits as a whole, with its `custom_description` and
+  `is_enabled`. A PATCH with only `custom_description` or `is_enabled`
+  runs as before. `DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}`
+  waits. Both answer `202` with the body `ClassificationRequestResponse`,
+  the one `202` shape of the PATCH route: `status` (`awaiting_approval`),
+  `approval_request_id`, `message`, `matched_operations` (1) and
+  `changed_operations` (0). The MCP tool `meho_connector_edit_op` waits too and still
+  refuses a looser edit first. `meho connector edit-op` and
+  `remove-override` print the request id and who approves it.
+- Every check of the edit runs before the request waits, as for a person
+  with a fresh sign-in (`ReviewService.check_op_edit`,
+  `check_override_removal`): a refused edit makes no request. A login that
+  is not a person (an agent, a service login, a hosted agent run) gets
+  `403`.
+- An Admin approves with a click in the web console. Only a platform admin
+  approves an edit that ends approval (`ends_approval: true` on the card)
+  or changes the whole install.
+- The approval card holds the full effect: the connector, the operation,
+  the scope and the tenant of the operation row, the old and new risk
+  level and approval (both, also when one stays the same), the other
+  fields, the reason and `ends_approval`.
+- The approved run checks the card's record of who asked again, also when
+  the person who asked clicks. Then it runs `apply_policy_edit` or
+  `remove_override` with the person who clicked as the operator, in the
+  scope on the card. In that same transaction, under the lock of the
+  operation, it builds the card of the effect with the same function as at
+  the ask and compares it once with the stored card. When the two differ,
+  the edit checks now refuse the edit, or the override to remove is gone,
+  it rolls back, writes nothing and
+  says "The policy changed since this request was made. Send the edit
+  again." With the switch off at the click, it writes nothing.
+- An ask that names an override of another tenant is refused before
+  anything waits (`403` on REST).
+- The web console keeps its own path in this part.
+
 ## Versions: `policy_revision`
 
 Migration `0163`. One row per imported file: the tenant (`NULL` for the

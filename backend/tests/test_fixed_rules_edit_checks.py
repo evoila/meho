@@ -36,9 +36,15 @@ from sqlalchemy import inspect, select
 from meho_backplane.api.v1.connectors_ingest import router as connectors_ingest_router
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.policy.op_edit import register_policy_op_edit_operations
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    AuditLog,
+    EndpointDescriptor,
+    OperationPolicyOverride,
+)
 from meho_backplane.op_classes import (
     _CREDENTIAL_CAPABLE,
     _PER_CALL_APPROVAL,
@@ -157,11 +163,16 @@ def _switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
     get_settings.cache_clear()
 
 
-async def _register(op_id: str, **extra: Any) -> None:
+def _embedding() -> AsyncMock:
     embedding = AsyncMock()
     embedding.encode_one.return_value = [0.25] * 384
     embedding.encode.return_value = [[0.25] * 384]
     embedding.dimension = 384
+    return embedding
+
+
+async def _register(op_id: str, **extra: Any) -> None:
+    embedding = _embedding()
     kwargs: dict[str, Any] = {
         "parameter_schema": {"type": "object"},
         "safety_level": "caution",
@@ -324,11 +335,22 @@ async def test_with_the_switch_off_approval_off_is_refused_only_where_it_was(
 async def test_an_operation_with_no_fixed_rule_may_still_lose_its_approval(
     monkeypatch: pytest.MonkeyPatch, on: bool
 ) -> None:
+    """With the switch on the edit waits for approval; with it off it is stored at once."""
     _switch(monkeypatch, on=on)
     await _register(_PLAIN_OP)
+    if on:
+        await register_policy_op_edit_operations(embedding_service=_embedding())
 
     response = _turn_off(_PLAIN_OP)
 
+    if on:
+        assert response.status_code == 202, response.text
+        assert response.json()["status"] == "awaiting_approval"
+        async with get_sessionmaker()() as session:
+            waiting = (await session.scalars(select(ApprovalRequest))).all()
+        assert [r.status for r in waiting] == ["pending"]
+        assert await _stored(_PLAIN_OP) == ([], [])
+        return
     assert response.status_code == 200, response.text
     overrides, edits = await _stored(_PLAIN_OP)
     assert [o.requires_approval for o in overrides] == [False]

@@ -5811,7 +5811,7 @@
           "connectors"
         ],
         "summary": "Edit Op Endpoint",
-        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho_connector_edit_op`` audit\nrow. Returns 200 with an :class:`EditOpResponse` on success.\n\nG0.23-T4 (#1630) promoted the route from 204 No Content to 200\nso enable-time advisories have a structured wire home:\n``is_enabled=true`` on an op whose resolved connector is the\nunconfigured ingest auto-shim returns\n``warnings=[{code='unreplaced_auto_shim', ...}]`` \u2014 the edit\nstill lands (warnings never block the write), but the operator\nlearns about the guaranteed dispatch dead end here instead of\none ``call_operation`` later. The sibling ``edit_group`` route\nstays at 204 \u2014 it has no advisory to carry.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/repos/{owner}/{repo}/issues\"``) round-trip without\nURL-encoding the colon-prefixed path segment.\n\n``safety_level`` / ``requires_approval`` are stored as an operator\noverride (#4711). Turning approval off needs a person with a fresh\nsign-in (:func:`~meho_backplane.auth.fresh_sign_in.has_fresh_sign_in`):\nan API token with an old sign-in, a service principal or an agent gets\n``401`` with ``WWW-Authenticate: Bearer\nerror=\"insufficient_user_authentication\"``. A tenant admin asking for it\ngets ``403``; a level below the classification, a missing reason or a\ndestructive operation gets ``400``.\n\n``category`` / ``labels`` (#6038) are a change of rights: sent alone,\nthey ask for the change and answer ``202`` with the approval request\nid; a tenant admin must approve it in the web console. Sent with other fields: 400.\n\nWith ``CUSTOM_POLICY`` on, a PATCH that sets ``safety_level`` or\n``requires_approval`` waits as a whole, also its ``custom_description``\nand ``is_enabled``: ``202`` with the approval request id, after the same\nchecks as above (the fresh sign-in is the approve click). A caller who\nis not a person gets ``403``.",
         "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
         "parameters": [
           {
@@ -5865,7 +5865,7 @@
             }
           },
           "202": {
-            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console.",
+            "description": "category / labels were sent: the change waits until a tenant admin approves it in the web console. With CUSTOM_POLICY on, safety_level / requires_approval were sent: the change waits until an admin approves it in the web console.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5894,7 +5894,7 @@
           "connectors"
         ],
         "summary": "Remove Op Override Endpoint",
-        "description": "Remove one operator override of a risk level or approval flag.\n\nThe override is the one ``GET /api/v1/connectors/operation-overrides``\nlists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the\ninstall-wide one). A platform admin can remove any tenant's override;\na tenant admin only their own tenant's (``403`` for the install-wide\none, ``404`` for another tenant's). When the removal ends approval in\nthat scope it needs ``platform_admin`` (``403``), a ``reason``\n(``400``) and a fresh sign-in (``401``), like turning approval off.\n``404`` when there is no such override. Writes one\n``meho_connector_edit_op`` audit row. Returns 204 on success.",
+        "description": "Remove one operator override of a risk level or approval flag.\n\nThe override is the one ``GET /api/v1/connectors/operation-overrides``\nlists for ``connector_id``, ``op_id`` and ``tenant_id`` (none for the\ninstall-wide one). A platform admin can remove any tenant's override;\na tenant admin only their own tenant's (``403`` for the install-wide\none, ``404`` for another tenant's). When the removal ends approval in\nthat scope it needs ``platform_admin`` (``403``), a ``reason``\n(``400``) and a fresh sign-in (``401``), like turning approval off.\n``404`` when there is no such override. Writes one\n``meho_connector_edit_op`` audit row. Returns 204 on success.\n\nWith ``CUSTOM_POLICY`` on, the removal waits: ``202`` with the approval\nrequest id, after the same checks. An admin approves it in the web\nconsole; only a platform admin approves one that ends approval or\nremoves the install-wide override.",
         "operationId": "remove_op_override_endpoint_api_v1_connectors__connector_id__operation_overrides__op_id__delete",
         "parameters": [
           {
@@ -5956,6 +5956,16 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "202": {
+            "description": "With CUSTOM_POLICY on: the change waits until an admin approves it in the web console.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClassificationRequestResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",

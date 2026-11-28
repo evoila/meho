@@ -138,6 +138,7 @@ __all__ = [
     "platform_admin_reason",
     "register_grant_op",
     "register_harmless_keys_rule",
+    "register_platform_admin_approves",
     "register_rights_change_check",
     "register_rights_change_op",
 ]
@@ -290,6 +291,30 @@ def register_rights_change_check(op_id: str, check: Callable[[dict[str, Any]], b
     declare_per_call_approval((op_id,))
 
 
+#: Operations whose waiting request may need a platform admin to approve it:
+#: op_id -> a check that reads the approval card and returns why, or ``None``.
+_PLATFORM_ADMIN_APPROVES: dict[str, Callable[[dict[str, Any]], str | None]] = {}
+
+
+def register_platform_admin_approves(
+    op_id: str, check: Callable[[dict[str, Any]], str | None]
+) -> None:
+    """Record *check*: why only a platform admin approves a request of *op_id*.
+
+    *check* reads the approval card that was stored when the request was
+    made. :func:`check_rights_change_approval` refuses any other approver.
+    """
+    _PLATFORM_ADMIN_APPROVES[op_id] = check
+
+
+def _platform_admin_approves(request: ApprovalRequest) -> str | None:
+    check = _PLATFORM_ADMIN_APPROVES.get(request.op_id)
+    if check is None:
+        return None
+    card = (request.proposed_effect or {}).get("preview")
+    return check(card if isinstance(card, dict) else {})
+
+
 def _params_are_rights_change(request: ApprovalRequest) -> bool:
     check = _RIGHTS_CHANGE_CHECKS.get(request.op_id)
     return check is not None and isinstance(request.params, dict) and check(request.params)
@@ -400,18 +425,22 @@ def check_rights_change_approval(operator: Operator, request: ApprovalRequest) -
     Only an admin approves it, and only with a click in the web console
     (:attr:`~meho_backplane.auth.operator.Operator.web_session`). The admin
     may be the person who asked, or a person behind the agent, service or
-    runner login that asked. In MEHO's own login realm the person who asked
-    approves it only when they asked in the web console
-    (:func:`check_grant_approval`).
+    runner login that asked. Only a platform admin approves a request whose
+    card needs one (:func:`register_platform_admin_approves`). In MEHO's own
+    login realm the person who asked approves it only when they asked in the
+    web console (:func:`check_grant_approval`).
     """
     if not is_rights_change(request):
         return
     from meho_backplane.operations.approval_queue import RightsChangeApprovalError
 
+    needs_platform_admin = None if operator.platform_admin else _platform_admin_approves(request)
     if not operator.may_approve_rights_change():
         reason = RIGHTS_CHANGE_REFUSAL
     elif not operator.web_session:
         reason = RIGHTS_CHANGE_CONSOLE_ONLY
+    elif needs_platform_admin is not None:
+        reason = needs_platform_admin
     else:
         return
     raise RightsChangeApprovalError(

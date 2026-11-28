@@ -104,6 +104,11 @@ func newEditOpCmd() *cobra.Command {
 			"with `meho connector overrides --reduced-approval`.\n\n" +
 			"A reason never holds a secret. MEHO refuses a --reason that looks\n" +
 			"like a secret and writes nothing.\n\n" +
+			"When the backplane runs with CUSTOM_POLICY on, a change of --safety or\n" +
+			"approval does not run at once. It waits until an admin approves it in\n" +
+			"the web console; a platform admin approves turning approval off. The\n" +
+			"command prints the approval request id. The other flags of the same\n" +
+			"command wait with it.\n\n" +
 			"--category and --label set the operation's category and labels.\n" +
 			"Use them without the other flags.\n" +
 			classifyNote + "\n" +
@@ -234,7 +239,7 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	patched, err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body)
+	patched, waiting, err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body)
 	if err != nil {
 		var he *httpResponseError
 		if errors.As(err, &he) {
@@ -250,6 +255,9 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 			return renderHTTPStatus(cmd, backplaneURL, he.statusCode, he.body, opts.JSONOut)
 		}
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
+	}
+	if waiting != nil {
+		return printPolicyEditWaiting(cmd, opts.ConnectorID, opts.OpID, waiting, opts.JSONOut)
 	}
 	// Enable-time advisories land on stderr in BOTH output modes
 	// (G0.23-T4 #1630): stdout stays the machine surface (--json) /
@@ -291,7 +299,10 @@ func isEmptyEditOpBody(b api.EditOpBody) bool {
 // enable-time advisories have a structured wire home); the decoded
 // JSON200 payload is returned for the caller to render. Non-200
 // surfaces as *httpResponseError for the caller to route through
-// renderHTTPStatus. The op_id segment may contain `:` and `/`
+// renderHTTPStatus. With CUSTOM_POLICY on, a risk level / approval edit
+// answers 202: the edit waits for an admin's click in the web console,
+// and the decoded answer is returned as the second value. The op_id
+// segment may contain `:` and `/`
 // (canonical form `METHOD:/path`); the generated client URL-escapes
 // the path parameter, so the colons / slashes survive the routing
 // layer.
@@ -299,10 +310,10 @@ func patchOp(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
 	body api.EditOpBody,
-) (*api.EditOpResponse, error) {
+) (*api.EditOpResponse, *api.ClassificationRequestResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp, err := retryOn401(ctx, authed,
 		func(ctx context.Context) (*api.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
@@ -319,15 +330,20 @@ func patchOp(
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if resp.StatusCode() == http.StatusAccepted {
+		if waiting := decodePolicyEditWaiting(resp.Body); waiting != nil {
+			return nil, waiting, nil
+		}
 	}
 	if resp.StatusCode() != http.StatusOK || resp.JSON200 == nil {
 		// A 200 whose body failed to decode (JSON200 nil) is the
 		// same contract-drift class as a non-200: surface the raw
 		// body so renderHTTPStatus can classify it.
-		return nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
+		return nil, nil, &httpResponseError{statusCode: resp.StatusCode(), body: resp.Body}
 	}
-	return resp.JSON200, nil
+	return resp.JSON200, nil, nil
 }
 
 // editOpResult is the synthetic envelope rendered to JSON for --json

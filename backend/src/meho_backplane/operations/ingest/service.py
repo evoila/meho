@@ -161,8 +161,11 @@ from meho_backplane.operations.op_policy import (
     OpKey,
     OpPolicyEditError,
     PolicyEditResult,
+    _scope_descriptor,
     apply_policy_edit,
+    effective_policy,
     effective_policy_map,
+    load_overrides,
     remove_override,
 )
 from meho_backplane.operations.tenant_operation_settings import load_tenant_settings
@@ -1039,15 +1042,13 @@ class ReviewService:
         reason: str | None = None,
         person_present: bool = False,
         tighten_only: bool = False,
+        policy_scope_tenant_id: UUID | _UnsetType | None = _UNSET,
+        card_check: Callable[[PolicyEditResult, UUID | None, UUID | None], None] | None = None,
     ) -> list[EditOpWarning]:
         """Update operator-controlled overrides on one :class:`EndpointDescriptor`.
 
-        ``safety_level`` / ``requires_approval`` are stored as an override,
-        not on the row (#4711); *reason*, *person_present* and
-        *tighten_only* feed its rules. See :meth:`_apply_policy_edit`.
-
-        Passing none of the five fields raises :class:`ValueError`.
-        Out-of-enum ``safety_level`` raises :class:`ValueError`.
+        ``safety_level`` / ``requires_approval`` go to an override (#4711): see
+        :meth:`_apply_policy_edit`, and :meth:`_write_op_edit` for *card_check*.
 
         ``custom_description`` also honours a clear (#2488): the
         :data:`_UNSET` default leaves it untouched, an explicit ``None``
@@ -1118,6 +1119,8 @@ class ReviewService:
             reason=reason,
             person_present=person_present,
             tighten_only=tighten_only,
+            policy_scope_tenant_id=policy_scope_tenant_id,
+            card_check=card_check,
         )
         # Probe only after the write landed: a 404/400 path above must
         # never emit an advisory for an edit that didn't happen.
@@ -1139,8 +1142,15 @@ class ReviewService:
         reason: str | None,
         person_present: bool,
         tighten_only: bool,
+        policy_scope_tenant_id: UUID | _UnsetType | None,
+        card_check: Callable[[PolicyEditResult, UUID | None, UUID | None], None] | None,
     ) -> ConnectorScope:
-        """Apply one :meth:`edit_op` and its audit row in one transaction; return the scope."""
+        """Apply one :meth:`edit_op` and its audit row in one transaction; return the scope.
+
+        *card_check*, when given, gets the effect of the edit (both values,
+        the scope of the override, the tenant of the row) in this transaction,
+        before the commit; an error it raises writes nothing.
+        """
         row_edit = custom_description is not _UNSET or is_enabled is not None
         row_edit = row_edit or llm_instructions is not None
         sessionmaker = self._sessionmaker()
@@ -1153,6 +1163,8 @@ class ReviewService:
                 builtin_needs_platform_admin=row_edit,
             )
             op_row = await load_op(session, scope, connector_id, op_id)
+            if isinstance(policy_scope_tenant_id, _UnsetType):
+                policy_scope_tenant_id = self._policy_scope_tenant_id(scope)
             policy = await self._apply_policy_edit(
                 session,
                 op_row,
@@ -1162,7 +1174,16 @@ class ReviewService:
                 reason=reason,
                 person_present=person_present,
                 tighten_only=tighten_only,
+                scope_tenant_id=policy_scope_tenant_id,
             )
+            if card_check is not None:
+                card_check(
+                    await _with_both_values(
+                        session, policy, OpKey.of(op_row), policy_scope_tenant_id, op_row
+                    ),
+                    policy_scope_tenant_id,
+                    op_row.tenant_id,
+                )
             changes = dict(policy.changes)
             if is_enabled is not None:
                 changes["is_enabled"] = {"old": op_row.is_enabled, "new": is_enabled}
@@ -1208,6 +1229,7 @@ class ReviewService:
         reason: str | None,
         person_present: bool,
         tighten_only: bool,
+        scope_tenant_id: UUID | _UnsetType | None = _UNSET,
     ) -> PolicyEditResult:
         """Store a risk level / approval edit as an override; return what changed.
 
@@ -1220,16 +1242,16 @@ class ReviewService:
         ``platform_admin``, a reason and *person_present* (a fresh sign-in on
         REST, the web session in the console) and is never allowed for a
         destructive operation; *tighten_only* (the MCP tool) refuses every
-        loosening.
+        loosening. *scope_tenant_id*, when given, replaces that choice of
+        scope: the approved run of ``policy.op_edit`` stores the override in
+        the scope its approval card names, not in the approver's scope.
         """
         if (refusal := reason_refusal(reason)) is not None:
             raise OpPolicyEditError("reason_looks_like_secret", refusal)
         if safety_level is None and requires_approval is None:
             return PolicyEditResult(changes={}, scope=_scope_name(scope.tenant_id))
-        if scope.tenant_id is not None:
-            scope_tenant_id: UUID | None = scope.tenant_id
-        else:
-            scope_tenant_id = None if self._operator.platform_admin else self._operator.tenant_id
+        if isinstance(scope_tenant_id, _UnsetType):
+            scope_tenant_id = self._policy_scope_tenant_id(scope)
         return await apply_policy_edit(
             session,
             row=op_row,
@@ -1243,6 +1265,115 @@ class ReviewService:
             max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
         )
 
+    def _policy_scope_tenant_id(self, scope: ConnectorScope) -> UUID | None:
+        """Where a risk level / approval override of a row in *scope* is stored.
+
+        The row's own tenant for a tenant row. For a built-in row: the whole
+        install (``None``) for a platform admin, the operator's tenant otherwise.
+        """
+        if scope.tenant_id is not None:
+            return scope.tenant_id
+        return None if self._operator.platform_admin else self._operator.tenant_id
+
+    async def check_op_edit(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        tenant_id: UUID | None,
+        safety_level: str | None,
+        requires_approval: bool | None,
+        reason: str | None,
+        row_edit: bool,
+        tighten_only: bool,
+        policy_scope_tenant_id: UUID | _UnsetType | None = _UNSET,
+    ) -> tuple[PolicyEditResult, UUID | None, UUID | None]:
+        """Run the checks of one :meth:`edit_op` and write nothing.
+
+        For an edit that waits for an admin's click in the web console
+        (``policy.op_edit``). The checks run as for a person with a fresh
+        sign-in, because the approved run is that click. *row_edit* says
+        whether the edit also sets ``custom_description`` or ``is_enabled``.
+        *policy_scope_tenant_id* is where the override goes; left out, it is
+        worked out from the operator, as :meth:`edit_op` does.
+
+        Returns what would change (always the old and new risk level and
+        approval), where the override would be stored (a tenant UUID, or
+        ``None`` for the whole install) and the tenant of the operation row
+        (``None`` for the install's row). Raises the errors of :meth:`edit_op`.
+        """
+        async with self._sessionmaker()() as session:
+            scope = await self._resolve_writable_scope(
+                connector_id,
+                tenant_id,
+                session,
+                probe=scope_has_rows,
+                builtin_needs_platform_admin=row_edit,
+            )
+            op_row = await load_op(session, scope, connector_id, op_id)
+            if isinstance(policy_scope_tenant_id, _UnsetType):
+                policy_scope_tenant_id = self._policy_scope_tenant_id(scope)
+            result = await self._apply_policy_edit(
+                session,
+                op_row,
+                scope,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                reason=reason,
+                person_present=True,
+                tighten_only=tighten_only,
+                scope_tenant_id=policy_scope_tenant_id,
+            )
+            result = await _with_both_values(
+                session, result, OpKey.of(op_row), policy_scope_tenant_id, op_row
+            )
+            row_tenant_id = op_row.tenant_id
+            await session.rollback()
+        return result, policy_scope_tenant_id, row_tenant_id
+
+    def _override_key(
+        self, connector_id: str, op_id: str, override_tenant_id: UUID | None
+    ) -> OpKey:
+        """The key of the override that *override_tenant_id* names; checks who may act on it."""
+        scope = self._resolve_scope(
+            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
+        )
+        self._require_platform_admin_for_builtin(connector_id, scope)
+        return OpKey(scope.product, scope.version, scope.impl_id, op_id)
+
+    async def check_override_removal(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        override_tenant_id: UUID | None,
+        reason: str | None,
+    ) -> tuple[PolicyEditResult, UUID | None]:
+        """Run the checks of one :meth:`remove_op_override` and write nothing.
+
+        Like :meth:`check_op_edit`: the checks run as for a person with a
+        fresh sign-in. Returns what would change (always the old and new
+        risk level and approval) and the tenant of the operation row that
+        the scope sees (``None`` for the install's row). Raises the errors
+        of :meth:`remove_op_override`.
+        """
+        key = self._override_key(connector_id, op_id, override_tenant_id)
+        async with self._sessionmaker()() as session:
+            row = await _scope_descriptor(session, key, override_tenant_id)
+            result = await remove_override(
+                session,
+                key=key,
+                scope_tenant_id=override_tenant_id,
+                operator=self._operator,
+                reason=reason,
+                person_present=True,
+                max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
+            )
+            result = await _with_both_values(session, result, key, override_tenant_id, row)
+            row_tenant_id = None if row is None else row.tenant_id
+            await session.rollback()
+        return result, row_tenant_id
+
     async def remove_op_override(
         self,
         connector_id: str,
@@ -1251,6 +1382,7 @@ class ReviewService:
         override_tenant_id: UUID | None,
         reason: str | None,
         person_present: bool,
+        card_check: Callable[[PolicyEditResult, UUID | None, UUID | None], None] | None = None,
     ) -> None:
         """Remove one stored risk level / approval override (#4711).
 
@@ -1270,14 +1402,13 @@ class ReviewService:
 
         Writes one ``meho_connector_edit_op`` audit row with
         ``override_removed=True``, ``override_tenant_id`` and
-        ``approval_ended_for_tenants``.
+        ``approval_ended_for_tenants``. *card_check* works as in :meth:`edit_op`.
         """
-        scope = self._resolve_scope(
-            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
-        )
-        self._require_platform_admin_for_builtin(connector_id, scope)
-        key = OpKey(scope.product, scope.version, scope.impl_id, op_id)
+        key = self._override_key(connector_id, op_id, override_tenant_id)
         async with self._sessionmaker()() as session:
+            row = None
+            if card_check is not None:
+                row = await _scope_descriptor(session, key, override_tenant_id)
             result = await remove_override(
                 session,
                 key=key,
@@ -1287,6 +1418,12 @@ class ReviewService:
                 person_present=person_present,
                 max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
             )
+            if card_check is not None:
+                card_check(
+                    await _with_both_values(session, result, key, override_tenant_id, row),
+                    override_tenant_id,
+                    None if row is None else row.tenant_id,
+                )
             await write_audit_row(
                 session,
                 operator_sub=self._operator.sub,
@@ -1875,3 +2012,30 @@ class ReviewService:
                 },
             )
             await session.commit()
+
+
+async def _with_both_values(
+    session: AsyncSession,
+    result: PolicyEditResult,
+    key: OpKey,
+    scope_tenant_id: UUID | None,
+    row: EndpointDescriptor | None,
+) -> PolicyEditResult:
+    """*result* with the old and new risk level and approval, also the ones it leaves as they are.
+
+    Reads the values in *scope_tenant_id* after the edit, in the same
+    session, the way :func:`~meho_backplane.operations.op_policy.apply_policy_edit`
+    works them out. With no row (the operation is gone) the lowest values apply.
+    """
+    overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
+    now = effective_policy(
+        "safe" if row is None else row.safety_level,
+        False if row is None else row.requires_approval,
+        overrides,
+    )
+    changes: dict[str, dict[str, Any]] = {
+        "safety_level": {"old": now.safety_level, "new": now.safety_level},
+        "requires_approval": {"old": now.requires_approval, "new": now.requires_approval},
+    }
+    changes.update(result.changes)
+    return replace(result, changes=changes)

@@ -60254,6 +60254,7 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *ClassificationRequestResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -78132,6 +78133,13 @@ func ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOp
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest ClassificationRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

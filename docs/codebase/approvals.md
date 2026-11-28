@@ -1690,6 +1690,16 @@ sentence:
 The REST detail is `rights_change_required: <that sentence>`, and
 `may_approve_reason` is `rights_change`.
 
+**Only a platform admin, when the card says so.** An operation can
+register a check of its approval card with
+`register_platform_admin_approves`. When the check gives a reason,
+`check_rights_change_approval` refuses every approver who is not a
+platform admin, with that reason. `policy.op_edit` and
+`policy.op_remove_override` use it: a request that ends approval
+(`ends_approval` on the card) or changes the whole install needs a
+platform admin ("This edit turns approval off or changes the whole
+install. Only a platform admin may approve it.").
+
 Run approvals (`RunApprovalService.approve`): a list with a rights-change
 operation is refused for everyone (`rights_change_required`): a run
 approval list never covers a change of rights. A list knows the operation
@@ -1732,7 +1742,8 @@ as every other change of rights does, when:
   realm the block must name the one login or group of the change; in the
   login realm the block's realm facts are enough. Only an operation
   registered with `register_no_login_realm_op` (`policy.apply`,
-  `policy.classify`) needs no such block.
+  `policy.classify`, `policy.op_edit`, `policy.op_remove_override`) needs
+  no such block.
 
 Then `may_make_alone` runs the check of who may make the change on that
 card, the same rule as `check_grant_approval` on approve. When the admin

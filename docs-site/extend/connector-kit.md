@@ -66,7 +66,7 @@ Your package imports MEHO only through one module:
 import meho_connector_kit as kit
 ```
 
-The kit version this page describes: **1.8**.
+The kit version this page describes: **1.9**.
 
 The names below are the promise. Every other MEHO module is private. It
 can change in any MEHO release, without notice. A module whose path has a
@@ -114,7 +114,8 @@ part that starts with an underscore is private by its name too.
 | Approvals | `PermissionPreflight` | The type of a check that runs while a change waits: may the caller make it? |
 | Approvals | `register_permission_preflight` | Register such a check for one operation. |
 | Approvals | `declare_root_shell` | Mark the operations that change a host by running a command or script as root, for example over SSH with `sudo`. A run approval of an automation run never covers them: a person approves each call. |
-| Requests | `check_before_send` | The check of a caller's block right before a request goes out. Use it in every client your package builds itself. See "A client your package builds" below. Needs kit 1.8 or higher. |
+| Requests | `build_http_client` | Build an `httpx.AsyncClient` that checks the caller's block before each request. The one way your package builds an `httpx` client. See "A client your package builds" below. Needs kit 1.9 or higher. |
+| Requests | `check_before_send` | The check of a caller's block right before a request goes out. Call it right before each call of a client that is not `httpx`. See "A client your package builds" below. Needs kit 1.8 or higher. |
 | Requests | `PrincipalBlockedStepError` | The refusal that `check_before_send` raises when the caller is blocked. Let it pass: do not retry it and do not turn it into a vendor error. Needs kit 1.8 or higher. |
 | Audit | `compute_audit_digest_hash` | A hash made with a secret key of MEHO, for a value that lands in an audit or approval row. |
 
@@ -185,26 +186,8 @@ operations you register, not `execute`.
 - **Caches.** Key a cache you keep across calls, for example a login
   token, with `kit.target_cache_key(target)`.
 - **Clients your package builds.** Every client your package builds itself
-  carries the check of the caller's block. An `httpx.AsyncClient` gets it as
-  a request hook:
-  `httpx.AsyncClient(..., event_hooks={"request": [kit.check_before_send]})`.
-  `httpx` runs the hook before every request, also before each redirect hop
-  and each retry that your package sends again through the client. The kit
-  supports this way for `httpx`. The template's test
-  `tests/test_httpx_clients_have_the_check.py` reports every other `httpx`
-  client it finds, also a synchronous `httpx.Client`. A file that uses another
-  client goes into `EXCEPTIONS` in that test file, with one line that says
-  where the file calls `kit.check_before_send()`. Such a client (a vendor
-  library, a database driver, an SSH connection, an `httpx.Client`) calls
-  `await kit.check_before_send()` right before each call that sends something:
-  each statement, each command, each request. A blocking library that runs in
-  a thread (`asyncio.to_thread`) is checked in the event loop, right before the
-  thread starts, not inside the thread. A check before the thread starts does
-  not cover the redirects that the library follows by itself: turn them off
-  and check before each request, or use `httpx.AsyncClient` with the hook.
-  A client that MEHO builds (the one of `HttpConnector`) needs nothing. Outside
-  a running call the check does nothing. The template's test cannot see
-  clients that are not `httpx`: cover those with a test that runs them.
+  checks the caller's block before each request. See
+  [A client your package builds](#a-client-your-package-builds).
 
 The steps, with code, are in
 [connector-packages.md, "Writing the connector"](https://github.com/evoila/meho/blob/main/docs/codebase/connector-packages.md#writing-the-connector).
@@ -214,6 +197,41 @@ More to read:
   [connectors-shared-vault-creds.md](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-shared-vault-creds.md);
 - error texts:
   [error-message-shape.md](https://github.com/evoila/meho/blob/main/docs/codebase/error-message-shape.md).
+
+### A client your package builds
+
+MEHO checks the caller's block right before each request that a client
+sends. A client that MEHO builds (the one of `HttpConnector`) needs nothing.
+For a client your package builds itself:
+
+- **`httpx`: use `kit.build_http_client(...)`.** It returns an
+  `httpx.AsyncClient` with `kit.check_before_send` as its last request hook.
+  It takes the options of `httpx.AsyncClient`, for example `base_url`,
+  `timeout`, `verify`, `auth`, `event_hooks` and `follow_redirects`. It
+  follows no redirects unless you ask; when it does, the check runs before
+  each redirect hop too. It refuses a transport that retries by itself
+  (`httpx.AsyncHTTPTransport(retries=3)`), because such a retry goes out
+  without the check. To retry, send the request again through the client.
+  Needs kit 1.9 or higher: `meho-connector-kit>=1.9,<2`.
+- **The template's test** `tests/test_httpx_clients_have_the_check.py`
+  reports every other way to build an `httpx` client: `httpx.AsyncClient`
+  or `httpx.Client` under any import name, a class that inherits from one of
+  them, the request functions such as `httpx.get`, and a transport that
+  retries by itself.
+- **A blocking library.** A file that must use the blocking `httpx.Client`
+  goes into `EXCEPTIONS` in that test, with one line that says where it calls
+  `await kit.check_before_send()`. The test prints the list. An entry leaves
+  out only the `httpx.Client` of that file: every other client in it is still
+  reported.
+- **A client that is not `httpx`** (a vendor library, a database driver, an
+  SSH connection) calls `await kit.check_before_send()` right before each
+  call that sends something. A library that runs in a thread
+  (`asyncio.to_thread`) is checked in the event loop, right before the
+  thread starts. Turn off the redirects that such a library follows by
+  itself. The template's test cannot see these clients: cover them with a
+  test that runs them.
+
+Outside a running call the check does nothing.
 
 ## 5. Add operations
 

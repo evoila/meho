@@ -29,6 +29,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.cache_key import TenantScopedTargetLike
 from meho_backplane.connectors._shared.cache_key import target_cache_key as _target_cache_key
 from meho_backplane.connectors._shared.credential_backend import CredentialsReadError
+from meho_backplane.connectors._shared.http_client import build_http_client
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
@@ -163,6 +164,7 @@ __all__ = [
     "TargetField",
     "VaultClientError",
     "VaultCredentialsReadError",
+    "build_http_client",
     "check_before_send",
     "compute_audit_digest_hash",
     "declare_root_shell",

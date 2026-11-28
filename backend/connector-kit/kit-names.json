@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.8",
+  "kit_version": "1.9",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -261,6 +261,17 @@
     },
     "VaultCredentialsReadError": {
       "kind": "class"
+    },
+    "build_http_client": {
+      "inputs": [
+        "*",
+        "event_hooks: Mapping[str, list[Any]] | None = None",
+        "transport: httpx.AsyncBaseTransport | None = None",
+        "mounts: Mapping[str, httpx.AsyncBaseTransport | None] | None = None",
+        "**options: Any"
+      ],
+      "kind": "function",
+      "returns": "httpx.AsyncClient"
     },
     "check_before_send": {
       "inputs": [

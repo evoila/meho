@@ -81,6 +81,8 @@ _BAD_COMMANDS = [
     'X="$DB_PASSWORD" some-tool',
     'printf \'%s\' "$(some-tool "$PUSH_PASSWORD")"',
     "{ printf 'Key: '; IFS= read -rs KEY; echo; some-tool \"$KEY\"; }",
+    'jq --arg s "${CLIENT_SECRET:?}" .',
+    'jq --arg s "${CLIENT_SECRET:-x}" .',
 ]
 
 # The new forms: a secret comes from a file or from standard input.
@@ -125,6 +127,7 @@ _GOOD_COMMANDS = [
     "unset CLIENT_SECRET",
     "echo 'the value of $TOKEN stays in single quotes'",
     'kubectl get pods -n "$KEYCLOAK_NS" --kubeconfig="$PWD/kc"',
+    "if rm -f $KC && (set -C; printf 'token: %s\\n' \"$TOKEN\" > $KC); then",
 ]
 
 

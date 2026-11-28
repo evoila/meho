@@ -30,8 +30,9 @@ end in a backslash, then fails on:
   the value is attached to ``-H`` (``-H"Authorization: ..."``), and
   ``Bearer $`` or ``Bearer <`` anywhere;
 * ``PASSWORD '`` in a SQL block;
-* a shell variable with a secret name (``$NAME`` or ``${NAME}``) that is
-  expanded as an argument of a program. The name holds ``PASSWORD``,
+* a shell variable with a secret name that is expanded as an argument of a
+  program: ``$NAME``, ``${NAME}``, and ``${NAME`` with an operator after the
+  name (``${NAME:?}``, ``${NAME:-<word>}``, ``${NAME%<word>}``). The name holds ``PASSWORD``,
   ``PASSWD``, ``SECRET``, ``TOKEN`` or ``CREDENTIAL`` (any case), or has
   ``KEY`` or ``PW`` as a whole part between underscores (``API_KEY``,
   ``TEMP_PW``, ``KEY``; not ``PWD``, not ``KEYCLOAK_URL``). Only the
@@ -75,7 +76,10 @@ _SQL_PASSWORD = re.compile(r"\bPASSWORD\s+'", re.IGNORECASE)
 
 _SECRET_NAME = re.compile(r"PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL", re.IGNORECASE)
 _SECRET_NAME_PARTS = {"KEY", "PW"}
-_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+# ``${NAME}``, ``${NAME<operator>...}`` (group 2 is ``}`` or empty) or ``$NAME``.
+_VARIABLE = re.compile(
+    r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(\}|(?=[-:=?+#%/^,@\[]))|([A-Za-z_][A-Za-z0-9_]*))"
+)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Words that start a shell construct; the program of the command comes after them.
 _KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "time"}
@@ -131,7 +135,8 @@ class _Splitter:
     """Split a command line into simple commands, quote-aware.
 
     A ``$(...)`` starts its own command. Text in single quotes expands
-    nothing. A ``#`` that starts a word starts a comment.
+    nothing. A ``#`` that starts a word starts a comment. The ``}`` that
+    closes a ``${NAME<operator>...}`` is part of the word.
     """
 
     _SEPARATORS = "|;&(){}`"
@@ -144,6 +149,7 @@ class _Splitter:
         self.command: list[_Word] = []
         self.word: _Word | None = None
         self.quote = ""
+        self.braces = 0
 
     def _current(self) -> _Word:
         if self.word is None:
@@ -177,8 +183,10 @@ class _Splitter:
         if not match:
             return False
         word = self._current()
-        word.variables.append(match.group(1) or match.group(2))
+        word.variables.append(match.group(1) or match.group(3))
         word.text += match.group(0)
+        if match.group(1) and not match.group(2):
+            self.braces += 1
         self.pos = match.end()
         return True
 
@@ -197,6 +205,9 @@ class _Splitter:
                 self._add(char)
         elif char == "\\":
             self._add(line[self.pos : self.pos + 2])
+        elif char == "}" and self.braces:
+            self.braces -= 1
+            self._add(char)
         elif line.startswith("$(", self.pos) and not line.startswith("$((", self.pos):
             self._open_substitution()
         elif char == "$" and self._variable():

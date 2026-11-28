@@ -14,9 +14,9 @@ REST and MCP call doors:
   Reader's hosted run are refused with ``insufficient_role`` and the Reader
   sentence. This holds for a write step, a credential step and a list with
   only read steps. No approval request is stored and the step is not sent.
-* The operation registers no step list: the call waits for approval as
-  before. After a person approves it, a change step is refused with the
-  Reader sentence and is not sent.
+* The operation registers no step list: the call waits for approval.
+  After a person approves it, a change step is refused with the Reader
+  sentence and is not sent, and a read step is sent once.
 * An Operator's agent login and hosted run keep their answers.
 * A guard: no operation the core registers counts as a read for a Reader
   while it has a step list.
@@ -202,6 +202,19 @@ async def test_a_reader_change_step_not_on_a_list_is_refused_after_the_approval(
     assert request.op_id == s.COMPOSITE_OP_ID
     assert resumed.status != "ok", resumed
     assert _ANSWER in str(resumed.error), resumed
+
+
+@pytest.mark.parametrize("step", list(_READ_STEPS.values()), ids=list(_READ_STEPS))
+@pytest.mark.parametrize("login", _LOGINS)
+async def test_a_reader_multi_step_read_waits_and_then_runs(step: str, login: str) -> None:
+    first = await _run(login, TenantRole.READ_ONLY, step, "safe")
+
+    assert first.status == "awaiting_approval", first.error
+    assert s.sent == []
+    second = await _approve_and_resume(first)
+    assert second.status == "ok", second.error
+    assert s.sent == [step]
+    assert len(await _requests()) == 1
 
 
 # --- An Operator's agent login and hosted run -------------------------------------------

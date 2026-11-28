@@ -13,12 +13,17 @@ Kubernetes client over an HTTP stand-in server are in
   ``plan_shown: true``. Every apply carries ``dryRun=All``, and the preview
   makes no approval request and one audit row of the class read.
 * A Secret value of the manifest is not in the dry-run result of the
-  preview, also when the cluster quotes it in a warning or a refusal.
+  preview, also when the cluster quotes it in a warning or a refusal, and
+  also for base64 ``data`` with line breaks.
+* A value that a redaction rule hides at one place of the list (the second
+  document) stays hidden in the texts of the cluster and in the names.
 * ``document`` is the place in the manifest, also across empty documents.
 * Each entry is made for its own document; a document the preview cannot
   name safely is not sent and is ``not_checked``.
 * A long list of documents is stored behind a result handle, and every
-  entry is read back; a short list stays in the answer.
+  entry is read back; a short list stays in the answer. When the store keeps
+  fewer entries than the preview checked, the plan is not whole. A long list
+  of documents that were not checked stays short in the answer.
 * A cluster that does not answer in time gives the time-out note and the
   rest of the preview. A failed sign-in gives a plain note.
 * A login with the Read-only role, and an Operator whom the policy refuses
@@ -29,6 +34,7 @@ Kubernetes client over an HTTP stand-in server are in
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import uuid
 from collections.abc import Iterator
@@ -53,6 +59,7 @@ from meho_backplane.operations import _composite_preview, dispatch
 from meho_backplane.operations._preview import _k8s_apply_redactor
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.redaction.command_line import HIDDEN
 from meho_backplane.settings import get_settings
 from tests.test_k8s_apply_card_through_dispatch import (
     _CONNECTOR_ID,
@@ -436,6 +443,112 @@ def test_a_text_that_quotes_a_short_secret_value_is_withheld(
     assert answer["proposed_effect"]["preview"]["documents"][0]["warnings"] == [WITHHELD]
 
 
+def _base64_secret_manifest() -> str:
+    encoded = base64.b64encode(_SECRET_VALUE.encode()).decode()
+    # A YAML block value: a line break inside and one at the end.
+    return (
+        "apiVersion: v1\nkind: Secret\nmetadata: {name: db, namespace: prod}\n"
+        f"data:\n  password: |\n    {encoded[:16]}\n    {encoded[16:]}\n"
+    )
+
+
+def test_a_warning_that_quotes_base64_data_with_line_breaks_hides_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(warnings=(f"the value {_SECRET_VALUE} is weak",))
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_base64_secret_manifest())
+
+    assert _changes(answer) == [(1, "Secret", "create")]
+    warnings = answer["proposed_effect"]["preview"]["documents"][0]["warnings"]
+    assert warnings and "is weak" in warnings[0]
+    assert _SECRET_VALUE not in json.dumps(answer)
+
+
+def test_a_refusal_that_quotes_base64_data_with_line_breaks_hides_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(
+        refused_kinds=frozenset({"Secret"}),
+        refusal=f"the password {_SECRET_VALUE} breaks the rule of the admission check",
+    )
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_base64_secret_manifest())
+
+    assert _changes(answer) == [(1, "Secret", "refused")]
+    error = answer["proposed_effect"]["preview"]["documents"][0]["error"]
+    assert "breaks the rule of the admission check" in error
+    assert _SECRET_VALUE not in json.dumps(answer)
+
+
+_HIDDEN_NAME = "hidden-name-b7"
+
+
+def _hides_name_at(position: int, *, drop_kind: str | None = None) -> Any:
+    """A redactor that hides the name of the document at *position* of its input."""
+
+    def _make(ctx: Any) -> Any:
+        redact = _k8s_apply_redactor(ctx)
+
+        def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            out = redact(docs)
+            if len(out) > position:
+                metadata = {**out[position]["metadata"], "name": HIDDEN}
+                out[position] = {**out[position], "metadata": metadata}
+            return [doc for doc in out if doc.get("kind") != drop_kind]
+
+        return _redact
+
+    return _make
+
+
+def test_a_name_hidden_only_in_the_second_document_stays_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster(warnings=(f"the object {_HIDDEN_NAME} looks odd",))
+    _setup(monkeypatch, cluster)
+    monkeypatch.setattr(dry_run_module, "_k8s_apply_redactor", _hides_name_at(1))
+    manifest = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: first-map, namespace: prod}\n"
+        "---\n"
+        f"apiVersion: v1\nkind: ConfigMap\nmetadata: {{name: {_HIDDEN_NAME}, namespace: prod}}\n"
+    )
+
+    answer = _preview(manifest)
+
+    documents = answer["proposed_effect"]["preview"]["documents"]
+    assert [doc["change"] for doc in documents] == ["create", "create"]
+    assert documents[0]["name"] == "first-map"
+    assert documents[1]["name"] == HIDDEN
+    assert all("looks odd" in doc["warnings"][0] for doc in documents)
+    assert _HIDDEN_NAME not in json.dumps(documents)
+
+
+def test_a_name_hidden_by_its_place_stays_hidden_when_a_document_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster()
+    _setup(monkeypatch, cluster)
+    redactor = _hides_name_at(2, drop_kind="Deployment")
+    monkeypatch.setattr(dry_run_module, "_k8s_apply_redactor", redactor)
+    manifest = _THREE_OBJECTS.replace(
+        "kind: Ingress\nmetadata: {name: web", (f"kind: Ingress\nmetadata: {{name: {_HIDDEN_NAME}")
+    )
+
+    answer = _preview(manifest)
+
+    documents = answer["proposed_effect"]["preview"]["documents"]
+    assert [doc["change"] for doc in documents] == ["create", "not_checked", "create"]
+    assert documents[2]["name"] == HIDDEN
+    assert _HIDDEN_NAME not in json.dumps(documents)
+
+
 def test_document_counts_the_place_across_empty_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -547,6 +660,96 @@ def test_a_long_list_of_documents_comes_back_as_a_handle(
     assert {row["kind"] for row in rows} == {"ConfigMap"}
     assert {row["namespace"] for row in rows} == {"prod"}
     assert [row["name"] for row in rows] == [f"cm-{n}" for n in range(400)]
+
+
+class _BrokenValkey(_Valkey):
+    """A Valkey stand-in that refuses every write."""
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        raise ConnectionError("the result store is not reachable")
+
+
+def test_a_list_the_store_did_not_keep_is_not_a_whole_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    _setup(monkeypatch, _StandInCluster())
+    store = ResultHandleStore(_BrokenValkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(dry_run_module, "_DOCUMENTS_REDUCER", JsonFluxReducer(store=store))
+
+    answer = _preview(_config_maps(400))
+
+    preview = answer["proposed_effect"]["preview"]
+    assert isinstance(preview["documents"], dict)
+    assert preview["not_stored"] == 400
+    assert answer["plan_shown"] is False
+    assert _composite_preview._PLAN_NOT_STORED_NOTE in answer["plan_note"]
+
+
+def test_a_list_cut_by_the_row_limit_of_the_store_is_not_a_whole_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    _setup(monkeypatch, _StandInCluster())
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store, max_spill_rows=100)
+    monkeypatch.setattr(dry_run_module, "_DOCUMENTS_REDUCER", reducer)
+
+    answer = _preview(_config_maps(400))
+
+    preview = answer["proposed_effect"]["preview"]
+    assert preview["documents"]["handle"]["fetch_more"]["drill_in"]["stored_rows"] == 100
+    assert preview["not_stored"] == 300
+    assert answer["plan_shown"] is False
+    assert _composite_preview._PLAN_NOT_STORED_NOTE in answer["plan_note"]
+
+
+def test_a_long_list_of_documents_not_checked_stays_short_in_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster()
+
+    async def _discover(*, api_version: str, kind: str) -> Any:
+        if kind == "Widget":
+            raise LookupError("no kind Widget is known")
+        return SimpleNamespace(kind=kind, namespaced=True)
+
+    cluster.resources = SimpleNamespace(get=_discover)
+    _setup(monkeypatch, cluster)
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    monkeypatch.setattr(dry_run_module, "_DOCUMENTS_REDUCER", JsonFluxReducer(store=store))
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    operator = _login("writer")
+    widgets = "---\n".join(
+        f"apiVersion: example.test/v1\nkind: Widget\nmetadata: {{name: w-{n}, namespace: prod}}\n"
+        for n in range(100)
+    )
+
+    answer = _preview(_config_maps(300) + "---\n" + widgets, operator)
+
+    preview = answer["proposed_effect"]["preview"]
+    assert isinstance(preview["documents"], dict)
+    assert preview["not_checked"] == list(range(301, 351))
+    assert preview["not_checked_count"] == 100
+    assert "not_stored" not in preview
+    assert answer["plan_shown"] is False
+    assert "not_checked_count" in answer["plan_note"]
+    handle_id = uuid.UUID(preview["documents"]["handle"]["handle_id"])
+
+    async def _read_all() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        while True:
+            window = await result_query_core.read_result_window(
+                operator, handle_id, offset=len(rows), limit=100
+            )
+            rows.extend(window["rows"])
+            if not window["rows"]:
+                return rows
+
+    rows = asyncio.run(_read_all())
+    not_checked = [row["document"] for row in rows if row["change"] == "not_checked"]
+    assert not_checked == list(range(301, 401))
 
 
 def test_a_short_list_of_documents_stays_in_the_answer(

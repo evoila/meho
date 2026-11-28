@@ -14,7 +14,8 @@ with or without ``AUDIT_WRAPPER_ROWS_RETIRED``:
 * ``method`` ``PREVIEW`` and ``path`` the op id, so the row is never read as
   a run of the operation itself (a run has ``method`` ``DISPATCH``);
 * ``payload.op_class`` ``read``, ``payload.preview`` ``target_read``, the
-  ``result_status`` (``ok``, ``timeout`` or ``error``) and the fields the op
+  ``result_status`` (``ok``, ``timeout``, ``error``, or ``cancelled`` when
+  the caller was cancelled while it waited for the target) and the fields the op
   adds (for ``k8s.apply`` the number of documents);
 * the caller, the tenant and the target, as on every row of a call.
 
@@ -47,7 +48,7 @@ __all__ = ["TARGET_READ_METHOD", "write_target_read_row"]
 TARGET_READ_METHOD = "PREVIEW"
 
 #: The HTTP-like status of the row for each result of the read.
-_STATUS_CODES: dict[str, int] = {"ok": 200, "timeout": 504, "error": 502}
+_STATUS_CODES: dict[str, int] = {"ok": 200, "timeout": 504, "error": 502, "cancelled": 499}
 
 
 async def write_target_read_row(

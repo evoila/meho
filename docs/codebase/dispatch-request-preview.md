@@ -229,11 +229,12 @@ the policy gate does not refuse. The build has
 row of the class read (`operations/_preview_audit.py`): `event_class`
 `operation_execution`, `method` `PREVIEW`, `path` the op id,
 `payload.op_class` `read`, with the caller, the tenant, the target and the
-number of documents. It writes this row also on a time-out or a failed
-login, and in both audit modes; with the wrapper rows retired the wrapper
+number of documents. It writes this row also on a time-out, a failed
+login or a cancel while the builder waits, and in both audit modes; with the wrapper rows retired the wrapper
 then adds no row, and with them kept it adds its request row as before.
 When the builder says that it could not check every part
-(`preview.not_checked`), `plan_shown` is false next to the
+(`preview.not_checked`), or that the result store did not keep every part
+(`preview.not_stored`), `plan_shown` is false next to the
 `proposed_effect`, and the console and `meho operation preview` show the
 plan with the `plan_note`. The policy gate (dispatch Step 4) runs in **decide-only**
 mode (#4923): it returns the verdict and writes nothing — no audit row, no

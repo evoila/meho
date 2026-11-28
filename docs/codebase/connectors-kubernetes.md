@@ -937,8 +937,13 @@ gives the preview builder the target's connector. The builder then calls
   sent and is `not_checked`.
 - In `warnings`, `error` and `reason`, secret-shaped text is hidden, and so
   is every value that the echo of the manifest hides: Secret values (also
-  the decoded text of `data`), `env` and `httpHeaders` values, command
+  the decoded text of `data`; line breaks in the base64 text are skipped,
+  as the API server skips them), `env` and `httpHeaders` values, command
   lines and the last-applied annotation (`ops_write_apply_dry_run_text.py`).
+  The shared params redaction runs over the whole list of documents, as
+  for the echo, so a rule for one place in the list (such as
+  `manifest.1.metadata.name`) hides that value in the texts and the names
+  too.
   A text that may quote a hidden value of fewer than four characters is not
   shown at all.
 - A refused object whose namespace is made by the same manifest gets a
@@ -949,7 +954,12 @@ gives the preview builder the target's connector. The builder then calls
   show the plan and the note.
 - A list of more than 50 documents, or of more than 4 KB, is stored behind a
   result handle (`preview.documents.handle`); `result_query` reads every
-  entry.
+  entry. `preview.not_checked` then keeps at most 50 numbers, and
+  `preview.not_checked_count` counts them all.
+- When the result store keeps fewer entries than the preview checked (it
+  is not reachable, or its row limit is reached), `preview.not_stored`
+  counts the missing entries. Then `plan_shown` is false, and `plan_note`
+  says that `result_query` cannot give the whole plan.
 - `preview.manifest` and `preview.subject` are the same as on the approval
   request, with Secret values hidden. The object summary and what each
   container runs stay for a person only.
@@ -962,7 +972,9 @@ cluster does not answer in time, the preview gives `plan_shown: false`, the
 time-out note and the rest of its answer. When the cluster login fails,
 `plan_note` says so in a plain sentence. Each preview that sends a dry run
 writes one audit row of the class read (`operations/_preview_audit.py`),
-in both audit modes, also on a time-out or a failed login. The preview
+in both audit modes, also on a time-out or a failed login, and also when
+the caller is cancelled while it waits for the cluster (`result_status`
+`cancelled`; the cancel goes on after the row is written). The preview
 makes no approval request and no row of the apply. The apply itself waits
 for approval, and its approval request is not changed. With the switch on,
 the approval of an apply whose call carried a `preview_hash` builds the

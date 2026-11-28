@@ -4,8 +4,10 @@
 """Stored bindings: after an import, and together with approver routing.
 
 * ``meho policy export`` with the switch on writes the shipped bindings
-  into a tenant's file. After an import they are stored bindings: the
-  group alone then gives the kind, also for a login with a tenant list.
+  into a tenant's file as a comment. The import of the file stores no
+  binding. When the admin removes the ``# `` in front of them, they are
+  stored bindings after the import: the group alone then gives the kind,
+  also for a login with a tenant list.
 * A binding sets the kind that the routing checks at the click.
 
 See :mod:`meho_backplane.policy.bindings` and
@@ -63,7 +65,7 @@ def _listed_operator() -> Operator:
 
 
 @pytest.mark.asyncio
-async def test_exported_shipped_bindings_count_for_a_listed_login_after_the_import() -> None:
+async def test_exported_shipped_bindings_count_for_a_listed_login_only_when_uncommented() -> None:
     """A login with a tenant list, entry ``Operators``, in the shipped self-approval group."""
     claims = {
         "meho_tenants": [f"{_TENANT}:tenant-a:Operators"],
@@ -77,8 +79,16 @@ async def test_exported_shipped_bindings_count_for_a_listed_login_after_the_impo
 
         async with get_sessionmaker()() as session:
             exported = await export_policy(session, scope="tenant", tenant_id=_TENANT)
-        assert "group: /MEHO-SA-Operators" in exported
         parsed = parse_policy_file(exported.encode())
+        assert parsed.mistakes == [] and parsed.model is not None
+        assert "bindings" not in document_of(parsed.model)
+
+        _, note = exported.split("# No bindings are stored for this tenant", 1)
+        uncommented = "\n".join(
+            line.removeprefix("# ") for line in note.splitlines()[2:] if line.startswith("# ")
+        )
+        assert "group: /MEHO-SA-Operators" in uncommented
+        parsed = parse_policy_file(exported.encode() + uncommented.encode() + b"\n")
         assert parsed.mistakes == [] and parsed.model is not None
         await _store(_TENANT, document_of(parsed.model))
 

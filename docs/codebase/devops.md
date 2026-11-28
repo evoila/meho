@@ -2095,7 +2095,7 @@ changed by a maintainer, never by a pull request.
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on a GitHub-hosted runner (#3251, #4626). |
 | `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). Another pull request may run one leg with the tests the test map picked (`Python unit tests picked by the test map`, see [Test map run](#test-map-run-5642)). |
-| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
+| `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the files that `backend/tests/_outside_backend_tests.py` finds, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
 | `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). Runs only in the merge queue and in the nightly run, never on a pull request. |
 | `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Runs on every event, also on a fork PR. On a pull request it passes with the summary line "The integration tests run in the merge queue." In the merge queue and at night it fails when any shard failed, was cancelled or skipped, or the detector is not green. |
@@ -2526,18 +2526,20 @@ runs one short job instead.
 - **What runs instead.** Some backend tests read files outside `backend/`:
   the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
   that changes no backend file can still break them. The job
-  `python-outside-backend` runs exactly these test files. The list lives in
-  `backend/tests/_outside_backend_tests.py`; the job reads it with
-  `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
+  `python-outside-backend` runs exactly these test files. The job gets them
+  from `uv run python tests/_outside_backend_tests.py`, which works them out
+  from the test source (there is no hand-kept list). It runs on a GitHub-hosted
   runner with Helm and node installed, `MEHO_REQUIRE_HELM=1` and
   `MEHO_REQUIRE_NODE=1`.
-- **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
-  scans the unit test files (everything under `backend/tests/` except
+- **How a file is found.** `scan()` in `backend/tests/_outside_backend_tests.py`
+  reads the unit test files (everything under `backend/tests/` except
   `integration/` and `migrations/`). A file reads outside `backend/` when it
   climbs from `Path(__file__)` to the repository root with `.parents[N]` or a
   `.parent` chain, calls a local `_repo_root` helper, or imports a helper
-  module in `tests/` that does. The test fails when the scan and the list
-  differ. Add a new file to the list in the same PR that adds it.
+  module in `tests/` that does. A new test file needs no list edit.
+  `backend/tests/test_outside_backend_tests.py` checks the scan, and checks
+  that it still finds every file the old hand-kept list held on 2026-11-28
+  (`FOUND_ON_2026_11_28`; a deleted file is skipped).
 - **The fan-in.** On this path `python-unit-lane` accepts the skipped lint and
   shards and requires `python-outside-backend` to pass. On a full run that job
   is skipped and lint and shards must pass, as before. The required check name
@@ -2595,7 +2597,9 @@ the six shards, so every test still runs before a change lands on `main`.
   unit test walks a folder tree (`rglob`, `os.walk`) and is neither in
   `CONTRACT_TESTS` nor in its short list of tests that walk something else.
   So a new test that scans every connector cannot be left out of the
-  short run by mistake.
+  short run by mistake. These two lists stay by hand: whether a walk
+  reads every connector is a choice the file does not show. The failure
+  names the file, both lists and the exact line to add to each.
 
 ### Test map run (#5642)
 
@@ -3050,7 +3054,7 @@ The rule:
 `backend/tests/_ci_image_check.py`. It finds the test jobs in `ci.yml` itself:
 each job with a pytest step (`uv run pytest`, `uv run python -m pytest` or
 `python -m pytest`), and the test files that step runs (its `find` and
-`grep -rl` lists, the list of `tests/_outside_backend_tests.py`, and the
+`grep -rl` lists, the files that `tests/_outside_backend_tests.py` finds, and the
 paths on the pytest command line). It fails:
 
 - when a test file names an image in plain text, or has a `FROM` line with a

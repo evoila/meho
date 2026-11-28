@@ -74,6 +74,13 @@ merges on its servers (the update button, the merge queue), so the conflict
 would stay there. Reference:
 <https://github.com/orgs/community/discussions/9288>.
 
+**A new test file:** run the two list tests before you push:
+`cd backend && uv run pytest -o tmp_path_retention_policy=failed
+tests/test_outside_backend_tests.py tests/test_unit_connector_select.py`.
+The first needs no list edit: it works the files out by itself. The
+second fails when your file walks a folder tree (`rglob`, `os.walk`), and
+says which line to add to which list.
+
 **Before you open a pull request:** merge main into your branch and run the
 tests again. Then check: does your change add a line to a file that other
 features also edit? If yes, move that part into your own module.

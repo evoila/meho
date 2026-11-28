@@ -1933,9 +1933,9 @@ jobs:
     # request python-lint, the six unit shards and python-integration skip.
     # Some backend tests still read files outside backend/: the Helm chart,
     # the Go CLI, the workflows, the docs and the examples. This job runs
-    # exactly those test files, from the list in
-    # backend/tests/_outside_backend_tests.py. The guard test
-    # tests/test_outside_backend_tests.py keeps the list complete.
+    # exactly those test files. backend/tests/_outside_backend_tests.py
+    # works them out from the test source; there is no hand-kept list. The
+    # guard test tests/test_outside_backend_tests.py checks the scan.
     #
     # Non-required check. The python-unit-lane fan-in fails the required
     # context when this job does not pass on such a pull request.

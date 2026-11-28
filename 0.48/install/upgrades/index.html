@@ -4107,6 +4107,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The preview of <code>k8s.apply</code> (<code>preview_operation</code>, <code>POST /api/v1/operations/preview</code> and the console preview) shows the identity of each document in <code>redacted_body.manifest</code>: one entry for each document with its kind, namespace and name, and no other content of the manifest.</td>
+<td>A script that reads <code>redacted_body.manifest</code> of a <code>k8s.apply</code> preview reads a list of document identities, not the manifest text. No schema action.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>Every call of <code>k8s.delete</code>, <code>k8s.label</code>, <code>k8s.annotate</code> and <code>k8s.namespace.create</code> waits for a person. No standing grant, no agent grant, no run approval, no approval override and no approved multi-step run covers it. Grant create, agent grant create and run approval create refuse these four operations. In sandbox mode a delete grant still covers <code>k8s.delete</code>, and only that one of the four. <code>k8s.scale</code>, <code>k8s.rollout.restart</code>, <code>k8s.cordon</code> and <code>k8s.cronjob.run</code> keep their rules: a standing grant and a run approval still cover them.</td>
 <td>A service login or an agent that runs one of the four operations under a grant or a run approval now waits for a person at each call: plan for a person to approve each call in the console or the CLI. Find the grants, agent grants and run approvals that name <code>k8s.delete</code>, <code>k8s.label</code>, <code>k8s.annotate</code> or <code>k8s.namespace.create</code> with <code>meho service-principals grants list</code>, <code>meho agent grant list</code> and <code>meho approvals runs list</code>, and remove them: they never run such a call. Sandbox delete grants for <code>k8s.delete</code> stay. No schema action.</td>
 </tr>

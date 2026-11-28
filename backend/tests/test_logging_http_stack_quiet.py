@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import logging.config
 import os
 import secrets
 import socket
@@ -26,7 +25,6 @@ import httpx2
 import openai
 import pytest
 import requests
-import uvicorn.config
 from requests.adapters import HTTPAdapter
 
 from meho_backplane.logging import _HTTP_STACK_LOGGERS, configure_logging
@@ -339,31 +337,54 @@ def test_stack_logger_level_lowered_after_setup_is_still_held(
     assert values["header"] in out
 
 
+def _logger_tree() -> dict[str, tuple[int, bool, list[logging.Handler], bool]]:
+    """The level, on/off state, handlers and ``propagate`` of every logger and the root."""
+    loggers = {
+        n: lg for n, lg in logging.root.manager.loggerDict.items() if isinstance(lg, logging.Logger)
+    }
+    loggers[""] = logging.root
+    return {n: (lg.level, lg.disabled, lg.handlers[:], lg.propagate) for n, lg in loggers.items()}
+
+
 @pytest.fixture
-def _uvicorn_logging() -> Iterator[None]:
-    """Apply uvicorn's own logging settings, as a server does before MEHO's set-up."""
-    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
-    saved = {n: (logging.getLogger(n).handlers[:], logging.getLogger(n).propagate) for n in names}
-    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
-    try:
-        yield
-    finally:
-        for n, (handlers, propagate) in saved.items():
-            logging.getLogger(n).handlers = handlers
-            logging.getLogger(n).propagate = propagate
+def _logger_tree_unchanged() -> Iterator[None]:
+    """Check that the test leaves every logger of the tree as it found it."""
+    before = _logger_tree()
+    yield
+    after = _logger_tree()
+    assert {n: after.get(n) for n in before} == before
 
 
-@pytest.mark.usefixtures("_uvicorn_logging")
+@pytest.mark.usefixtures("_logger_tree_unchanged")
 def test_request_line_logs_the_standard_phrase_not_the_vendor_phrase(
-    server: str, values: dict[str, str], capfd: pytest.CaptureFixture[str]
+    server: str, values: dict[str, str]
 ) -> None:
-    configure_logging(logging.INFO)
-    assert not logging.getLogger("httpx").disabled
-    with httpx.Client(follow_redirects=True) as client:
-        response = client.get(f"{server}/phrase/start")
-    assert response.status_code == 404
-    out = capfd.readouterr().out
-    _assert_clean(out, values)
+    # uvicorn's logging settings change every logger of the process, so the
+    # server's set-up runs in a child process.
+    script = textwrap.dedent(
+        """
+        import logging, logging.config, sys
+        import httpx
+        import uvicorn.config
+        from meho_backplane.logging import configure_logging
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        configure_logging(logging.INFO)
+        assert not logging.getLogger("httpx").disabled
+        with httpx.Client(follow_redirects=True) as client:
+            response = client.get(sys.argv[1] + "/phrase/start")
+        assert response.status_code == 404, response.status_code
+        """
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, server],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    out = done.stdout
+    _assert_clean(out + done.stderr, values)
     events = [json.loads(line)["event"] for line in out.splitlines() if line.startswith("{")]
     assert [e for e in events if e.startswith("HTTP Request:")] == [
         f'HTTP Request: GET {server} "HTTP/1.1 307 Temporary Redirect"',

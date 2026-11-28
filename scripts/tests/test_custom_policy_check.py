@@ -1998,7 +1998,10 @@ class DocsPageTest(unittest.TestCase):
         text = " ".join((ROOT / "docs/acceptance/custom-policy-check.md").read_text().split())
         for sentence in (
             "Exit code 0 needs the three open parts of check 11",
-            "#7073",
+            "the event intake (the script cannot send an event to the install)",
+            "it needs a sensor change and an AI model on the install",
+            "the runner executor (it needs a satellite runner)",
+            "Python 3.10 or newer",
             "the two parts of check 8 that need the write rule's own reason (#6966)",
             "not run: MEHO's explain answer says it only while the switch is on`. "
             "Check 7 runs with the switch off. With the switch off, MEHO's explain answer "

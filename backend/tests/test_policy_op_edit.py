@@ -45,7 +45,12 @@ from meho_backplane.connectors.policy.op_edit import (
     request_policy_edit,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    AuditLog,
+    EndpointDescriptor,
+    OperationPolicyOverride,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.connector_admin import _edit_op_handler
 from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
@@ -65,6 +70,7 @@ from ._install_limits_helpers import (
     switch_on_fixture,  # noqa: F401
 )
 from ._oidc_jwt_helpers import make_rsa_keypair, mock_discovery_and_jwks, public_jwks
+from ._secret_reason import assert_no_trace, made_up_key
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _isolated_jwks_cache,  # noqa: F401
@@ -175,8 +181,8 @@ async def _install_approval_off(op_id: str) -> None:
     )
 
 
-async def _tenant_copy(op_id: str) -> None:
-    """Give the tenant its own copy of the built-in row of *op_id*."""
+async def _tenant_copy(op_id: str, **facts: Any) -> None:
+    """Give the tenant its own copy of the built-in row of *op_id*, with *facts* changed."""
     async with get_sessionmaker()() as session, session.begin():
         built_in = (
             await session.execute(
@@ -188,7 +194,7 @@ async def _tenant_copy(op_id: str) -> None:
             for attr in EndpointDescriptor.__mapper__.column_attrs
             if attr.key not in {"id", "tenant_id"}
         }
-        session.add(EndpointDescriptor(**columns, tenant_id=h.TENANT))
+        session.add(EndpointDescriptor(**{**columns, **facts}, tenant_id=h.TENANT))
 
 
 async def _drop_tenant_copy(op_id: str) -> None:
@@ -801,6 +807,54 @@ async def test_a_removal_of_another_tenants_override_is_refused_before_it_waits(
     (request,) = await h.requests()
     assert request.tenant_id == _TENANT_B
     assert len(await _overrides(_RESTART)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_removal_that_ends_approval_held_by_a_fixed_rule_is_refused_at_the_ask(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    """The install-wide approval reached a tenant copy that a fixed rule holds: nothing waits."""
+    await _setup(embedding)
+    await ReviewService(h.person("platform-c")).edit_op(
+        _CONNECTOR, _RESTART, tenant_id=None, requires_approval=True
+    )
+    await _tenant_copy(_RESTART, tags=["destructive"])
+    key = make_rsa_keypair("kid-opedit-fixed-rule-removal")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        bearer = _token(key, sub="platform-a", platform_admin=True, **_fresh())
+        refused = _delete(client, bearer, _RESTART, reason="back to the code's value")
+    assert refused.status_code == 400, refused.text
+    assert "the fixed rule delete_waits holds" in refused.json()["detail"]
+    assert await h.requests() == []
+    (override,) = await _overrides(_RESTART)
+    assert (override.tenant_id, override.requires_approval) == (None, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_reason_that_looks_like_a_secret_is_refused_before_anything_waits(
+    client: TestClient, embedding: AsyncMock, capfd: pytest.CaptureFixture[str]
+) -> None:
+    await _setup(embedding)
+    await _raise_now(h.person("admin-a", platform_admin=False), _RESTART, "dangerous")
+    secret = made_up_key()
+    key = make_rsa_keypair("kid-opedit-secret-reason")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = {"safety_level": "destructive", "reason": secret}
+        edited = _patch(client, _token(key), _RESTART, body)
+        removed = _delete(client, _token(key), _RESTART, tenant_id=str(h.TENANT), reason=secret)
+    for refused in (edited, removed):
+        assert refused.status_code == 400, refused.text
+        assert "reason_looks_like_secret" in refused.text
+    assert await h.requests() == []
+    (override,) = await _overrides(_RESTART)
+    assert override.safety_level == "dangerous"
+    async with get_sessionmaker()() as session:
+        audit = [row.payload for row in (await session.scalars(select(AuditLog))).all()]
+    assert_no_trace(secret, edited.text, removed.text, audit, capfd.readouterr())
 
 
 @pytest.mark.asyncio

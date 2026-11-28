@@ -12,9 +12,11 @@ that leaves the two lines out writes no mark, and the approval table
 test fails then.
 
 The test reads the marks from the definitions in code, not from a copied
-list, so a new connector is covered with no change here. A definition
-belongs to the package of the registrar that registers it. The test finds
-definitions in the modules of that package, in three forms:
+list, so a new connector is covered with no change here. The test reads
+every module of every built-in connector package (the packages in
+``meho_backplane.connectors``). A definition belongs to the package of the
+registrar that registers it, or else to its built-in connector package.
+The test finds definitions in three forms:
 
 * an op record: a dataclass or named tuple with ``op_id`` and a handler
   field, or a dict with ``op_id`` and ``handler`` (a spec dict), held in a
@@ -24,7 +26,9 @@ definitions in the modules of that package, in three forms:
   ``op_id`` parameter of the function it names: a register call with a
   plain op id (its marks are the plain values it writes, or none), or any
   other call that writes a mark as a plain value (a call that makes a
-  record);
+  record). A plain value can also come from a local variable of the
+  function that is set once to a plain value, or from a dict that the call
+  unpacks with ``**`` (a local dict, or a dict of the module);
 * a ``for`` loop that unpacks spec tuples of a module variable into names
   such as ``op_id`` and ``hard_to_undo``.
 
@@ -34,13 +38,19 @@ The test fails when:
 * two definitions of one operation give it different marks, for example a
   call that makes a record and the record it makes;
 * a stored row holds other marks than its definition;
-* a definition has no stored row;
+* a definition has no stored row, also when its package queues no
+  registrar;
+* a register function keeps a mark in a local variable or a local dict
+  that no register call of the function passes on;
 * a spec dict has a key that its register call does not read;
 * a ``safe`` row has a mark.
 
 A definition that names its connector (``product``, ``version`` and
 ``impl_id``) holds only for the row of that connector, so two versions of
-one connector can give one op id different marks.
+one connector can give one op id different marks. A record that does not
+name its connector holds for the connector of the register call that uses
+it: during the start the test looks for the record in the variables of
+the code that runs the register call.
 """
 
 from __future__ import annotations
@@ -53,7 +63,7 @@ import inspect
 import pkgutil
 import sys
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field, fields, is_dataclass
 from types import ModuleType
 from typing import Any
@@ -61,6 +71,7 @@ from typing import Any
 import pytest
 from sqlalchemy import update
 
+import meho_backplane.connectors
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import typed_register
@@ -111,6 +122,8 @@ class _Definitions:
     )
     #: ``owner -> the dict keys that the register calls of that owner read``.
     keys_read: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    #: Local marks that no register call passes on.
+    problems: list[str] = field(default_factory=list)
 
     def add(self, key: _Key, mark: Mark, where: str) -> None:
         self.marks[key][mark].add(where)
@@ -127,8 +140,16 @@ def _owners() -> list[str]:
     return sorted({_owner_of_registrar(registrar) for registrar in _TYPED_OP_REGISTRARS})
 
 
+def _built_in_packages() -> list[str]:
+    """Every built-in connector package, also one that queues no registrar."""
+    root = meho_backplane.connectors
+    return sorted(
+        f"{root.__name__}.{info.name}" for info in pkgutil.iter_modules(root.__path__) if info.ispkg
+    )
+
+
 def _owner_of_module(name: str, owners: list[str]) -> str | None:
-    """The longest registrar package that holds module *name*."""
+    """The longest package in *owners* that holds module *name*."""
     holding = [owner for owner in owners if name == owner or name.startswith(f"{owner}.")]
     return max(holding, key=len) if holding else None
 
@@ -151,9 +172,33 @@ def _owner_modules(owners: list[str]) -> list[tuple[str, ModuleType]]:
 
 @dataclass
 class _Tracked:
-    """What the start stored: each row's registrar package."""
+    """What the start stored: each row's registrar package, and the connectors of each record."""
 
     owners: dict[tuple[Connector, str], set[str]] = field(default_factory=lambda: defaultdict(set))
+    #: ``id(record) -> (record, the connectors of the register calls that used it)``.
+    records: dict[int, tuple[Any, set[Connector]]] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        self.owners.clear()
+        self.records.clear()
+
+    def note_record(self, connector: Connector, op_id: str) -> None:
+        """Note the record that the running register call uses, if the test sees one.
+
+        The nearest frame that holds a record with this op id is the code
+        that runs the register call, for example a loop over the records.
+        """
+        frame = inspect.currentframe()
+        while frame is not None:
+            for value in list(frame.f_locals.values()):
+                found = _record(value)
+                if found is not None and found[0]["op_id"] == op_id:
+                    self.records.setdefault(id(value), (value, set()))[1].add(connector)
+                    return
+            frame = frame.f_back
+
+    def connectors_of(self, record: Any) -> set[Connector]:
+        return self.records.get(id(record), (None, set()))[1]
 
 
 @pytest.fixture(autouse=True)
@@ -183,6 +228,7 @@ def _a_real_start(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Tracked]:
         if owner is not None:
             connector = (kwargs["product"], kwargs["version"], kwargs["impl_id"])
             tracked.owners[(connector, kwargs["op_id"])].add(owner)
+            tracked.note_record(connector, kwargs["op_id"])
         await write(*args, **kwargs)
 
     def noted(registrar: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
@@ -251,11 +297,11 @@ def _mark_of(values: dict[str, Any]) -> Mark:
     return _text(values.get("hard_to_undo")), bool(values.get("changes_rights"))
 
 
-def _records(value: Any, depth: int = 0) -> Iterator[tuple[dict[str, Any], bool]]:
-    """Every op record in *value*, also in nested tuples, lists, sets and dicts."""
+def _records(value: Any, depth: int = 0) -> Iterator[tuple[dict[str, Any], bool, Any]]:
+    """Every op record in *value* (its fields, whether it is a spec dict, the record itself)."""
     found = _record(value)
     if found is not None:
-        yield found
+        yield (*found, value)
         return
     if depth >= _NESTING_LIMIT:
         return
@@ -282,13 +328,115 @@ def _assigned_names(tree: ast.Module) -> list[str]:
     return names
 
 
-def _resolve(node: ast.expr, module: ModuleType) -> Any:
-    """The value of a plain value or a module-level name, or ``None``."""
+@dataclass
+class _Scope:
+    """The plain values that code in a module or in one function can read by name."""
+
+    module: ModuleType
+    #: Local names that are set once, to a plain value.
+    constants: dict[str, Any] = field(default_factory=dict)
+    #: Names that are set to a dict literal with text keys.
+    dicts: dict[str, dict[str, ast.expr]] = field(default_factory=dict)
+    #: Local names that are set in another way; they hide a module name.
+    shadowed: set[str] = field(default_factory=set)
+    #: ``(local name, mark field, value)``: the marks that the function itself keeps.
+    marks: list[tuple[str, str, Any]] = field(default_factory=list)
+
+
+def _text_dict(node: ast.expr) -> dict[str, ast.expr] | None:
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = [
+        key.value
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    ]
+    if len(keys) != len(node.keys):
+        return None
+    return dict(zip(keys, node.values, strict=True))
+
+
+def _module_scope(tree: ast.Module, module: ModuleType) -> _Scope:
+    scope = _Scope(module)
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            literal = _text_dict(node.value)
+            if len(targets) == 1 and isinstance(targets[0], ast.Name) and literal is not None:
+                scope.dicts[targets[0].id] = literal
+    return scope
+
+
+def _function_scope(function: ast.FunctionDef | ast.AsyncFunctionDef, outer: _Scope) -> _Scope:
+    """The local names of *function* that are set once to a plain value or a dict literal."""
+    simple: dict[int, ast.expr] = {}
+    for node in ast.walk(function):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if len(targets) == 1 and isinstance(targets[0], ast.Name):
+                simple[id(targets[0])] = node.value
+    bound: dict[str, list[ast.expr | None]] = defaultdict(list)
+    arguments = function.args
+    for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
+        bound[arg.arg].append(None)
+    for arg in (arguments.vararg, arguments.kwarg):
+        if arg is not None:
+            bound[arg.arg].append(None)
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound[node.id].append(simple.get(id(node)))
+    scope = _Scope(outer.module, dicts=dict(outer.dicts))
+    for name, values in bound.items():
+        scope.dicts.pop(name, None)
+        value = values[0] if len(values) == 1 else None
+        literal = _text_dict(value) if value is not None else None
+        if isinstance(value, ast.Constant):
+            scope.constants[name] = value.value
+            if name in _MARK_FIELDS:
+                scope.marks.append((name, name, value.value))
+        elif literal is not None:
+            scope.dicts[name] = literal
+            scope.marks.extend(
+                (name, key, item.value)
+                for key, item in literal.items()
+                if key in _MARK_FIELDS and isinstance(item, ast.Constant)
+            )
+        else:
+            scope.shadowed.add(name)
+    return scope
+
+
+def _resolve(node: ast.expr, scope: _Scope) -> Any:
+    """The value of a plain value, a local plain value or a module-level name, or ``None``."""
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, ast.Name):
-        return getattr(module, node.id, None)
+        if node.id in scope.constants:
+            return scope.constants[node.id]
+        if node.id not in scope.shadowed:
+            return getattr(scope.module, node.id, None)
     return None
+
+
+def _plain(node: ast.expr, scope: _Scope) -> tuple[bool, Any]:
+    """``(True, value)`` for a plain value or a local name set to one, else ``(False, None)``."""
+    if isinstance(node, ast.Constant):
+        return True, node.value
+    if isinstance(node, ast.Name) and node.id in scope.constants:
+        return True, scope.constants[node.id]
+    return False, None
+
+
+def _unpacked(node: ast.expr, scope: _Scope) -> dict[str, ast.expr] | None:
+    """The keywords that ``**node`` passes, or ``None`` when the test cannot read them."""
+    if not isinstance(node, ast.Name) or node.id in scope.constants:
+        return None
+    if node.id in scope.dicts:
+        return scope.dicts[node.id]
+    value = None if node.id in scope.shadowed else getattr(scope.module, node.id, None)
+    if not isinstance(value, dict):
+        return None
+    return {key: ast.Constant(item) for key, item in value.items() if isinstance(key, str)}
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -331,7 +479,25 @@ def _positional_op_id(node: ast.Call, module: ModuleType) -> ast.expr | None:
     return node.args[index]
 
 
-def _call_definition(node: ast.Call, module: ModuleType) -> tuple[dict[str, Any], Mark] | None:
+def _call_keywords(node: ast.Call, scope: _Scope) -> dict[str, ast.expr] | None:
+    """The keywords of a call, also those of the dicts it unpacks with ``**``.
+
+    ``None`` for a register call that unpacks a dict the test cannot read:
+    its marks may come in through that dict.
+    """
+    keywords: dict[str, ast.expr] = {}
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            keywords[keyword.arg] = keyword.value
+            continue
+        unpacked = _unpacked(keyword.value, scope)
+        if unpacked is None and _call_name(node) in _REGISTER_CALLS:
+            return None
+        keywords.update(unpacked or {})
+    return keywords
+
+
+def _call_definition(node: ast.Call, scope: _Scope) -> tuple[dict[str, Any], Mark] | None:
     """The definition in a call with ``op_id``, or ``None`` when the call defines nothing.
 
     The op id is the ``op_id=`` keyword, or the argument in the place of the
@@ -341,24 +507,55 @@ def _call_definition(node: ast.Call, module: ModuleType) -> tuple[dict[str, Any]
     plain values it writes, or none. A register call that takes a mark from
     a variable only passes a definition on. Any other call with ``op_id=``
     (a record, a log line, an error) defines a mark only when it writes the
-    mark as a plain value.
+    mark as a plain value. A keyword that comes in through ``**`` counts the
+    same as a keyword written in the call.
     """
-    keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg}
-    op_id_node = keywords.get("op_id") or _positional_op_id(node, module)
-    op_id = _resolve(op_id_node, module) if op_id_node is not None else None
+    keywords = _call_keywords(node, scope)
+    if keywords is None:
+        return None
+    op_id_node = keywords.get("op_id") or _positional_op_id(node, scope.module)
+    op_id = _resolve(op_id_node, scope) if op_id_node is not None else None
     if not isinstance(op_id, str):
         return None
-    marks = [keywords[name] for name in _MARK_FIELDS if name in keywords]
-    if not all(isinstance(mark, ast.Constant) for mark in marks):
+    marks = {name: _plain(keywords[name], scope) for name in _MARK_FIELDS if name in keywords}
+    if not all(readable for readable, _ in marks.values()):
         return None
     if not marks and _call_name(node) not in _REGISTER_CALLS:
         return None
-    values = {name: _resolve(keywords[name], module) for name in _MARK_FIELDS if name in keywords}
+    values = {name: value for name, (_, value) in marks.items()}
     values.update(
-        {name: _resolve(keywords[name], module) for name in _CONNECTOR_FIELDS if name in keywords}
+        {name: _resolve(keywords[name], scope) for name in _CONNECTOR_FIELDS if name in keywords}
     )
     values["op_id"] = op_id
     return values, _mark_of(values)
+
+
+def _passes(node: ast.Call, name: str, mark: str) -> bool:
+    """Whether a call passes the local *name* on as *mark* or in a ``**`` dict."""
+    return any(
+        isinstance(keyword.value, ast.Name)
+        and keyword.value.id == name
+        and keyword.arg in (None, mark)
+        for keyword in node.keywords
+    )
+
+
+def _local_mark_lines(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    scope: _Scope,
+    calls: list[tuple[ast.Call, dict[str, Any]]],
+) -> Iterator[str]:
+    """A line for each local mark of *function* that none of its register *calls* passes on."""
+    for name, mark, value in scope.marks:
+        if any(_passes(call, name, mark) for call, _ in calls):
+            continue
+        for call, values in calls:
+            yield (
+                f"{values['op_id']}: its register function {function.name} "
+                f"({scope.module.__name__}:{function.lineno}) keeps {mark}={value!r} in "
+                f"the local {name!r}, but its register call (line {call.lineno}) passes "
+                f"{mark}={dict(zip(_MARK_FIELDS, _mark_of(values), strict=True))[mark]!r}"
+            )
 
 
 def _loop_definitions(node: ast.For, module: ModuleType) -> Iterator[dict[str, Any]]:
@@ -416,36 +613,98 @@ def _register_functions(tree: ast.Module) -> Iterator[ast.AST]:
             yield node
 
 
-def _read_module(owner: str, module: ModuleType, found: _Definitions) -> None:
+def _function_scopes(
+    tree: ast.Module, outer: _Scope
+) -> tuple[dict[int, _Scope], list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, _Scope]]]:
+    """The scope of each call (by node id), and each function with its scope."""
+    scopes: dict[int, _Scope] = {}
+    functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, _Scope]] = []
+    # ast.walk visits an outer function before the functions inside it, so
+    # the innermost function sets the scope of its calls last.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = _function_scope(node, outer)
+            functions.append((node, scope))
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    scopes[id(inner)] = scope
+    return scopes, functions
+
+
+def _read_records(
+    owner: str, module: ModuleType, names: Iterable[str], tracked: _Tracked, found: _Definitions
+) -> dict[tuple[str, str], set[Connector]]:
+    """Read the records in module variables.
+
+    Returns the connectors that the start used each record for, by
+    ``(variable name, op id)``.
+    """
+    used: dict[tuple[str, str], set[Connector]] = defaultdict(set)
+    for name in names:
+        where = f"{module.__name__}.{name}"
+        for values, is_spec_dict, record in _records(getattr(module, name, None)):
+            used[(name, values["op_id"])] |= tracked.connectors_of(record)
+            own = _connector_of(values)
+            connectors = [own] if own else sorted(tracked.connectors_of(record)) or [None]
+            for connector in connectors:
+                found.add(_Key(owner, connector, values["op_id"]), _mark_of(values), where)
+            if is_spec_dict:
+                found.spec_dicts[owner].append((values, where))
+    return used
+
+
+def _variable_of_calls(tree: ast.Module) -> dict[int, str]:
+    """The module variable that each call at the top level of the module helps to set."""
+    variables: dict[int, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if len(targets) == 1 and isinstance(targets[0], ast.Name):
+                for inner in ast.walk(node.value):
+                    variables[id(inner)] = targets[0].id
+    return variables
+
+
+def _read_module(owner: str, module: ModuleType, tracked: _Tracked, found: _Definitions) -> None:
     try:
         tree = ast.parse(inspect.getsource(module))
     except (OSError, TypeError):
         return
-    for name in _assigned_names(tree):
-        for values, is_spec_dict in _records(getattr(module, name, None)):
-            key = _Key(owner, _connector_of(values), values["op_id"])
-            found.add(key, _mark_of(values), f"{module.__name__}.{name}")
-            if is_spec_dict:
-                found.spec_dicts[owner].append((values, f"{module.__name__}.{name}"))
+    used = _read_records(owner, module, _assigned_names(tree), tracked, found)
+    variables = _variable_of_calls(tree)
+    module_scope = _module_scope(tree, module)
+    scopes, functions = _function_scopes(tree, module_scope)
+    register_calls: dict[int, list[tuple[ast.Call, dict[str, Any]]]] = defaultdict(list)
     for node in ast.walk(tree):
         where = f"{module.__name__}:{getattr(node, 'lineno', '?')}"
         if isinstance(node, ast.Call):
-            call = _call_definition(node, module)
-            if call is not None:
-                values, mark = call
-                found.add(_Key(owner, _connector_of(values), values["op_id"]), mark, where)
+            scope = scopes.get(id(node), module_scope)
+            call = _call_definition(node, scope)
+            if call is None:
+                continue
+            values, mark = call
+            # A call that makes a record in a module variable holds for the
+            # connectors of that record.
+            made = used.get((variables.get(id(node), ""), values["op_id"]), set())
+            own = _connector_of(values)
+            for connector in [own] if own else sorted(made) or [None]:
+                found.add(_Key(owner, connector, values["op_id"]), mark, where)
+            if _call_name(node) in _REGISTER_CALLS:
+                register_calls[id(scope)].append((node, values))
         elif isinstance(node, ast.For):
             for values in _loop_definitions(node, module):
                 key = _Key(owner, _connector_of(values), values["op_id"])
                 found.add(key, _mark_of(values), where)
+    for function, scope in functions:
+        found.problems.extend(_local_mark_lines(function, scope, register_calls[id(scope)]))
     for function in _register_functions(tree):
         found.keys_read[owner] |= _keys_read(function)
 
 
-def _definitions() -> _Definitions:
+def _definitions(tracked: _Tracked) -> _Definitions:
     found = _Definitions()
-    for owner, module in _owner_modules(_owners()):
-        _read_module(owner, module, found)
+    for owner, module in _owner_modules(sorted({*_owners(), *_built_in_packages()})):
+        _read_module(owner, module, tracked, found)
     return found
 
 
@@ -518,9 +777,10 @@ def _definition_lines(
         for owner in tracked.owners.get((_connector_of_row(row), row.op_id), set()):
             stored.add(_Key(owner, None, row.op_id))
             stored.add(_Key(owner, _connector_of_row(row), row.op_id))
+    queued = set(_owners())
     return [
-        f"{key.op_id}: defined in {sorted(set().union(*places.values()))}, "
-        f"but {key.owner} stores no row of it"
+        f"{key.op_id}: defined in {sorted(set().union(*places.values()))}, but {key.owner} "
+        + ("stores no row of it" if key.owner in queued else "queues no registrar, so no row")
         + (f" for {'/'.join(key.connector)}" if key.connector else "")
         for key, places in sorted(found.marks.items(), key=repr)
         if key not in stored
@@ -545,13 +805,14 @@ async def _built_in_rows() -> list[EndpointDescriptor]:
 
 
 def _assert_rows_match_code(rows: list[EndpointDescriptor], tracked: _Tracked) -> None:
-    found = _definitions()
+    found = _definitions(tracked)
     lines, marked = _row_lines(rows, tracked, found)
     # The test reads its marks from code. If that reading broke, few ops would
     # carry one, and a dropped mark would go unseen.
     assert marked > 100, f"only {marked} built-in ops carry a mark in code"
     lines += _definition_lines(rows, tracked, found)
     lines += _spec_dict_lines(found)
+    lines += found.problems
     assert not lines, (
         f"{len(lines)} problem(s) between the marks in code and the stored operation rows. "
         "Check that each register call passes hard_to_undo and changes_rights on:\n"
@@ -573,5 +834,5 @@ async def test_each_start_stores_the_marks_of_the_code(_a_real_start: _Tracked) 
         )
         await session.commit()
     assert emptied.rowcount > 500
-    _a_real_start.owners.clear()
+    _a_real_start.clear()
     _assert_rows_match_code(await _built_in_rows(), _a_real_start)

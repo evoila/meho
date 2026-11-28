@@ -166,10 +166,13 @@ The rules are in `policy/classification.py` (`classify`, no database):
    its own text (`_product_risk_text`): it names every operation the
    entry lowers, also those of connectors with a version, each with its
    connector (a connector with no version by its product), up to five and
-   a count of the rest. For each one it says to set `risk` on the tenant's
-   entry that already has exactly the match needed (`_exact_entry`), or
-   it suggests a new entry for that connector, never for the form with
-   the dash. A suggested entry quotes each value (`_entry_text`), so it
+   a count of the rest. It gives a fix for every lowered operation, also
+   those past the five, and one fix per match (`_lowered_by_match`): two
+   rows of one operation, such as a built-in row and the tenant's own,
+   get one fix at the higher level. For each one it says to set `risk` on
+   the tenant's entry that already has exactly the match needed
+   (`_exact_entry`), or it suggests a new entry for that connector, never
+   for the form with the dash. A suggested entry quotes each value (`_entry_text`), so it
    parses as written. It suggests a change of the refused entry only when
    the entry matches that one operation alone, because two products
    share the form with the dash. The single edit has no `risk` field, so it refuses only the

@@ -548,8 +548,10 @@ def _product_risk_text(
     """The sentence of :func:`install_floor_texts` when *entry* lowers a product's operation.
 
     It names each operation whose install level *entry* lowers, of every
-    connector, each with its connector. For each one it says to set
-    ``risk`` on the tenant entry that already matches exactly that
+    connector, each with its connector: up to :data:`_MAX_NAMED_OPS` of
+    them, and how many more there are. It gives a fix for every one of
+    them, one per match (:func:`_lowered_by_match`). For each it says to
+    set ``risk`` on the tenant entry that already matches exactly that
     operation (:func:`_exact_entry`), or it suggests a new entry. It
     suggests a change of *entry* only when *entry* matches that one
     operation alone, because *entry* can also match the operation of
@@ -557,13 +559,13 @@ def _product_risk_text(
     *entry* lowers the level of no operation named by its product.
     """
     risk = entry.risk or "safe"
-    lowered = [
-        (one, *found)
-        for one in coords
-        if (found := _risk_lowered_at(entry, one, entries)) is not None
+    with_group = entry.group is not None
+    found = [
+        (one, *at) for one in coords if (at := _risk_lowered_at(entry, one, entries)) is not None
     ]
-    if not any(one.dashed_connector_id is not None for one, _, _ in lowered):
+    if not any(one.dashed_connector_id is not None for one, _, _ in found):
         return None
+    lowered = _lowered_by_match(found, with_group=with_group)
     shown = lowered[:_MAX_NAMED_OPS]
     parts = [
         f"`{ref}` sets `{one.op_id}` of `{one.connector_id}` to `{level}`"
@@ -577,29 +579,58 @@ def _product_risk_text(
         f"so `risk: {risk}` does not count for {them}."
     )
     one, _, level = lowered[0]
-    if len(lowered) == 1 and not any(entry.matches(o) for o in coords if o is not one):
+    key = _match_key(one, with_group=with_group)
+    alone = not any(
+        entry.matches(o) and _match_key(o, with_group=with_group) != key for o in coords
+    )
+    if len(lowered) == 1 and alone:
         return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
-    return f"{head} This entry can stay. {_fix_text(entry, shown, entries)}"
+    return f"{head} This entry can stay. {_fix_text(entry, lowered, entries)}"
+
+
+def _match_key(one: OpCoordinates, *, with_group: bool) -> tuple[str, str, str | None]:
+    """The match of the entry that :func:`_entry_text` suggests for *one*."""
+    return one.connector_id, one.op_id, one.group_key if with_group else None
+
+
+def _lowered_by_match(
+    found: Sequence[tuple[OpCoordinates, str, str]], *, with_group: bool
+) -> list[tuple[OpCoordinates, str, str]]:
+    """*found* with one row per match, each at the highest level that match needs.
+
+    Two rows of one operation (a built-in row and the tenant's own) have
+    the same match, and a suggested entry for each would repeat it.
+    """
+    by_key: dict[tuple[str, str, str | None], tuple[OpCoordinates, str, str]] = {}
+    for one, ref, level in found:
+        key = _match_key(one, with_group=with_group)
+        kept = by_key.get(key)
+        if kept is None or RISK_LEVELS.index(level) > RISK_LEVELS.index(kept[2]):
+            by_key[key] = (kept[0] if kept else one, ref, level)
+    return list(by_key.values())
 
 
 def _fix_text(
     entry: ClassificationEntry,
-    shown: Sequence[tuple[OpCoordinates, str, str]],
+    lowered: Sequence[tuple[OpCoordinates, str, str]],
     entries: Sequence[ClassificationEntry],
 ) -> str:
-    """The fix for each shown operation: ``risk`` on the tenant's exact entry, else a new entry."""
+    """The fix for each lowered operation: ``risk`` on the exact entry, else a new entry."""
     with_group = entry.group is not None
-    texts: list[str] = []
+    on_entry: dict[str, str] = {}
     new: list[str] = []
-    for one, _, level in shown:
+    for one, _, level in lowered:
         exact = _exact_entry(entry, one, entries, with_group=with_group)
         if exact is None:
             new.append(f"`{_entry_text(one, level, with_group=with_group)}`")
             continue
-        texts.append(
-            f"Set `risk: {level}` or higher on `{exact.ref.removeprefix('tenant:')}`; "
-            "its other fields can stay."
-        )
+        ref = exact.ref.removeprefix("tenant:")
+        if RISK_LEVELS.index(level) > _risk_index(on_entry.get(ref)):
+            on_entry[ref] = level
+    texts = [
+        f"Set `risk: {level}` or higher on `{ref}`; its other fields can stay."
+        for ref, level in on_entry.items()
+    ]
     if new:
         what = "a tenant entry" if len(new) == 1 else "a tenant entry for each operation"
         texts.append(f"Add {what}, with this risk level or higher: {', '.join(new)}.")

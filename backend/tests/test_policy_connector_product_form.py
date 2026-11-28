@@ -28,6 +28,7 @@ import pytest
 import respx
 import yaml
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import TenantRole
@@ -904,6 +905,36 @@ async def _register_op(embedding: AsyncMock, product: str, version: str, op_id: 
     )
 
 
+def _refused_then_followed(
+    client: TestClient, key: Any, case: str, tenant: list[dict[str, Any]]
+) -> tuple[str, str]:
+    """The refusal of *tenant*, and the file after the tenant follows it; both checks accept it."""
+    refused = [_send_entries(client, key, path, tenant) for path in ("validate", "import")]
+    for answer in refused:
+        assert answer["ok"] is False, (case, answer)
+        assert len(answer["mistakes"]) == 1, (case, answer)
+    sentence = refused[0]["mistakes"][0]
+    assert refused[1]["mistakes"] == [sentence], case
+    followed = _followed(sentence, tenant)
+    accepted = [_send_text(client, key, path, followed) for path in ("validate", "import")]
+    for answer in accepted:
+        assert answer["ok"] is True, (case, followed, answer)
+        assert answer["mistakes"] == [], case
+    document = yaml.safe_load(followed)
+    for index, entry in enumerate(tenant):
+        kept = {k: v for k, v in document["classifications"][index].items() if k != "risk"}
+        assert kept == {k: v for k, v in entry.items() if k != "risk"}, (case, index, kept)
+    return sentence, followed
+
+
+async def _store_tenant_file(followed: str) -> None:
+    async with get_sessionmaker()() as session:
+        session.add(
+            TenantPolicy(tenant_id=TENANT, document=yaml.safe_load(followed), set_by_sub="admin-a")
+        )
+        await session.commit()
+
+
 _NETWORK = {"match": {"connector": "cowx", "op": RUN}, "category": "network"}
 _WIDGET = {"match": {"connector": "cowx", "op": WIDGET}, "risk": "dangerous"}
 _BULL_RUN = {"match": {"connector": BULL, "op": RUN}, "risk": "dangerous"}
@@ -975,29 +1006,9 @@ async def test_the_suggested_fix_passes_the_check_as_written(
     await policy(None, install)
     key = make_rsa_keypair(f"kid-cpf-follow-{case}")
 
-    refused = [_send_entries(client, key, path, tenant) for path in ("validate", "import")]
-    for answer in refused:
-        assert answer["ok"] is False, (case, answer)
-        assert answer["mistakes"] == [sentence], case
-    followed = _followed(sentence, tenant)
-    accepted = [_send_text(client, key, path, followed) for path in ("validate", "import")]
-    for answer in accepted:
-        assert answer["ok"] is True, (case, followed, answer)
-        assert answer["mistakes"] == [], case
-
-    document = yaml.safe_load(followed)
-    for index, entry in enumerate(tenant):
-        kept = {k: v for k, v in document["classifications"][index].items() if k != "risk"}
-        assert kept == {k: v for k, v in entry.items() if k != "risk"}, (case, index, kept)
-    async with get_sessionmaker()() as session:
-        session.add(
-            TenantPolicy(
-                tenant_id=TENANT,
-                document=document,
-                set_by_sub="admin-a",
-            )
-        )
-        await session.commit()
+    followed = _refused_then_followed(client, key, case, tenant)
+    assert followed[0] == sentence, case
+    await _store_tenant_file(followed[1])
     for connector, (level, category) in after.items():
         explained = _explain(client, key, connector, op_id)
         assert (explained["risk_level"], explained["category"]) == (level, category), (
@@ -1005,6 +1016,77 @@ async def test_the_suggested_fix_passes_the_check_as_written(
             connector,
             explained,
         )
+
+
+async def _copy_for_the_tenant(product: str, op_id: str) -> None:
+    """A tenant's own row of the built-in operation *op_id* of *product*."""
+    async with get_sessionmaker()() as session:
+        built_in = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == product,
+                    EndpointDescriptor.op_id == op_id,
+                    EndpointDescriptor.tenant_id.is_(None),
+                )
+            )
+        ).scalar_one()
+        fields = {
+            a.key: getattr(built_in, a.key)
+            for a in sa_inspect(EndpointDescriptor).column_attrs
+            if a.key != "id"
+        }
+        session.add(EndpointDescriptor(**{**fields, "tenant_id": TENANT}))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_one_fix_per_match_when_an_operation_has_two_rows(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    for product in PRODUCTS:
+        await _register_op(embedding, product, "", RUN)
+    await _register_op(embedding, "bullapi", "1.x", RUN)
+    await _copy_for_the_tenant("bullapi", RUN)
+    await policy(None, [_BY_PRODUCT, _BULL_RUN])
+    key = make_rsa_keypair("kid-cpf-follow-two-rows")
+
+    sentence, followed = _refused_then_followed(client, key, "two-rows", [_ALL_CAUTION])
+
+    assert sentence == (
+        f"{_HEAD}{_sets('cowx')} and `install:classifications[1]` sets `{RUN}` of `{BULL}` to "
+        "`dangerous` for the whole install, so `risk: caution` does not count for them. This "
+        "entry can stay. Add a tenant entry for each operation, with this risk level or higher: "
+        f"{_suggested('cowx')}, {_suggested(BULL)}."
+    )
+    await _store_tenant_file(followed)
+    for connector, level in (("cowx", "dangerous"), ("cowy", "caution"), (BULL, "dangerous")):
+        assert _explain(client, key, connector, RUN)["risk_level"] == level, connector
+
+
+SIX = tuple(f"wild.thing.run{n}" for n in range(1, 7))
+
+
+@pytest.mark.asyncio
+async def test_one_refusal_gives_a_fix_for_every_lowered_operation(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    for op_id in SIX:
+        for product in PRODUCTS:
+            await _register_op(embedding, product, "", op_id)
+    await policy(None, [{"match": {"connector": "cowx"}, "risk": "dangerous"}])
+    key = make_rsa_keypair("kid-cpf-follow-six")
+
+    sentence, followed = _refused_then_followed(client, key, "six", [_ALL_CAUTION])
+
+    named = re.findall(r"sets `(wild\.thing\.run\d)` of `cowx` to `dangerous`", sentence)
+    assert len(named) == 5 and set(named) < set(SIX), sentence
+    assert " and 1 more operations for the whole install," in sentence, sentence
+    suggested = [yaml.safe_load(t)["match"]["op"] for t in _NEW_ENTRY.findall(sentence)]
+    assert sorted(suggested) == list(SIX), sentence
+    await _store_tenant_file(followed)
+    for op_id in SIX:
+        assert _explain(client, key, "cowx", op_id)["risk_level"] == "dangerous", op_id
+        assert _explain(client, key, "cowy", op_id)["risk_level"] == "caution", op_id
 
 
 # ---------------------------------------------------------------------------

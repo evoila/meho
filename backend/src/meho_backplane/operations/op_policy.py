@@ -842,8 +842,13 @@ def _tenants_losing_approval(
     """The tenants in *scopes* where approval ends when *before* becomes *after*."""
     lost: list[UUID] = []
     for scope in scopes:
-        old = effective_policy(scope.code_safety, scope.code_approval, [before, *scope.own])
-        new = effective_policy(scope.code_safety, scope.code_approval, [after, *scope.own])
+        plain = scope.copy_row is not None and plain_mark_counts_as_level(scope.copy_row)
+        old = effective_policy(
+            scope.code_safety, scope.code_approval, [before, *scope.own], plain_mark=plain
+        )
+        new = effective_policy(
+            scope.code_safety, scope.code_approval, [after, *scope.own], plain_mark=plain
+        )
         if old.requires_approval and not new.requires_approval:
             lost.append(scope.tenant_id)
     return tuple(lost)

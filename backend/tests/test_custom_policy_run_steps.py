@@ -53,7 +53,13 @@ from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations import run_step_rules
 from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
-from meho_backplane.operations.op_policy import apply_policy_edit
+from meho_backplane.operations.op_policy import (
+    OpKey,
+    OpPolicyEditError,
+    PolicyEditResult,
+    apply_policy_edit,
+    remove_override,
+)
 from tests import _composite_wait_audit_helpers as h
 from tests import _custom_policy_remote_steps_helpers as r
 from tests import _custom_policy_run_steps_helpers as c
@@ -519,6 +525,127 @@ async def test_an_install_wide_approval_on_reaches_a_tenant_copy_with_the_plain_
         _PLAIN_CAUTION, child=child, run_op_id=r.REMOTE_CHILD_RUN if child else r.REMOTE_RUN
     )
     assert str(own.id) == result.extras["approval_request_id"]
+
+
+async def _platform_admin_removes(
+    step: Step, *, reason: str | None, person_present: bool
+) -> PolicyEditResult:
+    """A platform admin removes the install-wide override of *step*."""
+    admin = Operator(
+        sub="admin-a",
+        raw_jwt="header.payload.signature",
+        tenant_id=h.TENANT_ID,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+        principal_kind=PrincipalKind.USER,
+    )
+    async with get_sessionmaker()() as s, s.begin():
+        row = (
+            await s.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == step.op_id, EndpointDescriptor.tenant_id.is_(None)
+                )
+            )
+        ).scalar_one()
+        return await remove_override(
+            s,
+            key=OpKey.of(row),
+            scope_tenant_id=None,
+            operator=admin,
+            reason=reason,
+            person_present=person_present,
+            max_age_seconds=300,
+        )
+
+
+@_BOTH_STATES
+async def test_a_stale_removal_of_the_install_wide_approval_on_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+) -> None:
+    """With the switch on, removing the override for a plain-mark tenant copy needs the checks.
+
+    A removal with a stale sign-in and no reason is refused, the override
+    stays, and the child call waits. With the switch off the edit stores
+    nothing, and the child call waits.
+    """
+    c.switch(monkeypatch, on=on)
+    stored: list[OperationPolicyOverride | None] = []
+
+    async def _edit_then_remove() -> None:
+        stored.append(await _admin_turns_approval_on(_PLAIN_CAUTION, install_wide=True))
+        if on:
+            with pytest.raises(OpPolicyEditError):
+                await _platform_admin_removes(_PLAIN_CAUTION, reason=None, person_present=False)
+
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        _PLAIN_CAUTION,
+        {"level": "destructive", "typed": True},
+        {"typed": True},
+        child=True,
+        approver_role=TenantRole.TENANT_ADMIN,
+        before_start=_edit_then_remove,
+    )
+    [override] = stored
+    async with get_sessionmaker()() as s:
+        left = (
+            await s.execute(
+                select(OperationPolicyOverride).where(
+                    OperationPolicyOverride.op_id == _PLAIN_CAUTION.op_id
+                )
+            )
+        ).scalar_one_or_none()
+    if on:
+        assert override is not None
+        assert left is not None
+        assert (left.tenant_id, left.requires_approval) == (None, True)
+    else:
+        assert override is None
+        assert left is None
+    assert result.status == "awaiting_approval", result.error
+    await c.assert_waits(_PLAIN_CAUTION, child=True, run_op_id=r.REMOTE_CHILD_RUN)
+
+
+async def test_a_fresh_removal_with_a_reason_of_the_install_wide_approval_on_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """With the switch on, a platform admin with a fresh sign-in and a reason may remove it.
+
+    The built-in row is ``dangerous`` with approval on, so no fixed rule
+    holds it. The removal names the tenant whose copy loses approval, and the
+    child call then goes ahead under the run approval.
+    """
+    c.switch(monkeypatch, on=True)
+    removed: list[PolicyEditResult] = []
+
+    async def _edit_then_remove() -> None:
+        assert await _admin_turns_approval_on(_PLAIN_CAUTION, install_wide=True) is not None
+        removed.append(
+            await _platform_admin_removes(
+                _PLAIN_CAUTION, reason="test: approval back to the code", person_present=True
+            )
+        )
+
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        _PLAIN_CAUTION,
+        {"level": "dangerous", "typed": True},
+        {"typed": True},
+        child=True,
+        approver_role=TenantRole.TENANT_ADMIN,
+        before_start=_edit_then_remove,
+    )
+    [done] = removed
+    assert done.approval_ended_for_tenants == (h.TENANT_ID,)
+    assert result.status == "ok", result.error
+    assert c.ran == [h.STEP_A, _PLAIN_CAUTION.op_id]
 
 
 # -- a built-in row and the tenant's own row of a step-gate step ------------------

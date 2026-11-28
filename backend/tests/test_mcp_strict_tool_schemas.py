@@ -340,6 +340,35 @@ def test_a_ref_key_under_dependent_required_inside_not_is_a_name() -> None:
             assert _accepts(schema, candidate), candidate
 
 
+@pytest.mark.parametrize(
+    "index",
+    ["1", "01", "+1", " 1", "1 ", "\u00b9", "\u0661"],
+    ids=[
+        "plain",
+        "leading-zero",
+        "plus-sign",
+        "space-before",
+        "space-after",
+        "superscript",
+        "arabic-indic",
+    ],
+)
+def test_a_ref_steps_into_a_list_only_through_a_plain_index(index: str) -> None:
+    schema = {
+        "properties": {
+            "a": {"not": {"$ref": f"#/properties/b/anyOf/{index}"}},
+            "b": {"anyOf": [{"type": "integer"}, {"enum": ["x", None]}]},
+        }
+    }
+    sent = _without_null_enum_members(schema)
+    if index == "\u00b9":
+        # jsonschema cannot read this reference in either copy.
+        return
+    for value in (None, "x", "other", 3):
+        if _accepts(sent, {"a": value}):
+            assert _accepts(schema, {"a": value}), (index, value)
+
+
 def _sample(schema: dict[str, Any]) -> Any:
     """A valid value for *schema*, enough for the required inputs."""
     if "enum" in schema:

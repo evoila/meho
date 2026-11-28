@@ -2356,8 +2356,11 @@ form: `delivery` of `call_operation`.
   `enum` could make the sent schema accept a value that the server refuses:
   the schema under `not`, `if` and `oneOf`, under `contains` next to
   `maxContains`, and each schema these point to with `$ref` (also through
-  another `$ref`). When such a `$ref` is not a plain local path, or a schema
-  object below the top has an `$id`, the whole schema stays as it is. A `$ref`
+  another `$ref`). The whole schema stays as it is in three cases: such a
+  `$ref` is not a plain local path; its path steps into a list with an index
+  not written the plain way (only ASCII digits with no leading zero, sign or
+  space count as an index); or a schema object below the top has an `$id`.
+  The rewrite never fails on the form of an index. A `$ref`
   or `$id` key does not count in two places only: inside the value of
   `default`, `const`, `enum`, `examples` or `example`, and as a key under
   `properties`, `patternProperties`, `$defs`, `definitions`,

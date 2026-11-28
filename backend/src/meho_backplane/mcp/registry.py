@@ -477,13 +477,27 @@ def _ref_path(ref: Any) -> tuple[str, ...] | None:
     return tuple(part.replace("~1", "/").replace("~0", "~") for part in pointer.split("/")[1:])
 
 
+_PLAIN_INDEX: Final = re.compile(r"0|[1-9][0-9]*")
+_NOT_PLAIN: Final = object()
+
+
 def _at_path(node: Any, path: tuple[str, ...]) -> Any:
-    """The part of *node* at *path*, or ``None`` when there is no such part."""
+    """The part of *node* at *path*, or ``None`` when there is no such part.
+
+    A part steps into a list only when it is an index written the plain way:
+    ASCII digits with no leading zero, sign or space. Any other part on a list
+    gives :data:`_NOT_PLAIN`, because a validator may read it as an index too.
+    """
     for part in path:
         if isinstance(node, dict):
             node = node.get(part)
-        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
-            node = node[int(part)]
+        elif isinstance(node, list):
+            if not _PLAIN_INDEX.fullmatch(part):
+                return _NOT_PLAIN
+            index = int(part)
+            if index >= len(node):
+                return None
+            node = node[index]
         else:
             return None
     return node
@@ -505,9 +519,12 @@ def _kept_paths(schema: Any) -> set[tuple[str, ...]]:
     """The path of each schema a kept schema points to, also through other ``$ref``.
 
     A ``$ref``, ``$dynamicRef`` or ``$recursiveRef`` with a plain local path
-    (``#/...``) is followed. Any of them in another form (``#name``, another
-    file), or an ``$id`` in a schema object below the top, keeps the whole
-    schema: the path a reference points to is then not known for sure.
+    (``#/...``) is followed. Three cases keep the whole schema, because the
+    path a reference points to is then not known for sure: such a reference
+    in another form (``#name``, another file); a local path with a part on a
+    list that is not an index written the plain way (ASCII digits with no
+    leading zero, sign or space, see :func:`_at_path`); and an ``$id`` in a
+    schema object below the top.
 
     A ``$ref`` or ``$id`` key does not count in two places only: inside the
     value of ``default``, ``const``, ``enum``, ``examples`` or ``example``, and
@@ -528,7 +545,10 @@ def _kept_paths(schema: Any) -> set[tuple[str, ...]]:
             return {()}
         if path not in paths:
             paths.add(path)
-            refs.extend(_values_of(_at_path(schema, path), _REFERENCE_KEYWORDS))
+            target = _at_path(schema, path)
+            if target is _NOT_PLAIN:
+                return {()}
+            refs.extend(_values_of(target, _REFERENCE_KEYWORDS))
     return paths
 
 
@@ -549,7 +569,8 @@ def _without_null_enum_members(schema: Any, *, accept_null: bool = False) -> Any
     refuses: the schema under ``not``, ``if`` and ``oneOf``, under ``contains``
     next to ``maxContains``, and each schema these point to with a reference
     (``$ref``, ``$dynamicRef`` or ``$recursiveRef``). The whole schema stays
-    as it is when such a reference is not a plain local path (``#/...``), or
+    as it is when such a reference is not a plain local path (``#/...``), when
+    its path steps into a list with an index not written the plain way, or
     when a schema object below the top has an ``$id`` (see :func:`_kept_paths`).
 
     *accept_null* is true for an output schema: there ``null`` still passes
@@ -631,10 +652,12 @@ def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
     under ``not``, ``if`` and ``oneOf``, under ``contains`` next to
     ``maxContains``, and each schema these point to with a reference
     (``$ref``, ``$dynamicRef`` or ``$recursiveRef``). The whole schema stays as
-    it is in two cases: such a reference is not a plain local path
-    (``#/...``), or a schema object below the top has an ``$id`` (see
-    :func:`_kept_paths`). A tool whose sent schema still holds ``null`` in an
-    ``enum`` is caught by the test of the registry.
+    it is in three cases: such a reference is not a plain local path
+    (``#/...``); its path steps into a list with an index not written the
+    plain way (ASCII digits with no leading zero, sign or space); or a schema
+    object below the top has an ``$id`` (see :func:`_kept_paths`). A tool
+    whose sent schema still holds ``null`` in an ``enum`` is caught by the
+    test of the registry.
 
     *schema* is not mutated. When there is nothing to change (no top-level
     combinator and no ``null`` in an ``enum`` the rewrite touches), the same

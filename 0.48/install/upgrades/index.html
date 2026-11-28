@@ -4317,6 +4317,11 @@ Rows of the next release are in this table at once.</p>
 </tr>
 <tr>
 <td><strong>v0.49.0</strong></td>
+<td>The delete of a hand-made topology node (<code>topology.delete_node</code>) now says that it is hard to undo (<code>hard_to_undo: deletes</code>): a node made again gets a new id, and the old node's edges do not come back. With the switch <code>CUSTOM_POLICY</code> on, it is one of the operations that newly wait for a person when a service login calls it under a standing grant. With the switch off, nothing changes. See https://github.com/evoila/meho/blob/main/docs/codebase/policy-classification.md.</td>
+<td>Before you turn <code>CUSTOM_POLICY</code> on, check for standing grants of <code>topology.delete_node</code> with the query of the row on hard-to-undo operations. Plan for a person to approve those calls.</td>
+</tr>
+<tr>
+<td><strong>v0.49.0</strong></td>
 <td>An approved change on SSH, Kubernetes, a database or Vault whose answer was lost (a timeout or a dropped connection after MEHO sent it) now shows "uncertain" in every approvals view, like an HTTP change. A failed multi-step operation with such a step shows "uncertain" too, with the state of each step. The re-run route refuses these requests. Check the target first, then make a new request.</td>
 <td>None.</td>
 </tr>

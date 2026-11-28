@@ -18,6 +18,7 @@ from typing import Any
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.auth.caller_record import caller_columns
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -243,6 +244,7 @@ async def _record_use(
                 duration_ms=Decimal("0.00"),
                 payload=payload,
                 work_ref=row.work_ref,
+                **caller_columns(operator),
             )
         )
         await session.commit()

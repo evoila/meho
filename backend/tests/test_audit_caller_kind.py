@@ -135,12 +135,13 @@ class _Tokens:
         azp: str | None = "meho-cli",
         audience: str | None = None,
         runner_id: str | None = None,
+        client_id: str | None = None,
     ) -> str:
         claims: dict[str, Any] = {}
         if azp is not None:
             claims["azp"] = azp
         if kind in ("agent", "service"):
-            claims["client_id"] = sub
+            claims["client_id"] = client_id or sub
         elif kind is None:
             # A person's token comes from an interactive sign-in.
             claims["sid"] = "made-up-sign-in-session"
@@ -357,6 +358,29 @@ def test_the_approvals_list_names_the_kind(
         page = client.get("/ui/approvals", headers={"HX-Request": "true"})
     assert page.status_code == 200, page.text
     assert f"The service agent {agent} asked." in page.text
+
+
+def test_the_card_names_a_service_agent_by_its_client_id(
+    monkeypatch: pytest.MonkeyPatch, tokens: _Tokens
+) -> None:
+    _switch(monkeypatch, on=True)
+    _seed()
+    # A client-credentials token: the account id as ``sub``, the client as ``azp``.
+    account = str(uuid.uuid4())
+    token = tokens.token(account, kind="agent", azp="agent:reporter", client_id="agent:reporter")
+    result = tokens.call(_CAUTION_OP, token)
+    assert result["status"] == "awaiting_approval"
+
+    (request,) = _requests()
+    clear_jwks_cache()
+    client, mock, _ = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_CONSOLE_PERSON, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        modal = client.get(f"/ui/approvals/{request.id}")
+    assert modal.status_code == 200, modal.text
+    assert "The service agent agent:reporter asked." in modal.text
+    assert f"The service agent {account} asked." not in modal.text
 
 
 # ----------------------------------------------------------- the switch off

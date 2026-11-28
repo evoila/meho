@@ -210,3 +210,24 @@ async def test_target_with_no_connector_keeps_its_answer() -> None:
     result = await _call(_Target("gamma"))
     assert result.extras["error_code"] == "no_connector"
     assert _RUNS == []
+
+
+@pytest.mark.asyncio
+async def test_every_row_of_a_granted_call_names_a_service_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``CUSTOM_POLICY`` on and no login bound for a request, as in a scheduled run."""
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
+    await _register_op()
+    grant_id = await _seed_name_grant()
+
+    result = await _call(_Target("alpha"))
+
+    assert result.status == "ok", result.error
+    assert await _grant_use_rows(grant_id) == 1
+    async with get_sessionmaker()() as s:
+        query = select(AuditLog).where(AuditLog.operator_sub == _PRINCIPAL)
+        rows = (await s.execute(query)).scalars().all()
+    assert {row.path for row in rows} == {"approval.decision", _OP}
+    assert {row.caller_kind for row in rows} == {"service_agent"}

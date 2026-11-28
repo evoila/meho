@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 from meho_backplane.auth.caller_record import CALLER_KIND_KEY, caller_record_on
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations._preview import stored_requester_record
 from meho_backplane.operations.approval_outcome import (
     ResumeOutcome,
     resume_outcome,
@@ -291,12 +292,26 @@ def caller_line(row: ApprovalRequest, reader: Operator | None) -> str | None:
     who = row.principal_name or row.principal_sub
     lines = {
         "personal_agent": f"The personal agent of {who} asked.",
-        "service_agent": f"The service agent {row.principal_act or row.principal_sub} asked.",
+        "service_agent": f"The service agent {_service_agent_name(row)} asked.",
         "person": f"{who} asked in the web console.",
         "runner": f"The runner {row.principal_sub} asked.",
         "system": "MEHO itself asked.",
     }
     return lines.get(kind) if isinstance(kind, str) else None
+
+
+def _service_agent_name(row: ApprovalRequest) -> str:
+    """The agent of a ``service_agent`` request: ``agent:<name>`` when known.
+
+    The acting agent of a delegated call, else the client id of the stored
+    requester record (a direct agent token's ``sub`` is an account id),
+    else the login.
+    """
+    if row.principal_act:
+        return row.principal_act
+    record = stored_requester_record(row.proposed_effect)
+    client_id = record.get("client_id") if isinstance(record, dict) else None
+    return client_id if isinstance(client_id, str) and client_id else row.principal_sub
 
 
 def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:

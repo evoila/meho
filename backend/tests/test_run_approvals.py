@@ -277,6 +277,24 @@ async def test_listed_call_runs_and_audit_row_names_the_approval(run_ref: str) -
 
 
 @pytest.mark.asyncio
+async def test_with_custom_policy_on_the_approval_row_names_the_kind_of_caller(
+    run_ref: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
+    target = await _target("vc-a")
+    approval_id = await _approved(
+        RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP, target_id=target.id)
+    )
+
+    verdict, _ = await _verdict(target)
+
+    assert verdict is PermissionVerdict.AUTO_EXECUTE
+    (row,) = await _use_rows(approval_id)
+    assert row.caller_kind == "service_agent"
+
+
+@pytest.mark.asyncio
 async def test_targetless_entry_covers_only_a_call_without_target(run_ref: str) -> None:
     approval_id = await _approved(RunApprovalEntry(connector_id=_CONNECTOR, op_id=_WRITE_OP))
 

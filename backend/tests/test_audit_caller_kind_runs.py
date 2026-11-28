@@ -12,13 +12,18 @@ the audit rows:
   waiting request keep the requester's kind;
 * a hosted agent run that a person started from the web console: every
   row is ``service_agent``. The acting agent counts before the web session;
-* a check of the check runner: ``system``, the kind its login has.
+* a check of the check runner: ``system``, the kind its login has;
+* a person's token call that MEHO stopped at shutdown: its "unfinished"
+  row keeps the kind, saved when the call started.
 
 Fixture values are made up.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -31,9 +36,11 @@ from pydantic_ai.messages import ToolCallPart
 from sqlalchemy import select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.runner import _run_evaluation, _SensorSnapshot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRunStatus, AuditLog
+from meho_backplane.operations import dispatcher, shutdown_drain
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
 from meho_backplane.ui.auth.session_store import DecryptedSession
@@ -58,6 +65,7 @@ from tests.test_approved_run_rights import (
     op,
 )
 from tests.test_sensor_runner import _OK_ASSERTION
+from tests.test_shutdown_drain import _block_body
 
 __all__ = ["_reset_state", "client", "op", "stub_embedding_service"]
 
@@ -168,3 +176,36 @@ async def test_a_check_of_the_check_runner_writes_system(
 
     rows = await _rows(path="vault.kv.read")
     assert [(row.operator_sub, row.caller_kind) for row in rows] == [("__sensor__", "system")]
+
+
+async def test_a_call_stopped_at_shutdown_keeps_its_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    person = Operator(
+        sub="person-token",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        token_checked=True,
+    )
+    shutdown_drain.reset_drain_state()
+    entered, _release = _block_body(monkeypatch)
+    running = asyncio.create_task(
+        dispatcher.dispatch(
+            operator=person, connector_id="demo-1.x", op_id="demo.slow", target=None, params={}
+        )
+    )
+    try:
+        await entered.wait()
+        shutdown_drain.begin_drain()
+        still_running = await shutdown_drain.wait_for_running_operations(time.monotonic() + 0.2)
+        assert await shutdown_drain.record_unfinished_operations(still_running) == 1
+    finally:
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+        shutdown_drain.reset_drain_state()
+
+    (row,) = await _rows(path="demo.slow")
+    assert row.payload["result_status"] == "unfinished"
+    assert (row.operator_sub, row.caller_kind) == ("person-token", "personal_agent")

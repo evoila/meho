@@ -306,6 +306,7 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
+from meho_backplane.auth.caller_record import caller_columns
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
@@ -4340,6 +4341,7 @@ async def dispatch(
                     operator_sub=operator.sub,
                     tenant_id=operator.tenant_id,
                     approved_run=_approved,
+                    caller=caller_columns(operator),
                 ):
                     return await _dispatch_now(
                         operator=operator,

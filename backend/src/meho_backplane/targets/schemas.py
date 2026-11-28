@@ -136,7 +136,8 @@ def validate_ca_pin_pem(value: str | None) -> str | None:
     ctx = ssl.create_default_context()
     try:
         ctx.load_verify_locations(cadata=value)
-    except ssl.SSLError as exc:
+    except (ssl.SSLError, TypeError) as exc:
+        # TypeError: the stdlib refuses non-ASCII text in cadata.
         raise ValueError(f"tls_ca_pin is not a valid PEM certificate bundle: {exc}") from exc
     return value
 

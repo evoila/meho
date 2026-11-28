@@ -65,6 +65,8 @@ _TOOLS = {
 }
 _DEEP_REASON = f"extras may be at most {EXTRAS_MAX_DEPTH} levels deep"
 _PIN_REASON = "tls_ca_pin and verify_tls=false are mutually exclusive"
+_BAD_PIN_REASON = "tls_ca_pin is not a valid PEM certificate bundle"
+_CASES = ["too-deep-extras", "model-rule", "non-ascii-pin"]
 
 
 def _agent() -> Operator:
@@ -129,10 +131,13 @@ def _too_deep(value: str) -> dict[str, Any]:
 
 
 def _params(op_id: str, case: str, made: str, target: TargetORM) -> tuple[dict[str, Any], str]:
-    """Params the model refuses, each with the made-up value in ``extras``."""
+    """Params the model refuses, each with the made-up value in the sent fields."""
     if case == "too-deep-extras":
         fields: dict[str, Any] = {"extras": _too_deep(made)}
         reason = _DEEP_REASON
+    elif case == "non-ascii-pin":
+        fields = {"tls_ca_pin": f"caf\u00e9 {made}"}
+        reason = _BAD_PIN_REASON
     else:
         fields = {
             "tls_ca_pin": _VALID_CA_PEM,
@@ -171,7 +176,7 @@ async def _assert_nothing_stored(made: str, target: TargetORM) -> None:
     assert row.extras == {"a": 1}
 
 
-@pytest.mark.parametrize("case", ["too-deep-extras", "model-rule"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("op_id", [TARGETS_REGISTER_OP_ID, TARGETS_UPDATE_OP_ID])
 async def test_call_operation_refuses_at_once_without_the_value(
     op_id: str, case: str, _target: TargetORM
@@ -192,7 +197,7 @@ async def test_call_operation_refuses_at_once_without_the_value(
     await _assert_nothing_stored(made, _target)
 
 
-@pytest.mark.parametrize("case", ["too-deep-extras", "model-rule"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("op_id", [TARGETS_REGISTER_OP_ID, TARGETS_UPDATE_OP_ID])
 async def test_the_mcp_tool_refuses_at_once_without_the_value(
     op_id: str, case: str, _target: TargetORM, _mcp_client: TestClient
@@ -217,7 +222,7 @@ async def test_the_mcp_tool_refuses_at_once_without_the_value(
     await _assert_nothing_stored(made, _target)
 
 
-@pytest.mark.parametrize("case", ["too-deep-extras", "model-rule"])
+@pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("op_id", [TARGETS_REGISTER_OP_ID, TARGETS_UPDATE_OP_ID])
 async def test_the_handler_names_the_field_never_the_value(
     op_id: str, case: str, _target: TargetORM

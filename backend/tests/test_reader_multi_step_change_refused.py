@@ -1,24 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A Reader's agent or hosted run that starts a multi-step operation with a change step is refused.
+"""A Reader's agent or hosted run that starts a multi-step operation with a step list is refused.
 
 The multi-step operation is ``safe``, with no approval flag and no class.
 Its one step is sent through ``run_governed_subop`` without the approval
 flag, at ``safe`` or ``caution``. The step is a plain write (class
-``write``), a credential write or a credential mint. Each case runs through
-the real ``dispatch``, and the agent login also through the REST and MCP
-call doors:
+``write``), a credential write, a credential mint, or a read. Each case
+runs through the real ``dispatch``, and the agent login also through the
+REST and MCP call doors:
 
-* The step is on the operation's step list: a Reader's agent login and a
+* The operation registers a step list: a Reader's agent login and a
   Reader's hosted run are refused with ``insufficient_role`` and the Reader
-  sentence. No approval request is stored and the step is not sent.
-* The step is not on a list: the call waits for approval as before. After
-  a person approves it, the step is refused with the Reader sentence and
-  is not sent.
-* A list with only read steps: the call waits for approval, and after the
-  approval the read step is sent.
+  sentence. This holds for a write step, a credential step and a list with
+  only read steps. No approval request is stored and the step is not sent.
+* The operation registers no step list: the call waits for approval as
+  before. After a person approves it, a change step is refused with the
+  Reader sentence and is not sent.
 * An Operator's agent login and hosted run keep their answers.
+* A guard: no operation the core registers counts as a read for a Reader
+  while it has a step list.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import httpx
@@ -39,21 +41,28 @@ from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.op_classes import _DECLARED, declare_op_classes
 from meho_backplane.operations import dispatch
 from meho_backplane.operations.approval_queue import approve_request, resume_dispatch_after_approval
-from meho_backplane.operations.governed_subops import register_governed_subops
-from meho_backplane.operations.role_floors import READER_CHANGE_CODE, holds_change_step
+from meho_backplane.operations.governed_subops import (
+    governed_subops_for,
+    register_governed_subops,
+)
+from meho_backplane.operations.role_floors import READER_CHANGE_CODE, asks_for_change
+from meho_backplane.operations.typed_register import (
+    clear_typed_op_snapshot,
+    run_typed_op_registrars,
+)
 from meho_backplane.settings import get_settings
 from tests import _composite_wait_audit_helpers as h
 from tests import _credential_step_always_waits_helpers as s
 from tests._composite_wait_audit_helpers import NoOpVaultConnector
-from tests.test_agent_grant_required import _AGENT, _TENANT, _reset_state
+from tests.test_agent_grant_required import _AGENT, _TENANT, _reset_state, stub_embedding_service
 from tests.test_approved_run_rights import _required_settings_env, _token
 from tests.test_reader_change_refused import _ANSWER, _REST_BODY, _mcp_call, client, mcp_as
 
-__all__ = ["_required_settings_env", "_reset_state", "client", "mcp_as"]
+__all__ = ["_required_settings_env", "_reset_state", "client", "mcp_as", "stub_embedding_service"]
 
 pytestmark = pytest.mark.asyncio
 
@@ -61,6 +70,8 @@ _CLASS_STEP = "vault.standin.step.plain"
 _CHANGE_STEPS = {"plain_write": _CLASS_STEP, "credential_write": s.WRITE_STEP}
 _CHANGE_STEPS["credential_mint"] = s.MINT_STEP
 _READ_STEPS = {"get_path": "GET:/standin/config", "list_name": "vault.standin.step.config.list"}
+_READ_STEPS["plain_name"] = "vault.standin.step.config"
+_LISTED_STEPS = {**_CHANGE_STEPS, **_READ_STEPS}
 _LEVELS = ["safe", "caution"]
 _LOGINS = ["agent", "hosted"]
 _PLAIN_FORBIDDEN = "forbidden: 'call_operation' requires a higher role"
@@ -158,46 +169,13 @@ def _assert_reader_refused(result: OperationResult) -> None:
     assert result.extras["reason"] == _ANSWER
 
 
-# --- The step list -------------------------------------------------------------------
-
-
-async def test_a_listed_change_step_makes_the_operation_a_change() -> None:
-    assert not holds_change_step(s.COMPOSITE_OP_ID), "no list, no known step"
-    for step in _CHANGE_STEPS.values():
-        _list(step)
-        assert holds_change_step(s.COMPOSITE_OP_ID), step
-    for step in _READ_STEPS.values():
-        _list(step)
-        assert not holds_change_step(s.COMPOSITE_OP_ID), step
-
-
-async def test_a_step_of_a_listed_step_counts_and_a_list_that_loops_ends() -> None:
-    inner = "vault.composite.standin_inner"
-    register_governed_subops(
-        composite_op_id=s.COMPOSITE_OP_ID,
-        connector_id=s.CONNECTOR_ID,
-        sub_op_ids=(_READ_STEPS["list_name"], inner),
-    )
-    register_governed_subops(
-        composite_op_id=inner,
-        connector_id=s.CONNECTOR_ID,
-        sub_op_ids=(s.COMPOSITE_OP_ID, _READ_STEPS["get_path"]),
-    )
-    assert not holds_change_step(s.COMPOSITE_OP_ID)
-
-    register_governed_subops(
-        composite_op_id=inner, connector_id=s.CONNECTOR_ID, sub_op_ids=(s.MINT_STEP,)
-    )
-    assert holds_change_step(s.COMPOSITE_OP_ID)
-
-
 # --- A Reader's agent login and hosted run ---------------------------------------------
 
 
-@pytest.mark.parametrize("step", list(_CHANGE_STEPS.values()), ids=list(_CHANGE_STEPS))
+@pytest.mark.parametrize("step", list(_LISTED_STEPS.values()), ids=list(_LISTED_STEPS))
 @pytest.mark.parametrize("level", _LEVELS)
 @pytest.mark.parametrize("login", _LOGINS)
-async def test_a_reader_change_step_on_the_list_is_refused_before_the_call_waits(
+async def test_a_reader_multi_step_operation_with_a_step_list_is_refused_before_the_call_waits(
     step: str, level: str, login: str
 ) -> None:
     _list(step)
@@ -224,21 +202,6 @@ async def test_a_reader_change_step_not_on_a_list_is_refused_after_the_approval(
     assert request.op_id == s.COMPOSITE_OP_ID
     assert resumed.status != "ok", resumed
     assert _ANSWER in str(resumed.error), resumed
-
-
-@pytest.mark.parametrize("step", list(_READ_STEPS.values()), ids=list(_READ_STEPS))
-@pytest.mark.parametrize("login", _LOGINS)
-async def test_a_reader_multi_step_read_waits_and_then_runs(step: str, login: str) -> None:
-    _list(step)
-
-    first = await _run(login, TenantRole.READ_ONLY, step, "safe")
-
-    assert first.status == "awaiting_approval", first.error
-    assert s.sent == []
-    second = await _approve_and_resume(first)
-    assert second.status == "ok", second.error
-    assert s.sent == [step]
-    assert len(await _requests()) == 1
 
 
 # --- An Operator's agent login and hosted run -------------------------------------------
@@ -279,7 +242,7 @@ async def test_an_operator_caution_or_credential_step_waits_for_its_own_approval
 # --- The REST and MCP call doors of a Reader's agent login ---------------------------------
 
 
-@pytest.mark.parametrize("step", list(_CHANGE_STEPS.values()), ids=list(_CHANGE_STEPS))
+@pytest.mark.parametrize("step", list(_LISTED_STEPS.values()), ids=list(_LISTED_STEPS))
 async def test_a_reader_agent_rest_call_gets_the_code_and_the_sentence(
     client: tuple[httpx.AsyncClient, Any], step: str
 ) -> None:
@@ -303,11 +266,10 @@ async def test_a_reader_agent_rest_call_gets_the_code_and_the_sentence(
     assert s.sent == []
 
 
-async def test_a_reader_agent_rest_call_of_a_multi_step_read_keeps_its_answer(
+async def test_a_reader_agent_rest_call_with_no_step_list_keeps_its_answer(
     client: tuple[httpx.AsyncClient, Any],
 ) -> None:
     ac, key = client
-    _list(_READ_STEPS["get_path"])
     headers = _token(key, "reader-agent", role=TenantRole.READ_ONLY, kind="agent", client_id=_AGENT)
 
     response = await ac.post(
@@ -325,7 +287,7 @@ def _reader_agent() -> Operator:
     return _login("agent", TenantRole.READ_ONLY)
 
 
-@pytest.mark.parametrize("step", list(_CHANGE_STEPS.values()), ids=list(_CHANGE_STEPS))
+@pytest.mark.parametrize("step", list(_LISTED_STEPS.values()), ids=list(_LISTED_STEPS))
 async def test_a_reader_agent_mcp_call_gets_the_code_and_the_sentence(
     client: tuple[httpx.AsyncClient, Any], mcp_as: Callable[[Operator], None], step: str
 ) -> None:
@@ -348,11 +310,10 @@ async def test_a_reader_agent_mcp_call_gets_the_code_and_the_sentence(
     assert s.sent == []
 
 
-async def test_a_reader_agent_mcp_call_of_a_multi_step_read_keeps_its_answer(
+async def test_a_reader_agent_mcp_call_with_no_step_list_keeps_its_answer(
     client: tuple[httpx.AsyncClient, Any], mcp_as: Callable[[Operator], None]
 ) -> None:
     ac, _ = client
-    _list(_READ_STEPS["list_name"])
     mcp_as(_reader_agent())
 
     body = await _mcp_call(
@@ -362,3 +323,50 @@ async def test_a_reader_agent_mcp_call_of_a_multi_step_read_keeps_its_answer(
     )
 
     assert body["error"]["message"] == _PLAIN_FORBIDDEN, body
+
+
+# --- The guard over the operations the core registers -------------------------------------
+
+
+async def _register_the_core(embedding_service: AsyncMock) -> None:
+    """Run every registrar for real, so each one registers its step lists again."""
+    clear_typed_op_snapshot()
+    await run_typed_op_registrars(embedding_service=embedding_service)
+
+
+async def _reads_with_a_step_list() -> list[str]:
+    """Every registered operation that has a step list but counts as a read for a Reader."""
+    async with get_sessionmaker()() as session:
+        stmt = select(EndpointDescriptor).where(EndpointDescriptor.tenant_id.is_(None))
+        rows = (await session.execute(stmt)).scalars().all()
+    assert rows, "the core registered no operation"
+    return sorted(
+        row.op_id
+        for row in rows
+        if governed_subops_for(row.op_id) is not None and not asks_for_change(row, {})
+    )
+
+
+async def test_no_operation_of_the_core_with_a_step_list_counts_as_a_read(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    await _register_the_core(stub_embedding_service)
+
+    assert await _reads_with_a_step_list() == []
+
+
+async def test_the_guard_names_a_read_with_a_step_list(stub_embedding_service: AsyncMock) -> None:
+    await _register_the_core(stub_embedding_service)
+    async with get_sessionmaker()() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id.is_(None),
+            EndpointDescriptor.source_kind != "composite",
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+    read = next(row for row in rows if not asks_for_change(row, {}))
+
+    register_governed_subops(
+        composite_op_id=read.op_id, connector_id=s.CONNECTOR_ID, sub_op_ids=(_CLASS_STEP,)
+    )
+
+    assert await _reads_with_a_step_list() == [read.op_id]

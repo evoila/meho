@@ -443,12 +443,12 @@ login, an agent login, and a hosted agent run that a Reader started.
   (`declare_safe_writes`, `is_safe_write`);
 - a credential write or mint;
 - a change of rights;
-- a multi-step operation whose step list has a change step
-  (`holds_change_step`). The list is the one its connector registers
-  (`register_governed_subops`), read at every level. The list names only
-  op ids, so a listed step counts as a change unless its class says it
-  reads (`GET` / `HEAD`, a read name such as `.list`, or a declared
-  class). An operation with only read steps is not a change.
+- a multi-step operation that registers a step list
+  (`register_governed_subops`, read with `governed_subops_for`). This
+  holds for a list with a write step, a credential step or only read
+  steps. MEHO takes no class of a step from its op id. A multi-step
+  operation with no step list counts by its own class, as a single call
+  does.
 
 A `safe` read is not a change. A credential read is at least `caution` and
 waits for a person's approval (`operations/credential_read.py`), so it

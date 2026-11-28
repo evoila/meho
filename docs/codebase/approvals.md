@@ -418,7 +418,9 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
-  - A credential write, and a `k8s.apply` whose manifest holds a Secret
+  - A call of class `credential_write` or `credential_use`, a waiting
+    plain step of a multi-step operation of one of these classes, and a
+    `k8s.apply` whose manifest holds a Secret
     or a secret-looking value (the param a connector declares with
     `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
@@ -1039,15 +1041,18 @@ refused, and the operation does not run. A preview is not a change. The rule, th
 
 ## A credential call always waits for a person
 
-A call that reads, writes or makes a credential (the classes
-`credential_read`, `credential_write` and `credential_mint`) always waits
-for a person. No standing grant, no agent grant and no run approval covers
-it. One rule says so: `service_grants.never_covered_reason`, with
+A call that reads, writes, makes or uses a credential (the classes
+`credential_read`, `credential_write`, `credential_mint` and
+`credential_use`) always waits for a person. No standing grant, no agent
+grant and no run approval covers it. A person's own call of a
+`credential_use` operation follows its risk level and approval mark. One
+rule says so: `service_grants.never_covered_reason`, with
 `credential_grant_reason` for these classes. Grant create, run approval
 create and agent grant create (an exact op id with `auto-execute`) refuse
 such an operation with the reason "A standing grant, an agent grant or a
 run approval never covers 'OP': it reads, writes or makes a credential, so
-a person approves each call. Leave it out." The call of an agent or a
+a person approves each call. Leave it out." For a `credential_use`
+operation the reason says "it uses a credential". The call of an agent or a
 service login waits also at level `safe`. The approval of a parent
 multi-step run does not cover such a step or child call: it waits for its
 own approval (`_covered_by_approved_run`). This holds also when the person
@@ -3518,7 +3523,8 @@ of these hold:
 - the body's `status` equals `error_code`, so the body is MEHO's own error
   answer, not a vendor answer;
 - neither the run's op nor the parked op is in a secret class
-  (`credential_read`, `credential_mint`, `credential_write`).
+  (`credential_read`, `credential_mint`, `credential_write`,
+  `credential_use`).
 
 So no param and no vendor text of an operation that sends or reads a secret
 reaches the summary (the rule of #4854). For other operations the text is
@@ -3743,7 +3749,7 @@ Three invariants make the hook safe to wire on the park path:
    `classify_op` (the same single-sourced sensitivity classification used
    for broadcast/audit redaction, #1401) and **suppresses the generic
    params-echo default** for any credential class (`credential_read` /
-   `credential_mint` / `credential_write`) — the generic echo can only do
+   `credential_mint` / `credential_write` / `credential_use`) — the generic echo can only do
    generic key-name / value-shape redaction and is not trusted to scrub a
    connector-specific secret shape, so a credential-class op with no
    bespoke builder collapses to the identifier-only default. For an
@@ -5381,6 +5387,7 @@ a `role="alert"` warning banner when `write_capability_warning` is set
 rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
+`credential_use_redacted` → the same copy, which says the call uses a credential,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
 key-value table of the operation-specific fields (the bespoke `preview`,
 else the generic redaction-safe `params_echo`, #1856). The full envelope
@@ -5922,9 +5929,10 @@ of the steps each run went through (`operations/composite_steps.py`):
   - a step that only `enforce_subop_policy` checks: `started`. The seam
     does not see the handler's own call, so this step never has a stored
     end.
-  A result is kept only when the step's operation does not read, write or
-  make a credential (its class from `classify_op` is not
-  `credential_read`, `credential_mint` or `credential_write`, and its
+  A result is kept only when the step's operation does not read, write,
+  make or use a credential (its class from `classify_op` is not
+  `credential_read`, `credential_mint`, `credential_write` or
+  `credential_use`, and its
   answer does not hide its values, `hides_secret_values`), and the result
   is JSON and holds no secret-named value, also no number under a secret
   name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
@@ -5933,8 +5941,9 @@ of the steps each run went through (`operations/composite_steps.py`):
 - **Credential steps.** MEHO never stores the result of a credential step,
   and never a credential value. The entry holds only the connector, op id,
   target and the keyed params hash. The rule:
-  - A step that **writes or makes** a credential (`credential_write`,
-    `credential_mint`) and ended well becomes `done_no_result`. "Ended
+  - A step that **writes, makes or uses** a credential (`credential_write`,
+    `credential_mint`, `credential_use`) and ended well becomes
+    `done_no_result`. "Ended
     well": the `call` of `run_governed_subop` returned, or the
     `dispatch_child` result is `ok` and not `execution_outcome:
     "uncertain"`. The entry says only that the step is finished.
@@ -6212,7 +6221,8 @@ What the agent waiter does:
   the target's detected version no longer fits it. Covered by
   `test_agent_resume_runs_on_the_stored_sibling_catalog` and
   `test_agent_resume_is_refused_when_the_target_version_moved`.
-- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+- **Sub-op of a `credential_write` or `credential_use` operation.** The row
+  stores only the parent `op_id`; the
   parent params live in the encrypted custody copy. For a composite sub-op
   the claim winner consumes that copy to get the parent params. For a direct
   request it still discards the copy.
@@ -6469,8 +6479,8 @@ repository, no operation made from an API file at run time.
   check.
 - **What fails.** An operation that gets a lower risk level (`destructive` >
   `dangerous` > `caution` > `safe`); loses "needs approval"; loses "no grant
-  can cover it"; moves from `credential_read`, `credential_write` or
-  `credential_mint` to another class; or is removed. A new row passes, and
+  can cover it"; moves from `credential_read`, `credential_write`,
+  `credential_mint` or `credential_use` to another class; or is removed. A new row passes, and
   so does a change to more approval or a higher level.
 - **List a wanted change.** Add one entry for each change, with a one-line
   reason, to `backend/tests/snapshots/approval_table_approved.yaml`:

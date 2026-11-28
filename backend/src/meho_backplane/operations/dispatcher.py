@@ -554,7 +554,7 @@ from meho_backplane.operations.run_step_rules import (
 )
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import (
-    CREDENTIAL_CARD_LINE,
+    descriptor_credential_card_line,
     descriptor_credential_waits,
 )
 from meho_backplane.operations.shutdown_drain import (
@@ -569,7 +569,7 @@ from meho_backplane.operations.uncertain_outcome import (
     with_uncertain_outcome,
 )
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
-from meho_backplane.policy.stamp import take_rule
+from meho_backplane.policy.stamp import row_rule, take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3649,7 +3649,7 @@ async def _build_proposed_effect(
             base["waits_because"] = TOKEN_CALL_WAIT
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
-            base["credential_wait"] = CREDENTIAL_CARD_LINE
+            base["credential_wait"] = descriptor_credential_card_line(descriptor)
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -4661,7 +4661,8 @@ async def _dispatch_now(
                 params=params,
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
-            policy_rule_var.set(take_rule())
+            kept_rule = take_rule()
+            policy_rule_var.set(kept_rule)
             console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
@@ -4737,6 +4738,8 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            # With CUSTOM_POLICY on, the rule that decided this verdict.
+            policy_rule_var.set(row_rule(kept_rule, verdict))
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
                 policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
                 structlog.contextvars.bind_contextvars(

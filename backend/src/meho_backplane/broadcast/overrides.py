@@ -78,6 +78,7 @@ from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.change_counter import ChangeCounter
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import BroadcastOverride
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 
 __all__ = [
     "compute_effective_broadcast_detail",
@@ -129,9 +130,10 @@ _TENANT_CHANGES = ChangeCounter()
 #:   *secret material*. Letting a request-override surface it on the feed
 #:   would defeat the redaction guarantee, so these are excluded from the
 #:   upgrade branch (:data:`_UPGRADEABLE_OP_CLASSES`).
-_SENSITIVE_OP_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_mint", "credential_write", "audit_query"}
-)
+#: * ``credential_use`` — aggregate by default AND non-upgradeable, like
+#:   ``credential_write``: the request carries a secret, or MEHO sends a
+#:   stored secret to the target.
+_SENSITIVE_OP_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES | {"audit_query"}
 
 #: Subset of :data:`_SENSITIVE_OP_CLASSES` a per-call ``"full"``
 #: request-override is permitted to upgrade. Secret-material classes

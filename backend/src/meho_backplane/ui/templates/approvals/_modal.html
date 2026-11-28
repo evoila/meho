@@ -545,8 +545,8 @@
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
         </div>
       {% endif %}
-      {#- The policy rule that matched the call (#6044). Only while the policy
-          evaluator runs in shadow mode; then the rule did not decide. -#}
+      {#- The policy rule of the call (#6044). With CUSTOM_POLICY on it is the
+          rule that decided; with only shadow mode on, it did not decide. -#}
       {% if request.policy_rule %}
         {% set rule = request.policy_rule %}
         <div class="flex items-baseline justify-between gap-4" data-testid="approval-policy-rule">
@@ -683,7 +683,17 @@
         {#- #2332: the envelope collapsed to the op-identity-only default. Name
             WHY so a deliberately-redacted credential write reads distinctly
             from a connector that simply never populated a preview. -#}
-        {% if effect.get("preview_reason") == "credential_write_redacted" %}
+        {% if effect.get("preview_reason") == "credential_use_redacted" %}
+          <div class="alert alert-warning mt-2" role="note">
+            <div>
+              <h4 class="font-semibold text-sm">Values deliberately redacted</h4>
+              <p class="text-xs text-muted">
+                This call uses a credential; its values are intentionally
+                withheld from the approval record. Treat as elevated risk.
+              </p>
+            </div>
+          </div>
+        {% elif effect.get("preview_reason") == "credential_write_redacted" %}
           <div class="alert alert-warning mt-2" role="note">
             <div>
               <h4 class="font-semibold text-sm">Values deliberately redacted</h4>

@@ -34,7 +34,11 @@ fixed rules take their rule ids from :mod:`meho_backplane.policy.fixed_rules`
   sandbox mode a delete grant still clears an operation with the mark
   ``sandbox_delete_grant`` (today only ``k8s.delete``).
 
-Pure functions; no database and no settings.
+Pure functions; no database and no settings. One exception: with
+``CUSTOM_POLICY`` on, :func:`call_floors` puts the token floor before the
+fixed rules, so a fixed rule names a wait that both make (the rule on the
+audit row, see ``docs/codebase/policy-evaluator.md``). With the switch off
+the order is as before. The verdict is the same in both orders.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ from meho_backplane.operations.role_floors import (
     role_floor_denial,
 )
 from meho_backplane.policy.fixed_rules import CREDENTIAL_WAITS, DESTRUCTIVE_WAITS
+from meho_backplane.policy.switches import custom_policy_on_in_environment
 
 if TYPE_CHECKING:
     from meho_backplane.policy.evaluate import Asked, Asker
@@ -128,12 +133,24 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
     """Return every floor that holds for *asker* calling *asked*, in order.
 
     A role floor denial comes first: nothing after it can change a deny.
+    On a tie the later floor names the answer. With ``CUSTOM_POLICY`` on the
+    token floor comes before the fixed rules, so the fixed rule names it.
     """
     hits: list[FloorHit] = []
     if asker.kind == "person":
         denial = role_floor_denial(asked.op_id, asker.tenant_role)
         if denial is not None:
             hits.append(FloorHit("deny", "role_floor", denial, source="role_floor"))
+    fixed = _fixed_rule_floors(asker, asked)
+    token = _token_floor(asker, asked)
+    if custom_policy_on_in_environment():
+        return [*hits, *token, *fixed]
+    return [*hits, *fixed, *token]
+
+
+def _fixed_rule_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
+    """The floors that are fixed rules: ``destructive_waits`` and ``credential_waits``."""
+    hits: list[FloorHit] = []
     if asked.risk == "destructive":
         hits.append(
             FloorHit(
@@ -154,16 +171,15 @@ def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:
                 ),
             )
         )
-    if _token_call(asker) and asked.risk in KNOWN_NON_SAFE:
-        hits.append(
-            FloorHit(
-                "wait",
-                "token_runs_only_safe",
-                f"risk level {asked.risk}: a call made with a token runs only safe "
-                "operations at once",
-            )
-        )
     return hits
+
+
+def _token_floor(asker: Asker, asked: Asked) -> list[FloorHit]:
+    """``token_runs_only_safe`` when a call made with a token is above ``safe``."""
+    if not (_token_call(asker) and asked.risk in KNOWN_NON_SAFE):
+        return []
+    text = f"risk level {asked.risk}: a call made with a token runs only safe operations at once"
+    return [FloorHit("wait", "token_runs_only_safe", text)]
 
 
 def grant_may_clear(asked: Asked, *, sandbox: bool) -> bool:

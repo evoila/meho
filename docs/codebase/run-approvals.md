@@ -223,13 +223,15 @@ Marked today:
   themselves. Examples: `policy.classify` and the Keycloak writes that
   change what a token says or who has a role.
 
-## Never covered: an operation that reads, writes or makes a credential
+## Never covered: an operation that reads, writes, makes or uses a credential
 
-A call that reads, writes or makes a credential always waits for a
+A call that reads, writes, makes or uses a credential always waits for a
 person. No standing grant, no agent grant and no run approval covers it.
 The classes are `credential_read` (for example `k8s.secret.read_to_ref`
-or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
-`credential_mint` (for example `vault.token.create`). The class comes from
+or `vault.kv.read`), `credential_write` (for example `vault.kv.put`),
+`credential_mint` (for example `vault.token.create`) and `credential_use`
+(declared by a connector). A person's own call of a `credential_use`
+operation follows its risk level and approval mark. The class comes from
 the class stored on the row of an ingested operation, or from the op id (a
 connector's `declare_op_classes`, or the core lists of
 `broadcast/events.py`). An operation a connector marks with
@@ -266,8 +268,9 @@ Secret or cannot be read. The rule is the one of the standing grants
   entry whose calls wait (`service_grants.credential_call_waits`), with
   its position (`entry`), `connector_id`, `op_id` and the reason "reads,
   writes or makes a credential. A run approval never covers it: each call
-  waits for a person" (`operations/run_approval_notes.py`). For
-  `vault.kv.read` the reason is "reads a credential. A run approval never
+  waits for a person" (`operations/run_approval_notes.py`). For a
+  `credential_use` operation it says "uses a credential" in place of
+  "reads, writes or makes a credential". For `vault.kv.read` the reason is "reads a credential. A run approval never
   covers it: each call with reveal_secret waits for a person". A read
   that returns no secret value gets no note. Request answers have an empty
   list. The list, revoke and end routes leave the field `null`, because

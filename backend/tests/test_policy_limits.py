@@ -109,6 +109,18 @@ def test_a_reserved_key_is_refused_by_the_parser(key: str, value: str) -> None:
     assert mistakes == [_NOT_READ.format(key)]
 
 
+def test_the_import_with_the_switch_on_lets_risk_levels_through_and_keeps_it_out() -> None:
+    text = b"policy: v1\nrisk_levels: [example-value-7]\nbaseline: x\n"
+    parsed = parse_policy_file(text, read_risk_levels=True)
+    assert parsed.mistakes == [_NOT_READ.format("baseline")]
+    parsed = parse_policy_file(
+        b"policy: v1\nrisk_levels: [example-value-7]\n", read_risk_levels=True
+    )
+    assert parsed.mistakes == []
+    assert parsed.model is not None
+    assert "risk_levels" not in document_of(parsed.model)
+
+
 @pytest.mark.parametrize(
     "form", ["limits: {}", "limits: null", "limits:", "limits: {personal_agent_up_to: null}"]
 )

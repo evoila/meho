@@ -89,6 +89,10 @@ _SECOND_SITE_ONLY_STEPS = {
     "Hide the proxy name in the test reports",
 }
 _HIDE_STEP = "Hide the proxy name in the test reports"
+# The alias of the sync step is also in the hosted-trial job. With the line
+# after it, it is found only in the second-site job.
+_SYNC_ALIAS = "      - *unit-sync\n"
+_SYNC_IN_THE_SECOND_SITE_JOB = _SYNC_ALIAS + "\n      - &site2-fastembed-restore\n"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("jq") is None or shutil.which("bash") is None,
@@ -365,9 +369,10 @@ def test_smoke_job_has_no_cache_access() -> None:
 def test_a_secret_in_the_second_site_job_or_the_workflow_env_is_found() -> None:
     text = _CI.read_text()
     secret = "${{ secrets.SHARED_TOKEN }}"
-    marker = "      - *unit-sync\n"
+    marker = _SYNC_IN_THE_SECOND_SITE_JOB
     assert text.count(marker) == 1
-    in_step = text.replace(marker, marker + f"      - name: Extra\n        run: echo {secret}\n", 1)
+    extra = f"      - name: Extra\n        run: echo {secret}\n"
+    in_step = text.replace(marker, _SYNC_ALIAS + extra + marker.removeprefix(_SYNC_ALIAS), 1)
     job = yaml.safe_load(in_step)["jobs"][_NEW_JOB]
     with pytest.raises(AssertionError):
         _assert_no_secret_environment_or_id_token(yaml.safe_dump(job))
@@ -495,13 +500,13 @@ def test_smoke_pulls_one_of_the_unit_test_images() -> None:
     assert f"PROXY/{image.removeprefix('docker.io/')}" in script
 
 
-def test_only_the_watchdogs_may_cancel_a_run() -> None:
+def test_only_the_second_site_watchdog_may_cancel_a_run() -> None:
     writers = sorted(
         name
         for name, job in _ci_jobs().items()
         if (job.get("permissions") or {}).get("actions") == "write"
     )
-    assert writers == ["merge-queue-watchdog", "second-site-watchdog"]
+    assert writers == ["second-site-watchdog"]
 
 
 # --- The same test steps in both shard jobs --------------------------------------
@@ -654,7 +659,13 @@ def _with_step_after(text: str, marker: str, step: str) -> str:
 
 
 def test_save_check_finds_a_save_step_in_the_job() -> None:
-    text = _with_step_after(_CI.read_text(), "      - *unit-sync\n", _SAVE_STEP)
+    text = _CI.read_text()
+    assert text.count(_SYNC_IN_THE_SECOND_SITE_JOB) == 1
+    text = text.replace(
+        _SYNC_IN_THE_SECOND_SITE_JOB,
+        _SYNC_ALIAS + _SAVE_STEP + _SYNC_IN_THE_SECOND_SITE_JOB.removeprefix(_SYNC_ALIAS),
+        1,
+    )
     assert _second_site_saving_steps(text) == ["Save something to the cache"]
 
 

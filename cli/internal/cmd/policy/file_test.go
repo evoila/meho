@@ -344,3 +344,45 @@ func TestDiffOfAFileThatChangesNoRulePrintsNoRuleLine(t *testing.T) {
 		}
 	}
 }
+
+const riskLevelsFile = "policy: v1\nclassifications: []\nrisk_levels:\n" +
+	"- rule: override:3c1f6a2e-5b7d-4e9a-8f10-2b3c4d5e6f70\n" +
+	"  operation:\n    product: inslim\n    version: 1.x\n    impl_id: inslim\n    op_id: inslim.vm.restart\n" +
+	"  scope: tenant\n  level: dangerous\n  reason: Restarts drop users.\n" +
+	"  set_by: admin-a\n  set_at: '2026-11-28T10:00:00+00:00'\n"
+
+func TestExportKeepsTheRiskLevelsPartWithReasonWhoAndWhen(t *testing.T) {
+	var got seen
+	srv := server(t, 200, riskLevelsFile, &got)
+	out := filepath.Join(t.TempDir(), "out.yaml")
+	if _, stderr, err := run(t, "export", "-o", out, "--backplane", srv.URL); err != nil {
+		t.Fatalf("export: %v; stderr=%s", err, stderr)
+	}
+	data, _ := os.ReadFile(out)
+	if string(data) != riskLevelsFile {
+		t.Fatalf("file: %q", data)
+	}
+	for _, want := range []string{
+		"rule: override:3c1f6a2e-5b7d-4e9a-8f10-2b3c4d5e6f70",
+		"reason: Restarts drop users.",
+		"set_by: admin-a",
+		"set_at: '2026-11-28T10:00:00+00:00'",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("file misses %q", want)
+		}
+	}
+}
+
+func TestImportPrintsTheRiskLevelsRefusalWithItsLine(t *testing.T) {
+	var got seen
+	sentence := "Line 4: `risk_levels[0]` is not a stored risk-level edit. Changing risk-level " +
+		"edits with a policy file is not in this version of MEHO. Keep the part as " +
+		"`meho policy export` wrote it, or remove it."
+	srv := server(t, 422, `{"preview":false,"ok":false,"scope":"tenant","mistakes":["`+sentence+`"],`+
+		`"warnings":[],"no_change":false,"file_sha256":"a","based_on":"b","diff":null}`, &got)
+	stdout, _, err := run(t, "import", writeFile(t), "--backplane", srv.URL)
+	if err == nil || !strings.Contains(stdout, "mistake: "+sentence) {
+		t.Fatalf("err=%v stdout=%s", err, stdout)
+	}
+}

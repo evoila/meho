@@ -35,9 +35,12 @@ authenticates, and maturity.
 - `config.credentialBackend: vault` (the default — omitting it selects
   Vault).
 - A reachable Vault with a **KV v2** mount and a **JWT auth role**
-  (conventionally named `meho-mcp`) bound to your Keycloak issuer and
-  audience, so MEHO can exchange a caller's Keycloak token for a Vault
-  token. The role + policy provisioning walk-through is
+  (conventionally named `meho-mcp`) bound to your Keycloak issuer,
+  audience and MEHO's addresses (`token_bound_cidrs`), so MEHO can
+  exchange a caller's Keycloak token for a Vault token. Only MEHO needs
+  to reach the Vault login path. The policy is the per-tenant policy:
+  each tenant reads only `secret/tenants/<tenant id>/`. The role + policy
+  provisioning walk-through is
   [`docs/cross-repo/vault-provisioning.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
 - The `vault.address`, `vault.role`, `vault.paths.kv` values (plus the
   mirrored `config.vaultAddr`) — shown on
@@ -168,20 +171,18 @@ Realm-side, create the confidential client with the
 other service principals
 ([`docs/cross-repo/keycloak-agent-client.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/keycloak-agent-client.md)).
 
-!!! warning "On Vault, the check-runner is a privilege decision — not a no-op"
+!!! warning "On Vault, give the check-runner a role of its own"
 
-    The conventionally-provisioned `meho-mcp` Vault role accepts *any*
-    principal carrying the backplane audience, and its policy reads
-    the whole MEHO secret tree. Enable the check-runner against that
-    role unchanged, and **every scheduled evaluation can read any
-    target credential** — the "background work cannot read
-    operator-context secrets" carve-out is gone. That may be exactly
-    what you want (it is what makes credentialed sensors work on
-    Vault), but decide it consciously: give the runner its own,
-    narrower Vault role, or bind the existing role to operator-only
-    claims. Both recipes, with verification commands, are in
+    The conventionally-provisioned `meho-mcp` Vault role accepts a
+    principal that carries the backplane audience, from MEHO's
+    addresses. The check-runner carries that audience too. On Vault the
+    check-runner does not start unless `VAULT_CHECK_RUNNER_ROLE` names a
+    narrower Vault role of its own, other than `VAULT_OIDC_ROLE`. Without
+    one it logs `sensor_runner_refused` and evaluates no Sensor. Binding
+    the existing role to operator-only claims is an extra step; the runner
+    still needs its own role. The recipe, with verification commands, is in
     [`docs/cross-repo/vault-provisioning.md` § Bounding the check-runner principal](https://github.com/evoila/meho/blob/main/docs/cross-repo/vault-provisioning.md).
-    The chart prints this same warning at install time when
+    The chart prints a note about this at install time when
     `checkRunner.enabled: true` meets the Vault backend.
 
 ## Can I switch later?

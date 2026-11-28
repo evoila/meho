@@ -684,7 +684,8 @@ before.
   scope on the card. In that same transaction, under the lock of the
   operation, it builds the card of the effect with the same function as at
   the ask and compares it once with the stored card. When the two differ,
-  or the override to remove is gone, it rolls back, writes nothing and
+  the edit checks now refuse the edit, or the override to remove is gone,
+  it rolls back, writes nothing and
   says "The policy changed since this request was made. Send the edit
   again." With the switch off at the click, it writes nothing.
 - An ask that names an override of another tenant is refused before

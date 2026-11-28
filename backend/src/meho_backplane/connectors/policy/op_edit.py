@@ -25,8 +25,8 @@ such an edit (an override), is a change of the policy. The REST routes,
   (:func:`policy_op_edit`, :func:`policy_op_remove_override`) and stores
   the override where the card says. In the write's own transaction it
   builds the card again from the effect, with the same function as at the
-  ask. When the two differ, or the override to remove is gone, it rolls
-  back and writes nothing (:data:`POLICY_CHANGED_REFUSAL`).
+  ask. When the two differ, the edit checks now refuse it, or the override
+  to remove is gone, it rolls back and writes nothing (:data:`POLICY_CHANGED_REFUSAL`).
 
 The operations exist only while ``CUSTOM_POLICY`` is on. With the switch
 off the registrar deletes their rows, and a run refuses
@@ -524,29 +524,38 @@ async def policy_op_edit(operator: Operator, target: Any, params: dict[str, Any]
     the web console (``person_present``), with *operator* (the person who
     clicked) as the one who changes it. After an approval the override
     goes where the card says, and the write compares its effect with the
-    card in its own transaction: on a difference it writes nothing.
+    card in its own transaction: on a difference, or when the edit checks
+    now refuse it, it writes nothing and answers :data:`POLICY_CHANGED_REFUSAL`.
     """
     del target
     from meho_backplane.operations.ingest.service import ReviewService
+    from meho_backplane.operations.op_policy import OpPolicyEditError
 
     card = _check_who_runs(operator, params, POLICY_OP_EDIT_OP_ID)
+    approved = approved_requester_sub() is not None
     scope: dict[str, Any] = {}
-    if approved_requester_sub() is not None:
+    if approved:
         if card.get("scope") not in {"tenant", "install"}:
             raise ValueError(_NO_SCOPE_ON_CARD)
         scope["policy_scope_tenant_id"] = _uuid_or_none(card.get("scope_tenant_id"))
         scope["card_check"] = _card_check(card, _edit_card, params)
     fields = {name: params[name] for name in (*POLICY_FIELDS, *_ROW_FIELDS) if name in params}
-    warnings = await ReviewService(operator).edit_op(
-        params["connector_id"],
-        params["op_id"],
-        tenant_id=_uuid_or_none(params.get("tenant_id")),
-        reason=params.get("reason"),
-        person_present=True,
-        tighten_only=bool(params.get("tighten_only")),
-        **fields,
-        **scope,
-    )
+    try:
+        warnings = await ReviewService(operator).edit_op(
+            params["connector_id"],
+            params["op_id"],
+            tenant_id=_uuid_or_none(params.get("tenant_id")),
+            reason=params.get("reason"),
+            person_present=True,
+            tighten_only=bool(params.get("tighten_only")),
+            **fields,
+            **scope,
+        )
+    except OpPolicyEditError:
+        # The checks passed at the ask; a refusal now means the policy changed.
+        if not approved:
+            raise
+        raise ValueError(POLICY_CHANGED_REFUSAL) from None
     return {
         "connector_id": params["connector_id"],
         "op_id": params["op_id"],
@@ -561,11 +570,12 @@ async def policy_op_remove_override(
 
     Op-id: ``policy.op_remove_override``. Targetless. Like
     :func:`policy_op_edit`; the scope is in *params*. After an approval, an
-    override that is gone counts as a changed policy.
+    override that is gone, or a removal the checks now refuse, counts as a
+    changed policy.
     """
     del target
     from meho_backplane.operations.ingest.service import ReviewService
-    from meho_backplane.operations.op_policy import OverrideNotFoundError
+    from meho_backplane.operations.op_policy import OpPolicyEditError, OverrideNotFoundError
 
     card = _check_who_runs(operator, params, POLICY_OP_REMOVE_OVERRIDE_OP_ID)
     approved = approved_requester_sub() is not None
@@ -578,7 +588,7 @@ async def policy_op_remove_override(
             person_present=True,
             card_check=_card_check(card, _removal_card, params) if approved else None,
         )
-    except OverrideNotFoundError:
+    except (OverrideNotFoundError, OpPolicyEditError):
         if not approved:
             raise
         raise ValueError(POLICY_CHANGED_REFUSAL) from None

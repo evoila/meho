@@ -687,6 +687,59 @@ async def test_the_second_of_two_waiting_removals_is_refused_as_changed(
     _refused_as_changed(next(r for r in await h.requests() if r.id == second))
 
 
+async def _ask_raise(client: TestClient, key: Any, way: str, level: str) -> uuid.UUID:
+    """A tenant admin asks to raise ``_RESTART`` to *level* over REST or the MCP tool."""
+    if way == "rest":
+        return _waits(_patch(client, _token(key), _RESTART, {"safety_level": level}))
+    person = h.person("admin-a", platform_admin=False, web=False)
+    answer = await _edit_op_handler(
+        person, {"connector_id": _CONNECTOR, "op_id": _RESTART, "safety_level": level}
+    )
+    assert answer["status"] == "awaiting_approval", answer
+    return uuid.UUID(answer["approval_request_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize("way", ["rest", "mcp"])
+async def test_a_raise_that_became_a_lowering_is_refused_as_changed(
+    client: TestClient, embedding: AsyncMock, way: str
+) -> None:
+    """Two raises wait; the higher one is approved first; the second writes nothing."""
+    await _setup(embedding)
+    key = make_rsa_keypair(f"kid-opedit-two-raises-{way}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        first = await _ask_raise(client, key, way, "destructive")
+        second = await _ask_raise(client, key, way, "dangerous")
+        clicked = await h.console_approve(client, key, first, sub="admin-b", platform_admin=False)
+        assert clicked.status_code == 200, clicked.text
+        await h.console_approve(client, key, second, sub="admin-b", platform_admin=False)
+    (override,) = await _overrides(_RESTART)
+    assert override.safety_level == "destructive"
+    _refused_as_changed(next(r for r in await h.requests() if r.id == second))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_removal_after_an_approved_raise_of_the_same_override_is_refused_as_changed(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    await _raise_now(h.person("admin-a", platform_admin=False), _RESTART, "dangerous")
+    key = make_rsa_keypair("kid-opedit-raise-then-remove")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        edit = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "destructive"}))
+        removal = _waits(_delete(client, _token(key), _RESTART, tenant_id=str(h.TENANT)))
+        clicked = await h.console_approve(client, key, edit, sub="admin-b", platform_admin=False)
+        assert clicked.status_code == 200, clicked.text
+        await h.console_approve(client, key, removal, sub="admin-b", platform_admin=False)
+    (override,) = await _overrides(_RESTART)
+    assert override.safety_level == "destructive"
+    _refused_as_changed(next(r for r in await h.requests() if r.id == removal))
+
+
 async def _change_requester_record(request_id: uuid.UUID, record: dict[str, Any] | None) -> None:
     """Replace the card's record of who asked; ``None`` removes it."""
     async with get_sessionmaker()() as session, session.begin():

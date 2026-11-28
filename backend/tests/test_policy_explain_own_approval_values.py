@@ -184,6 +184,8 @@ async def test_case_b_a_change_of_the_rights_of_one_login(
         ADMIN_TOKEN,
         OPERATOR_WEB,
         OPERATOR_TOKEN,
+        AGENT,
+        SERVICE,
     )
     params = {"user_id": str(uuid.uuid4())}
     with respx.mock as r:
@@ -194,13 +196,6 @@ async def test_case_b_a_change_of_the_rights_of_one_login(
             )
             for caller in callers
         }
-        # With the switch on, only a person may ask for a change of rights.
-        for machine in (AGENT, SERVICE):
-            body = machine.ask(client, key, "demo.login.grant")
-            assert body["answer"] == "deny", (machine.name, body)
-            result = await call(machine.operator(), "demo.login.grant", params)
-            assert result.status == "denied", (machine.name, result)
-            assert "only a person may ask for a change" in str(result.error)
     expected = dict.fromkeys((caller.name for caller in callers), (False, False))
     expected[PLATFORM_WEB.name] = (True, False)
     assert found == expected

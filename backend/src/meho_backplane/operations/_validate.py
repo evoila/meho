@@ -64,7 +64,6 @@ from meho_backplane.policy.fixed_rules import (
     RIGHTS_CHANGE_WAITS,
     TARGET_RIGHTS_WAITS,
     fixed_rule_for,
-    rights_change_asker_refusal,
 )
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
@@ -1110,15 +1109,9 @@ def _requester_denial(
     The op's requester check
     (:func:`~meho_backplane.operations.role_floors.register_requester_check`)
     holds for every kind of login, so a refused call is ``DENY`` before any
-    approval request or preview is built. With the switch ``CUSTOM_POLICY``
-    on, the fixed rule that only a person asks for a change of the policy
-    or of rights holds too, for every such operation, also one with no
-    check of its own
-    (:func:`~meho_backplane.policy.fixed_rules.rights_change_asker_refusal`).
+    approval request or preview is built.
     """
     denial = requester_check_denial(descriptor.op_id, operator, params or {})
-    if denial is None:
-        denial = rights_change_asker_refusal(descriptor.op_id, operator)
     if denial is not None:
         _log.info(
             "policy_gate_requester_denied",

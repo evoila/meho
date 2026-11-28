@@ -3,11 +3,6 @@
 
 """Whole-path tests of the fixed rules on who asks and who approves.
 
-* With the switch ``CUSTOM_POLICY`` on, only a person may ask for a change
-  of the policy or of rights. The rule holds for every such operation from
-  the call gate, also for a stand-in operation that brings no check of its
-  own: an agent login, a service login and a hosted agent run are refused
-  before anything waits; a person's token waits.
 * In sandbox mode the gate itself holds a change of rights: a standing
   grant alone and a run approval alone do not run a service login's change
   of rights, also for an operation with no per-call approval mark.
@@ -15,8 +10,7 @@
   agent, a service login or a runner tries to approve.
 
 The calls go over ``POST /api/v1/operations/call`` and
-``POST /api/v1/approvals/{id}/approve`` with signed tokens, and through the
-dispatcher for the hosted agent run, as the hosted agent does. The
+``POST /api/v1/approvals/{id}/approve`` with signed tokens. The
 connector, the operations and the target are made up.
 """
 
@@ -29,7 +23,6 @@ from typing import Any
 import httpx
 import pytest
 
-from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -39,7 +32,6 @@ from meho_backplane.db.models import (
     Target,
 )
 from meho_backplane.op_classes import _PER_CALL_APPROVAL, needs_per_call_approval
-from meho_backplane.operations import dispatch
 from meho_backplane.operations.approval_queue import NonHumanApprovalError, _check_reviewer_role
 from meho_backplane.operations.grant_approval import _RIGHTS_CHANGE_OPS, is_rights_change_op
 from meho_backplane.operations.role_floors import has_requester_check
@@ -49,7 +41,6 @@ from tests._fixed_rules_helpers import (
     RUNS,
     TARGET,
     call_as,
-    call_rows,
     register,
 )
 from tests._hard_to_undo_helpers import (
@@ -108,61 +99,10 @@ async def _seed(op_id: str = _STAND_IN) -> Target:
     return target
 
 
-async def _hosted_run(target: Target) -> Any:
-    """A hosted agent run that a person started calls the operation."""
-    person = Operator(
-        sub="person-starter",
-        raw_jwt="header.payload.signature",
-        tenant_id=TENANT,
-        tenant_role=TenantRole.OPERATOR,
-    )
-    with actor_delegation("hosted-agent:rule-helper"):
-        return await dispatch(
-            operator=person, connector_id=CONNECTOR, op_id=_STAND_IN, target=target, params={}
-        )
-
-
 def test_the_stand_in_brings_no_check_of_its_own() -> None:
     assert is_rights_change_op(_STAND_IN)
     assert not has_requester_check(_STAND_IN)
     assert not needs_per_call_approval(_STAND_IN)
-
-
-@pytest.mark.asyncio
-async def test_with_the_switch_on_only_a_person_may_ask_for_a_change_of_rights(
-    monkeypatch: pytest.MonkeyPatch, client: tuple[httpx.AsyncClient, Any]
-) -> None:
-    custom_policy(monkeypatch, on=True)
-    target = await _seed()
-
-    agent = await call_as(client, _STAND_IN, kind="agent", sub="agent:rule-bot")
-    service = await call_as(client, _STAND_IN, kind="service", sub=SERVICE)
-    hosted = await _hosted_run(target)
-    person = await call_as(client, _STAND_IN, kind="user", sub="person-token")
-
-    for refused in (agent, service):
-        assert refused["status"] == "denied", refused
-        assert "only a person may ask for a change of the policy or of rights" in str(refused)
-    assert hosted.status == "denied", hosted
-    assert "only a person may ask" in str(hosted.error)
-    assert person["status"] == "awaiting_approval", person
-    assert RUNS == []
-    assert await request_op_ids() == [_STAND_IN]
-    assert sorted(row.status_code for row in await call_rows(_STAND_IN)) == [403, 403, 403]
-
-
-@pytest.mark.asyncio
-async def test_with_the_switch_off_an_agent_still_asks_and_waits(
-    monkeypatch: pytest.MonkeyPatch, client: tuple[httpx.AsyncClient, Any]
-) -> None:
-    custom_policy(monkeypatch, on=False)
-    await _seed()
-
-    agent = await call_as(client, _STAND_IN, kind="agent", sub="agent:rule-bot")
-
-    assert agent["status"] == "awaiting_approval", agent
-    assert await request_op_ids() == [_STAND_IN]
-    assert await call_rows(_STAND_IN) == []
 
 
 @pytest.mark.asyncio
@@ -188,12 +128,10 @@ async def test_in_sandbox_mode_no_grant_and_no_run_approval_runs_a_change_of_rig
         client, _STAND_IN, kind="service", sub=other, work_ref="run-rights"
     )
 
-    # With the switch on a service login may not even ask; with it off the call waits.
-    expected = "denied" if on else "awaiting_approval"
-    assert with_grant["status"] == expected, with_grant
-    assert with_run_approval["status"] == expected, with_run_approval
+    assert with_grant["status"] == "awaiting_approval", with_grant
+    assert with_run_approval["status"] == "awaiting_approval", with_run_approval
     assert RUNS == []
-    assert await request_op_ids() == ([] if on else [_STAND_IN, _STAND_IN])
+    assert await request_op_ids() == [_STAND_IN, _STAND_IN]
     assert await grant_use_rows(grant_id) == []
     assert await run_approval_uses(approval_id) == 0
 

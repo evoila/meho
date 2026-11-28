@@ -31,6 +31,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations.approval_queue import (
     ApprovalError,
+    NonHumanApprovalError,
     approve_request,
 )
 from meho_backplane.policy.explain import CallQuestion, explain_call
@@ -45,7 +46,7 @@ from tests.test_rights_change_console_run import (
     keycloak,  # noqa: F401 -- fixture: registers the Keycloak operations
 )
 
-from ._own_approval_cases import DEPENDS, call, switches
+from ._own_approval_cases import DEPENDS, MACHINE, call, switches
 
 _OP = "keycloak.authflow.ensure_approval_flow"
 _DEMO_TARGET = "demo-keycloak"
@@ -177,13 +178,12 @@ def _machine(kind: PrincipalKind, *, web: bool) -> Operator:
 @pytest.mark.parametrize("self_approval", ["false", "true"])
 @pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE], ids=str)
 @pytest.mark.parametrize("target_name", [_DEMO_TARGET, _TARGET_NAME])
-async def test_case_d_a_machine_login_may_not_ask_for_the_change_of_rights(
+async def test_case_d_a_machine_login_reads_false_and_the_approve_refuses_it(
     monkeypatch: pytest.MonkeyPatch,
     self_approval: str,
     kind: PrincipalKind,
     target_name: str,
 ) -> None:
-    """With the switch on, only a person may ask for a change of rights: nothing waits."""
     switches(monkeypatch, APPROVAL_ALLOW_SELF_APPROVAL=self_approval)
     await _seed_demo_target()
     asker = _machine(kind, web=False)
@@ -192,12 +192,20 @@ async def test_case_d_a_machine_login_may_not_ask_for_the_change_of_rights(
             asker=asker, me=True, connector_id=_CONNECTOR_ID, op_id=_OP, target=target_name
         )
     )
-    assert answer.answer == "deny", answer
-    assert answer.own_approval is None
+    assert answer.answer == "wait", answer
+    assert answer.own_approval is not None
+    assert answer.own_approval.model_dump() == MACHINE
 
     async with get_sessionmaker()() as session:
         target = await resolve_target(session, _TENANT_ID, target_name)
     params = {"client_id": "demo-cli-approve"}
     result = await call(asker, _OP, params, connector_id=_CONNECTOR_ID, target=target)
-    assert result.status == "denied", result
-    assert "only a person may ask for a change" in str(result.error)
+    assert result.status == "awaiting_approval", result
+    request_id = uuid.UUID(str(result.extras["approval_request_id"]))
+    for web in (True, False):
+        async with get_sessionmaker()() as session:
+            with pytest.raises(NonHumanApprovalError):
+                await approve_request(
+                    session, request_id, operator=_machine(kind, web=web), params=params
+                )
+            await session.rollback()

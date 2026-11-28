@@ -187,7 +187,7 @@ Two rules are never the answer of `fixed_rule_for`:
 call. `root_shell_rule(op_id)` names the root shell rule; the run approval
 check asks it (`run_approval_gate._never_covered`).
 
-**With the switch `CUSTOM_POLICY` on, three more things hold:**
+**With the switch `CUSTOM_POLICY` on, two more things hold:**
 
 - The edit checks (`_new_approval_field`, `_refuse_unless_may_end_approval`
   in `operations/op_policy.py`) ask `fixed_rule_of_operation(descriptor)`:
@@ -198,12 +198,6 @@ check asks it (`run_approval_gate._never_covered`).
   "approval off" is refused only where it was before: a `destructive`
   operation, an address the caller gives, and a change of rights.
 - An operation with `changes_rights` waits for approval (`_with_floors`).
-- Only a person may ask for a change of the policy or of rights
-  (`rights_change_asker_refusal`). The call gate checks it first, for every
-  such operation, also one that brings no check of its own. An agent
-  login, a service login, a runner and a hosted agent run are refused
-  before anything waits; a person's token waits. With the switch off each
-  operation's own check holds, as before.
 
 Steps that stay in the dispatcher and are not in the evaluator: the
 children of an approved run, the wait of a secret reveal, the announce

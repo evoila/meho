@@ -79,7 +79,6 @@ __all__ = [
     "FixedRuleId",
     "fixed_rule_for",
     "fixed_rule_of_operation",
-    "rights_change_asker_refusal",
     "root_shell_rule",
 ]
 
@@ -138,14 +137,6 @@ FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
             "waits for approval, and no standing grant and no run approval covers it."
         ),
     }
-)
-
-#: What MEHO says when a login that is not a person asks for a change of
-#: the policy or of rights (:func:`rights_change_asker_refusal`).
-_RIGHTS_ASK_NEEDS_PERSON: Final[str] = (
-    "only a person may ask for a change of the policy or of rights. An agent login, "
-    "a service login and a hosted agent run cannot ask for it. A person asks in the "
-    "web console or with their own token"
 )
 
 #: The operations that change the policy. They are changes of rights too.
@@ -221,25 +212,6 @@ def root_shell_rule(op_id: str) -> FixedRuleId | None:
     from meho_backplane.op_classes import is_root_shell
 
     return ROOT_SHELL_WAITS if is_root_shell(op_id) else None
-
-
-def rights_change_asker_refusal(op_id: str, caller: Operator) -> str | None:
-    """Why *caller* may not ask for *op_id* at all, or ``None``.
-
-    With the switch ``CUSTOM_POLICY`` on, only a person may ask for a change
-    of the policy or of rights. An agent login, a service login, a runner
-    and a hosted agent run are refused before anything waits. A person's
-    token is not refused here: its call waits. The rule holds for every
-    such operation, also one that brings no check of its own. With the
-    switch off it answers ``None``; then each operation's own check holds.
-    """
-    from meho_backplane.operations.grant_approval import is_rights_change_op
-
-    if not custom_policy_on(get_settings()) or not is_rights_change_op(op_id):
-        return None
-    if is_human_principal(caller) and resolve_actor_sub() is None:
-        return None
-    return _RIGHTS_ASK_NEEDS_PERSON
 
 
 def fixed_rule_for(descriptor: EndpointDescriptor, caller: Operator) -> FixedRuleId | None:

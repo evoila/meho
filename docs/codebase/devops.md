@@ -2103,6 +2103,23 @@ changed by a maintainer, never by a pull request.
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v9 action, golangci-lint v2) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
+Time limits in tests come in two kinds (`backend/tests/_time_limits.py`):
+
+- `check_time_limit` with the `slow_runner_tolerant` marker: the required
+  shards turn the limit off, and only the `python-timing-tests` job
+  above checks it (#6270).
+- `wallclock_limit(seconds)`: the limit counts in every job, but it is
+  multiplied by `MEHO_TIME_LIMIT_FACTOR`. The pytest steps of the unit
+  shards and the integration shards set it to 3 on a pull request and in
+  the merge queue, and to 1 on the nightly run, so the real limits are
+  checked once a night (#7220). Unset means 1. A test that waits for a
+  condition with a timeout takes the timeout from it too.
+  `test_time_limits.py` fails when a test file gets a new `assert` that
+  compares a measured time (`elapsed`, `took`, `duration`, a name ending
+  in `_ms`, `monotonic()`, `perf_counter()`, `loop.time()`) with a
+  number without the helper. The files that still do it are listed
+  there with their count, and the counts may only go down.
+
 The six `python-unit-shard` legs run on one of two heavy runner sets
 (ARC scale sets on the same machines; their sizes live outside this
 repo, #761). The set depends on the event:

@@ -13,6 +13,7 @@ from meho_backplane.redaction.secret_fields import (
     scrub_secret_fields,
     scrub_secret_fields_in_text,
 )
+from tests._time_limits import wallclock_limit
 
 
 @pytest.mark.parametrize(
@@ -45,7 +46,7 @@ def test_plain_value_is_replaced(value: str) -> None:
 def test_long_value_is_replaced_quickly(value: str) -> None:
     started = time.monotonic()
     assert scrub_secret_fields({"password": value}) == {"password": SECRET_FIELD_MARKER}
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < wallclock_limit(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +124,7 @@ def test_long_text_is_scrubbed_quickly() -> None:
     text = '{"password": "' + "y" * 2_000_000 + '"}'
     started = time.monotonic()
     scrubbed = scrub_secret_fields_in_text(text)
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < wallclock_limit(2.0)
     assert scrubbed == f'{{"password": "{SECRET_FIELD_MARKER}"}}'
 
 
@@ -192,7 +193,7 @@ def test_large_object_under_a_secret_name_is_replaced_quickly() -> None:
     text = json.dumps({"credentials": {"value": "v" * 1_000_000, "list": ["w"] * 10_000}})
     started = time.monotonic()
     assert scrub_secret_fields_in_text(text) == f'{{"credentials": {_QUOTED_MARKER}}}'
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < wallclock_limit(2.0)
 
 
 def test_iter_quoted_secret_fields_lists_object_values() -> None:
@@ -386,7 +387,7 @@ def test_many_pairs_in_text_are_scrubbed_quickly() -> None:
     text = json.dumps(pairs)
     started = time.monotonic()
     scrubbed = scrub_secret_fields_in_text(text)
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < wallclock_limit(2.0)
     assert "p" * 20 not in scrubbed
     assert scrubbed.count(SECRET_FIELD_MARKER) == 25_000
     assert scrubbed.count('"value": "root"') == 25_000
@@ -397,6 +398,6 @@ def test_many_value_members_before_the_name_are_scrubbed_quickly() -> None:
     text = "{" + members + ', "name": "PASSWORD"}'
     started = time.monotonic()
     scrubbed = scrub_secret_fields_in_text(text)
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < wallclock_limit(2.0)
     assert scrubbed.count(SECRET_FIELD_MARKER) == 1
     assert scrubbed.endswith(f'"value": "{SECRET_FIELD_MARKER}", "name": "PASSWORD"}}')

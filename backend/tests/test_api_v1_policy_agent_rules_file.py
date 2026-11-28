@@ -59,6 +59,7 @@ from ._targets_helpers import (
     _isolated_jwks_cache,  # noqa: F401
     _settings_env,  # noqa: F401
 )
+from ._time_limits import wallclock_limit
 
 _KEYPAIR = make_rsa_keypair("kid-agents-file")
 
@@ -267,11 +268,11 @@ async def test_an_admin_import_in_the_web_console_run_window_runs_at_once(
         mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
         page = await _console_run(client, params, sub="tenant-admin-a")
     assert page.status_code == 200, page.text
-    for _ in range(100):
-        stored = await a.stored_tenant()
-        if stored is not None:
-            break
+    deadline = time.monotonic() + wallclock_limit(5.0)
+    stored = await a.stored_tenant()
+    while stored is None and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
+        stored = await a.stored_tenant()
     assert stored is not None, page.text
     assert [rule["name"] for rule in stored["agents"]] == ["helper"]
     assert await h.requests() == []

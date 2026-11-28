@@ -26,6 +26,7 @@ from meho_backplane.redaction.flight_recorder._content import scrub_content
 from meho_backplane.redaction.patterns import NAMED_PATTERNS, secret_spans
 from meho_backplane.redaction.resolver import get_default_policy
 from meho_backplane.redaction.url_secret import is_secret_query_name
+from tests._time_limits import wallclock_limit
 
 # Made-up values only. Each one must be gone from every output.
 _S3_SIGNATURE: Final = "made-up-s3-signature-0a1b2c3d"
@@ -277,7 +278,7 @@ def test_url_secret_reads_many_adjacent_quoted_links_fast() -> None:
     spans = secret_spans(NAMED_PATTERNS["url_secret"], text)
     elapsed = time.perf_counter() - started
     assert len(spans) == count
-    assert elapsed < 2.0, f"scan took {elapsed:.2f}s"
+    assert elapsed < wallclock_limit(2.0), f"scan took {elapsed:.2f}s"
 
 
 #: (link, the same link with its token value hidden). The URL rule runs

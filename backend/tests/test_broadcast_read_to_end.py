@@ -25,6 +25,7 @@ from structlog.testing import capture_logs
 from meho_backplane.broadcast import read_to_end
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.settings import get_settings
+from tests._time_limits import wallclock_limit
 
 #: A statement that never ends by itself; SQLite can interrupt it.
 _ENDLESS = text(
@@ -60,7 +61,7 @@ async def _leave_read(
 
     event.listen(engine.sync_engine, "before_cursor_execute", _mark)
     caller = asyncio.ensure_future(read_to_end.run_to_end(get_sessionmaker(), read))
-    async with asyncio.timeout(2.0):
+    async with asyncio.timeout(wallclock_limit(2.0)):
         await started.wait()
     await asyncio.sleep(0.1)
     caller.cancel()
@@ -96,8 +97,8 @@ async def test_left_read_in_a_running_statement_is_interrupted_at_the_limit(
     with capture_logs() as logs:
         await _leave_read(engine, _endless)
         started = time.monotonic()
-        await _wait_until_no_left_read(2.0)
-    assert time.monotonic() - started < read_to_end.STOP_WAIT_SECONDS
+        await _wait_until_no_left_read(wallclock_limit(2.0))
+    assert time.monotonic() - started < wallclock_limit(read_to_end.STOP_WAIT_SECONDS)
 
     stopped = [entry for entry in logs if entry["event"] == "broadcast_archive_read_stopped"]
     assert [entry["read_ended"] for entry in stopped] == [True]

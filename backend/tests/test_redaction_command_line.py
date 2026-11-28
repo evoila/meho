@@ -24,6 +24,7 @@ from meho_backplane.redaction.command_line import (
     hide_in_text,
     hide_shell_script,
 )
+from tests._time_limits import wallclock_limit
 
 _FAKE = "made-up-value-not-real-4471"
 _USER = "admin"
@@ -100,7 +101,7 @@ def test_shell_script_with_one_very_long_line_is_hidden_within_the_time_bound(un
     script = unit * (_ONE_MIB // len(unit))
     started = time.perf_counter()
     shown = hide_shell_script(script)
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert shown == script
 
 
@@ -112,7 +113,7 @@ def test_quoted_part_with_many_words_is_hidden_within_the_time_bound() -> None:
     script = f'echo "{words}" --password {_FAKE}\n'
     started = time.perf_counter()
     shown = hide_shell_script(script)
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert shown == f'echo "{words}" --password {HIDDEN}\n'
 
 
@@ -120,7 +121,7 @@ def test_url_password_is_still_hidden_inside_a_long_line() -> None:
     script = "x" * _ONE_MIB + f" curl https://{_USER}:{_FAKE}@host.example.invalid/\n"
     started = time.perf_counter()
     shown = hide_shell_script(script)
-    assert time.perf_counter() - started < _TIME_LIMIT_SECONDS
+    assert time.perf_counter() - started < wallclock_limit(_TIME_LIMIT_SECONDS)
     assert _FAKE not in shown
     assert f"https://{_USER}:{HIDDEN}@host.example.invalid/" in shown
 

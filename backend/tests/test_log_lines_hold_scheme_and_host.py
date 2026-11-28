@@ -237,22 +237,32 @@ def test_mcp_protocol_version_header_is_written_only_in_the_date_form() -> None:
 
 _LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
 _ADDRESS_WORDS = ("url", "uri", "location", "href", "endpoint")
-_SAFE_CALLS = {"host_for_log", "origin_for_log", "spec_source_for_log"}
+_ADDRESS_NAMES = {"header", "cookie", "spec_source"}
+_SAFE_CALLS = {
+    "host_for_log",
+    "origin_for_log",
+    "spec_source_for_log",
+    "_protocol_header_for_log",
+}
 _SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "meho_backplane"
 
-# (file, event) pairs whose value is MEHO's own address or route, or is already cut.
+# (file, event, keyword) of a log field whose value is not a raw address of a caller or vendor.
 _ALLOWED = {
-    ("api/v1/conventions.py", "mcp_resource_updated_emit"),
-    ("mcp/handlers.py", "mcp_resource_read_forbidden"),
-    ("mcp/handlers.py", "mcp_resource_read_capability_forbidden"),
-    ("mcp/handlers.py", "mcp_audit_write_failed"),
-    ("mcp/server.py", "mcp_profile_token_url_mismatch"),
-    # The value is already a host name or the fixed mark when it reaches the call.
-    ("connectors/adapters/http.py", "connector_redirect_not_followed_cross_origin"),
+    # MEHO's own resource address.
+    ("api/v1/conventions.py", "mcp_resource_updated_emit", "uri"),
+    # The resource address of a refused MCP read.
+    ("mcp/handlers.py", "mcp_resource_read_forbidden", "uri"),
+    ("mcp/handlers.py", "mcp_resource_read_capability_forbidden", "uri"),
+    # The name of an MCP profile, not an address.
+    ("mcp/server.py", "mcp_profile_token_url_mismatch", "url_profile"),
+    # The caller cuts the value to a host name or the fixed mark.
+    ("connectors/adapters/http.py", "connector_redirect_not_followed_cross_origin", "location"),
     # MEHO's own resource address template.
-    ("mcp/registry.py", "mcp_resource_registered"),
-    # The value is cut to the date form or the fixed mark inside the call.
-    ("mcp/server.py", "mcp_unsupported_protocol_version"),
+    ("mcp/registry.py", "mcp_resource_registered", "uri_template"),
+    # The short name of a spec that tags its rows, not an address.
+    ("operations/ingest/register_ingested.py", "ingest_op_allowlist_dropped", "spec_source"),
+    ("operations/ingest/register_ingested.py", "ingested_operation_upserted", "spec_source"),
+    ("operations/ingest/register_ingested.py", "ingested_operations_registered", "spec_source"),
 }
 
 
@@ -297,8 +307,8 @@ def _bad_log_calls() -> list[str]:
                 if kw.arg is None or _safe_value(kw.value):
                     continue
                 key = kw.arg.lower()
-                if kw.arg in {"header", "cookie"} or any(w in key for w in _ADDRESS_WORDS):
-                    if (rel, event) in _ALLOWED:
+                if key in _ADDRESS_NAMES or any(w in key for w in _ADDRESS_WORDS):
+                    if (rel, event, kw.arg) in _ALLOWED:
                         continue
                     if key.endswith(("_name", "_names", "_count")) or "kind" in key:
                         continue

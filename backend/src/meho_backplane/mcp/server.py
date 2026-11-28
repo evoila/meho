@@ -909,6 +909,11 @@ def _parse_request_body(raw_body: bytes) -> dict[str, Any] | JSONResponse:
     return payload
 
 
+def _protocol_header_for_log(value: str) -> str:
+    """Return ``value`` when it has the date form of a protocol version, else ``"malformed"``."""
+    return value if _PROTOCOL_DATE.fullmatch(value) else "malformed"
+
+
 def _validate_protocol_version_header(
     request: Request,
     method: str,
@@ -938,7 +943,7 @@ def _validate_protocol_version_header(
     _log.warning(
         "mcp_unsupported_protocol_version",
         method=method,
-        header=protocol_header if _PROTOCOL_DATE.fullmatch(protocol_header) else "malformed",
+        header=_protocol_header_for_log(protocol_header),
         supported=PROTOCOL_VERSION,
     )
     return _error_response(

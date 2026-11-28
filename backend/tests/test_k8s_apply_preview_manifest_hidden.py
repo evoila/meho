@@ -21,16 +21,22 @@ import asyncio
 import base64
 import json
 import secrets
+import time
+import tracemalloc
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict
 
 from meho_backplane.api.v1 import operations as operations_api
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.kubernetes import ops_write_dangerous
+from meho_backplane.connectors.kubernetes.ops_write_preview import MANIFEST_ECHO_MAX_BYTES
 from meho_backplane.mcp.handlers import handle_tools_call
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import meta_tools
@@ -202,3 +208,154 @@ def test_a_manifest_that_cannot_be_read_shows_only_the_marker() -> None:
     )
 
     assert card_param_echoes(ctx) == {"manifest": _PARAM_REDACTED}
+
+
+def _basic_value() -> str:
+    return base64.b64encode(_made_up().encode()).decode()
+
+
+def _key_ring_value() -> str:
+    return "AQ" + secrets.token_hex(18) + "=="
+
+
+def _config_map(body: str) -> str:
+    return f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: prod\n{body}"
+
+
+def _custom(kind: str, body: str) -> str:
+    return f"apiVersion: ex.io/v1\nkind: {kind}\nmetadata:\n  name: one\n  namespace: prod\n{body}"
+
+
+#: Each case: the made-up secret part, and the manifest text that holds it unquoted.
+_PAIR_CASES: dict[str, Any] = {
+    "config-map-data-header": lambda v: _config_map(f"data:\n  Authorization: Basic {v}\n"),
+    "config-map-annotation-header": lambda v: (
+        f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: prod\n"
+        f"  annotations:\n    Authorization: Basic {v}\ndata:\n  a: b\n"
+    ),
+    "custom-kind-header": lambda v: _custom(
+        "Probe", f"spec:\n  headers:\n    Authorization: Basic {v}\n"
+    ),
+    "config-map-data-key-ring": lambda v: _config_map(f"data:\n  key: {v}\n"),
+    "custom-kind-key-ring": lambda v: _custom("Store", f"spec:\n  auth:\n    key: {v}\n"),
+}
+
+
+@pytest.mark.parametrize("path", ["preview_dispatch", "mcp"])
+@pytest.mark.parametrize("case", sorted(_PAIR_CASES))
+def test_a_value_known_by_its_key_is_hidden_in_the_preview_and_the_card(
+    monkeypatch: pytest.MonkeyPatch, path: str, case: str
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    _resolve_to_stand_in(monkeypatch)
+    value = _key_ring_value() if "key-ring" in case else _basic_value()
+    manifest = _PAIR_CASES[case](value)
+    forms = (value, base64.b64encode(value.encode()).decode(), json.dumps(value)[1:-1])
+
+    answer, text = _preview(path, manifest)
+    card = _park(_login("person-token"), manifest).proposed_effect
+
+    assert answer["status"] == "ok", answer
+    card_text = json.dumps(card, default=str)
+    for form in forms:
+        assert form not in text
+        assert form not in card_text
+    shown = answer["redacted_body"]["manifest"]
+    assert shown == card["preview"]["manifest"]
+    assert shown[0]["kind"] in {"ConfigMap", "Probe", "Store"}
+
+
+@pytest.mark.parametrize("path", ["preview_dispatch", "mcp"])
+def test_an_ordinary_config_map_value_shows_in_the_preview_and_the_card(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    _resolve_to_stand_in(monkeypatch)
+    plain = _made_up()
+    manifest = _config_map(f"data:\n  mode: {plain}\n")
+
+    answer, _text = _preview(path, manifest)
+    card = _park(_login("person-token"), manifest).proposed_effect
+
+    shown = answer["redacted_body"]["manifest"]
+    assert shown == card["preview"]["manifest"]
+    assert shown == [
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "cfg", "namespace": "prod"},
+            "data": {"mode": plain},
+        }
+    ]
+
+
+def _alias_manifest(levels: int) -> str:
+    """A ConfigMap of under 600 bytes whose aliases name one list 10**levels times."""
+    lines = [
+        "apiVersion: v1",
+        "kind: ConfigMap",
+        "metadata: {name: a, namespace: prod}",
+        "data: {x: y}",
+        "spec:",
+        "  l0: &l0 [q, q, q, q, q, q, q, q, q, q]",
+    ]
+    lines += [
+        f"  l{n}: &l{n} [" + ", ".join([f"*l{n - 1}"] * 10) + "]" for n in range(1, levels + 1)
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _timed(run: Any) -> tuple[Any, float, int]:
+    """The result of *run*, the seconds it took and its peak of new memory in bytes."""
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        result = run()
+        return result, time.monotonic() - started, tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def _send_identity_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer each dry run with the object's identity, without sending the document.
+
+    So the test measures how MEHO builds the preview and the card, not how
+    the Kubernetes client writes a large document to the stand-in server.
+    """
+
+    async def _send(_dyn: Any, _resource: Any, doc: dict[str, Any], **_: Any) -> tuple[Any, str]:
+        metadata = doc.get("metadata") or {}
+        identity = {key: metadata.get(key) for key in ("name", "namespace")}
+        body = {"apiVersion": doc.get("apiVersion"), "kind": doc.get("kind"), "metadata": identity}
+        return SimpleNamespace(status=200, headers=CIMultiDict()), json.dumps(body)
+
+    monkeypatch.setattr(ops_write_dangerous, "_send_apply", _send)
+
+
+@pytest.mark.parametrize("levels", [6, 7])
+def test_an_alias_manifest_gives_a_small_preview_and_card_fast(
+    monkeypatch: pytest.MonkeyPatch, levels: int
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    _send_identity_only(monkeypatch)
+    manifest = _alias_manifest(levels)
+    assert len(manifest) < 600
+    # The first call that waits sets up the database; it is not measured.
+    _park(_login("person-token"), _config_map("data:\n  a: b\n"))
+    (answer, _text), preview_seconds, preview_peak = _timed(lambda: _through_dispatch(manifest))
+    row, card_seconds, card_peak = _timed(lambda: _park(_login("person-token"), manifest))
+
+    assert preview_seconds < 5
+    assert preview_peak < 50 * 1024 * 1024
+    assert card_seconds < 5
+    assert card_peak < 50 * 1024 * 1024
+    for shown in (answer["redacted_body"]["manifest"], row.proposed_effect["preview"]["manifest"]):
+        assert len(json.dumps(shown).encode()) <= MANIFEST_ECHO_MAX_BYTES
+        assert shown == [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "a", "namespace": "prod"},
+                "echo_omitted": shown[0]["echo_omitted"],
+            }
+        ]

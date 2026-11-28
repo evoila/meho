@@ -151,6 +151,74 @@ ManifestRedactor = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
 _SUBJECT_MAX_OBJECTS = 5
 
 
+class _CopyTooLargeError(Exception):
+    """A copy passed :data:`MANIFEST_ECHO_MAX_BYTES` while it was made."""
+
+
+class _CopyRoom:
+    """The bytes a copy of a ``k8s.apply`` document may still take, counted as it is made.
+
+    Each node takes at most the bytes it has as JSON, and at least one. So a
+    walk that stops at the limit visits a bounded number of nodes, also when
+    a YAML alias names one object many times.
+    """
+
+    def __init__(self, limit: float = MANIFEST_ECHO_MAX_BYTES) -> None:
+        self.left = limit
+
+    def take(self, node: Any) -> None:
+        """Count *node* (a key or a value); raise :class:`_CopyTooLargeError` past the limit."""
+        if isinstance(node, dict | list):
+            size = 2
+        elif isinstance(node, str):
+            size = len(node) + 2
+        else:
+            size = max(len(str(node)), 1)
+        self.left -= size
+        if self.left < 0:
+            raise _CopyTooLargeError
+
+
+#: A room with no limit, for a copy that is not counted (the Job previews).
+_NO_LIMIT = _CopyRoom(math.inf)
+
+
+def _measure(node: Any, room: _CopyRoom) -> None:
+    """Count every key and value of *node* in *room*; stop with :class:`_CopyTooLargeError`."""
+    room.take(node)
+    if isinstance(node, dict):
+        for key, item in node.items():
+            room.take(key)
+            _measure(item, room)
+    elif isinstance(node, list):
+        for item in node:
+            _measure(item, room)
+
+
+def _identity_view(doc: dict[str, Any]) -> dict[str, Any]:
+    """*doc* cut down to ``apiVersion``, ``kind`` and the text ``metadata.name`` / ``namespace``."""
+    raw_metadata = doc.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    return {
+        "apiVersion": doc.get("apiVersion"),
+        "kind": doc.get("kind"),
+        "metadata": {
+            key: metadata[key]
+            for key in ("name", "namespace")
+            if key in metadata and not isinstance(metadata[key], dict | list)
+        },
+    }
+
+
+def _within_limit(doc: dict[str, Any]) -> dict[str, Any]:
+    """*doc*, or its identity (:func:`_identity_view`) when it passes the limit as JSON."""
+    try:
+        _measure(doc, _CopyRoom())
+    except _CopyTooLargeError:
+        return _identity_view(doc)
+    return doc
+
+
 def _sorted_keys(value: Any) -> list[str]:
     """Sorted key names of a dict param; ``[]`` for anything else."""
     return sorted(str(key) for key in value) if isinstance(value, dict) else []
@@ -343,7 +411,7 @@ def _is_secret_scalar(key: Any, item: Any, *, secret_pair: bool) -> bool:
     return is_secret_param_name(key) or (secret_pair and key == "value")
 
 
-def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
+def _hide_values(node: Any, *, hide_commands: bool = True, room: _CopyRoom = _NO_LIMIT) -> Any:
     """Copy *node*, hiding at any depth every value that can hold a secret.
 
     * The ``value`` of every entry in an ``env`` or ``httpHeaders`` list is
@@ -362,49 +430,82 @@ def _hide_values(node: Any, *, hide_commands: bool = True) -> Any:
     * A number or a yes/no value under a secret name is hidden
       (:func:`_is_secret_scalar`). The shared redaction that runs after
       this hides a text under a secret name, but keeps such a value.
+
+    Each key and value walked is counted in *room* (:class:`_CopyRoom`),
+    and so is each map or list inside a hidden command list. The walk stops
+    with :class:`_CopyTooLargeError` when the copy passes the limit of
+    *room*.
     """
+    room.take(node)
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         command_line = {} if hide_commands else _hide_command_line(node)
         secret_pair = is_secret_name_value_pair(node)
         for key, item in node.items():
+            room.take(key)
             if key in command_line:
                 out[key] = command_line[key]
             elif _is_secret_scalar(key, item, secret_pair=secret_pair):
                 out[key] = _HIDDEN
             elif key in _NAME_VALUE_LISTS and isinstance(item, list):
                 out[key] = [
-                    _hide_values({**entry, "value": _HIDDEN}, hide_commands=hide_commands)
+                    _hide_values(
+                        {**entry, "value": _HIDDEN}, hide_commands=hide_commands, room=room
+                    )
                     if isinstance(entry, dict) and "value" in entry
-                    else _hide_values(entry, hide_commands=hide_commands)
+                    else _hide_values(entry, hide_commands=hide_commands, room=room)
                     for entry in item
                 ]
             elif key in _COMMAND_LISTS and isinstance(item, list):
+                _measure([part for part in item if isinstance(part, dict | list)], room)
                 out[key] = {"hidden": True, "bytes": _parts_bytes(item)}
             elif key == "annotations" and isinstance(item, dict) and _LAST_APPLIED in item:
                 out[key] = _hide_values(
-                    {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands
+                    {**item, _LAST_APPLIED: _HIDDEN}, hide_commands=hide_commands, room=room
                 )
             else:
-                out[key] = _hide_values(item, hide_commands=hide_commands)
+                out[key] = _hide_values(item, hide_commands=hide_commands, room=room)
         return _hide_secret_values(out) if out.get("kind") == "Secret" else out
     if isinstance(node, list):
-        return [_hide_values(item, hide_commands=hide_commands) for item in node]
+        return [_hide_values(item, hide_commands=hide_commands, room=room) for item in node]
     return node
 
 
-def _identity_only(doc: dict[str, Any], size: int) -> dict[str, Any]:
-    """A document cut down to its identity, saying why the rest is left out."""
+def _identity_only(doc: dict[str, Any], size: int | None) -> dict[str, Any]:
+    """A document cut down to its identity, saying why the rest is left out.
+
+    *size* is ``None`` when the copy of the document stopped at the limit
+    (:class:`_CopyRoom`), so its full size is not known.
+    """
     raw_metadata = doc.get("metadata")
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     identity = {key: metadata[key] for key in ("name", "namespace") if key in metadata}
+    told = f"more than {MANIFEST_ECHO_MAX_BYTES}" if size is None else str(size)
     return {
         "apiVersion": doc.get("apiVersion"),
         "kind": doc.get("kind"),
         "metadata": identity,
-        "echo_omitted": f"document is {size} bytes; the echo keeps at most "
+        "echo_omitted": f"document is {told} bytes; the echo keeps at most "
         f"{MANIFEST_ECHO_MAX_BYTES} bytes of manifest",
     }
+
+
+def _hidden_documents(docs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], set[int]]:
+    """Each document with its values hidden (:func:`_hide_values`), and the places of the cut ones.
+
+    The copy of each document is counted as it is made. A document whose
+    copy passes :data:`MANIFEST_ECHO_MAX_BYTES` is cut to its identity
+    (:func:`_identity_only`) at that point.
+    """
+    hidden: list[dict[str, Any]] = []
+    cut: set[int] = set()
+    for index, doc in enumerate(docs):
+        try:
+            hidden.append(_hide_values(doc, room=_CopyRoom()))
+        except _CopyTooLargeError:
+            hidden.append(_identity_only(_identity_view(doc), None))
+            cut.add(index)
+    return hidden, cut
 
 
 def _omitted_summary(count: int) -> dict[str, Any]:
@@ -553,7 +654,10 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
 
     Secret ``data`` / ``stringData`` values, ``env`` and ``httpHeaders``
     values, ``command`` / ``args`` text and the last-applied annotation are
-    hidden at any depth (see the module docstring). Then *redact*, the
+    hidden at any depth (see the module docstring). The copy of each
+    document is counted while it is made, and a document whose copy passes
+    :data:`MANIFEST_ECHO_MAX_BYTES` keeps only its identity, so a YAML
+    alias that names one object many times costs no more. Then *redact*, the
     caller's shared params redaction, runs over all documents. Only then is
     the budget applied, because a redaction marker can be longer than the
     value it replaces: the stored echo is what is measured. The documents
@@ -562,7 +666,8 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
     keeps only its identity, and once not even an identity fits, one last
     entry counts the documents left out.
     """
-    docs = redact([_hide_values(doc) for doc in card_documents(manifest)])
+    hidden_docs, cut = _hidden_documents(card_documents(manifest))
+    docs = redact(hidden_docs)
     # Room is kept for the closing summary while documents may still follow,
     # so the whole echo stays within the budget, summary included.
     summary_bytes = _entry_bytes(_omitted_summary(len(docs)))
@@ -571,11 +676,11 @@ def apply_manifest_echo(manifest: str, *, redact: ManifestRedactor) -> list[dict
     for index, hidden in enumerate(docs):
         budget = MANIFEST_ECHO_MAX_BYTES - (summary_bytes if index < len(docs) - 1 else 0)
         size = _entry_bytes(hidden)
-        if used + size <= budget:
+        if index not in cut and used + size <= budget:
             echo.append(hidden)
             used += size
             continue
-        identity = _identity_only(hidden, size)
+        identity = hidden if index in cut else _identity_only(hidden, size)
         identity_size = _entry_bytes(identity)
         if used + identity_size <= budget:
             echo.append(identity)
@@ -706,9 +811,44 @@ def _exec_commands(container: dict[str, Any]) -> dict[str, list[Any]]:
     return {where: command for where, command in commands.items() if command is not None}
 
 
-def _run_command_entry(label: str, container: dict[str, Any]) -> dict[str, Any]:
+def _nested_run_parts(container: dict[str, Any]) -> list[Any]:
+    """Each map or list among the name, the image and the command items of *container*."""
+    lists = [container.get(key) for key in _COMMAND_LISTS]
+    lists += [
+        handler["exec"].get(key)
+        for handler in _exec_handlers(container).values()
+        for key in _COMMAND_LISTS
+    ]
+    parts = [container.get("name"), container.get("image")]
+    parts += [part for items in lists if isinstance(items, list) for part in items]
+    return [part for part in parts if isinstance(part, dict | list)]
+
+
+def _run_command_entry(label: str, container: dict[str, Any], room: _CopyRoom) -> dict[str, Any]:
     """What one container runs: its image, its command line and the commands of
-    its hooks and probes, secret values hidden."""
+    its hooks and probes, secret values hidden.
+
+    A map or a list where a text belongs is counted in *room*, shared by all
+    containers of the manifest. Once *room* is used up, the entry keeps only
+    the object and ``cut`` (:func:`_name_only`), with each name and image
+    that is not a text hidden.
+    """
+    try:
+        _measure(_nested_run_parts(container), room)
+    except _CopyTooLargeError:
+        names = {
+            "object": label,
+            "container": container.get("name"),
+            "image": container.get("image"),
+        }
+        return _name_only(
+            {
+                key: _HIDDEN if isinstance(value, dict | list) else value
+                for key, value in names.items()
+                if key != "image" or "image" in container
+            },
+            None,
+        )
     entry: dict[str, Any] = {"object": label, "container": container.get("name")}
     if "image" in container:
         entry["image"] = container.get("image")
@@ -732,11 +872,17 @@ def _command_text(entry: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _name_only(entry: dict[str, Any], text: str) -> dict[str, Any]:
-    """*entry* without what it runs: the object, the container, the image and the ``cut`` note."""
+def _name_only(entry: dict[str, Any], text: str | None) -> dict[str, Any]:
+    """*entry* without what it runs: the object, the container, the image and the ``cut`` note.
+
+    *text* is ``None`` when the count stopped at the limit (:class:`_CopyRoom`).
+    """
     cut = {key: value for key, value in entry.items() if key not in _RUN_KEYS}
+    told = (
+        f"more than {MANIFEST_ECHO_MAX_BYTES}" if text is None else str(len(text.encode("utf-8")))
+    )
     cut["cut"] = (
-        f"what this container runs is {len(text.encode('utf-8'))} bytes; the card shows "
+        f"what this container runs is {told} bytes; the card shows "
         f"only its start, as the list keeps at most {MANIFEST_ECHO_MAX_BYTES} bytes"
     )
     cut["command_cut"] = ""
@@ -805,11 +951,16 @@ def apply_run_commands(manifest: str, *, redact: ManifestRedactor) -> list[dict[
     # Each label is built from the document as the card shows it, after
     # *redact*: a rule for a field path such as ``manifest.*.metadata.name``
     # hides the name in the label too.
-    labels = [_object_label(doc) for doc in redact(docs)] if docs else []
+    # A document that passes the limit as JSON is redacted as its identity
+    # only (:func:`_within_limit`): the label reads no other field.
+    labels = (
+        [_object_label(doc) for doc in redact([_within_limit(d) for d in docs])] if docs else []
+    )
     if len(labels) != len(docs):
         labels = [_HIDDEN] * len(docs)
+    parts_room = _CopyRoom()
     entries = [
-        _run_command_entry(label, container)
+        _run_command_entry(label, container, parts_room)
         for doc, label in zip(docs, labels, strict=True)
         for container in _containers_in(doc)
     ]

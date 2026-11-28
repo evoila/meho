@@ -128,6 +128,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_in_code_logins_have_a_kind.py",
     # Direct reads of the policy switches, read from every module in the package.
     "tests/test_custom_policy_switch.py",
+    # Log calls that hold a web address, read from every module in the package.
+    "tests/test_log_lines_hold_scheme_and_host.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")

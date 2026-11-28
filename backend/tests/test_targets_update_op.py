@@ -54,7 +54,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
-from meho_backplane.operations.role_floors import role_floor_for
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE, role_floor_for
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_known_person
 
@@ -305,7 +305,7 @@ async def test_a_target_outside_the_tenant_is_not_found(case: str) -> None:
     ("fields", "needle"),
     [
         ({"secret_ref": _NEW_REF, "host": "169.254.169.254"}, "invalid target parameters"),
-        ({"secret_ref": _NEW_REF, "tls_ca_pin": "not a pem"}, "invalid target parameters"),
+        ({"secret_ref": _NEW_REF, "tls_ca_pin": "not a pem"}, "tls_ca_pin"),
         ({"secret_ref": "secret/meho/other-team/login"}, "secret_ref"),
         ({}, "at least one field"),
         ({"secret_ref": _NEW_REF, "product": None}, ""),
@@ -331,7 +331,11 @@ async def test_a_refused_change_is_an_error_and_changes_nothing(
     result = await _run(_admin(), row.id, **fields)
 
     assert result.status in {"error", "invalid_params"}, result
-    message = str(result.extras.get("exception_message") or result.error)
+    message = str(
+        result.extras.get("exception_message")
+        or result.extras.get("validation_errors")
+        or result.error
+    )
     assert needle in message
     after = await _row(row.id)
     assert after.secret_ref == _OLD_REF
@@ -383,7 +387,9 @@ async def test_a_person_below_tenant_admin_is_denied_through_call_operation(
     )
 
     assert call["status"] == "denied", call
-    assert "tenant_admin" in str(call.get("error"))
+    # A Reader who asks for a change is refused first, with the plain sentence.
+    expected = "tenant_admin" if role is TenantRole.OPERATOR else READER_CHANGE_SENTENCE
+    assert expected in str(call.get("error"))
     assert (await _row(row.id)).secret_ref == _OLD_REF
     assert await _approval_rows() == []
     (audit,) = await _audit_rows()

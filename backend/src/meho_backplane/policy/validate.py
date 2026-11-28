@@ -28,7 +28,14 @@ is refused by
 :func:`meho_backplane.policy.routing_floor.tenant_floor_mistakes`. The ``bindings`` are checked by
 :func:`~meho_backplane.policy.bindings.binding_mistakes`: no binding in the
 install's file, no runner, no agent or service with a kind that may
-approve, and no unknown category.
+approve, and no unknown category. The key ``limits`` is checked by
+:func:`~meho_backplane.policy.limits.limits_mistakes`: a file that holds it
+is refused, whatever its value, unless it is the install's file and the
+caller passes ``custom_policy=True`` (the ``CUSTOM_POLICY`` switch is on).
+The ``agents`` rules are checked by
+:func:`~meho_backplane.policy.agent_rules.agent_rules_mistakes`: only in a
+tenant's file, only with the switch on, and never above the outer limit of
+the install's policy.
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.caller_address import has_caller_address
 from meho_backplane.operations.credential_read import has_credential_read_floor
 from meho_backplane.operations.role_floors import role_floor_for
+from meho_backplane.policy.agent_rules import agent_rules_mistakes
 from meho_backplane.policy.bindings import binding_mistakes
 from meho_backplane.policy.classification import (
     RISK_LEVELS,
@@ -62,6 +70,7 @@ from meho_backplane.policy.classification import (
     taxonomy_from_documents,
 )
 from meho_backplane.policy.document import read_kind
+from meho_backplane.policy.limits import limits_mistakes, personal_agent_limit
 from meho_backplane.policy.routing import group_names, routing_mistakes, today_kinds
 from meho_backplane.policy.routing_floor import tenant_floor_mistakes
 
@@ -285,6 +294,7 @@ def check_document(
     install_document: dict[str, Any] | None,
     ops: Sequence[KnownOp],
     other_entries: Sequence[ClassificationEntry] = (),
+    custom_policy: bool = False,
 ) -> list[str]:
     """Return the mistakes of *document*, a valid file's stored form.
 
@@ -292,7 +302,8 @@ def check_document(
     its taxonomy is the base, its "always wait" entries and risk levels
     cannot be set back, and its entries take part in the conflict check).
     *other_entries* are more entries that apply next to the file (the
-    category and labels set on one operation).
+    category and labels set on one operation). *custom_policy* says whether
+    the ``CUSTOM_POLICY`` switch is on.
     """
     taxonomy = (
         taxonomy_from_documents(document, None)
@@ -306,6 +317,11 @@ def check_document(
     if scope == "tenant":
         mistakes.extend(tenant_floor_mistakes(document, install_document))
     mistakes.extend(binding_mistakes(document, scope=scope, taxonomy=taxonomy))
+    mistakes.extend(limits_mistakes(document, scope=scope, custom_policy=custom_policy))
+    limit = personal_agent_limit(install_document, custom_policy=custom_policy)
+    mistakes.extend(
+        agent_rules_mistakes(document, scope=scope, custom_policy=custom_policy, limit=limit)
+    )
     if mistakes:
         return _capped(mistakes)
     entries = entries_from_document(document, scope=scope)

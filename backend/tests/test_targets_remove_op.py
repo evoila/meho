@@ -62,6 +62,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 from tests._sandbox_mode_helpers import (
     grant_use_rows,
@@ -325,7 +326,17 @@ async def _ask_and_approve(asker: Operator, approver: Operator, target_id: uuid.
     return await resume_dispatch_after_approval(operator=approver, request=request)
 
 
-@pytest.mark.parametrize("asker_role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+async def test_a_reader_cannot_ask_to_remove_a_target() -> None:
+    row = await _seed("asked-by-read_only")
+
+    call = await call_operation(_operator("op-asker", role=TenantRole.READ_ONLY), _args(row.id))
+
+    assert call["status"] == "denied", call
+    assert READER_CHANGE_SENTENCE in str(call.get("error"))
+    assert await _is_removed(row.id) is False
+
+
+@pytest.mark.parametrize("asker_role", [TenantRole.OPERATOR])
 async def test_the_target_stays_when_an_operator_approves(asker_role: TenantRole) -> None:
     row = await _seed(f"asked-by-{asker_role.value}")
     asker = _operator("op-asker", role=asker_role)

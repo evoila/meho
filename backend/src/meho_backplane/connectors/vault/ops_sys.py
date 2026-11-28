@@ -796,6 +796,8 @@ async def register_vault_sys_typed_operations(
         tags=["write", "policy", "acl", "dangerous"],
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=VAULT_SYS_POLICY_WRITE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
@@ -820,6 +822,8 @@ async def register_vault_sys_typed_operations(
         tags=["write", "policy", "acl", "dangerous"],
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions=VAULT_SYS_POLICY_DELETE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
@@ -851,6 +855,7 @@ async def register_vault_sys_typed_operations(
         tags=["write", "auth-methods", "bootstrap", "dangerous"],
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

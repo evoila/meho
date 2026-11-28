@@ -13,7 +13,9 @@ Four sources raise the parsed safety of an ingested operation:
 * the per-spec ``safety_overlay`` declared on the catalog row; and
 * the op class of the operation: a read whose answer holds credentials
   (``credential_read``, see :mod:`meho_backplane.operations.credential_read`)
-  is at least ``caution`` and waits for a person's approval; and
+  is at least ``caution`` and waits for a person's approval, and an
+  operation that writes or makes a credential (``credential_write``,
+  ``credential_mint``) waits for a person's approval; and
 * the caller-address marker: an operation with a parameter that holds an
   address MEHO connects to (``x-meho-caller-address: true``, see
   :mod:`meho_backplane.operations.caller_address`) is at least ``caution``
@@ -31,6 +33,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Final
 
+from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.op_classes import CREDENTIAL_CHANGE_OP_CLASSES
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -114,6 +118,21 @@ def _apply_credential_read_floor(proto: EndpointDescriptorProto) -> EndpointDesc
     )
 
 
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = CREDENTIAL_CHANGE_OP_CLASSES
+
+
+def _apply_credential_change_floor(proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
+    """Turn approval on for an operation that writes or makes a credential.
+
+    Returns *proto* itself when the op is not such an operation, and a copy
+    otherwise, so :func:`has_safety_floor` sees every such operation as
+    governed. The risk level stays as it is.
+    """
+    if resolve_op_class(proto.op_id, proto.op_class) not in _CREDENTIAL_CHANGE_CLASSES:
+        return proto
+    return proto.model_copy(update={"requires_approval": True})
+
+
 def _apply_caller_address_floor(proto: EndpointDescriptorProto) -> EndpointDescriptorProto:
     """Raise an op with a caller-address parameter to at least ``caution`` with approval.
 
@@ -145,7 +164,7 @@ def _check_op_class(proto: EndpointDescriptorProto) -> None:
 def has_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> bool:
-    """Return whether any of the four floors governs *proto*."""
+    """Return whether any of the five floors governs *proto*."""
     applied = apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
     return applied is not proto
 
@@ -153,10 +172,12 @@ def has_safety_floor(
 def apply_safety_floor(
     *, product: str, version: str, impl_id: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Apply the connector floor, the catalog overlay, then the two marker floors, to *proto*."""
+    """Apply the connector floor, the catalog overlay, then the three marker floors, to *proto*."""
     check_switch_names(proto.parameter_schema, op_id=proto.op_id)
     floor = _FLOORS.get((product, impl_id))
     floored = floor(version, proto) if floor is not None else proto
     _check_op_class(floored)
     overlaid = _apply_catalog_overlay(product=product, version=version, proto=floored)
-    return _apply_caller_address_floor(_apply_credential_read_floor(overlaid))
+    return _apply_caller_address_floor(
+        _apply_credential_change_floor(_apply_credential_read_floor(overlaid))
+    )

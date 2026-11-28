@@ -251,8 +251,9 @@ def test_waiting_request_behind_many_batches_still_comes_first() -> None:
 
 
 def test_request_decided_between_batches_does_not_hide_a_waiting_request() -> None:
-    # A batch of 5 reads the 26 seeded requests in 6 queries. Someone approves
-    # the newest request just before the last query. With a counted offset
+    # The list first takes the bell's count (one query, #6932). Then a batch of
+    # 5 reads the 26 seeded requests in 6 queries. Someone approves the newest
+    # request just before the last query. With a counted offset
     # the queue moves up by one row, and the last query would start after the
     # oldest request: the one waiting for this person.
     _seed_newer_others_and_one_older_waiting()
@@ -263,7 +264,7 @@ def test_request_decided_between_batches_does_not_hide_a_waiting_request() -> No
     async def list_pending_with_a_decision(db_session: Any, **kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
-        if calls == 6:
+        if calls == 7:
             first = (await real_list_pending(db_session, **{**kwargs, "after": None}))[0]
             await db_session.execute(
                 update(ApprovalRequest)
@@ -281,7 +282,7 @@ def test_request_decided_between_batches_does_not_hide_a_waiting_request() -> No
     ):
         page_one = _get_list("/ui/approvals/list?tab=pending&order=newest", operator)
 
-    assert calls == 6
+    assert calls == 7
     ops_one = _row_ops(page_one)
     assert ops_one[0] == "older.waiting"
     assert _waiting_ops(page_one) == ["older.waiting"]

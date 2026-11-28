@@ -141,6 +141,7 @@ APPROVAL_FLOW_OPS: tuple[KeycloakOp, ...] = (
         tags=("login-flow", "client", "keycloak"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_AUTHFLOW,
             "when_to_call": (

@@ -36,6 +36,10 @@ shape looks like a secret is masked, and every value of a free-form map (a
 parameter the schema types as an object without fixed ``properties``, for
 example the OVF properties of an appliance deploy) is masked while its keys
 stay. The hash still changes with every value, through ``params_digest``.
+A parameter with a registered card echo
+(:func:`~meho_backplane.operations._preview.register_card_param_echo`)
+shows its echo instead: the manifest of ``k8s.apply`` is one entry per
+document with only its kind, namespace and name.
 
 Every synthetic preview says whether it shows the plan (#4028):
 ``plan_shown=True`` when ``proposed_effect`` is present, otherwise
@@ -57,6 +61,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     _redact_echoed_params,
     build_proposed_effect,
+    card_param_echoes,
     describe_preview_provenance,
 )
 from meho_backplane.operations._request_preview import (
@@ -90,6 +95,26 @@ PLAN_NOT_SHOWN_NOTE: Final[str] = (
 )
 
 
+def _agent_preview_context(
+    *,
+    operator: Operator,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+) -> PreviewContext:
+    """The context of a preview for the caller, with no connector instance (egress-free)."""
+    return PreviewContext(
+        descriptor=descriptor,
+        connector_instance=None,
+        operator=operator,
+        target=target,
+        params=params,
+        connector_id=connector_id,
+        agent_preview=True,
+    )
+
+
 async def _synthetic_proposed_effect(
     *,
     operator: Operator,
@@ -112,14 +137,12 @@ async def _synthetic_proposed_effect(
     preview stays clean.
     """
     proposed_effect = await build_proposed_effect(
-        PreviewContext(
-            descriptor=descriptor,
-            connector_instance=None,
+        _agent_preview_context(
             operator=operator,
+            connector_id=connector_id,
+            descriptor=descriptor,
             target=target,
             params=params,
-            connector_id=connector_id,
-            agent_preview=True,
         )
     )
     populated, _reason = describe_preview_provenance(proposed_effect, op_id=descriptor.op_id)
@@ -186,6 +209,37 @@ def safe_params_view(
     return _redact_echoed_params(hidden, connector_id=connector_id, tenant=tenant, op_id=op_id)
 
 
+def _redacted_body(
+    *,
+    operator: Operator,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The ``redacted_body`` of the preview: the safe view, with each card echo in place.
+
+    A parameter with a registered card echo (for example the manifest of
+    ``k8s.apply``) shows its echo, which hides at least what the approval
+    card hides.
+    """
+    body = safe_params_view(
+        params,
+        parameter_schema=descriptor.parameter_schema,
+        connector_id=connector_id,
+        operator=operator,
+        op_id=descriptor.op_id,
+    )
+    ctx = _agent_preview_context(
+        operator=operator,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        target=target,
+        params=params,
+    )
+    return {**body, **card_param_echoes(ctx)}
+
+
 async def build_composite_preview(
     *,
     operator: Operator,
@@ -223,12 +277,12 @@ async def build_composite_preview(
     redacted_body = (
         None
         if is_credential_builder_op(descriptor)
-        else safe_params_view(
-            params,
-            parameter_schema=descriptor.parameter_schema,
-            connector_id=connector_id,
+        else _redacted_body(
             operator=operator,
-            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            target=target,
+            params=params,
         )
     )
     _log.info(

@@ -128,8 +128,8 @@ Header rules (load-bearing):
   `vsphere.vm.list` (which already broadcasts full) is a no-op; the
   audit row keeps `broadcast_detail_origin = "default"`. Sensitive
   classes are `credential_read` + `audit_query` per decision #3.
-  `credential_mint` and `credential_write` always stay `aggregate`:
-  neither the header nor a tenant rule upgrades them.
+  `credential_mint`, `credential_write` and `credential_use` always stay
+  `aggregate`: neither the header nor a tenant rule upgrades them.
 * **MCP equivalent.** The MCP transport equivalent is
   `_meta.broadcast_detail = "full"` in the `tools/call` params per
   the MCP `_meta` envelope spec

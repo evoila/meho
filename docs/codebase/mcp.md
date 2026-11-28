@@ -994,7 +994,7 @@ say *how* to call it. Exact-op mode closes that gap without a new tool:
   `tenant_admin` (the same role the full descriptor read needs);
   anyone else gets the slim hit.
 - **Category and labels, behind a switch (#6041).** While the switch
-  `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
+  `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` is on, a ranked hit and the exact-op contract
   also carry `category` (for example `network`) and `labels` (a map of
   free `key=value` text). They are the operation's classification for
   the caller's tenant, the same values dispatch uses
@@ -1646,7 +1646,7 @@ add-on-family gate.
 
 | Tool | Role | Extra gate | What it does |
 |---|---|---|---|
-| `add_to_knowledge` | operator, or a `read_only` person who can decide approvals (`approver_may_call`) | — | Write a distilled entry to the tenant knowledge base. With `KB_SIMILAR_CHECK` on (off by default), a new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). With it off, the tool has no text about this and no `create_anyway` input. On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
+| `add_to_knowledge` | operator | — | Write a distilled entry to the tenant knowledge base. With `KB_SIMILAR_CHECK` on (off by default), a new slug with similar entries is not written; the answer lists them (`create_anyway` writes anyway, `dry_run` writes nothing). With it off, the tool has no text about this and no `create_anyway` input. On a tenant that keeps its lessons in its own wiki, `wiki` says if the lesson also goes there. |
 | `add_to_memory` | operator | — | Save a scoped memory entry (user / tenant / target). |
 | `ask_docs` | operator | `meho-docs` | Synthesized, cited answer over a vendor-document collection. |
 | `call_operation` | operator | — | Invoke a resolved connector operation against a target. |
@@ -1718,8 +1718,8 @@ session (on top of the Role + Extra-gate columns).
 | `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
 | `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
 | `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
-| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
-| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name; with `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` on, ask for its category or labels. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides; with `CUSTOM_POLICY` or `POLICY_CLASSIFICATION` on, ask for its category or labels. |
 | `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
 | `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
 | `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |
@@ -2021,7 +2021,9 @@ with `tenant_admin` approves it. People who change a target at once use
 `tenant_admin`, so a person with the `operator` role is refused on every
 path, also through `call_operation`. The target is named by `target_id`,
 never by name, so an approved call changes the target the approver saw;
-the preview names that target and the fields the call sends. Only the
+the preview names that target and the fields the call sends. The input
+`extras_changes` sets or removes single keys of `extras` and keeps the
+others (see `docs/codebase/targets.md`). Only the
 sent fields change, and an explicit `null` clears a nullable field. Its
 `inputSchema` is the operation's `parameter_schema` (one object), and its
 `outputSchema` is the parked-shape union, like `meho_targets_register`.
@@ -2137,9 +2139,11 @@ Three switches take text away while they are off:
 | --- | --- | --- |
 | `KB_SIMILAR_CHECK` | `add_to_knowledge` | No text about the similar-entry check, no `create_anyway` input, and `dry_run` says nothing about similar entries (`mcp/tools/_kb_similar_text.py`). |
 | `TEAM_KNOWLEDGE_RECALL` | `call_operation`, `preview_operation` | No `team_knowledge` field in the `outputSchema` (`mcp/tools/_operation_recall.py`). |
-| `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
+| `CUSTOM_POLICY` and `POLICY_ENGINE_SHADOW` | `preview_operation` | No `policy_rule` and no `approvers` field in the `outputSchema` (`mcp/tools/_preview_policy_fields.py`). |
 
-With `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
+Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`, `POLICY_APPROVER_ROUTING`) still turns on its own part alone.
+
+With `CUSTOM_POLICY` or `POLICY_ENGINE_SHADOW` on, a `preview_operation` answer whose op
 resolved has two more fields (#6045):
 
 * `policy_rule`: the rule the policy evaluator matched for this call,
@@ -2161,7 +2165,8 @@ and check `policy_rule` and `approvers` against `meho policy explain`.
 
 `tests/test_mcp_surface_conformance.py` checks both states of each switch.
 `preview_operation` follows two switches, so its listing is the registered
-one only when `TEAM_KNOWLEDGE_RECALL` and `POLICY_ENGINE_SHADOW` are both on.
+one only when `TEAM_KNOWLEDGE_RECALL` is on and `CUSTOM_POLICY` or
+`POLICY_ENGINE_SHADOW` is on.
 
 A third switch works the other way: `MCP_SHORT_TOOL_TEXTS` (off by
 default) gives the biggest tools a short text while it is on. One session
@@ -2332,24 +2337,56 @@ The read checks no agent grant.
 A strict model gateway refuses a tool schema that holds `null` inside an
 `enum`, and then refuses the whole tool list. 16 fields in 11 tools are
 written as `{"type": ["string", "null"], "enum": [..., null]}`. There is no
-switch. The copy of an input schema that `tools/list` sends never has `null`
-in an `enum`. Output schemas are sent as they are.
+switch. For every registered tool, the copy of the input schema and of the
+output schema that `tools/list` sends has no `null` in an `enum`. The registry
+tests stop a tool whose sent copy would have one. One output field has the
+form: `delivery` of `call_operation`.
 
 - `_wire_safe_input_schema` in `mcp/registry.py` walks the whole schema
   (`properties`, `items`, `$defs`, and so on) and drops `None` from each
-  `enum`. Nothing else changes: a `type` list such as `["string", "null"]`
+  `enum` outside the parts of an input schema that stay as they are (the next
+  bullet names them). Nothing else changes: a `type` list such as `["string", "null"]`
   stays. Values under `default`, `const` and `examples` are data and stay as
   they are. The members of an `enum` are data too: only a direct `null` member
   goes, and an object among the members stays as it is. An `enum` of only
   `null` becomes `const: null`, so the sent schema does not accept more than
-  the server does. An `enum` without `null`, also an empty one, stays. No
+  the server does. When it sits next to a `const` that is not `null`, that
+  `const` stays and the `enum` becomes empty, so no value passes, the same as
+  in the full schema. An `enum` without `null`, also an empty one, stays. No
   registered tool has these special forms.
+- In an input schema some parts stay as they are, because there a smaller
+  `enum` could make the sent schema accept a value that the server refuses:
+  the schema under `not`, `if` and `oneOf`, under `contains` next to
+  `maxContains`, and each schema these point to with `$ref` (also through
+  another `$ref`). The whole schema stays as it is in three cases: such a
+  `$ref` is not a plain local path; its path steps into a list with an index
+  not written the plain way (only ASCII digits with no leading zero, sign or
+  space count as an index); or a schema object below the top has an `$id`.
+  The rewrite never fails on the form of an index. A `$ref`
+  or `$id` key does not count in two places only: inside the value of
+  `default`, `const`, `enum`, `examples` or `example`, and as a key under
+  `properties`, `patternProperties`, `$defs`, `definitions`,
+  `dependentSchemas`, `dependentRequired`, `dependencies` or `$vocabulary`
+  (there a key is a name). Every other `$ref` or `$id` key counts. The
+  registry test shows any tool whose sent schema still has `null` in an
+  `enum`.
+- `_wire_safe_output_schema` does the same walk for `outputSchema`, with one
+  difference. MEHO answers `null` for `delivery`, and a client may check the
+  answer against the sent schema (the MCP Python SDK does). So `null` is not
+  just dropped. The rule `{"enum": [..., null]}` becomes
+  `{"anyOf": [{"enum": [...]}, {"type": "null"}]}`, and the other keywords stay.
+  An `anyOf` that the schema already has stays inside an `allOf`. This keeps
+  the meaning, so the walk also rewrites the `enum` under `not`, `if`,
+  `oneOf` and `contains`: the parts that stay as they are apply to the input
+  schema only. The full `outputSchema` on the tool does not change.
 - The server checks each call against `inputSchema`, not the wire copy. A
   call that sends `null` for such a field still passes, and the handler
   treats it like a missing field.
 - MEHO's own hosted agent reuses `to_wire()`, so it gets the same copy.
 - No tool is added, removed or renamed.
-- Tests: `tests/test_mcp_strict_tool_schemas.py`. It runs the real handler of
+- Tests: `tests/test_mcp_strict_output_schemas.py` checks every kind of
+  `call_operation` answer against the sent output schema.
+  `tests/test_mcp_strict_tool_schemas.py` runs the real handler of
   each of the 11 tools with `null` and with the field left out. Only the call
   below the handler (service or database) is a stand-in.
 

@@ -284,6 +284,7 @@ _BUCKET_UPDATE_OP = GcloudOp(
     tags=(*_TAGS, "update"),
     safety_level="caution",
     requires_approval=True,
+    hard_to_undo="deletes",
     llm_instructions={
         "when_to_call": (
             "Call after the bucket exists, to keep old versions, protect objects for a set time "
@@ -428,6 +429,7 @@ _ACCESS_ADD_OP = GcloudOp(
     tags=(*_TAGS, "policy"),
     safety_level="dangerous",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call to let one identity use a bucket, for example to give the backup service "
@@ -499,6 +501,7 @@ _SA_CREATE_OP = GcloudOp(
     tags=("gcloud", "iam", "write", "create", "service-accounts"),
     safety_level="caution",
     requires_approval=True,
+    changes_rights=True,
     llm_instructions={
         "when_to_call": (
             "Call to make the identity that will write backups to a bucket. The account has "

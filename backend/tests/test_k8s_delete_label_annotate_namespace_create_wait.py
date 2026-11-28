@@ -150,7 +150,11 @@ _NOT_FOR_A_DELETE_GRANT: list[tuple[str, dict[str, Any]]] = [
     ("k8s.namespace.create", _FOUR["k8s.namespace.create"]),
     (
         "k8s.apply",
-        {"manifest": yaml.safe_dump({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {}})},
+        {
+            "manifest": yaml.safe_dump(
+                {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "settings"}}
+            )
+        },
     ),
     ("k8s.exec", {"pod": "web-1", "namespace": "apps", "command": ["id"]}),
     ("k8s.secret.create", {"name": "db", "namespace": "apps"}),

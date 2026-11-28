@@ -773,27 +773,36 @@ config:
   # `POLICY_CLASSIFICATION`. When `"true"`, each connector, operation
   # group and operation can carry a category, labels and an "always wait"
   # mark, and an operation takes the values of its group and connector.
-  # When `"false"` (the default), MEHO reads none of it and behaves as
-  # before. See `docs/codebase/policy-classification.md`.
+  # When `CUSTOM_POLICY` and `POLICY_CLASSIFICATION` are `"false"` (the
+  # default), MEHO reads none of it. See
+  # `docs/codebase/policy-classification.md`.
   # `policy.engineShadow` is rendered into `POLICY_ENGINE_SHADOW`. When
   # `"true"`, the policy evaluator works out its own answer next to
   # today's checks and logs every difference. It also writes the rule it
   # matched on audit rows and approval requests, and a preview shows the
-  # rule and who may approve. It decides nothing. When
-  # `"false"` (the default), it does not run. See
+  # rule and who may approve. It decides nothing. When `CUSTOM_POLICY`
+  # and `POLICY_ENGINE_SHADOW` are `"false"` (the default), it does not
+  # run. See
   # `docs/codebase/policy-evaluator.md`.
   # `policy.approverRouting` is rendered into `POLICY_APPROVER_ROUTING`.
   # When `"true"`, a waiting request stores the login group kinds that may
   # approve it, from the policy file's `routing` section, and MEHO checks
   # them at the click. The `bindings` of the tenant's policy file give login
   # groups, matched by full path or group attribute, a group kind and
-  # categories. When `"false"` (the default), MEHO reads no binding and
-  # today's rule decides who may approve. See `docs/codebase/approvals.md`
+  # categories. When `CUSTOM_POLICY` and `POLICY_APPROVER_ROUTING` are
+  # `"false"` (the default), MEHO reads no binding and today's rule
+  # decides who may approve. See `docs/codebase/approvals.md`
   # and `docs/codebase/policy-bindings.md`.
+  # `policy.customPolicy` is rendered into `CUSTOM_POLICY`, the one switch
+  # of the custom policy model. When `"true"`, the three switches above
+  # count as on; each of them still works alone. When `"false"` (the
+  # default), the three parts follow their own switches. See
+  # `docs/codebase/policy.md`.
   policy:
     classification: "false"
     engineShadow: "false"
     approverRouting: "false"
+    customPolicy: "false"
   # -- Tenants whose knowledge entries marked `shared` every tenant on
   # this instance can read. Comma-separated tenant ids. Rendered into
   # `KB_SHARED_TENANT_IDS`. Empty (the default): no tenant may share, and
@@ -1416,7 +1425,8 @@ uiConsole:
 # must wait for approval. While this block is off, the pod gets no
 # APPROVAL_HANDOFF_ENCRYPTION_KEY and MEHO denies every such operation
 # instead of letting it wait for approval. `GET /ready` shows the state under
-# `features.approval_custody`.
+# `features.approval_custody`. With `metricsAuth` on (the default), `/ready`
+# shows it only to a caller that sends the metrics token (see `metricsAuth`).
 #
 # With a built-in core part on, it is on by default (#4047): the install
 # makes the key in `<release>-core-approval-handoff`. Without one, create a

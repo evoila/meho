@@ -71,6 +71,8 @@ source "$DOWNLOAD_DIR/lib/rke2.sh"
 source "$DOWNLOAD_DIR/lib/core.sh"
 # shellcheck source=lib/update.sh
 source "$DOWNLOAD_DIR/lib/update.sh"
+# shellcheck source=lib/targets.sh
+source "$DOWNLOAD_DIR/lib/targets.sh"
 
 HOSTNAME_FQDN=""
 PUBLIC_ADDRESS=""
@@ -81,6 +83,10 @@ SERVICE_CIDR="10.43.0.0/16"
 JOIN_ADDRESS=""
 JOIN_TOKEN_FILE=""
 ADMIN_NETWORK=""
+# The value of --target-networks as given. parse_target_networks (lib/targets.sh)
+# checks it and sets TARGET_NETWORKS, the list that goes to the record and
+# the values.
+TARGET_NETWORKS_GIVEN=""
 FROM_DISK=0
 CONFIRM_BACKUP=0
 OS_PACKAGES_FILE=""
@@ -132,6 +138,15 @@ Options:
                              address of the SSH session that runs
                              install.sh. On the machine's console the
                              option is required.
+  --target-networks <list>   The networks of the systems that MEHO manages,
+                             such as vCenter, NSX, switches and servers:
+                             IPv4 ranges such as 10.20.0.0/16 and
+                             addresses, with commas between them. An
+                             address may carry a port, for example
+                             10.30.0.5:443. No host names. MEHO accepts a
+                             target on a private address only inside them.
+                             Default: none. Change them later with
+                             meho-host target-networks.
   --first-tenant-id <uuid>   The id of the first tenant. Default: a new
                              random id. Give the old id to keep it on a
                              move to another machine.
@@ -181,6 +196,7 @@ set_option() {
         --join-address) JOIN_ADDRESS=$2 ;;
         --join-token-file) JOIN_TOKEN_FILE=$2 ;;
         --admin-network) ADMIN_NETWORK=$2 ;;
+        --target-networks) TARGET_NETWORKS_GIVEN=$2 ;;
         --os-packages) OS_PACKAGES_FILE=$2 ;;
         *) usage_error "unknown option: $1" ;;
     esac
@@ -240,6 +256,10 @@ validate_options() {
         usage_error "--cluster-cidr must be an IPv4 range, for example 10.42.0.0/16."
     is_ipv4_cidr "$SERVICE_CIDR" ||
         usage_error "--service-cidr must be an IPv4 range, for example 10.43.0.0/16."
+    if [[ -n $TARGET_NETWORKS_GIVEN ]]; then
+        parse_target_networks "$TARGET_NETWORKS_GIVEN" "$CLUSTER_CIDR" "$SERVICE_CIDR" ||
+            usage_error "--target-networks: $TARGET_NETWORKS_PROBLEM"
+    fi
     if [[ -n $ADMIN_NETWORK && $ADMIN_NETWORK != none ]] && ! is_ipv4 "$ADMIN_NETWORK"; then
         is_ipv4_cidr "$ADMIN_NETWORK" ||
             usage_error "--admin-network must be an IPv4 range such as 10.0.50.0/24, one IPv4 address, or none."
@@ -279,13 +299,16 @@ on_error() {
 }
 
 # find_the_install: the checks every run needs first, then find_install of
-# lib/update.sh, which sets UPDATE.
+# lib/update.sh, which sets UPDATE. The lock comes before find_install and
+# the install record, so an update holds it from its first read of the
+# record until it wrote the record again.
 find_the_install() {
     local update_options=0
     if ((CONFIRM_BACKUP)) || [[ -n $OS_PACKAGES_FILE ]]; then
         update_options=1
     fi
     check_root
+    take_host_lock
     check_download "$DOWNLOAD_DIR" "${DOWNLOAD_FILES[@]}"
     read_download_version "$DOWNLOAD_DIR"
     find_install "$DOWNLOAD_DIR" "$update_options"
@@ -322,9 +345,10 @@ prepare_machine() {
 # same names as the options of a first install. The record is install.sh's
 # own file, so a value that breaks the rules of its option means that the
 # file was changed by hand. A record of an older install.sh has no
-# join_address; the install then had no join options.
+# join_address; the install then had no join options. Nor has it
+# target_networks: the list is then empty, as it was.
 use_install_answers() {
-    local key bad=()
+    local key bad=() target_networks
     for key in meho_version rke2_version installed_at hostname first_tenant_id \
         admin_user cluster_cidr service_cidr; do
         [[ -n $(record_value "$key") ]] || bad+=("$key")
@@ -339,6 +363,7 @@ use_install_answers() {
     CLUSTER_CIDR=$(record_value cluster_cidr)
     SERVICE_CIDR=$(record_value service_cidr)
     JOIN_ADDRESS=$(record_value join_address)
+    target_networks=$(record_value target_networks)
     if [[ $(record_value from_disk) == true ]]; then
         RECORD_FROM_DISK=1
     fi
@@ -349,6 +374,13 @@ use_install_answers() {
     is_ipv4_cidr "$CLUSTER_CIDR" || bad+=(cluster_cidr)
     is_ipv4_cidr "$SERVICE_CIDR" || bad+=(service_cidr)
     [[ -z $JOIN_ADDRESS || $JOIN_ADDRESS =~ $JOIN_ADDRESS_RE ]] || bad+=(join_address)
+    # The list comes only from the record. Its check needs the two ranges,
+    # so it runs only with good ones.
+    TARGET_NETWORKS=""
+    if [[ -n $target_networks ]] && is_ipv4_cidr "$CLUSTER_CIDR" && is_ipv4_cidr "$SERVICE_CIDR"; then
+        parse_target_networks "$target_networks" "$CLUSTER_CIDR" "$SERVICE_CIDR" ||
+            bad+=(target_networks)
+    fi
     ((${#bad[@]} == 0)) ||
         fail "The install record $MEHO_INSTALL_RECORD has values that install.sh cannot use: $(join_by ', ' "${bad[@]}")." \
             "run 'meho-host support-bundle' and send the file to support."
@@ -406,7 +438,7 @@ update_meho() {
 
     update_step "update the MEHO core"
     write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" \
-        "$CLUSTER_CIDR" "$SERVICE_CIDR"
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$TARGET_NETWORKS"
     install_core "$DOWNLOAD_DIR"
 
     update_step "install the meho command and meho-host, and write the install record"
@@ -415,7 +447,7 @@ update_meho() {
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" \
-        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$RECORD_FROM_DISK"
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$TARGET_NETWORKS" "$RECORD_FROM_DISK"
     print_update_result "$HOSTNAME_FQDN" "$installed_version"
 }
 
@@ -431,6 +463,7 @@ main() {
     if ((FROM_DISK)); then
         step "Step 1: check the host name and the files on the disk"
         check_root
+        take_host_lock
         check_hostname "$HOSTNAME_FQDN"
         check_download "$DOWNLOAD_DIR" "${CORE_DOWNLOAD_FILES[@]}"
         read_download_version "$DOWNLOAD_DIR"
@@ -460,7 +493,7 @@ main() {
         FIRST_TENANT_ID=$(tenant_id)
     fi
     write_place_values "$HOSTNAME_FQDN" "$FIRST_TENANT_ID" "$ADMIN_USER" \
-        "$CLUSTER_CIDR" "$SERVICE_CIDR"
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$TARGET_NETWORKS"
     install_core "$DOWNLOAD_DIR"
 
     step "Step 5: write the two one-time files"
@@ -473,7 +506,7 @@ main() {
     write_console_ca
     write_install_record "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         "$HOSTNAME_FQDN" "$PUBLIC_ADDRESS" "$FIRST_TENANT_ID" "$ADMIN_USER" \
-        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$FROM_DISK"
+        "$CLUSTER_CIDR" "$SERVICE_CIDR" "$JOIN_ADDRESS" "$TARGET_NETWORKS" "$FROM_DISK"
     print_result "$HOSTNAME_FQDN" "$unseal_key_written"
 }
 

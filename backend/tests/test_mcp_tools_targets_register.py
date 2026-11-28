@@ -487,7 +487,7 @@ async def test_bad_name_and_host_are_rejected(
     ).json()
     assert body["error"]["code"] == INVALID_PARAMS
     message = body["error"]["message"]
-    # The message is cut short, so check the error count and the first error.
-    assert "2 validation errors" in message
+    # The call is refused before it can wait; the answer names the first field.
+    assert "1 validation error" in message
     assert "name must not contain spaces" in message
     assert await _count(TargetORM) == 0

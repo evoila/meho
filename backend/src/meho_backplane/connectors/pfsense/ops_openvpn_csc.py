@@ -1009,6 +1009,7 @@ OPENVPN_CSC_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "vpn", "pfsense"),
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_guidance(
             {
                 "when_to_call": (

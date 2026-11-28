@@ -108,6 +108,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.op_classes import declare_per_call_approval
 from meho_backplane.operations.approval_sign_in_writes import approval_sign_in_check
+from meho_backplane.operations.role_floors import has_requester_check
 
 if TYPE_CHECKING:
     from meho_backplane.db.models import ApprovalRequest
@@ -124,6 +125,7 @@ __all__ = [
     "RIGHTS_CHANGE_CONSOLE_ONLY",
     "RIGHTS_CHANGE_REFUSAL",
     "GrantFacts",
+    "approve_reads_call_facts",
     "asked_in_web_console",
     "check_grant_approval",
     "check_rights_change_approval",
@@ -352,6 +354,26 @@ def is_rights_change_op(op_id: str) -> bool:
     """
     op = _GRANT_OPS.get(op_id)
     return (op is not None and op.applies is None and op.per_call) or op_id in _RIGHTS_CHANGE_OPS
+
+
+def approve_reads_call_facts(op_id: str) -> bool:
+    """True when the approve of a request of *op_id* reads facts that only the call has.
+
+    Such facts are the values of the call, or facts that MEHO reads from
+    them or from the target when the request starts to wait. An operation
+    registered with one of three functions has them:
+
+    * :func:`register_rights_change_check`: a change of rights only for
+      some values;
+    * :func:`register_grant_op`: the approval card holds the login, the
+      group, the login-realm fact and the platform admin mark;
+    * :func:`~meho_backplane.operations.role_floors.register_requester_check`:
+      the check of who may ask reads the values.
+
+    ``meho policy explain`` asks without values, so for such an operation
+    it says that the answer depends on them.
+    """
+    return op_id in _GRANT_OPS or op_id in _RIGHTS_CHANGE_CHECKS or has_requester_check(op_id)
 
 
 def is_rights_change(request: ApprovalRequest) -> bool:

@@ -65,6 +65,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 
 __all__ = ["LinuxSshConnector", "parse_fingerprint_output", "parse_os_release"]
 
@@ -251,6 +252,58 @@ class LinuxSshConnector(SshConnector):
     version_range_reason = (
         "Any Linux host that runs systemd fits. A rule for the distribution applies, not a range."
     )
+    credential_ways = (
+        CredentialWay(
+            key="key",
+            label="SSH key",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user to log in as. MEHO uses root when you leave it out.",
+                    required=False,
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="ssh_private_key",
+                    label="Private key",
+                    help="The private key of the user, as text.",
+                    multiline=True,
+                ),
+                CredentialField(
+                    name="known_hosts",
+                    label="Known hosts",
+                    help="The host key line of the server. MEHO needs it to trust the host.",
+                    hidden=False,
+                    multiline=True,
+                ),
+            ),
+        ),
+        CredentialWay(
+            key="password",
+            label="Password",
+            fields=(
+                CredentialField(
+                    name="username",
+                    label="User name",
+                    help="The user to log in as. MEHO uses root when you leave it out.",
+                    required=False,
+                    hidden=False,
+                ),
+                CredentialField(
+                    name="password", label="Password", help="The password of the user."
+                ),
+                CredentialField(
+                    name="known_hosts",
+                    label="Known hosts",
+                    help="The host key line of the server. MEHO needs it to trust the host.",
+                    hidden=False,
+                    multiline=True,
+                ),
+            ),
+        ),
+    )
+    test_operation = "linux.identity.show"
 
     async def fingerprint(
         self,
@@ -697,6 +750,8 @@ class LinuxSshConnector(SshConnector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
         _log.info(
@@ -727,6 +782,7 @@ class LinuxSshConnector(SshConnector):
         from meho_backplane.db.models import EndpointDescriptor
         from meho_backplane.operations._errors import (
             result_connector_error,
+            result_if_left_out,
             result_invalid_params,
             result_unknown_op,
         )
@@ -734,6 +790,7 @@ class LinuxSshConnector(SshConnector):
             import_handler,
             is_unbound_method,
         )
+        from meho_backplane.operations._left_out import left_out_row_clause
         from meho_backplane.operations._lookup import count_known_ops
         from meho_backplane.operations._validate import validate_params
 
@@ -752,11 +809,21 @@ class LinuxSshConnector(SshConnector):
                     EndpointDescriptor.impl_id == self.impl_id,
                     EndpointDescriptor.op_id == op_id,
                     EndpointDescriptor.is_enabled.is_(True),
+                    left_out_row_clause(),
                 )
             )
             descriptor = result.scalar_one_or_none()
 
         if descriptor is None:
+            left_out = result_if_left_out(
+                product=self.product,
+                version=self.version,
+                impl_id=self.impl_id,
+                op_id=op_id,
+                duration_ms=_elapsed(),
+            )
+            if left_out is not None:
+                return left_out
             known_op_count = await count_known_ops(
                 tenant_id=None,  # operator-less chassis path: global rows only
                 product=self.product,

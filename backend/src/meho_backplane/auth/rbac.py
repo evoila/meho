@@ -38,12 +38,13 @@ declaring `verify_jwt_and_bind` separately.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from typing import Final
+from typing import Final, cast
 from uuid import UUID
 
 import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, check_fresh_approval_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
@@ -56,6 +57,7 @@ __all__ = [
     "ensure_human_principal",
     "require_approvals_access",
     "require_human_principal",
+    "require_operator_for_call",
     "require_role",
 ]
 
@@ -78,7 +80,14 @@ _ROLE_ORDER: Final[tuple[TenantRole, ...]] = (
 )
 
 
-def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
+#: The default of the ``request`` argument of the role check, for a direct
+#: call outside a request. FastAPI fills the argument from its annotation.
+_NO_REQUEST: Final[Request] = cast(Request, None)
+
+
+def require_role(
+    min_role: TenantRole, *, reads_only: bool = False
+) -> Callable[[Operator], Operator]:
     """Build a FastAPI dependency that enforces a minimum tenant role.
 
     Returns a callable suitable for ``Depends(...)`` whose body reads
@@ -86,7 +95,7 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
     :func:`verify_jwt_and_bind`, compares ``operator.tenant_role``
     against *min_role* using the linear ordering in
     :data:`_ROLE_ORDER`, and either returns the operator (route is
-    authorised) or raises HTTP 403 ``insufficient_role``.
+    authorised) or raises HTTP 403 ``insufficient_role`` (see :func:`_raise_reader_change_refusal`).
 
     The minimum-role rank is resolved **once at factory call time**
     rather than on every request: the lookup is a tuple search, so the
@@ -120,6 +129,7 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
             ``TENANT_ADMIN``; ``TENANT_ADMIN`` accepts only
             ``TENANT_ADMIN``; ``READ_ONLY`` accepts everyone (rare —
             most routes that allow read-only just don't need the gate).
+        reads_only: ``True`` for a ``POST`` route that only reads (a preview).
 
     Returns:
         A FastAPI dependency callable. Call sites pass it to
@@ -133,7 +143,10 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
     """
     min_rank = _ROLE_ORDER.index(min_role)
 
-    def _checker(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
+    def _checker(
+        operator: Operator = Depends(verify_jwt_and_bind),
+        request: Request = _NO_REQUEST,
+    ) -> Operator:
         actual_rank = _ROLE_ORDER.index(operator.tenant_role)
         if actual_rank < min_rank:
             # Resolve the logger per-call rather than from a module-
@@ -163,6 +176,7 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
                 actual_role=operator.tenant_role.value,
                 required_role=min_role.value,
             )
+            _raise_reader_change_refusal(operator, min_role, request, reads_only=reads_only)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="insufficient_role",
@@ -170,6 +184,93 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
         return operator
 
     return _checker
+
+
+#: HTTP methods that only read.
+_READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The plain ``operator`` check of the general call route, used after the
+#: Reader lookup of :func:`require_operator_for_call`.
+_OPERATOR_PLAIN_CHECK: Final = require_role(TenantRole.OPERATOR, reads_only=True)
+
+
+async def require_operator_for_call(
+    request: Request,
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> Operator:
+    """The ``operator`` role check of ``POST /api/v1/operations/call``.
+
+    A Reader's answer depends on the operation, so this check looks it up
+    from the body first
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    An operation that asks for a change gets ``403 insufficient_role`` with
+    the sentence in ``message``. A plain read, an operation that cannot be
+    found and a body that names no operation get the plain ``403
+    {"detail": "insufficient_role"}``. MEHO stores nothing and runs nothing.
+    """
+    if operator.tenant_role is TenantRole.READ_ONLY:
+        from meho_backplane.auth.role_refusal import RoleRefusedError
+        from meho_backplane.operations.reader_call import reader_call_refusal
+        from meho_backplane.operations.role_floors import READER_CHANGE_CODE
+
+        sentence = await reader_call_refusal(operator, await _json_body_or_none(request))
+        if sentence is not None:
+            structlog.get_logger(__name__).warning(
+                "insufficient_role",
+                operator_sub=operator.sub,
+                actual_role=operator.tenant_role.value,
+                required_role=TenantRole.OPERATOR.value,
+            )
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence)
+    return _OPERATOR_PLAIN_CHECK(operator)
+
+
+async def _json_body_or_none(request: Request) -> object:
+    """The JSON body of *request*, or ``None`` when the body names no operation.
+
+    An empty body, a form body and a ``text/plain`` body that is not JSON
+    name no operation: a Reader gets the plain ``403 {"detail":
+    "insufficient_role"}``. A body with the content type
+    ``application/json`` that is not valid JSON gets ``422`` before the role
+    check runs. A body that this check cannot read (its JSON is nested too
+    deep for the parser) also names no operation, so a Reader gets the plain
+    ``403`` of the door, never a server error. FastAPI read the body before
+    the dependencies run and the request keeps it, so this read does not
+    wait on the client.
+    """
+    raw = await request.body()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _raise_reader_change_refusal(
+    operator: Operator, min_role: TenantRole, request: Request | None, *, reads_only: bool
+) -> None:
+    """Refuse a Reader who asks for a change with the code and the sentence.
+
+    A route that needs the ``operator`` role and does not only read
+    (any method but ``GET`` / ``HEAD`` / ``OPTIONS``, and not marked
+    *reads_only*) asks for a change.
+    The body keeps ``detail: insufficient_role`` and adds the sentence in
+    ``message`` (:class:`~meho_backplane.auth.role_refusal.RoleRefusedError`).
+    Returns when the refusal is not this one.
+    """
+    from meho_backplane.auth.role_refusal import RoleRefusedError
+    from meho_backplane.operations.role_floors import READER_CHANGE_CODE, reader_change_refusal
+
+    is_change = (
+        min_role is TenantRole.OPERATOR
+        and not reads_only
+        and request is not None
+        and request.method.upper() not in _READ_METHODS
+    )
+    sentence = reader_change_refusal(operator.tenant_role, is_change=is_change)
+    if sentence is not None:
+        raise RoleRefusedError(READER_CHANGE_CODE, sentence)
 
 
 #: Rank of ``operator`` in :data:`_ROLE_ORDER`, resolved once at import.

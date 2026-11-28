@@ -19,7 +19,6 @@ the ``policy-registry`` connector while the switch is off.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Final
 
 from meho_backplane.connectors.policy.classify import (
@@ -30,7 +29,7 @@ from meho_backplane.connectors.policy.classify import (
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.bulk import preview_classification_edit
 from meho_backplane.policy.store import ClassificationEdit
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.policy.switches import classification_on_in_environment
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -162,7 +161,7 @@ async def register_policy_classify_preview_operation(
     embedding_service: EmbeddingService | None = None,
 ) -> None:
     """Upsert the ``policy.classify_preview`` typed op while the switch is on."""
-    if not parse_bool_env(os.environ.get("POLICY_CLASSIFICATION")):
+    if not classification_on_in_environment():
         return
     await register_typed_operation(
         product="policy",

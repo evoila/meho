@@ -48,6 +48,10 @@ Approval posture — the load-bearing dial (#2537):
   rather than park them, defeating the propose-then-approve loop. Graph
   writes are reversible (unannotate + §6 arbitration + append-only
   history), unlike credential moves.
+* ``topology.delete_node`` sets ``hard_to_undo="deletes"``: a node made
+  again later gets a new id, and the edges of the old node do not come
+  back. With the switch ``CUSTOM_POLICY`` on, a service login's call of it
+  under a standing grant waits for a person.
 
 The handlers are module-level functions (no connector instance to bind),
 so the dispatcher resolves them with ``connector_instance=None`` and
@@ -459,6 +463,9 @@ _OPERATION_SPECS: tuple[dict[str, Any], ...] = (
         "parameter_schema": DELETE_NODE_PARAMETER_SCHEMA,
         "response_schema": DELETE_NODE_RESPONSE_SCHEMA,
         "tags": ["topology", "write", "node-seed"],
+        # A node made again later gets a new id; the old node's edges do
+        # not come back, and no call of this connector restores them.
+        "hard_to_undo": "deletes",
         "llm_instructions": {
             "when_to_use": (
                 "Remove a mis-seeded or stale manual node (e.g. a probe-"

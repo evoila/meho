@@ -52,6 +52,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay, TargetField
 from meho_backplane.op_classes import declare_root_shell
 from meho_backplane.operations._preview import (
     PermissionPreflight,
@@ -144,6 +145,8 @@ __all__ = [
     "ConnectorAuthError",
     "ConnectorOwnMessage",
     "ConnectorUpstreamError",
+    "CredentialField",
+    "CredentialWay",
     "CredentialsReadError",
     "EmbeddingService",
     "FingerprintResult",
@@ -157,6 +160,7 @@ __all__ = [
     "ProbeResult",
     "RetiredOp",
     "Target",
+    "TargetField",
     "VaultClientError",
     "VaultCredentialsReadError",
     "check_before_send",
@@ -189,8 +193,11 @@ _PROMISED_PARTS: dict[str, tuple[str, ...]] = {
         "_get_json",
         "_post_json",
     ),
+    "CredentialField": ("name", "label", "help", "required", "hidden", "multiline"),
+    "CredentialWay": ("key", "label", "fields"),
     "PreviewContext": ("target", "operator", "params", "connector_instance", "connector_id"),
     "Target": ("name", "host", "extras", "auth_model", "verify_tls", "secret_ref"),
+    "TargetField": ("key", "label", "help", "required", "kind", "choices", "default"),
 }
 
 #: Old kit names: name -> what to use instead. An old name stays for one kit

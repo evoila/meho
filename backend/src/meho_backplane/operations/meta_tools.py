@@ -112,6 +112,7 @@ from meho_backplane.operations._lookup import (
     enabled_for_tenant_clause,
     group_visible_for_tenant_clause,
     installed_owner_clause,
+    package_missing_clause,
     parse_connector_id,
     visible_scope_clause,
 )
@@ -759,7 +760,8 @@ class PreviewOperationResponse(BaseModel):
     policy_rule: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched "
+            "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy "
+            "evaluator matched "
             "({source, rule_id, text, decided}). decided is false: today's checks "
             "decide. Null when the evaluator failed."
         ),
@@ -767,7 +769,8 @@ class PreviewOperationResponse(BaseModel):
     approvers: list[str] | None = Field(
         default=None,
         description=(
-            "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve "
+            "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that "
+            "may approve "
             "the call when policy_verdict is needs-approval; empty otherwise."
         ),
     )
@@ -1269,7 +1272,7 @@ async def _missing_package_of_connector(
         return None
     stmt = (
         select(EndpointDescriptor.owner_package)
-        .where(*connector_rows, ~installed_owner_clause())
+        .where(*connector_rows, package_missing_clause())
         .order_by(EndpointDescriptor.owner_package)
         .limit(1)
     )
@@ -1881,8 +1884,9 @@ async def _call_operation_impl(
 
     Two public wrappers thread different ``approved`` values into the same
     body: :func:`call_operation` (the default) calls the dispatcher's policy
-    gate; :func:`call_operation_with_approval` skips it because the durable
-    approval-decision row is the authorization (G11.1-T9 #1117 / G11.2-T4 #817).
+    gate; :func:`call_operation_with_approval` does not ask for the approval
+    again (G11.1-T9 #1117 / G11.2-T4 #817), and the dispatcher checks the
+    agent's rights again (:mod:`~meho_backplane.operations.approved_run_rights`).
     Both share the same target-resolution + fqdn-override + structlog-audit
     wiring so the audit row shapes stay symmetric.
 
@@ -2037,9 +2041,9 @@ async def call_operation_with_approval(
     :func:`~meho_backplane.agent.approval_wait.resume_or_surface_awaiting_approval`
     after the broadcast feed reported ``approval.approved`` for an in-flight
     agent run's pending request. Same body as :func:`call_operation` but
-    threads ``_approved=True`` into the dispatcher, which skips the policy
-    gate — the durable approval-decision row is the authorization the gate
-    bypass relies on.
+    threads ``_approved=True`` into the dispatcher, which does not ask for
+    the approval again. It still checks the agent's rights as for a new call
+    made now (:mod:`~meho_backplane.operations.approved_run_rights`).
 
     Not part of the public MCP / REST surface: only the agent layer calls
     this. The operator surfaces (REST ``/approve`` + ``/decide``, MCP by-id

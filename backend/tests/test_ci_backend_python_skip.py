@@ -29,7 +29,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard", "python-integration-shard")
+_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard")
 
 
 def _jobs() -> dict[str, Any]:
@@ -419,6 +419,9 @@ def _fan_in(
         "LINT_RESULT": lint,
         "SHARDS_RESULT": shards,
         "OUTSIDE_RESULT": outside,
+        # The second runner site is off (#7085), so its shard job skips.
+        "CHANGES_SECOND_SITE": "",
+        "SECOND_SITE_RESULT": "skipped",
     }
     return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values, **(env or {})})
 
@@ -560,44 +563,3 @@ def test_fork_fan_in_fails_when_the_detector_did_not_pass(tmp_path: Path) -> Non
     )
     assert result.returncode != 0
     assert summary == ""
-
-
-# --- The `python-integration` fan-in -----------------------------------------
-
-
-def _integration_fan_in(
-    tmp_path: Path, *, docs_only: str, backend_python: str, shards: str
-) -> subprocess.CompletedProcess[str]:
-    script = _step_script("python-integration", name="Assert every integration shard passed")
-    assert "${{" not in script
-    values = {
-        "CHANGES_RESULT": "success",
-        "CHANGES_DOCS_ONLY": docs_only,
-        "CHANGES_BACKEND_PYTHON": backend_python,
-        "SHARDS_RESULT": shards,
-    }
-    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values})
-
-
-@pytest.mark.parametrize(
-    ("docs_only", "backend_python", "shards", "passes"),
-    [
-        # No-backend path: the shards skip; the merge queue runs them.
-        ("false", "false", "skipped", True),
-        ("false", "false", "failure", False),
-        ("false", "false", "cancelled", False),
-        # Full run: the shards must pass.
-        ("false", "true", "success", True),
-        ("false", "true", "skipped", False),
-        ("false", "", "skipped", False),
-        # Docs-only: the shards skip.
-        ("true", "false", "skipped", True),
-    ],
-)
-def test_integration_fan_in_result(
-    tmp_path: Path, docs_only: str, backend_python: str, shards: str, passes: bool
-) -> None:
-    result = _integration_fan_in(
-        tmp_path, docs_only=docs_only, backend_python=backend_python, shards=shards
-    )
-    assert (result.returncode == 0) is passes, result.stdout + result.stderr

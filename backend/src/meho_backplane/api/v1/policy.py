@@ -18,6 +18,10 @@ see ``docs/codebase/policy.md``. The work is in
   switch is off.
 * ``GET /api/v1/policy/export`` -- the stored policy as a file.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
+* ``GET /api/v1/policy/carry-over/dry-run`` -- every saved "always wait"
+  and what changes for each one if MEHO reads it as ``destructive``
+  (:mod:`meho_backplane.policy.carry_over`). Writes only its audit row.
+  An agent login gets 403; every other caller gets the export's answer.
 * ``POST /api/v1/policy/explain`` -- why a call runs, waits or is denied,
   and who may approve it (:mod:`meho_backplane.policy.explain`). Runs
   nothing and writes nothing. Asking for yourself (``me``) needs the
@@ -49,13 +53,15 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
+from meho_backplane.connectors.policy.apply_card import diff_as_read
 from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import ApprovalNotFoundError
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.policy.carry_over import CarryOverDryRun, carry_over_dry_run
 from meho_backplane.policy.document import MAX_POLICY_BYTES
 from meho_backplane.policy.explain import (
     FILE_NEEDS_CLASSIFICATION,
@@ -75,6 +81,8 @@ from meho_backplane.policy.service import (
     list_history,
 )
 from meho_backplane.policy.store import InvalidStoredPolicyError, classification_enabled
+from meho_backplane.policy.switches import custom_policy_on
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -205,6 +213,18 @@ def _plan_response(
     )
 
 
+async def _plan(
+    session: AsyncSession, operator: Operator, scope: PolicyScope, content: bytes
+) -> PolicyPlan:
+    return await build_plan(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        content=content,
+        custom_policy=custom_policy_on(get_settings()),
+    )
+
+
 def _bind_audit(op_id: str, op_class: str) -> None:
     structlog.contextvars.bind_contextvars(audit_op_id=op_id, audit_op_class=op_class)
 
@@ -219,9 +239,7 @@ async def validate(
     """Check the file: its shape, its categories and levels, and the floors. Writes nothing."""
     _bind_audit("policy.file.validate", "read")
     _check_scope(operator, scope)
-    plan = await build_plan(
-        session, scope=scope, tenant_id=operator.tenant_id, content=await _read_file(request)
-    )
+    plan = await _plan(session, operator, scope, await _read_file(request))
     return PolicyValidateResponse(
         ok=not plan.mistakes, scope=scope, mistakes=plan.mistakes, warnings=plan.warnings
     )
@@ -277,13 +295,13 @@ async def import_policy(
     content = await _read_file(request)
     if preview:
         _bind_audit("policy.file.preview", "read")
-        plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+        plan = await _plan(session, operator, scope, content)
         return _plan_response(plan, preview=True, message=NO_CHANGE if plan.no_change else None)
 
     _bind_audit("policy.file.import", "write")
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SWITCH_OFF_IMPORT)
-    plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+    plan = await _plan(session, operator, scope, content)
     if plan.mistakes:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -310,7 +328,12 @@ async def export(
     """The stored policy of *scope* as a ``policy: v1`` file."""
     _bind_audit("policy.file.export", "read")
     _check_scope(operator, scope)
-    text = await export_policy(session, scope=scope, tenant_id=operator.tenant_id)
+    text = await export_policy(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        custom_policy=custom_policy_on(get_settings()),
+    )
     return Response(
         content=text,
         media_type="application/yaml",
@@ -325,11 +348,45 @@ async def history(
     scope: Annotated[PolicyScope, Query()] = "tenant",
     limit: Annotated[int, Query(ge=1, le=KEEP_REVISIONS)] = KEEP_REVISIONS,
 ) -> list[PolicyRevisionView]:
-    """The imported policy files of *scope*, newest first (MEHO keeps the last 20)."""
+    """The imported policy files of *scope*, newest first (MEHO keeps the last 20).
+
+    Each entry's ``diff`` reads as an approval card's plan
+    (:func:`~meho_backplane.connectors.policy.apply_card.diff_as_read`): a
+    person gets each role's whole list, every other caller the short form.
+    """
     _bind_audit("policy.file.history", "read")
     _check_scope(operator, scope)
     rows = await list_history(session, scope=scope, tenant_id=operator.tenant_id, limit=limit)
-    return [PolicyRevisionView.model_validate(row) for row in rows]
+    whole = is_human_principal(operator)
+    return [
+        PolicyRevisionView.model_validate({**row, "diff": diff_as_read(row["diff"], whole=whole)})
+        for row in rows
+    ]
+
+
+@router.get("/carry-over/dry-run", response_model=CarryOverDryRun)
+async def carry_over(
+    operator: Annotated[Operator, _policy_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    scope: Annotated[PolicyScope, Query()] = "tenant",
+) -> CarryOverDryRun:
+    """Every saved "always wait" of *scope*, and what changes if MEHO reads it as ``destructive``.
+
+    An agent login gets 403, also one with the platform admin mark. Every
+    other caller gets the export's answer. Writes only its audit row and
+    reads no switch.
+    """
+    _bind_audit("policy.carry_over.dry_run", "read")
+    if operator.principal_kind is PrincipalKind.AGENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An agent login cannot run the dry run.",
+        )
+    _check_scope(operator, scope)
+    try:
+        return await carry_over_dry_run(session, scope=scope, tenant_id=operator.tenant_id)
+    except InvalidStoredPolicyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +477,7 @@ async def _file_document(
     _check_scope(operator, body.scope)
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FILE_NEEDS_CLASSIFICATION)
-    plan = await build_plan(
-        session,
-        scope=body.scope,
-        tenant_id=operator.tenant_id,
-        content=body.file.encode("utf-8"),
-    )
+    plan = await _plan(session, operator, body.scope, body.file.encode("utf-8"))
     # The plan only read; end that transaction before explain opens its own.
     await session.rollback()
     if plan.mistakes:
@@ -445,8 +497,8 @@ async def explain(
     """Why a call runs, waits or is denied, and who may approve it. Runs nothing.
 
     The answer is today's answer (the policy gate, decide-only), the policy
-    evaluator's answer with every rule it matched (with
-    ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
+    evaluator's answer with every rule it matched (with ``CUSTOM_POLICY``
+    or ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and
     the groups that may approve. No audit row for a call, no approval
     request, no call to an outside system. A caller who is not a tenant
     admin or a platform admin gets the answer without the policy's entries

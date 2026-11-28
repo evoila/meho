@@ -118,7 +118,7 @@ from meho_backplane.retrieval.usage import (
     parse_since,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator_read
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -167,10 +167,11 @@ _SINCE_OPTIONS: Final[tuple[str, ...]] = ("24h", "7d", "30d", "90d")
 
 #: Module-level ``Depends`` closure for the operator-role gate. Built once
 #: (rather than inline) to satisfy ruff B008, matching the convention the
-#: corpus / kb / dashboard routes established. ``require_ui_operator`` checks
-#: the role in the session's access token, so every route of the surface has
-#: the same ``operator`` floor as its REST twin.
-_require_session = Depends(require_ui_operator)
+#: corpus / kb / dashboard routes established. ``require_ui_operator_read``
+#: checks the role in the session's access token, so every route of the
+#: surface has the same ``operator`` floor as its REST twin. The surface only
+#: reads, so a Reader gets ``operator_required`` also on its ``POST`` forms.
+_require_session = Depends(require_ui_operator_read)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:

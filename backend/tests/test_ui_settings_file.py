@@ -44,7 +44,6 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.audit_query.query import query_audit
 from meho_backplane.audit_query.schemas import AuditQueryFilters
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditEventClass,
@@ -98,33 +97,6 @@ def cutover_on(monkeypatch: pytest.MonkeyPatch) -> Any:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-
-
-@pytest.fixture
-def sqlite_transactions(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let SQLite open a real transaction, so a rollback undoes the savepoints too.
-
-    The sqlite driver sends no ``BEGIN`` before a ``SAVEPOINT``, so releasing
-    a savepoint commits it at once. This is the SQLAlchemy recipe for
-    SQLite: the driver starts no transaction itself, and each SQLAlchemy
-    transaction sends ``BEGIN``.
-    """
-    make = engine_module.create_engine_for_url
-
-    def _make(url: str, *, pool_size: int, pool_timeout: float) -> Any:
-        engine = make(url, pool_size=pool_size, pool_timeout=pool_timeout)
-
-        @event.listens_for(engine.sync_engine, "connect")
-        def _no_driver_transactions(dbapi_connection: Any, _record: Any) -> None:
-            dbapi_connection.isolation_level = None
-
-        @event.listens_for(engine.sync_engine, "begin")
-        def _begin(connection: Any) -> None:
-            connection.exec_driver_sql("BEGIN")
-
-        return engine
-
-    monkeypatch.setattr(engine_module, "create_engine_for_url", _make)
 
 
 def _seed_tenants() -> None:
@@ -646,7 +618,6 @@ def test_a_target_search_finds_the_apply_that_changed_the_target(
     assert revision.audit_id in asyncio.run(_search())
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_failed_audit_write_saves_nothing(
     cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
@@ -709,7 +680,6 @@ def _assert_nothing_saved_and_only_the_attempt_recorded(applied: Any, text: str)
 _INTERNAL_ERROR = "MEHO could not apply this file because of an internal error."
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_failed_revision_write_saves_nothing(
     cutover: bool, request: pytest.FixtureRequest
@@ -734,7 +704,6 @@ def test_a_failed_revision_write_saves_nothing(
     _assert_nothing_saved_and_only_the_attempt_recorded(applied, _INTERNAL_ERROR)
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_cancelled_apply_saves_nothing_and_its_row_names_the_attempt(
     cutover: bool, request: pytest.FixtureRequest
@@ -764,7 +733,6 @@ def test_a_cancelled_apply_saves_nothing_and_its_row_names_the_attempt(
     assert row.payload["settings_tenant_ids"] == [str(_TENANT_A)]
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_commit_step_that_fails_without_a_database_error_saves_nothing(
     cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
@@ -788,7 +756,6 @@ def test_a_commit_step_that_fails_without_a_database_error_saves_nothing(
     )
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_failed_read_at_the_start_of_the_apply_saves_nothing(
     cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
@@ -810,7 +777,6 @@ def test_a_failed_read_at_the_start_of_the_apply_saves_nothing(
     _assert_nothing_saved_and_only_the_attempt_recorded(applied, _INTERNAL_ERROR)
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @pytest.mark.parametrize("broken", ["rollback", "attempted_tenant_ids"])
 def test_a_failed_cleanup_step_still_answers_with_the_error_text(
     broken: str, monkeypatch: pytest.MonkeyPatch
@@ -1007,7 +973,6 @@ def test_a_platform_admin_needs_a_reason_for_another_tenant() -> None:
     assert row.payload["reason"] == _REASON
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 def test_a_new_tenant_planned_again_under_the_lock_needs_a_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

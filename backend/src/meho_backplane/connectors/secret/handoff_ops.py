@@ -249,6 +249,7 @@ async def register_secret_handoff_operations(
         parameter_schema=SECRET_HANDOFF_EXPORT_PARAMETER_SCHEMA,
         response_schema=_EXPORT_RESPONSE_SCHEMA,
         tags=["secret-broker", "handoff", "change-class"],
+        changes_rights=True,
         llm_instructions=_EXPORT_LLM_INSTRUCTIONS,
         **common,
     )
@@ -265,6 +266,7 @@ async def register_secret_handoff_operations(
         parameter_schema=SECRET_HANDOFF_IMPORT_PARAMETER_SCHEMA,
         response_schema=_IMPORT_RESPONSE_SCHEMA,
         tags=["secret-broker", "handoff", "write", "change-class"],
+        hard_to_undo="overwrites",
         llm_instructions=_IMPORT_LLM_INSTRUCTIONS,
         **common,
     )

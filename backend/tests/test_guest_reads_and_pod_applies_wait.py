@@ -249,8 +249,12 @@ def test_an_apply_of_other_kinds_waits_too(kind: str, api_version: str) -> None:
 
 
 def test_only_the_manifest_of_a_secret_is_hidden_after_the_run() -> None:
-    assert manifest_holds_credential({"manifest": _DEPLOYMENT}) is False
+    plain_pod = {"containers": [{"name": "web", "image": "web:1", "args": ["--port", 8443]}]}
+    plain = _manifest("Deployment", "apps/v1", spec={"template": {"spec": plain_pod}})
+    assert manifest_holds_credential({"manifest": plain}) is False
     assert manifest_holds_credential({"manifest": _manifest("Secret")}) is True
+    # The value after ``--token`` on a command line is a secret too.
+    assert manifest_holds_credential({"manifest": _DEPLOYMENT}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -650,10 +654,9 @@ async def test_a_container_named_twice_by_an_alias_is_listed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = (
-        "apiVersion: v1\nkind: List\nmetadata: {name: l}\n"
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: a}\n"
         "x: &c {name: web, image: registry.example.test/web:1}\n"
-        "items:\n"
-        "  - {apiVersion: v1, kind: Pod, metadata: {name: a}, spec: {containers: [*c, *c]}}\n"
+        "spec: {containers: [*c, *c]}\n"
     )
     effect = await _apply_preview(monkeypatch, manifest, agent=False)
     assert [entry["container"] for entry in effect["preview"][RUN_COMMANDS_KEY]] == ["web"]

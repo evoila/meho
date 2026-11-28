@@ -5,7 +5,8 @@
   Account page (G10.11-T1 #1892). Extends ``base.html`` so the chrome
   matches the rest of the console. Two regions:
 
-    * Identity card -- operator_sub, tenant (reusing the chassis
+    * Identity card -- the person's name, their subject ID
+      (operator_sub, labelled as an ID), tenant (reusing the chassis
       ``session_tenant`` shape), the live role (read from the
       freshly-verified token by the route, never a value cached on the
       session row), and the current session's expiry (absolute + "in
@@ -52,8 +53,21 @@
     <div class="card-body space-y-3">
       <h2 class="card-title text-base">Identity</h2>
       <dl class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {#- The person's name and their ID are two rows. The ID is
+            shown here, labelled as an ID, and never stands in for the
+            name. -#}
         <div>
-          <dt class="meho-overline mb-1">Operator</dt>
+          <dt class="meho-overline mb-1">Name</dt>
+          {% if session_display_name %}
+          <dd class="truncate text-sm" data-field="display-name" title="{{ session_display_name }}">{{ session_display_name }}</dd>
+          {% else %}
+          {#- True both for a session from before migration 0192 and for a
+              login token without a ``name`` claim. -#}
+          <dd class="text-sm text-subtle" data-field="display-name">No name on this session. If your login has one, it shows after your next sign-in.</dd>
+          {% endif %}
+        </div>
+        <div>
+          <dt class="meho-overline mb-1">Subject ID</dt>
           <dd
             class="truncate font-mono text-sm"
             data-field="operator-sub"
@@ -76,7 +90,9 @@
             {% if session_tenant is not none %}{{ tenant_label(session_tenant) }}{% else %}&mdash;{% endif %}
           </dd>
         </div>
-        <div>
+        {#- Fifth cell of the two-column grid: spans both columns so the
+            last row has no empty half. -#}
+        <div class="sm:col-span-2">
           <dt class="meho-overline mb-1">Session expires</dt>
           <dd class="text-sm" data-field="expires-at">
             {% if expires_at is not none %}

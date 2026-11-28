@@ -70,7 +70,7 @@ __all__ = ["ReadDocsRequest", "router"]
 router = APIRouter(prefix="/api/v1", tags=["docs"])
 
 #: Module-level ``Depends`` closure for the RBAC gate (ruff B008 idiom).
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 #: Longest ``read_handle`` / ``cursor`` accepted (the corpus parse's bound).
 _MAX_READ_TOKEN = 8192

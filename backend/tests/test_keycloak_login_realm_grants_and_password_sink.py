@@ -42,6 +42,7 @@ from meho_backplane.operations.grant_approval import (
     grant_changed_since_request,
 )
 from meho_backplane.operations.grant_cover_check import GRANT_COVER_REFUSAL
+from meho_backplane.policy.fixed_rules import fixed_rule_for
 from tests.test_api_v1_approvals_fresh_sign_in import (
     _settings_env,  # noqa: F401 -- autouse fixture: pins the env these tests need
 )
@@ -76,6 +77,19 @@ _NO_MARK = sorted(
     if not needs_per_call_approval(op_id)
 )
 _PARAMS = {write.op_id: write for write in _WRITES if write.op_id in _NO_MARK}
+#: The writes of :data:`_NO_MARK` under a fixed rule (a delete or a credential
+#: call): no standing grant and no run approval is looked up for them.
+_FIXED_RULE = frozenset(
+    {
+        "keycloak.client.delete",
+        "keycloak.group.delete",
+        "keycloak.group.member.remove",
+        "keycloak.realm.delete",
+        "keycloak.user.check_login",
+        "keycloak.user.delete",
+    }
+)
+_GRANTABLE = [op_id for op_id in _NO_MARK if op_id not in _FIXED_RULE]
 
 
 def test_the_writes_without_a_per_call_mark_are_known() -> None:
@@ -122,6 +136,8 @@ async def _verdict(
         op_class=None,
         safety_level="caution",
         policy_always_wait=False,
+        method="POST",
+        tags=[],
     )
     verdict, reason = await _service_grant_verdict(
         operator=_person("service-login"),
@@ -152,9 +168,39 @@ async def test_in_the_login_realm_no_grant_clears_the_write(
     assert used == []
 
 
+def test_the_writes_under_a_fixed_rule_are_known() -> None:
+    operator = _person("service-login")
+    for op_id in _NO_MARK:
+        descriptor = SimpleNamespace(
+            op_id=op_id,
+            parameter_schema={},
+            op_class=None,
+            safety_level="caution",
+            method="POST",
+            tags=[],
+        )
+        rule = fixed_rule_for(descriptor, operator)  # type: ignore[arg-type]
+        assert (rule is not None) is (op_id in _FIXED_RULE), op_id
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["standing grant", "run approval"])
-@pytest.mark.parametrize("op_id", _NO_MARK)
+@pytest.mark.parametrize("op_id", sorted(_FIXED_RULE))
+async def test_in_another_realm_no_grant_clears_a_write_under_a_fixed_rule(
+    fake: _FakeKeycloak,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    path: str,
+) -> None:
+    verdict, _reason, used = await _verdict(monkeypatch, fake, op_id, _OTHER_REALM, path=path)
+
+    assert verdict is None
+    assert used == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["standing grant", "run approval"])
+@pytest.mark.parametrize("op_id", _GRANTABLE)
 async def test_in_another_realm_a_grant_clears_the_write(
     fake: _FakeKeycloak,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,

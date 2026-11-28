@@ -127,6 +127,8 @@ async def register_vault_identity_token_operations(
             tags=spec["tags"],
             safety_level=spec["safety_level"],
             requires_approval=spec["requires_approval"],
+            hard_to_undo=spec.get("hard_to_undo"),
+            changes_rights=spec.get("changes_rights", False),
             llm_instructions=spec["llm_instructions"],
             embedding_service=embedding_service,
         )

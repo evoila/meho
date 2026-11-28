@@ -1328,7 +1328,7 @@ async def test_mint_refuses_needs_approval_verdict(monkeypatch: pytest.MonkeyPat
     async with sessionmaker() as session:
         result = await mint_gateway_command(
             session,
-            operator=_operator(),
+            operator=_caller(_MINTER_SUB, PrincipalKind.SERVICE),
             connector_id=_CONNECTOR_ID,
             op_id=_OP_ID,
             target=None,

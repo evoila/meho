@@ -228,6 +228,8 @@ class _CompositeSpec(NamedTuple):
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None = None
+    hard_to_undo: Literal["deletes", "stops", "overwrites"] | None = None
+    changes_rights: bool = False
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -466,6 +468,7 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "repos"],
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_call": (
                 "Call when a person asks for a new repository in a GitHub organisation. "
@@ -605,6 +608,8 @@ async def register_github_composite_operations(
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,
+            hard_to_undo=spec.hard_to_undo,
+            changes_rights=spec.changes_rights,
             llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )

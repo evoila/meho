@@ -8,8 +8,9 @@ counts the requests that reached the target
 (``_composite_credential_steps_helpers.sent``). Covered:
 
 * change, wait, change: each change is sent once;
-* credential write, wait, change: the write is sent once and the run
-  finishes; the stored record says only that the write is finished;
+* credential write, wait, change: the write waits for its own approval and
+  is sent once; the run then waits at the next step and finishes; the
+  stored record says only that the write is finished;
 * credential read, wait, change: the read is sent again after the approval
   and the run finishes; when the read gives another answer and the approved
   step changes with it, the run stops and the step is not sent; when the
@@ -26,10 +27,10 @@ counts the requests that reached the target
   the read is sent again after the approval; when its policy now needs a
   person, the approval of the run does not cover it and it is not sent;
 * two credential writes, each one waits: each write is sent once;
-* a credential write whose answer was lost, then a wait: MEHO asks for no
-  approval and stops at once;
-* a credential write through ``dispatch_child``, wait, change: the write is
-  sent once and gives back no result after the approval;
+* a credential write whose answer was lost after its approval, then a
+  wait: MEHO asks for no second approval and stops at once;
+* a credential write through ``dispatch_child``: it waits for its own
+  approval, and the approval runs only the write;
 * a credential read checked by ``enforce_subop_policy``, wait, change: when
   the login is blocked while the read waits in its policy check before it
   is sent again, the read is not sent and the answer is the block refusal;
@@ -200,7 +201,7 @@ async def test_change_wait_change_sends_each_change_once(
 async def test_credential_write_wait_change_finishes_and_sends_the_write_once(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
-    """The write is finished: after the approval it is not sent again and gives no result."""
+    """The write waits for its own approval and is sent once; then the run waits again."""
     await _setup(
         stub_embedding_service,
         session,
@@ -210,24 +211,32 @@ async def test_credential_write_wait_change_finishes_and_sends_the_write_once(
 
     first = await h.run(c.CREDENTIAL_WRITE_WAIT_CHANGE_OP_ID)
     assert first.status == "awaiting_approval", first.error
-    assert c.sent == [c.CREDENTIAL_WRITE_STEP]
-    (waiting,) = await _requests()
-    assert [(step["op_id"], step["status"]) for step in _steps(waiting)] == [
-        (c.CREDENTIAL_WRITE_STEP, STEP_DONE_NO_RESULT)
-    ]
-    _assert_no_secret(waiting)
+    assert c.sent == [], "the write waits before it is sent"
+    (for_write,) = await _requests()
+    assert for_write.op_id == c.CREDENTIAL_WRITE_STEP
+    _assert_no_secret(for_write)
 
     second = await _approve_and_resume(first)
+    assert second.status == "awaiting_approval", second.error
+    assert c.sent == [c.CREDENTIAL_WRITE_STEP]
+    requests = await _requests()
+    assert [request.op_id for request in requests] == [c.CREDENTIAL_WRITE_STEP, c.WAIT_STEP]
+    assert [(step["op_id"], step["status"]) for step in _steps(requests[1])] == [
+        (c.CREDENTIAL_WRITE_STEP, STEP_DONE_NO_RESULT)
+    ]
+    _assert_no_secret(requests[1])
 
-    assert second.status == "ok", second.error
-    assert second.result == {"done": True, "credential_replayed": True}
-    assert c.sent == [c.CREDENTIAL_WRITE_STEP, c.WAIT_STEP, c.CHANGE_STEP]
+    third = await _approve_and_resume(second)
+
+    assert third.status == "ok", third.error
+    assert third.result == {"done": True, "credential_replayed": True}
+    assert c.sent == [c.CREDENTIAL_WRITE_STEP, c.WAIT_STEP, c.CHANGE_STEP], "the write is sent once"
 
 
-async def test_credential_write_through_dispatch_child_is_sent_once(
+async def test_credential_write_through_dispatch_child_waits_for_its_own_approval(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
-    """A ``dispatch_child`` credential write gives back ``ok`` with no result after the approval."""
+    """A ``dispatch_child`` credential write waits for a person; its approval runs only it."""
     await _setup(
         stub_embedding_service,
         session,
@@ -237,25 +246,22 @@ async def test_credential_write_through_dispatch_child_is_sent_once(
 
     first = await h.run(c.CHILD_CREDENTIAL_WRITE_OP_ID)
     assert first.status == "awaiting_approval", first.error
-    assert c.sent == [c.CREDENTIAL_WRITE_CHILD]
+    assert c.sent == []
     (waiting,) = await _requests()
-    assert [(step["op_id"], step["status"]) for step in _steps(waiting)] == [
-        (c.CREDENTIAL_WRITE_CHILD, STEP_DONE_NO_RESULT)
-    ]
-    assert c.SECRET_VALUE not in json.dumps(waiting.resume_parent)
-    assert "result" not in _steps(waiting)[0]
+    assert waiting.op_id == c.CREDENTIAL_WRITE_CHILD
+    assert waiting.resume_parent is None
 
     second = await _approve_and_resume(first)
 
     assert second.status == "ok", second.error
-    assert second.result == {"done": True, "child_result": None}
-    assert c.sent == [c.CREDENTIAL_WRITE_CHILD, c.WAIT_STEP, c.CHANGE_STEP]
+    assert c.sent == [c.CREDENTIAL_WRITE_CHILD]
+    assert len(await _requests()) == 1
 
 
 async def test_credential_write_with_a_lost_answer_stops_before_the_wait(
     stub_embedding_service: AsyncMock, session: AsyncSession
 ) -> None:
-    """MEHO does not know if the write happened: it asks no person and stops at once."""
+    """The write waits; after the approval its answer is lost: MEHO asks no one again and stops."""
     await _setup(
         stub_embedding_service,
         session,
@@ -264,12 +270,18 @@ async def test_credential_write_with_a_lost_answer_stops_before_the_wait(
     )
 
     first = await h.run(c.LOST_CREDENTIAL_WRITE_OP_ID)
+    assert first.status == "awaiting_approval", first.error
+    assert c.sent == [], "the write waits before it is sent"
+    (for_write,) = await _requests()
+    assert for_write.op_id == c.CREDENTIAL_WRITE_STEP
 
-    assert first.status == "error"
-    assert first.extras["error_code"] == "composite_resume_step_outcome_unknown"
-    assert first.extras["blocked_op_id"] == c.CREDENTIAL_WRITE_STEP
-    assert await _requests() == [], "no approval request is made"
-    assert c.sent == [c.CREDENTIAL_WRITE_STEP], "the step that would wait is not sent"
+    second = await _approve_and_resume(first)
+
+    assert second.status == "error"
+    assert second.extras["error_code"] == "composite_resume_step_outcome_unknown"
+    assert second.extras["blocked_op_id"] == c.CREDENTIAL_WRITE_STEP
+    assert len(await _requests()) == 1, "no second approval request is made"
+    assert c.sent == [c.CREDENTIAL_WRITE_STEP], "the write is sent once; the step that waits is not"
 
 
 async def test_two_credential_writes_that_each_wait_are_sent_once(

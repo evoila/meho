@@ -107,7 +107,7 @@ from meho_backplane.docs_search import (
 from meho_backplane.docs_search.answer import ANSWER_SOURCE_UPSTREAM
 from meho_backplane.docs_search.target_scope import apply_target_default
 from meho_backplane.settings import get_settings
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator_read
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
     verify_access_token_with_refresh,
@@ -161,7 +161,7 @@ _MEHO_DOCS_REF_PREFIX: Final[str] = "meho://docs/"
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
 #: the kb / topology / dashboard routes established.
-_require_operator = Depends(require_ui_operator)
+_require_operator = Depends(require_ui_operator_read)
 
 
 async def _resolve_operator(session: UISessionContext) -> Operator:

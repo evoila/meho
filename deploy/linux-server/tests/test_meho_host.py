@@ -49,7 +49,7 @@ RKE2_UNIT = "/etc/systemd/system/rke2-server.service"
 RKE2_UNINSTALL = "/usr/local/bin/rke2-uninstall.sh"
 MEHO_COMMANDS = ("/usr/local/bin/meho", "/usr/local/sbin/meho-host")
 MEHO_HOST_LIB = "/usr/local/lib/meho-host"
-LIB_FILES = ("firewall.sh", "cis.sh")
+LIB_FILES = ("firewall.sh", "cis.sh", "targets.sh")
 # The fake rke2-uninstall.sh removes what the real one removes: RKE2's
 # unit, its data, its binaries and itself.
 RKE2_UNINSTALL_STUB = (
@@ -2052,7 +2052,11 @@ class InstallTests(InstallTestCase):
         self.assertIn("check [--json]", help_result.stdout)
 
     def test_meho_host_without_its_lib_files_stops_with_the_fix(self) -> None:
-        cases = {"no lib file": (), "only firewall.sh next to it": ("firewall.sh",)}
+        cases = {
+            "no lib file": (),
+            "only firewall.sh next to it": ("firewall.sh",),
+            "no targets.sh next to it": ("firewall.sh", "cis.sh"),
+        }
         for case, next_to_it in cases.items():
             with (
                 self.subTest(case=case),
@@ -2070,9 +2074,9 @@ class InstallTests(InstallTestCase):
                 self.assertEqual(1, result.returncode)
                 self.assertEqual("", result.stdout)
                 self.assertEqual(
-                    "[FAIL] meho-host cannot find firewall.sh and cis.sh: neither "
-                    f"{base}/sbin/lib nor {base}/lib/meho-host holds both. Fix: copy "
-                    "lib/firewall.sh and lib/cis.sh of the MEHO download to "
+                    "[FAIL] meho-host cannot find firewall.sh, cis.sh and targets.sh: neither "
+                    f"{base}/sbin/lib nor {base}/lib/meho-host holds all three. Fix: copy "
+                    "lib/firewall.sh, lib/cis.sh and lib/targets.sh of the MEHO download to "
                     "/usr/local/lib/meho-host/.\n",
                     result.stderr,
                 )

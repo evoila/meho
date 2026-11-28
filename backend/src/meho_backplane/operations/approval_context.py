@@ -89,6 +89,7 @@ from meho_backplane.db.models import (
     EndpointDescriptor,
     Target,
 )
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 if TYPE_CHECKING:
@@ -107,9 +108,7 @@ _log = structlog.get_logger(__name__)
 #: Sensitivity classes whose subject must never be echoed -- a
 #: credential-class op gets no identity echo at all (mirrors the
 #: ``_SENSITIVE_CLASSES`` set the preview builder suppresses on).
-_CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_mint", "credential_write"}
-)
+_CREDENTIAL_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES
 
 #: Non-path-variable param keys that name the *human* subject the caller
 #: supplied for a governed write. Deliberately narrow: an identity label,

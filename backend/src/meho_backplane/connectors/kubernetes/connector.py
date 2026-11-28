@@ -109,6 +109,7 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
     TopologyHints,
 )
+from meho_backplane.connectors.target_form import CredentialField, CredentialWay
 from meho_backplane.targets.ssrf_guard import TargetDestinationBlockedError
 
 __all__ = ["KubernetesConnector", "product_from_git_version"]
@@ -483,6 +484,21 @@ class KubernetesConnector(Connector):
     # Kubernetes lines that are supported upstream (1.35 to 1.37) plus the
     # 1.32 line that CI tests today. Older targets get a clear fit warning.
     supported_version_range = ">=1.32,<1.38"
+    credential_ways = (
+        CredentialWay(
+            key="kubeconfig",
+            label="Kubeconfig",
+            fields=(
+                CredentialField(
+                    name="kubeconfig",
+                    label="Kubeconfig",
+                    help="The kubeconfig file of a service account, as text.",
+                    multiline=True,
+                ),
+            ),
+        ),
+    )
+    test_operation = "k8s.namespace.list"
 
     def __init__(
         self,
@@ -1998,6 +2014,8 @@ class KubernetesConnector(Connector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
         _log.info(
@@ -2076,6 +2094,7 @@ class KubernetesConnector(Connector):
         from meho_backplane.db.models import EndpointDescriptor
         from meho_backplane.operations._errors import (
             result_connector_error,
+            result_if_left_out,
             result_invalid_params,
             result_unknown_op,
         )
@@ -2083,6 +2102,7 @@ class KubernetesConnector(Connector):
             import_handler,
             is_unbound_method,
         )
+        from meho_backplane.operations._left_out import left_out_row_clause
         from meho_backplane.operations._lookup import count_known_ops
         from meho_backplane.operations._validate import validate_params
 
@@ -2106,11 +2126,21 @@ class KubernetesConnector(Connector):
                     EndpointDescriptor.impl_id == self.impl_id,
                     EndpointDescriptor.op_id == op_id,
                     EndpointDescriptor.is_enabled.is_(True),
+                    left_out_row_clause(),
                 )
             )
             descriptor = result.scalar_one_or_none()
 
         if descriptor is None:
+            left_out = result_if_left_out(
+                product=self.product,
+                version=self.version,
+                impl_id=self.impl_id,
+                op_id=op_id,
+                duration_ms=_elapsed(),
+            )
+            if left_out is not None:
+                return left_out
             known_op_count = await count_known_ops(
                 tenant_id=None,  # operator-less chassis path: global rows only
                 product=self.product,

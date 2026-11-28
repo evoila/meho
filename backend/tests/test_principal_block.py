@@ -30,14 +30,16 @@ from typing import Any
 import httpx
 import pytest
 import respx
+import structlog.testing
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from httpx import ASGITransport
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth import principal_block
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
@@ -495,6 +497,37 @@ async def test_block_again_updates_the_reason_and_unblock_of_nobody_is_404(
 
     (row,) = await _rows(_BLOCKED)
     assert row.reason == "second"
+
+
+@pytest.mark.asyncio
+async def test_unblock_removes_nothing_when_a_block_is_set_again_while_it_runs(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second database session sets the block again after the unblock read it."""
+    ac, key = _client
+    await _seed_tenants()
+    admin = _admin(key)
+    await _block(ac, admin, reason="first")
+    read_blocks = principal_block._read_blocks
+
+    async def _read_then_set_again(session: AsyncSession, sub: str) -> Any:
+        blocks = await read_blocks(session, sub)
+        async with get_sessionmaker()() as other, other.begin():
+            await other.execute(
+                update(PrincipalBlock).where(PrincipalBlock.sub == sub).values(reason="again")
+            )
+        return blocks
+
+    monkeypatch.setattr(principal_block, "_read_blocks", _read_then_set_again)
+    changed = await ac.delete(f"{_ROUTE}/{_BLOCKED}", headers=_auth(admin))
+
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"].startswith("principal_block_changed")
+    (row,) = await _rows(_BLOCKED)
+    assert row.reason == "again"
+    async with get_sessionmaker()() as session:
+        rows = list((await session.execute(select(AuditLog))).scalars())
+    assert [r for r in rows if r.payload.get("unblocked_sub") == _BLOCKED] == []
 
 
 def test_there_is_no_mcp_tool_to_block_or_unblock() -> None:
@@ -960,6 +993,54 @@ async def test_unblock_answers_503_when_the_table_read_fails_with_the_list_cache
     assert len(await _rows(_BLOCKED)) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_failed_block_or_unblock_logs_no_login_or_reason(
+    _client: tuple[httpx.AsyncClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ac, key = _client
+    await _seed_tenants()
+    private = "private reason of the admin"
+    assert (await _block(ac, _admin(key), reason=private)).status_code == 201
+    real_execute = AsyncSession.execute
+
+    async def _execute(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        writes = getattr(statement, "is_insert", False) or getattr(statement, "is_delete", False)
+        table = getattr(getattr(statement, "table", None), "name", None)
+        if writes and table == PrincipalBlock.__tablename__:
+            params = {"sub": _BLOCKED, "reason": private}
+            raise OperationalError(str(statement), params, Exception("gone"))
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", _execute)
+    with structlog.testing.capture_logs() as logs:
+        block = await _block(ac, _admin(key), reason=private)
+        unblock = await _unblock(ac, _admin(key), _BLOCKED, reason=private)
+    monkeypatch.undo()
+
+    for response in (block, unblock):
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == "principal_block_check_unavailable"
+    failed = [e for e in logs if str(e["event"]).endswith("_write_failed")]
+    assert failed == [
+        {
+            "event": "principal_block_write_failed",
+            "log_level": "warning",
+            "operation": "block",
+            "error_type": "OperationalError",
+            "error_code": "none",
+        },
+        {
+            "event": "principal_unblock_write_failed",
+            "log_level": "warning",
+            "operation": "unblock",
+            "error_type": "OperationalError",
+            "error_code": "none",
+        },
+    ]
+    assert private not in repr(logs)
+    assert [r.reason for r in await _rows(_BLOCKED)] == [private]
+
+
 # ---------------------------------------------------------------------------
 # Who may unblock, and what the way back needs
 # ---------------------------------------------------------------------------
@@ -1012,8 +1093,25 @@ async def test_own_unblock_with_a_login_token_asks_for_a_fresh_sign_in(
     assert row.operator_sub == _PA
 
 
+_OWN_REASON_TEXT = (
+    "unblock_reason_required: Removing a block on your own login needs a reason: "
+    "1 to 500 characters, with at least one character that is not a blank. "
+    "Add --reason <text>."
+)
+_OTHER_REASON_TEXT = (
+    "unblock_reason_required: A reason has 1 to 500 characters, with at least one "
+    "character that is not a blank. Leave out --reason, or fix the text."
+)
+_BLANK_REASONS = [" ", "     ", "\t", "\n", " \t\r\n "]
+_BLANK_IDS = ["space", "spaces", "tab", "line-break", "mixed"]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [None, "", "x" * 501], ids=["none", "empty", "too-long"])
+@pytest.mark.parametrize(
+    "reason",
+    [None, "", "x" * 501, *_BLANK_REASONS],
+    ids=["none", "empty", "too-long", *_BLANK_IDS],
+)
 async def test_own_unblock_needs_a_reason(
     _client: tuple[httpx.AsyncClient, Any], reason: str | None
 ) -> None:
@@ -1024,10 +1122,59 @@ async def test_own_unblock_needs_a_reason(
     refused = await _unblock(ac, _pa_token(key), _PA, reason=reason)
 
     assert refused.status_code == 422, refused.text
-    assert refused.json()["detail"].startswith("unblock_reason_required: ")
+    assert refused.json()["detail"] == _OWN_REASON_TEXT
     assert len(await _rows(_PA)) == 1
     (row,) = await _unblock_rows()
     assert row.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["", "x" * 501, *_BLANK_REASONS],
+    ids=["empty", "too-long", *_BLANK_IDS],
+)
+async def test_unblock_of_another_login_refuses_a_reason_without_text(
+    _client: tuple[httpx.AsyncClient, Any], reason: str
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    assert (await _block(ac, _admin(key))).status_code == 201
+
+    refused = await _unblock(ac, _admin(key), _BLOCKED, reason=reason)
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == _OTHER_REASON_TEXT
+    assert len(await _rows(_BLOCKED)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", _BLANK_REASONS, ids=_BLANK_IDS)
+async def test_block_with_a_reason_of_only_blanks_writes_no_block(
+    _client: tuple[httpx.AsyncClient, Any], reason: str
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+
+    refused = await _block(ac, _admin(key), reason=reason)
+
+    assert refused.status_code == 422, refused.text
+    assert await _rows(_BLOCKED) == []
+
+
+@pytest.mark.asyncio
+async def test_a_reason_with_blanks_around_a_word_is_stored_as_sent(
+    _client: tuple[httpx.AsyncClient, Any],
+) -> None:
+    ac, key = _client
+    await _seed_one_tenant()
+    reason = "  planned  maintenance \n"
+
+    assert (await _block(ac, _admin(key), reason=reason)).status_code == 201
+    assert [row.reason for row in await _rows(_BLOCKED)] == [reason]
+
+    removed = await _unblock(ac, _admin(key), _BLOCKED, reason=reason)
+    assert removed.status_code == 200, removed.text
 
 
 @pytest.mark.asyncio

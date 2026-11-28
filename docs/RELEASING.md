@@ -301,8 +301,7 @@ How users get the new version is in the
   hang trips the step-level timeout and degrades to an absorbed job
   failure with run conclusion `success`, so a `cancelled` run
   means a genuine cancel.) Do not re-run a cancelled merge-queue run:
-  after the merge the queue branch is gone, and the watchdog job
-  cancels the re-run. When the merge-queue run of the tagged commit is
+  after the merge its queue branch is gone. When the merge-queue run of the tagged commit is
   `cancelled` or missing, the proof is the next green nightly run on
   `main` that contains the commit. Wait for it before tagging.
 

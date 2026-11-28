@@ -24,7 +24,7 @@ from meho_backplane.operations.run_approval_schemas import (
     RunApprovalRead,
     RunApprovalWaitNote,
 )
-from meho_backplane.operations.service_grants import credential_call_waits
+from meho_backplane.operations.service_grants import credential_call_waits, only_uses_credential
 
 __all__ = ["wait_notes", "with_wait_notes"]
 
@@ -70,9 +70,13 @@ async def wait_notes(
 def _wait_reason(op_id: str, stored_class: str | None) -> str | None:
     """The note for *op_id*, or ``None`` when none of its calls wait."""
     if credential_call_waits(op_id, stored_class):
+        action = (
+            "uses a credential"
+            if only_uses_credential(op_id, stored_class)
+            else "reads, writes or makes a credential"
+        )
         return (
-            f"op {op_id!r} reads, writes or makes a credential. A run approval never "
-            "covers it: each call waits for a person"
+            f"op {op_id!r} {action}. A run approval never covers it: each call waits for a person"
         )
     if has_credential_read_floor(op_id, reveal_secret=True, stored_op_class=stored_class):
         return (

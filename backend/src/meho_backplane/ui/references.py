@@ -59,7 +59,12 @@ from urllib.parse import quote
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.audit_query.query import is_withdraw_row
+from meho_backplane.audit_query.query import (
+    ReuseState,
+    is_reuse_row,
+    is_withdraw_row,
+    reuse_state,
+)
 from meho_backplane.auth.operator import MACHINE_PRINCIPAL_KINDS
 from meho_backplane.db.models import (
     AuditLog,
@@ -363,6 +368,10 @@ def humanize_relative(then: datetime, *, now: datetime) -> str:
     return then.strftime("%Y-%m-%d")
 
 
+#: The colour of a retry row, by the ``result_status`` of its state.
+_REUSE_TONES = {"pending": "warning", "ok": "success", "error": "error"}
+
+
 def resolve_status(status_code: int) -> StatusRef:
     """Map an HTTP status code to a human label + DaisyUI tone.
 
@@ -582,10 +591,17 @@ def _build_what_happened(
     target: TargetRef,
     status: StatusRef,
     withdrawn: bool = False,
+    reuse: ReuseState | None = None,
+    same_call: bool = False,
 ) -> str:
     """Compose the plain-language "what happened" line (op + target + outcome).
 
-    A withdrawn request (#5717) did not run, so it never says "ran".
+    A withdrawn request (#5717) did not run, so it never says "ran". Nor does a
+    retry row: it says the state the request had at the time of the retry.
+    Nor does the row of a call that got the waiting request of the same call
+    (*same_call*: an ``approval.reuse`` row with no ``request_state``): it says
+    "<who> asked again for <operation> on <target>. At that time the same call
+    was waiting for approval, and this call got that request."
     """
     op_label = operation.summary or operation.op_id
     if target.name:
@@ -598,6 +614,16 @@ def _build_what_happened(
         return (
             f"{principal.display} withdrew the approval request for {op_label}"
             f"{target_clause}. The operation did not run."
+        )
+    if reuse is not None:
+        return (
+            f"{principal.display} asked again for {op_label}{target_clause} with the same key. "
+            f"At that time the request {reuse.words}."
+        )
+    if same_call:
+        return (
+            f"{principal.display} asked again for {op_label}{target_clause}. "
+            "At that time the same call was waiting for approval, and this call got that request."
         )
     return f"{principal.display} ran {op_label}{target_clause} → {status.label}"
 
@@ -632,11 +658,17 @@ async def resolve_audit_references(
     run = await _resolve_run(db_session, row)
     parent = await _resolve_parent(db_session, row)
     withdrawn = is_withdraw_row(row)
-    status = (
-        StatusRef(code=row.status_code, label="Withdrawn", tone="neutral")
-        if withdrawn
-        else resolve_status(row.status_code)
-    )
+    reuse = reuse_state(row)
+    if withdrawn:
+        status = StatusRef(code=row.status_code, label="Withdrawn", tone="neutral")
+    elif reuse is not None:
+        status = StatusRef(
+            code=row.status_code,
+            label=reuse.label,
+            tone=_REUSE_TONES[reuse.result_status],
+        )
+    else:
+        status = resolve_status(row.status_code)
 
     # A CLI login session is not an agent session: no replay link, as in the list.
     session_id = (
@@ -674,6 +706,8 @@ async def resolve_audit_references(
             target=target,
             status=status,
             withdrawn=withdrawn,
+            reuse=reuse,
+            same_call=reuse is None and is_reuse_row(row),
         ),
         audit_href=f"/ui/audit?audit_id={row.id}",
     )

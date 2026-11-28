@@ -159,12 +159,15 @@ async def test_credential_write_secret_not_in_audit_row(
         name = "cred-write-target"
 
     # The secret rides in params — exactly what the audit row must not keep.
+    # A credential write always waits for a person: this is the run after
+    # the approval (the approval-queue resume sets ``_approved``).
     result = await dispatch(
         operator=operator,
         connector_id="credwrite-1.x",
         op_id=op_id,
         target=_Target(),
         params={"path": "secret/db", "data": {"password": _SENTINEL_SECRET}},
+        _approved=True,
     )
     assert result.status == "ok", result.error
 

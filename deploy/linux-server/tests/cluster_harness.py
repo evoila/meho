@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 """A fake installed machine whose kubectl keeps state, for the tests of
-meho-host certificate, keyholder and unseal (#4738).
+meho-host certificate, keyholder and unseal (#4738), and target-networks
+(#6828).
 
 ClusterHost is the FakeHost of host_harness.py with three changes:
 

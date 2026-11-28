@@ -66,6 +66,7 @@ from meho_backplane.operations.approval_queue import (
     get_request,
     list_pending,
 )
+from meho_backplane.operations.platform_admin_card import card_for_reader
 from meho_backplane.settings import get_settings
 
 #: Canonical op ids — same as the REST routes for transport-independent audit rows.
@@ -140,8 +141,29 @@ def _outcome_to_dict(outcome: ResumeOutcome) -> dict[str, Any]:
     return out
 
 
-def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
-    """Render an :class:`ApprovalRequest` as a JSON-serialisable dict.
+def _effect_for(row: ApprovalRequest, reader: Operator | None) -> dict[str, Any] | None:
+    """The stored card of *row* as *reader* reads it.
+
+    A card behind a switch reads as ``preview_operation`` gives it
+    (:func:`proposed_effect_for_agent`). The view of the op gives each
+    role's list in its short form, also to a person. The parts of a card
+    that only a platform admin reads stay out for every other reader, also
+    when *reader* is ``None``
+    (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
+    """
+    effect = proposed_effect_for_agent(
+        row.op_id,
+        row.proposed_effect,
+        params=row.params,
+        connector_id=row.connector_id,
+        tenant=str(row.tenant_id),
+    )
+    shown: dict[str, Any] | None = card_for_reader(row.op_id, effect, reader=reader, whole=False)
+    return shown
+
+
+def _row_to_dict(row: ApprovalRequest, *, reader: Operator | None = None) -> dict[str, Any]:
+    """Render an :class:`ApprovalRequest` as a JSON-serialisable dict for *reader*.
 
     Inlined here (rather than importing the REST route's pydantic view)
     to keep the MCP transport independent of the FastAPI surface.
@@ -151,7 +173,9 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
     run ended. The result body stays on the owner-only REST ``/result``.
     ``reveal_secret`` matches the REST view too: ``True`` when the requester
     asked for the hidden values of the answer. The run happens when the
-    requester gets the values.
+    requester gets the values. The parts of a card that only a platform
+    admin reads stay out for every other reader
+    (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
     """
     result_state = approval_result_state(row)
     outcome = resume_outcome(row)
@@ -167,14 +191,7 @@ def _row_to_dict(row: ApprovalRequest) -> dict[str, Any]:
         "op_id": row.op_id,
         "connector_id": row.connector_id,
         "target_id": str(row.target_id) if row.target_id else None,
-        # A card behind a switch reads as ``preview_operation`` gives it.
-        "proposed_effect": proposed_effect_for_agent(
-            row.op_id,
-            row.proposed_effect,
-            params=row.params,
-            connector_id=row.connector_id,
-            tenant=str(row.tenant_id),
-        ),
+        "proposed_effect": _effect_for(row, reader),
         # True when the requester asked for the hidden values of the answer
         # (``reveal_secret: true``). The operation runs when the requester
         # gets the values, not on approve.
@@ -295,7 +312,7 @@ async def _list_handler(
                 offset=offset,
             )
     return {
-        "items": [_row_to_dict(r) for r in rows],
+        "items": [_row_to_dict(r, reader=operator) for r in rows],
         "limit": limit,
         "offset": offset,
     }
@@ -399,7 +416,7 @@ async def _get_handler(
             )
         except ApprovalNotFoundError as exc:
             raise McpInvalidParamsError("approval_request_not_found") from exc
-    return _row_to_dict(row)
+    return _row_to_dict(row, reader=operator)
 
 
 register_mcp_tool(

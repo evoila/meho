@@ -2104,6 +2104,10 @@ removes one through `DELETE /api/v1/targets/{name}`.
   are sent only when set, so every other column keeps its value.
   For example, `--vpn-required=false` clears the VPN flag, and an
   update without `--vpn-required` leaves it as it is (#5075).
+  `--set-extra key=value`, `--set-extra-json key=<json>` and
+  `--unset-extra key` (repeatable) change single keys of `extras` and
+  keep the others: the CLI sends `extras_changes`, which the backplane
+  merges when the change runs. They cannot be mixed with `--extra`.
   `--alias` replaces the whole alias list and `--extra key=value`
   replaces the whole `extras` map, matching the server's PATCH
   semantics. `--secret-field <connector_field>=<source_field>` adds or

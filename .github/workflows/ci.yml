@@ -69,13 +69,7 @@
 # One short job, `python-outside-backend` (GitHub-hosted runner), runs only
 # the backend tests that read files outside `backend/` (the Helm chart, the Go
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
-# path. The nightly run always runs everything.
-#
-# Merge queue (#7183): the `changes` detector reads the diff of the whole
-# queue group, from its base commit to its head, with the same rules. A
-# docs-only group or a group with no backend change skips `python-lint` and
-# the unit shards and runs `python-outside-backend` instead. A docs-only
-# group also skips the integration shards. Any doubt runs everything.
+# path. merge_group and the nightly run always run everything.
 #
 # Integration shards (#7183): the four `python-integration-shard` legs run
 # only in the merge queue and in the nightly run, never on a pull request.
@@ -229,9 +223,8 @@ jobs:
     #                required `python-migration-tests` job runs only then.
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
-    #                heavy Python lanes (`python-lint`, the `python-unit-shard`
-    #                matrix, and in the merge queue the
-    #                `python-integration-shard` matrix) skip
+    #                heavy Python lanes (`python-lint` and the
+    #                `python-unit-shard` matrix) skip
     #                via their own `if:` and report success-by-skip (#3252).
     #   backend_python — `false` when a PR changes no file under `backend/`
     #                (except `.md`), does not change this file and does not
@@ -239,8 +232,8 @@ jobs:
     #                same heavy Python lanes skip. The job
     #                `python-outside-backend` runs instead: only the backend
     #                tests that read files outside `backend/`. Fails CLOSED
-    #                like `docs_only`: it starts `true`, and the nightly run
-    #                and any diff problem keep it `true` (full run).
+    #                like `docs_only`: it starts `true`, and merge_group, the
+    #                nightly run and any diff problem keep it `true` (full run).
     #   redaction_compare — `true` when a PR changes any file under
     #                `backend/tests/redaction_compare/`, `.md` files too, so the
     #                job `redaction-compare` judges that change also when
@@ -265,20 +258,9 @@ jobs:
     # thing allowed to skip the heavy lanes is a diff we can PROVE is
     # docs-only. `--no-renames` makes a rename appear as delete(old)+add(new)
     # so a code→`*.md` (or `*.md`→code) rename can never smuggle a non-docs
-    # path past the allow-list. The nightly run NEVER fast-paths: it emits
-    # `docs_only=false` unconditionally.
-    #
-    # Merge queue (#7183): `docs_only` and `backend_python` come from the
-    # diff of the whole group, from its base commit to its head, with the
-    # same classifiers. A group that mixes docs and code is not docs-only,
-    # so it runs the full set. In the queue a docs-only group runs
-    # `python-outside-backend` too: some backend tests read the docs (for
-    # example the generated reference pages), and the queue is the last
-    # check before `main`. A group with no backend change still runs the
-    # integration shards, which a pull request never runs. The migration
-    # gate, the compare job and the six unit shards keep the full-run
-    # values in the queue. A missing base commit or any other doubt keeps
-    # the full run.
+    # path past the allow-list. merge_group / nightly NEVER fast-path (a queue
+    # batch may mix docs + code; the queue run must always run the full
+    # matrix) — they emit `docs_only=false` unconditionally.
     #
     #   single_connector — the connector name when a PR changes only one
     #                connector folder (plus its tests and docs), else empty
@@ -332,15 +314,12 @@ jobs:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
         # `main`. Its first parent (HEAD^1) is that `main` commit, so
-        # depth 2 is enough for the diff below. In the merge queue the
-        # detect step fetches the group's base commit when it is missing.
+        # depth 2 is enough for the diff below.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
-        env:
-          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           # Full run unless proven. The four outputs start at the full run:
@@ -369,10 +348,8 @@ jobs:
           # Run `grep` on a file and return 0 (match), 1 (no match) or 2
           # (error). `set -e` does not stop a command whose status is
           # tested, so the caller reads the code from `$?`.
-          # $1 is the commit to diff against: HEAD^1 on a pull request,
-          # the base commit of the group in the merge queue.
           classify() {
-            local base="$1" list non_md rc
+            local list non_md rc
             # The list of changed files goes into a file under RUNNER_TEMP,
             # and the classifiers get the file as an argument. Not a
             # here-string: bash writes it to a temporary file of its own,
@@ -389,15 +366,15 @@ jobs:
               reason="could not make the second list file"
               return 1
             fi
-            # On a pull request HEAD^1, not `github.event.pull_request.base.sha`:
-            # the event's base sha is `main` as of when the PR was opened.
-            # Once `main` moves, a diff against it also lists other PRs'
-            # files and a docs-only PR loses the fast path (#4657).
+            # HEAD^1, not `github.event.pull_request.base.sha`: the event's
+            # base sha is `main` as of when the PR was opened. Once `main`
+            # moves, a diff against it also lists other PRs' files and a
+            # docs-only PR loses the fast path (#4657).
             # core.quotePath=false: git prints a path with non-ASCII bytes
             # (e.g. `café.json`) as is. By default git wraps such a path in
             # double quotes and escapes the bytes, and the classifiers below
             # would not match it (#5310).
-            if ! git -c core.quotePath=false diff --name-only --no-renames "${base}" HEAD >"${list}"; then
+            if ! git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD >"${list}"; then
               reason="git diff failed"
               return 1
             fi
@@ -406,7 +383,7 @@ jobs:
               reason="empty diff"
               return 1
             fi
-            printf 'changed files (%s..HEAD):\n' "${base}"
+            printf 'changed files (HEAD^1..HEAD):\n'
             cat "${list}"
             # git still quotes a path that holds a double quote, a backslash
             # or a control character. The classifiers below work line by
@@ -492,40 +469,10 @@ jobs:
             return 0
           }
 
-          # Merge queue (#7183): the diff of the whole group, from its base
-          # commit to its head (HEAD, the commit this job checked out). Only
-          # docs_only and backend_python come from it: the migration gate, the
-          # compare job and the six unit shards stay at the full run. The
-          # base commit must be a commit id; it is fetched when the shallow
-          # checkout does not hold it. Any doubt keeps the full run.
-          queue_base() {
-            case "${QUEUE_BASE_SHA:-}" in
-              ''|*[!0-9a-f]*) reason="no base commit of the queue group"; return 1 ;;
-            esac
-            if [ "${#QUEUE_BASE_SHA}" -ne 40 ] && [ "${#QUEUE_BASE_SHA}" -ne 64 ]; then
-              reason="no base commit of the queue group"
-              return 1
-            fi
-            if ! git cat-file -e "${QUEUE_BASE_SHA}^{commit}" 2>/dev/null &&
-              ! git fetch --no-tags --quiet --depth=1 origin "${QUEUE_BASE_SHA}"; then
-              reason="could not fetch the base commit of the queue group"
-              return 1
-            fi
-            return 0
-          }
-
-          if [ "${{ github.event_name }}" = "merge_group" ]; then
-            if queue_base && classify "${QUEUE_BASE_SHA}"; then
-              docs_only="${c_docs_only}"
-              backend_python="${c_backend_python}"
-              echo "merge_group, classified from the queue diff -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (six unit shards when the Python jobs run)"
-            else
-              echo "merge_group: ${reason:-classification failed} -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (fail-safe full run)"
-            fi
-          elif [ "${{ github.event_name }}" != "pull_request" ]; then
-            # The nightly run: never fast-path; always the full matrix.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # merge_group / nightly: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
-          elif classify HEAD^1; then
+          elif classify; then
             migrations="${c_migrations}"
             docs_only="${c_docs_only}"
             backend_python="${c_backend_python}"
@@ -656,11 +603,11 @@ jobs:
     # CLOSED (it asserts `needs.changes.result == 'success'`). It also skips
     # when `backend_python` is `false` (#5296): ruff and mypy read only
     # backend/.
-    # In the merge queue the same outputs come from the group's diff (#7183).
     needs: changes
     if: >-
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.backend_python != 'false'
+      github.event_name != 'pull_request' ||
+      (needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
@@ -754,13 +701,12 @@ jobs:
     # these legs and the fan-in fails the required context CLOSED. The legs
     # also skip when `backend_python` is `false` (#5296); the job
     # `python-outside-backend` then runs the tests that read outside backend/.
-    # In the merge queue the same outputs come from the group's diff (#7183).
     needs: changes
     if: >-
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository) &&
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.backend_python != 'false'
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true' &&
+       needs.changes.outputs.backend_python != 'false')
     # The heavy runner pool (#761); its sizes live outside this repo. Only the
     # pytest sweep is CPU/memory-bound enough to want the extra cores;
     # ruff/mypy run once in python-lint on a small runner.
@@ -1847,35 +1793,28 @@ jobs:
 
   python-outside-backend:
     name: Python tests that read files outside backend
-    # #5296. Runs on a pull request that changes no file under backend/
+    # #5296. Runs only on a pull request that changes no file under backend/
     # (`backend_python` is `false`) and is not docs-only. On such a pull
-    # request python-lint and the six unit shards skip.
+    # request python-lint, the six unit shards and python-integration skip.
     # Some backend tests still read files outside backend/: the Helm chart,
     # the Go CLI, the workflows, the docs and the examples. This job runs
     # exactly those test files, from the list in
     # backend/tests/_outside_backend_tests.py. The guard test
     # tests/test_outside_backend_tests.py keeps the list complete.
     #
-    # In the merge queue (#7183) it runs for a group with no backend change,
-    # docs-only groups too: the docs-only check reads the same diff, and
-    # some of the listed tests read the docs.
-    #
     # Non-required check. The python-unit-lane fan-in fails the required
-    # context when this job does not pass on such a pull request or group.
+    # context when this job does not pass on such a pull request.
     #
-    # GitHub-hosted runner on a pull request: the listed tests need public
-    # tools only (uv, Helm, jq, Docker for the chart's own PostgreSQL image).
-    # A short job must not wait for a slot on the internal pools. Merge-queue
-    # runs use our own pool (#6325).
+    # GitHub-hosted runner: the listed tests need public tools only (uv, Helm,
+    # jq, Docker for the chart's own PostgreSQL image). A short job must not
+    # wait for a slot on the internal pools.
     needs: changes
     if: >-
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.backend_python == 'false' &&
-       needs.changes.outputs.docs_only != 'true') ||
-      (github.event_name == 'merge_group' &&
-       needs.changes.outputs.backend_python == 'false')
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.backend_python == 'false' &&
+      needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
     # About 2 minutes of pytest plus setup; the cap is a hang backstop.
     timeout-minutes: 20
     defaults:
@@ -2174,8 +2113,8 @@ jobs:
     # move after a release. The steps are the ones the template's README
     # tells a connector author to run against the MEHO release they build for.
     #
-    # Non-required check. Skipped for a docs-only pull request or merge queue
-    # group (#7183), like the other Python jobs. It does not skip when backend_python is false: a pull
+    # Non-required check. Skipped for a docs-only pull request, like the other
+    # Python jobs. It does not skip when backend_python is false: a pull
     # request that changes only the template must still test it.
     #
     # GitHub-hosted runner, and the internal pool in merge-queue runs (#6325):
@@ -2183,9 +2122,9 @@ jobs:
     # backend).
     needs: changes
     if: >-
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository) &&
-      needs.changes.outputs.docs_only != 'true'
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       needs.changes.outputs.docs_only != 'true')
     # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
     runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
     # About 3 minutes; the cap is a hang backstop.
@@ -2301,9 +2240,7 @@ jobs:
     # GitHub-hosted runners.
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
-    #     must pass instead. On every other path that job is skipped. In the
-    #     merge queue (#7183) a docs-only group takes this path too: the
-    #     docs-only fast path above is for pull requests only.
+    #     must pass instead. On every other path that job is skipped.
     #  5. Second runner site (#7085). When `second_site` is `on`, shards 1-3
     #     run in python-unit-shard and shards 4-6 in
     #     python-unit-shard-second-site, and both must succeed. When it is
@@ -2319,7 +2256,6 @@ jobs:
       - name: Assert lint + typecheck + every pytest shard passed
         env:
           IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # Job results and outputs reach the script only through env:, as
@@ -2423,7 +2359,7 @@ jobs:
               } >> "${GITHUB_STEP_SUMMARY}"
               echo "Unit lane GREEN for a fork pull request, but the unit test shards did not run (lint: ${lint}). The merge queue runs them. See the step summary."
             fi
-          elif [ "${docs_only}" = "true" ] && [ "${EVENT_NAME}" != "merge_group" ]; then
+          elif [ "${docs_only}" = "true" ]; then
             # DOCS-ONLY FAST PATH — python-lint + every shard were skipped by
             # their detect-gated `if:` (they never ran). Accept `skipped` (the
             # expected state) or `success` (defensive: if one somehow ran and
@@ -2472,7 +2408,7 @@ jobs:
 
           if [ "${IS_FORK_PR}" = "true" ]; then
             :  # the fork branch above already reported
-          elif [ "${docs_only}" = "true" ] && [ "${EVENT_NAME}" != "merge_group" ]; then
+          elif [ "${docs_only}" = "true" ]; then
             echo "Unit lane GREEN (docs-only fast path #3252) — lint + all 6 pytest shards skipped-by-detect; nothing to test for a pure docs/*.md diff."
           elif [ "${backend_python}" = "false" ]; then
             echo "Unit lane GREEN (no backend change, #5296) — lint + all 6 pytest shards skipped; the tests that read files outside backend/ passed."
@@ -3216,23 +3152,14 @@ jobs:
     # the test files, split by measured time (see the pytest step), so the
     # wall is about the slowest shard instead of the sum.
     #
-    # #3252 docs-only skip, in the merge queue (#7183): a queue group whose
-    # diff is docs only skips the legs (plain `needs: changes` + an `if:` that
-    # ANDs in the detect output), deliberately NOT `always()`. If the detect
-    # job hard-CRASHES, `needs: changes` skip-cascades these legs to
-    # `skipped`, and the fan-in fails the required context CLOSED (it
-    # checks that `changes` succeeded). The CLASSIFIER itself is fail-safe:
-    # only a proven-docs-only diff sets `docs_only=true`, so a code change is
-    # never skipped here.
-    #
-    # The legs do NOT skip when `backend_python` is `false`: a few
-    # integration tests read files outside backend/ (the Keycloak sub-chart,
-    # examples/, the CLI) and need containers, so the merge queue is where
-    # they run. The `if:` holds no `||`, so no pull request event, also not
-    # from a fork, can start a leg (test_ci_fork_runner_isolation.py).
-    if: >-
-      github.event_name != 'pull_request' &&
-      needs.changes.outputs.docs_only != 'true'
+    # Plain `needs: changes`, deliberately NOT `always()`: these are HEAVY
+    # legs, so keeping cancel-in-progress matters. If the detect job
+    # hard-CRASHES, `needs: changes` skip-cascades these legs to `skipped`,
+    # and the fan-in fails the required context CLOSED (it checks that
+    # `changes` succeeded, and needs strict success outside a pull request).
+    # The `if:` holds no `||`, so no pull request event, also not from a
+    # fork, can start a leg (test_ci_fork_runner_isolation.py).
+    if: github.event_name != 'pull_request'
     needs: changes
     # The normal internal pool, not the heavy one: the tests run serially
     # (no xdist) and mostly wait on containers.
@@ -3627,10 +3554,8 @@ jobs:
     #     and this step passes with one summary line that says the
     #     integration tests run in the merge queue. A failed or cancelled
     #     shard result still fails it.
-    #  3. Docs-only merge queue groups: every shard skips by its
-    #     detect-gated `if:` and this step accepts `skipped` ONLY when
-    #     `changes` succeeded and said docs_only=true. On every other queue
-    #     or nightly run it needs strict success.
+    #  3. Merge queue and nightly run: every shard must succeed. A failed,
+    #     cancelled or skipped shard fails this step.
     # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
     # use the internal pool instead (#6325), so the queue never waits for
     # GitHub-hosted runners.
@@ -3647,18 +3572,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           CHANGES_RESULT: ${{ needs.changes.result }}
-          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
           detect="${CHANGES_RESULT}"
-          docs_only="${CHANGES_DOCS_ONLY}"
           shards="${SHARDS_RESULT}"
           echo "event: ${EVENT_NAME}"
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}"
+          echo "changes (detect): result=${detect}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 
           if [ "${detect}" != "success" ]; then
-            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required integration lane closed."
+            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}'. Failing the required integration lane closed."
             exit 1
           fi
 
@@ -3669,11 +3592,6 @@ jobs:
               success|skipped)
                 echo "The integration tests run in the merge queue." >> "${GITHUB_STEP_SUMMARY}"
                 echo "Integration lane GREEN for a pull request — the integration tests run in the merge queue." ;;
-              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
-            esac
-          elif [ "${docs_only}" = "true" ]; then
-            case "${shards}" in
-              success|skipped) echo "Integration lane GREEN (docs-only fast path #3252) — all 4 shards skipped-by-detect." ;;
               *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
             esac
           elif [ "${shards}" = "success" ]; then

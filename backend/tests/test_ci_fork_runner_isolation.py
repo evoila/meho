@@ -59,10 +59,10 @@ _ROUTE_COND = "head.repo.full_name != github.repository"
 _HOSTED_TARGET = "ubuntu-latest"
 # A job gated to push only is not reachable by a pull_request at all.
 _PUSH_ONLY = "github.event_name == 'push'"
-# A job whose `if:` starts with this and holds no `||` never runs on a
-# pull_request (#7183). On a pull_request_target the event name differs, so
-# this counts only in a workflow without that trigger.
-_NOT_PULL_REQUEST = re.compile(r"github\.event_name != 'pull_request' &&[^|]*")
+# A job whose `if:` is this, alone or followed by `&&` terms with no `||`,
+# never runs on a pull_request (#7183). On a pull_request_target the event
+# name differs, so this counts only in a workflow without that trigger.
+_NOT_PULL_REQUEST = re.compile(r"github\.event_name != 'pull_request'(?: &&[^|]*)?")
 # The merge-queue-only route (#6325): the job uses an internal pool only on
 # a merge_group event, and a GitHub-hosted runner on every other event.
 # Forks never start merge_group runs. Only this exact expression counts.
@@ -204,6 +204,7 @@ _MQ_ROUTE = "${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubu
 @pytest.mark.parametrize(
     ("job_if", "triggers", "safe"),
     [
+        ("github.event_name != 'pull_request'", {"pull_request"}, True),
         ("github.event_name != 'pull_request' && x != 'true'", {"pull_request"}, True),
         # A `||` can let a pull request in again.
         ("github.event_name != 'pull_request' && a || b", {"pull_request"}, False),

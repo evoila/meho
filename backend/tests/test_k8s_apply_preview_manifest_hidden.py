@@ -326,7 +326,10 @@ _PAIR_CASES: dict[str, Any] = {
 
 
 def _alias_manifest(levels: int) -> str:
-    """A ConfigMap of under 600 bytes whose aliases name one list 10**levels times."""
+    """A ConfigMap of under 600 bytes whose aliases name one list 10**levels times.
+
+    Up to 5 levels, it stays under the written-out size limit of k8s.apply.
+    """
     lines = [
         "apiVersion: v1",
         "kind: ConfigMap",
@@ -352,7 +355,7 @@ def _timed(run: Any) -> tuple[Any, float, int]:
         tracemalloc.stop()
 
 
-@pytest.mark.parametrize("levels", [6, 7])
+@pytest.mark.parametrize("levels", [4, 5])
 @pytest.mark.usefixtures("_typed_writes")
 def test_an_alias_manifest_gives_its_preview_fast(
     monkeypatch: pytest.MonkeyPatch, levels: int

@@ -1362,11 +1362,19 @@ def _k8s_apply_redactor(
 
 
 def _text_entries(docs: list[dict[str, Any]]) -> list[tuple[dict[Any, Any], Any]]:
-    """Each ``(mapping, key)`` of *docs*, at any depth, whose value is a text not yet hidden."""
+    """Each ``(mapping, key)`` of *docs*, at any depth, whose value is a text not yet hidden.
+
+    A list or mapping that YAML aliases name many times is read once.
+    """
     entries: list[tuple[dict[Any, Any], Any]] = []
     stack: list[Any] = list(docs)
+    seen: set[int] = set()
     while stack:
         node = stack.pop()
+        if isinstance(node, list | dict):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
         if isinstance(node, list):
             stack.extend(node)
         elif isinstance(node, dict):

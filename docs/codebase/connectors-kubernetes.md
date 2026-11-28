@@ -887,6 +887,26 @@ are left out first, then a long `apiVersion` or `kind` gives way to
 uses the same numbers. When the cluster refuses one document of the text,
 the documents before it stay applied.
 
+Each document of a `k8s.apply` manifest is at most 3145728 characters
+(3 MiB, the default request size limit of the Kubernetes API server) with
+its YAML aliases and merge keys written out. MEHO measures each document
+from its YAML structure before YAML builds it (`_written_out_size` in
+`_apply_manifest.py`): each scalar counts its length plus one, each list
+and mapping one, and a part that aliases name many times is measured once
+and counted each time it is named. So the check costs about as much as
+reading the text, also for a small text that writes out very large. A
+document over the limit is refused with "document N is larger than
+3145728 characters when its YAML aliases are written out". The check
+runs as the params check of `k8s.apply` (`_apply_size_check` in
+`ops_write_preview.py`): on every call and every preview, before the
+policy gate, with `invalid_params`. So nothing waits, nothing is stored
+and nothing goes to the cluster. `_parse_manifest` runs the same check
+on each document before it builds it. It also keeps the documents of the
+last text it parsed in the running task, so the preview, the check before
+the wait and the approval card parse one manifest once. These callers only
+read the documents. The run (`k8s_apply`) parses the text again and gets
+its own documents.
+
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
 mutating -- the diff-preview an agent or reviewer runs before the real

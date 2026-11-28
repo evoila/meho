@@ -124,9 +124,9 @@ async def step_wait_reason_after_approval(
     ``floor:rights_change_waits``. ``None``: no such wait. With the switch
     off, or outside such a run, the answer is ``None`` and nothing is read.
     """
-    from meho_backplane.operations.composite import _runs_after_approval
+    from meho_backplane.operations.composite import runs_after_approval
 
-    if not custom_policy_on(get_settings()) or not _runs_after_approval():
+    if not custom_policy_on(get_settings()) or not runs_after_approval():
         return None
     for row in rows:
         why = await _own_approval_reason(row, caller)

@@ -47,6 +47,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
 )
 from meho_backplane.operations.approval_rerun import RERUN_AUDIT_PATH
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import (
     AUDIENCE,
@@ -406,7 +407,7 @@ async def test_rerun_with_a_read_only_token_is_refused(
     )
 
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role"}
+    assert response.json() == {"detail": "insufficient_role", "message": READER_CHANGE_SENTENCE}
     assert call.status_code == 403
     assert call.json() == response.json()
     assert len(_RUNS) == 1

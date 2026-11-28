@@ -941,6 +941,16 @@ gate asks this list before it reads a standing grant or a run approval.
 Each rule and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
+## A Reader's change is refused, not stored
+
+A caller with the Reader role (`read_only`) who asks for a change gets one
+plain sentence next to the code `insufficient_role`. MEHO stores nothing and
+runs nothing. The same check covers a new call and a re-run by the
+requester (`POST /api/v1/approvals/{id}/rerun`), checked with the role in
+the caller's token at the re-run: a requester whose role is now Reader is
+refused, and the operation does not run. A preview is not a change. The rule, the sentence and the places MEHO checks it:
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
+
 ## A credential call always waits for a person
 
 A call that reads, writes or makes a credential (the classes
@@ -961,9 +971,15 @@ the person approves the step, the multi-step run goes on with this step
 cleared; when the person rejects it, the run ends and the step never runs.
 A child call (`dispatch_child`) that waits is its own request. When a
 person approves it, only the child runs, and the multi-step run does not
-go on. An install or tenant override does not turn
-off the approval that the code turns on for an operation that writes or
-makes a credential. Details:
+go on. An operation that writes or makes a credential always has the
+approval flag: MEHO turns it on when the operation is looked up and when
+an API description is ingested, also when the connector registered it
+without the flag. A step of a multi-step operation whose operation writes
+or makes a credential gets the flag too, whatever flag the step declares
+(`apply_step_policy`): the step waits for a person, also at level `safe`
+and in the web console, and its risk level stays as it is. No install or tenant override turns it off. So a
+person's call waits too, with a token and in the web console, at every
+risk level. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
 [run-approvals.md](run-approvals.md),
 [agent-permission-grants.md](agent-permission-grants.md).
@@ -1158,6 +1174,11 @@ request field, header or command-line flag can set it.
 | MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
 | MEHO-Operators (also MEHO-SA-Operators, read as Operators) | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
 | MEHO-Readers (also MEHO-Approvers, read as Readers) | (they cannot run changes) | no | no |
+
+A Reader cannot ask for a change at all. MEHO refuses the call at once with
+`insufficient_role` and a plain sentence, and stores no approval request, so
+a Reader's change never waits for approval. See
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
 
 MEHO reads the old group MEHO-SA-Operators as Operators and MEHO-Approvers as
 Readers. The default groups set no `approver` flag and no self-approval flag
@@ -2516,7 +2537,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
-| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`); a Reader also gets the plain sentence in `message` |
 | A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
 | The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 
@@ -3550,7 +3571,10 @@ The per-op preview is opt-in via a builder registry in
   (`operations/platform_admin_card.py`, core only) names the parts of a
   card that only a platform admin who is a person reads, in a call of
   their own. Every view of a stored card passes it through
-  `card_for_reader`: the REST approvals API, the MCP tools
+  `card_for_reader`, which first runs the op's card view when it has one
+  (`register_card_view(op_id, view)`, in the same module: the view gets
+  the effect and whether the reader gets the whole card). The views are
+  the REST approvals API, the MCP tools
   `meho_approvals_get` and `meho_approvals_list`, and the console pages.
   Every other reader gets the card as the filter gives it back. So does
   a call that runs with an acting agent (`actor_delegation`, for example
@@ -3755,9 +3779,9 @@ for the old `v1` kinds), the kind, the namespace and the name, and:
   the cluster refuses or that fails gives `unknown` and a `state_note`; the
   card says "not known if it exists", never "new". MEHO reads the live
   object only when the login that asked has the role Operator or higher.
-  For any other login there is no read: `state` is `not_read`, the card
-  shows the badge "not read" and the line "The live object was not read:
-  the login that asked has a role below Operator."
+  A `k8s.apply` of a login with the Reader role is refused before an
+  approval card is made: the code `insufficient_role` and the Reader
+  sentence, and nothing is stored.
 - `other_writers`: the managers in the live object's `managedFields`,
   without `meho`. `null` when the live object was not read or could not be
   read.

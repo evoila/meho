@@ -109,10 +109,16 @@ After the restart, OpenBao stays sealed until a keyholder unseals it.
    harm: the helper removes them before it unseals.
 
     ```bash
-    read -rs KEY    # paste the key, press Enter; it is not shown
-    printf %s "$KEY" | kubectl -n <namespace> create secret generic \
-      <release>-core-vault-unseal --from-file=key=/dev/stdin
-    unset KEY
+    {
+      printf 'Paste the key and press Enter (not shown): '; IFS= read -rs KEY; echo
+      if [ -n "$KEY" ]; then
+        printf %s "$KEY" | kubectl -n <namespace> create secret generic \
+          <release>-core-vault-unseal --from-file=key=/dev/stdin
+      else
+        echo 'No key was typed. Nothing was made.'
+      fi
+      unset KEY
+    }
     ```
 
 2. Restart OpenBao:

@@ -219,6 +219,42 @@ def test_the_rewrite_goes_to_any_depth_and_leaves_values_alone() -> None:
     assert sent["properties"]["enum"] == {"type": "string"}
 
 
+_NULL_OR_X = {"anyOf": [{"enum": ["x"]}, {"type": "null"}]}
+
+
+@pytest.mark.parametrize(
+    ("schema", "sent"),
+    [
+        ({"not": {"enum": ["x", None]}}, {"not": _NULL_OR_X}),
+        (
+            {"if": {"enum": ["x", None]}, "then": {"type": "string"}, "else": {"type": "null"}},
+            {"if": _NULL_OR_X, "then": {"type": "string"}, "else": {"type": "null"}},
+        ),
+        (
+            {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]},
+            {"oneOf": [_NULL_OR_X, {"type": "null"}]},
+        ),
+        (
+            {"contains": {"enum": ["x", None]}, "maxContains": 1},
+            {"contains": _NULL_OR_X, "maxContains": 1},
+        ),
+        (
+            {"not": {"$ref": "#/$defs/d"}, "$defs": {"d": {"enum": ["x", None]}}},
+            {"not": {"$ref": "#/$defs/d"}, "$defs": {"d": _NULL_OR_X}},
+        ),
+    ],
+)
+def test_the_output_rewrite_also_rewrites_under_not_if_one_of_and_contains(
+    schema: dict[str, Any], sent: dict[str, Any]
+) -> None:
+    """An output schema keeps its meaning everywhere, so no part is left as it is."""
+    assert _wire_safe_output_schema(schema) == sent
+    assert not _null_enum_paths(sent)
+    for value in (None, "x", "other", 3, [], [None], ["x"], [None, None], ["x", None]):
+        full = jsonschema.Draft202012Validator(schema).is_valid(value)
+        assert jsonschema.Draft202012Validator(sent).is_valid(value) == full, (schema, value)
+
+
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_tools_list_over_the_mcp_path_has_no_null_in_an_enum(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

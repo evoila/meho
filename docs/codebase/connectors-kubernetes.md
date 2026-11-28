@@ -72,8 +72,10 @@ of each object (`object_summary`, built by `ops_write_apply_summary.py`):
 whether it is new or exists already, which other writers own fields of it,
 and its risky fields after the apply, read only from the places that
 Kubernetes defines. MEHO reads the live object only when the login that
-asked has the role Operator or higher; for any other login the card says
-"not read". It changes no approval rule. When the dry run fails, the card
+asked has the role Operator or higher. A `k8s.apply` of a login with the
+Reader role is refused before an approval card is made: the code
+`insufficient_role` and the Reader sentence, and nothing is stored. It
+changes no approval rule. When the dry run fails, the card
 of a person still shows the manifest and the subject line, and names the
 document the dry run stopped at. See `approvals.md`. A manifest that
 is not valid YAML or JSON is refused before the wait, with the document

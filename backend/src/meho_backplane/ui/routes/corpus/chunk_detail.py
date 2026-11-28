@@ -119,7 +119,7 @@ from meho_backplane.docs_search import (
     read_docs,
     resolve_readable_collection,
 )
-from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator
+from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_operator_read
 from meho_backplane.ui.csrf import mint_csrf_token
 from meho_backplane.ui.routes.corpus.routes import _resolve_operator, internal_chunk_ref
 from meho_backplane.ui.templating import get_templates
@@ -154,7 +154,7 @@ _READ_UNAVAILABLE = "The text could not be loaded right now. Try again later."
 
 #: Module-level ``Depends`` closures — ruff B008 idiom matching the sibling
 #: corpus routes (no function calls in default argument positions).
-_require_operator_dep = Depends(require_ui_operator)
+_require_operator_dep = Depends(require_ui_operator_read)
 _get_session_dep = Depends(get_session)
 
 

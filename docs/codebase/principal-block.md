@@ -111,6 +111,32 @@ is 5 seconds old. A process that cannot read the table refuses the
 request (503 `principal_block_check_unavailable`); it never answers "not
 blocked" for an unknown state.
 
+When a read or a write of the block table fails, MEHO writes one warning.
+The warning holds the step, the error type and the error code.
+The warning holds the step (`operation`), the type of the error (`error_type`) and a fixed
+code (`error_code`), and no traceback and no text of the error.
+`error_code` is the SQLSTATE of the driver error when there is one (for
+example `57014`), else the `errno` name of an operating system error (for
+example `ECONNREFUSED`), else `none`. It is never a message.
+
+| Warning | `operation` | Answer |
+|---|---|---|
+| `principal_block_list_read_failed` | `list_blocked` (the list an admin sees) | REST list: 500. Console page and the confirm page of an unblock: 503 `principal_block_check_unavailable` |
+| `principal_block_read_failed` | `read_list` (the cached list), `read_blocks` (the rows of one login) | 503 `principal_block_check_unavailable` |
+| `principal_unblock_sign_in_check_failed` | `sign_in_check` | 503 `principal_block_check_unavailable` |
+| `principal_block_write_failed` | `block` | 503 `principal_block_check_unavailable` for a database error, else 500 |
+| `principal_unblock_write_failed` | `unblock` | 503 `principal_block_check_unavailable` for a database error, else 500 |
+
+The error that leaves the block code has the type of the error as its
+only text, and it has no link to the error of the step. A write that
+fails with an error that is not a database error ends with
+`PrincipalBlockWriteError` (500), and a failed read of the REST list
+ends with `PrincipalBlockUnavailableError` (500). So the `request_failed`
+line and the line of the web server hold no statement values either. These warnings
+add no login field of their own. The fields of the request log context
+(`request_id`, `operator_sub`,
+`tenant_id`, ...) stay on them.
+
 Where the list is checked:
 
 | Place | What happens |

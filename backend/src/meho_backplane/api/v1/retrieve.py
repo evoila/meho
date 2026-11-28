@@ -112,7 +112,7 @@ router = APIRouter(prefix="/api/v1", tags=["retrieval"])
 #: keeps the FastAPI parameterised-dependency pattern compatible with
 #: ruff's B008 rule, matching the convention
 #: :mod:`meho_backplane.api.v1.rbac_test` established.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 
 #: Cap on the number of keys in ``metadata_filters``. 20 is a

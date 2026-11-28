@@ -105,6 +105,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.caller_record import bind_request_caller
 from meho_backplane.auth.client_identity import bind_request_client
+from meho_backplane.auth.current_tenant import bind_tenant_role_source
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -518,6 +519,10 @@ async def _verify_session_token(
     )
     bind_request_client(web_operator)
     bind_request_caller(web_operator)
+    # The console's bind step for the role note (the REST and MCP bind
+    # steps call the same helper): a platform admin outside their role
+    # groups leaves ``tenant_role_source: platform_admin`` on every row.
+    bind_tenant_role_source(web_operator)
     return web_operator
 
 

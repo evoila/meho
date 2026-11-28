@@ -2787,6 +2787,32 @@ def test_modal_says_in_one_line_why_a_credential_call_waits() -> None:
     assert 'data-testid="approval-credential-wait"' not in plain
 
 
+def test_modal_says_in_one_line_why_a_call_that_deletes_waits() -> None:
+    from meho_backplane.connectors.argocd.op_classes import SYNC_PRUNE_LINE
+
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-api-3.x",
+            "safety_level": "dangerous",
+            "delete_wait": SYNC_PRUNE_LINE,
+        }
+    )
+    line = body.split('data-testid="approval-delete-wait">')[1].split("</p>")[0]
+    assert line == SYNC_PRUNE_LINE
+    plain = _render_modal_of(
+        _seed_request(
+            tenant_id=_TENANT_A,
+            proposed_effect={
+                "op_id": "argocd.app.sync",
+                "connector_id": "argocd-api-3.x",
+                "safety_level": "dangerous",
+            },
+        )
+    )
+    assert 'data-testid="approval-delete-wait"' not in plain
+
+
 def test_modal_names_what_each_container_runs_after_a_failed_dry_run() -> None:
     """The card lists the commands next to the warning that the preview failed."""
     body = _render_modal(

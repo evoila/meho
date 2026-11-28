@@ -237,12 +237,12 @@ def vault_dev_addr(request: pytest.FixtureRequest) -> Iterator[str]:
         container.start()
     except Exception as exc:
         # Any boot failure (privileged denied, image pull rate-limit,
-        # cgroup refusal) → clean skip, not a red suite — same stance
-        # the k3d / pgvector container fixtures take. Under CI the OpenBao
-        # case fails instead, so a broken image or proxy cannot hide it.
-        if expected_product == "openbao" and os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(f"openbao dev container failed to start ({type(exc).__name__}): {exc}")
-        pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
+        # cgroup refusal) → clean skip on a laptop. Under CI the test
+        # fails instead, so a broken image or proxy cannot hide it.
+        reason = f"{expected_product} dev container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         # Vault logs this line once the dev server is unsealed and

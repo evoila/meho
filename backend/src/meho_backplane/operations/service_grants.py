@@ -646,11 +646,30 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     operation's own definition says a call is hard to undo
     (:attr:`~meho_backplane.db.models.EndpointDescriptor.hard_to_undo`).
     With the switch off, the field changes no answer.
+
+    With the switch on, the row of one call can also carry the sign of the
+    call itself: its params delete something
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.delete_call_reason`,
+    set by
+    :func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     reason = _delete_reason_by_descriptor_fields(descriptor)
     if reason is None:
         reason = _hard_to_undo_reason(descriptor)
+    if reason is None:
+        reason = _delete_call_reason(descriptor)
     return reason
+
+
+def _delete_call_reason(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason when the params of this call delete something."""
+    sentence = getattr(descriptor, "delete_call_reason", None)
+    if sentence is None:
+        return None
+    return (
+        f"this call of op {descriptor.op_id!r} deletes something ({sentence}); "
+        "a standing grant and a run approval never cover such a call, a person approves it"
+    )
 
 
 def _delete_reason_by_descriptor_fields(descriptor: EndpointDescriptor) -> str | None:

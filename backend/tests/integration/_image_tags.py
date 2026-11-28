@@ -25,6 +25,14 @@ def major_of_image(image: str) -> str | None:
     return match.group(0) if match else None
 
 
+def image_without_registry(image: str) -> str:
+    """*image* without its registry part, with its tag or digest.
+
+    ``registry.example:5000/library/mongo:7`` gives ``mongo:7``.
+    """
+    return image.rsplit("/", 1)[-1]
+
+
 class ImageRun(NamedTuple):
     """One image a module runs against, with the public name of the run."""
 

@@ -38,6 +38,7 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
 from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
     UnsupportedKubeconfigError,
     enforce_passive_kubeconfig,
+    new_passive_api_client,
 )
 from meho_backplane.settings import get_settings
 
@@ -428,6 +429,23 @@ def test_exec_config_never_reaches_library_client_build(
         ) as client_factory:
             with pytest.raises(UnsupportedKubeconfigError):
                 await connector._get_api_client(_TARGET, _make_operator())
+            client_factory.assert_not_awaited()
+
+    asyncio.run(_check())
+
+
+def test_new_passive_api_client_refuses_exec_before_the_library_builds() -> None:
+    """``new_passive_api_client`` runs the check before the library client build."""
+    config = _passive_config()
+    config["users"][0]["user"] = {"exec": {"command": "/bin/plugin"}}
+
+    async def _check() -> None:
+        with patch(
+            "kubernetes_asyncio.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+        ) as client_factory:
+            with pytest.raises(UnsupportedKubeconfigError, match="exec"):
+                await new_passive_api_client(config)
             client_factory.assert_not_awaited()
 
     asyncio.run(_check())

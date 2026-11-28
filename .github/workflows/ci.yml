@@ -71,7 +71,7 @@
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
 # path. merge_group and the nightly run always run everything.
 #
-# Integration shards (#7183): the four `python-integration-shard` legs run
+# Integration shards: the four `python-integration-shard` legs run
 # only in the merge queue and in the nightly run, never on a pull request.
 # On a pull request the fan-in `Python (integration testcontainers)` still
 # reports and passes, with a summary line that says so.
@@ -3136,7 +3136,7 @@ jobs:
     # (pgvector/valkey/k3d testcontainers). Kept apart from the unit shards so the required
     # lint+mypy+unit gate stays fast.
     #
-    # Not on a pull request (#7183): the shards run in the merge queue and in
+    # Not on a pull request: the shards run in the merge queue and in
     # the nightly run only. They were 30 percent of the runner minutes of a
     # pull request run, and the queue ran them again before every merge. The
     # fan-in `python-integration` still reports on every pull request.
@@ -3550,7 +3550,7 @@ jobs:
     #     failed (a skipped required check counts as Success, #2140), and
     #     the step FAILS on any shard result that is not allowed. A hung
     #     shard hits its own timeout → `cancelled` → this gate fails.
-    #  2. Pull requests (#7183), also from a fork: the shards never start,
+    #  2. Pull requests, also from a fork: the shards never start,
     #     and this step passes with one summary line that says the
     #     integration tests run in the merge queue. A failed or cancelled
     #     shard result still fails it.
@@ -3586,7 +3586,7 @@ jobs:
           fi
 
           if [ "${EVENT_NAME}" = "pull_request" ]; then
-            # PULL REQUEST (#7183) — the shards never start on a pull
+            # PULL REQUEST — the shards never start on a pull
             # request; the merge queue runs them on the merged result.
             case "${shards}" in
               success|skipped)

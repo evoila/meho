@@ -60,7 +60,7 @@ _HOSTED_TARGET = "ubuntu-latest"
 # A job gated to push only is not reachable by a pull_request at all.
 _PUSH_ONLY = "github.event_name == 'push'"
 # A job whose `if:` is this, alone or followed by `&&` terms with no `||`,
-# never runs on a pull_request (#7183). On a pull_request_target the event
+# never runs on a pull_request. On a pull_request_target the event
 # name differs, so this counts only in a workflow without that trigger.
 _NOT_PULL_REQUEST = re.compile(r"github\.event_name != 'pull_request'(?: &&[^|]*)?")
 # The merge-queue-only route (#6325): the job uses an internal pool only on
@@ -561,7 +561,7 @@ def test_hosted_ci_jobs_run_on_a_fork_pull_request(name: str) -> None:
 
 def test_ci_jobs_on_the_own_pool_skip_a_fork_pull_request() -> None:
     # Every other pull_request job that can use an own pool keeps the guard.
-    # A job that never runs on a pull request needs none (#7183).
+    # A job that never runs on a pull request needs none.
     bad = []
     for name, job in _ci_jobs().items():
         if name in _FORK_OPEN_JOBS:

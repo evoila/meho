@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""What CI runs on a pull request, in the merge queue and at night (#7183).
+"""What CI runs on a pull request, in the merge queue and at night.
 
 * On a pull request the four integration shards never start. The fan-in
   ``Python (integration testcontainers)`` still reports, passes and says in

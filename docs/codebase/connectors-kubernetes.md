@@ -909,6 +909,68 @@ as stored, counting every entry. A document that does not fit whole
 keeps only its identity; when not even that fits, one closing entry
 counts the documents left out.
 
+**`k8s.apply` dry run in the agent's own preview.** With the switch
+`K8S_APPLY_PREVIEW_DRY_RUN` on (off by default), `preview_operation` for
+`k8s.apply` asks the cluster too. With the switch off, the preview never
+contacts the cluster. `ops_write_preview.py` registers the op with
+`register_preview_target_read`, so `operations/_composite_preview.py`
+gives the preview builder the target's connector. The builder then calls
+`k8s_apply_agent_dry_run` in `ops_write_apply_dry_run.py`:
+
+- It sends a server-side apply for every document, with the target's own
+  cluster account (the same account as the real apply). Every request that
+  can change something carries `dryRun=All`. The only other requests are
+  `GET` reads of the cluster's API list (`/version`, `/api`, `/apis` and the
+  group paths). No request carries the caller's token. Nothing is stored on
+  the cluster.
+- It does not stop at a refused document. Each entry of
+  `preview.documents` has `document`, `kind`, `namespace`, `name` (hidden
+  as on the approval request), `warnings`, and `change`. `document` is the
+  place in the manifest, counted from 1; empty documents count too, as in
+  the refusal of the manifest check. `change` is `create` (the API server
+  answers 201 Created), `change` (200 OK), `refused` (the cluster decided
+  against it: 400, 403, 404, 409, 422 or another 4xx answer; with `error`)
+  or `not_checked` (the cluster did not decide: 401, 408, 429 or a 5xx
+  answer, no answer, or a kind the cluster does not know; with `reason`).
+- Each document of the manifest has exactly one entry, made for that
+  document. A document whose name the preview cannot show safely is not
+  sent and is `not_checked`.
+- For a document that holds a value the echo of the manifest hides (Secret
+  values, `env` and `httpHeaders` values, command lines, the last-applied
+  annotation, or a value of a redaction setting), `warnings`, `error` and
+  `reason` hold one fixed sentence in place of the cluster's text: "MEHO
+  does not pass on the cluster's text for a document that holds hidden
+  values."; other documents keep the cluster's text with secret-shaped text
+  hidden.
+- A refused object whose namespace is made by the same manifest gets a
+  `note`: the dry run cannot see that namespace yet.
+- `preview.not_checked` lists the documents that were not checked. Then
+  `plan_shown` is false next to the `proposed_effect`, and `plan_note` says
+  that the plan is not whole. The console and `meho operation preview`
+  show the plan and the note.
+- A list of more than 50 documents, or of more than 4 KB, is stored behind a
+  result handle (`preview.documents.handle`); `result_query` reads every
+  entry.
+- `preview.manifest` and `preview.subject` are the same as on the approval
+  request, with Secret values hidden. The object summary and what each
+  container runs stay for a person only.
+
+Only a caller with the role Operator or higher, whom the policy gate
+(`decide_only`) does not refuse the apply, gets the dry run. Any other
+caller gets `plan_shown: false` with a note that says why, and nothing is
+sent. The dry run has 10 seconds (`TARGET_READ_TIMEOUT_SECONDS`). When the
+cluster does not answer in time, the preview gives `plan_shown: false`, the
+time-out note and the rest of its answer. When the cluster login fails,
+`plan_note` says so in a plain sentence. Each preview that sends a dry run
+writes one audit row of the class read (`operations/_preview_audit.py`),
+in both audit modes, also on a time-out or a failed login. The preview
+makes no approval request and no row of the apply. The apply itself waits
+for approval, and its approval request is not changed. With the switch on,
+the approval of an apply whose call carried a `preview_hash` builds the
+preview again (`approval_resume_checks.preview_changed_since_request`), so
+MEHO sends one more dry run to the cluster and waits up to 10 seconds for
+it before the apply runs.
+
 **`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
 each field of an object. `k8s.apply` applies under the owner `meho`. When
 an object was applied before by another tool (`kubectl apply`, Helm), a

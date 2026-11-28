@@ -449,6 +449,60 @@ func TestPrintPreviewResultSaysPlanNotShown(t *testing.T) {
 	}
 }
 
+// TestPrintPreviewResultShowsAPartPlanAndItsNote — a dry run that checked
+// one document and not the other gives a plan and plan_shown=false: the
+// summary prints the plan and the note next to it.
+func TestPrintPreviewResultShowsAPartPlanAndItsNote(t *testing.T) {
+	shown := false
+	effect := `{"preview":{"dry_run":true,"documents":[` +
+		`{"document":1,"kind":"ConfigMap","change":"create"},` +
+		`{"document":2,"kind":"Widget","change":"not_checked","reason":"no kind Widget"}],` +
+		`"not_checked":[2]}}`
+	r := &PreviewResult{
+		Status:         "ok",
+		SourceKind:     "typed",
+		Method:         "COMPOSITE",
+		ResolvedPath:   "k8s.apply",
+		PreviewHash:    "abc789",
+		ProposedEffect: json.RawMessage(effect),
+		PlanShown:      &shown,
+		PlanNote:       "The dry run could not check every part of this call.",
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "k8s-1.x", "k8s.apply", r)
+	out := buf.String()
+	for _, want := range []string{
+		"plan (proposed_effect):",
+		`"change": "create"`,
+		`"change": "not_checked"`,
+		"plan: not complete in this preview",
+		"The dry run could not check every part of this call.",
+		"preview_hash: abc789",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintPreviewResultWholePlanHasNoNote — a whole plan prints no note.
+func TestPrintPreviewResultWholePlanHasNoNote(t *testing.T) {
+	shown := true
+	r := &PreviewResult{
+		Status:         "ok",
+		Method:         "COMPOSITE",
+		ResolvedPath:   "k8s.apply",
+		PreviewHash:    "abc790",
+		ProposedEffect: json.RawMessage(`{"preview":{"dry_run":true}}`),
+		PlanShown:      &shown,
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "k8s-1.x", "k8s.apply", r)
+	if strings.Contains(buf.String(), "plan: not") {
+		t.Errorf("a whole plan printed a note:\n%s", buf.String())
+	}
+}
+
 // TestPrintPreviewResultErrorRendersExtras — a status=error preview
 // surfaces the error string and the extras envelope, and never prints a
 // preview_hash line.

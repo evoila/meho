@@ -27,8 +27,13 @@ params on the ``redacted_body`` slot, a keyed digest of the full params on
 the ``params_digest`` slot, a ``COMPOSITE`` sentinel ``method``, the
 ``op_id`` as ``resolved_path``) so :func:`compute_preview_hash` stays
 param-sensitive, and layers on the reused park-time ``proposed_effect``. No
-handler runs, no connector is dialled, and nothing is sent — it is a pure,
-egress-free projection.
+handler runs. With ``K8S_APPLY_PREVIEW_DRY_RUN`` off, no connector is
+dialled and nothing is sent: it is a pure, egress-free projection. With it
+on, the preview of ``k8s.apply`` sends a dry run to the cluster
+(``dryRun=All`` on each request that can change something; the other
+requests read the cluster's API list), for a caller who may ask for the
+apply, and writes one audit row of the class read for it
+(:mod:`._preview_audit`). Every other op stays egress-free.
 
 ``redacted_body`` is the same safe view the generic plan shows
 (:func:`safe_params_view`): a secret-named value is masked, a value whose
@@ -38,35 +43,52 @@ example the OVF properties of an appliance deploy) is masked while its keys
 stay. The hash still changes with every value, through ``params_digest``.
 
 Every synthetic preview says whether it shows the plan (#4028):
-``plan_shown=True`` when ``proposed_effect`` is present, otherwise
+``plan_shown=True`` when the whole plan is in ``proposed_effect``, otherwise
 ``plan_shown=False`` plus a plain ``plan_note``. A builder that must read the
-target declines here, and its plan is built only at park time.
+target declines here, and its plan is built only at park time. The one
+exception is the dry run of ``k8s.apply`` while its switch is on: it can
+also give a ``proposed_effect`` that checked only part of the manifest, with
+``plan_shown=False`` and a note.
 """
 
 from __future__ import annotations
 
+import asyncio
+import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 import structlog
 
-from meho_backplane.auth.operator import Operator
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._preview import (
     _PARAM_REDACTED,
     PreviewContext,
     _redact_echoed_params,
     build_proposed_effect,
     describe_preview_provenance,
+    preview_reads_target,
+    preview_target_read_audit_fields,
 )
+from meho_backplane.operations._preview_audit import write_target_read_row
 from meho_backplane.operations._request_preview import (
     PARAMS_DIGEST_KEY,
     compute_preview_hash,
     is_credential_builder_op,
 )
-from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations._validate import compute_params_hash, policy_gate
 
-__all__ = ["PLAN_NOT_SHOWN_NOTE", "build_composite_preview", "safe_params_view"]
+__all__ = [
+    "PLAN_NOT_SHOWN_NOTE",
+    "TARGET_READ_NOT_ALLOWED_NOTE",
+    "TARGET_READ_TIMEOUT_NOTE",
+    "TARGET_READ_TIMEOUT_SECONDS",
+    "build_composite_preview",
+    "safe_params_view",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -77,10 +99,13 @@ _log = structlog.get_logger(__name__)
 _COMPOSITE_PREVIEW_METHOD: Final[str] = "COMPOSITE"
 
 #: Plain note set when the synthetic preview carries no ``proposed_effect``
-#: (#4028). The preview never contacts the target, so a plan builder that
-#: must read the target first (DRS rule create/delete, Keycloak deletes,
-#: ``windns.record.remove``) declines here. Without this note the caller saw
-#: ``status="ok"`` + a hash and could not tell that the plan was missing.
+#: (#4028). With ``K8S_APPLY_PREVIEW_DRY_RUN`` off the preview never contacts
+#: the target, so a plan builder that must read the target first (DRS rule
+#: create/delete, Keycloak deletes, ``windns.record.remove``) declines here.
+#: With it on, only the preview of ``k8s.apply`` sends a dry run to the
+#: cluster; this note is then used only when it sent nothing. Without this
+#: note the caller saw ``status="ok"`` + a hash and could not tell that the
+#: plan was missing.
 PLAN_NOT_SHOWN_NOTE: Final[str] = (
     "This preview does not show what the operation will change. "
     "The preview never contacts the target, so it cannot build the plan "
@@ -90,6 +115,129 @@ PLAN_NOT_SHOWN_NOTE: Final[str] = (
 )
 
 
+#: How long the preview waits for the target when its builder may read it
+#: (:func:`~meho_backplane.operations._preview.register_preview_target_read`).
+TARGET_READ_TIMEOUT_SECONDS: Final[float] = 10.0
+
+#: The note when the target did not answer in :data:`TARGET_READ_TIMEOUT_SECONDS`.
+TARGET_READ_TIMEOUT_NOTE: Final[str] = (
+    "This preview does not show what the operation will change: the target "
+    "did not answer the dry run in time. The rest of the preview is complete. "
+    "If the call waits for approval, the plan is shown on the approval "
+    "request before anyone approves it."
+)
+
+#: The note when the caller may not ask for the call, so the preview reads nothing.
+TARGET_READ_NOT_ALLOWED_NOTE: Final[str] = (
+    "This preview does not show what the operation will change. The dry run "
+    "on the target is only for a caller who may ask for this operation: the "
+    "role Operator or higher, and a call the policy does not refuse."
+)
+
+#: The note when the dry run did not check every part of the plan.
+_PLAN_NOT_COMPLETE_NOTE: Final[str] = (
+    "The dry run could not check every part of this call, so this preview "
+    "does not show the whole plan. See `proposed_effect.preview.not_checked` "
+    "and the `reason` of each part that was not checked."
+)
+
+#: The key of a preview that lists the parts the dry run could not check.
+_NOT_CHECKED_KEY: Final[str] = "not_checked"
+
+#: The class name of the error at the start of a stored builder reason.
+_CLASS_NAME_PREFIX: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:: |$)")
+
+
+async def _target_read_connector(
+    *,
+    operator: Operator,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params: dict[str, Any],
+) -> tuple[Connector | None, str | None]:
+    """The connector the preview builder may read the target with, or why there is none.
+
+    ``(None, None)``: the op does not read the target in a preview (its
+    switch is off), or there is no target or connector. ``(None, note)``:
+    the caller may not ask for the call, so nothing is read. A caller may
+    ask for it with the role Operator or higher, when the policy gate does
+    not refuse it (``decide_only``: nothing is written).
+    """
+    if target is None or not preview_reads_target(descriptor.op_id):
+        return None, None
+    if operator.tenant_role not in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
+        return None, TARGET_READ_NOT_ALLOWED_NOTE
+    verdict, _reason = await policy_gate(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+        params=params,
+        decide_only=True,
+    )
+    if verdict is PermissionVerdict.DENY:
+        return None, TARGET_READ_NOT_ALLOWED_NOTE
+    # Imported lazily: the dispatcher imports the preview modules.
+    from meho_backplane.operations.dispatcher import _resolve_connector_instance
+
+    try:
+        instance, resolution_error, _ = await _resolve_connector_instance(descriptor, target)
+    except Exception:
+        return None, None
+    return (None, None) if resolution_error is not None else (instance, None)
+
+
+def _failed_read_note(effect: dict[str, Any] | None) -> str | None:
+    """The note for a builder that read the target and failed, with its safe reason.
+
+    The stored reason starts with the class name of the error
+    (:func:`~meho_backplane.operations._preview.preview_failure_reason`); the
+    note leaves it out, so it is a plain sentence.
+    """
+    if not isinstance(effect, dict) or effect.get("preview_unavailable") is not True:
+        return None
+    reason = _CLASS_NAME_PREFIX.sub("", str(effect.get("preview_error") or ""), count=1)
+    what = f": {reason}" if reason else ""
+    return (
+        "This preview does not show what the operation will change. The dry "
+        f"run on the target did not work{what}. If the call waits for "
+        "approval, the plan is shown on the approval request before anyone "
+        "approves it."
+    )
+
+
+async def _read_target_effect(ctx: PreviewContext) -> tuple[dict[str, Any] | None, str | None]:
+    """Build the plan with the target's connector, and record the read in one audit row.
+
+    The build has :data:`TARGET_READ_TIMEOUT_SECONDS`. The row is written
+    also when the target does not answer in time or the build fails
+    (:func:`~meho_backplane.operations._preview_audit.write_target_read_row`).
+    Returns the effect and the note that says why there is no whole plan.
+    """
+    started = time.monotonic()
+    effect: dict[str, Any] | None = None
+    try:
+        async with asyncio.timeout(TARGET_READ_TIMEOUT_SECONDS):
+            effect = await build_proposed_effect(ctx)
+    except TimeoutError:
+        _log.warning("preview_target_read_timeout", op_id=ctx.descriptor.op_id)
+        note: str | None = TARGET_READ_TIMEOUT_NOTE
+        status = "timeout"
+    else:
+        note = _failed_read_note(effect)
+        status = "ok" if note is None else "error"
+    await write_target_read_row(
+        operator=ctx.operator,
+        descriptor=ctx.descriptor,
+        target=ctx.target,
+        result_status=status,
+        duration_ms=(time.monotonic() - started) * 1000,
+        fields=preview_target_read_audit_fields(ctx.descriptor.op_id, ctx.params),
+    )
+    return effect, note
+
+
 async def _synthetic_proposed_effect(
     *,
     operator: Operator,
@@ -97,33 +245,61 @@ async def _synthetic_proposed_effect(
     descriptor: EndpointDescriptor,
     target: Any,
     params: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str | None]:
     """Reuse the park-time ``proposed_effect`` builder for a pre-dispatch preview (#3312).
 
     Runs :func:`~meho_backplane.operations._preview.build_proposed_effect` — the
     *same* park-path builder, so no effect logic is duplicated and redaction is
     identical — but with ``connector_instance=None`` to keep the preview
-    **egress-free**: a pure builder (``vault.kv.delete``'s ``_kv_delete_preview``
-    reads only its params) populates, while a live-read blast-radius builder
-    declines for lack of a connector. Returns the effect only when genuinely
+    **egress-free** (with ``K8S_APPLY_PREVIEW_DRY_RUN`` off this holds for
+    every op; with it on, for every op but ``k8s.apply``): a pure builder
+    (``vault.kv.delete``'s ``_kv_delete_preview`` reads only its params)
+    populates, while a live-read blast-radius builder declines for lack of a
+    connector. Returns the effect only when genuinely
     populated (bespoke ``preview`` or generic ``params_echo``, per
     :func:`describe_preview_provenance`); a decline / credential suppression /
     fail-soft ``preview_unavailable`` marker yields ``None`` so the synthetic
     preview stays clean.
+
+    An op whose builder may read the target in a preview
+    (:func:`~meho_backplane.operations._preview.register_preview_target_read`,
+    for example the dry run of ``k8s.apply``) gets the target's connector
+    instead, for a caller who may ask for the call
+    (:func:`_target_read_connector`). The preview of ``k8s.apply`` then
+    sends a dry run to the cluster, with :data:`TARGET_READ_TIMEOUT_SECONDS`,
+    and writes one audit row of the class read (:func:`_read_target_effect`).
+    The second value is the note that says why there is no plan, or ``None``
+    for the default note.
     """
-    proposed_effect = await build_proposed_effect(
-        PreviewContext(
-            descriptor=descriptor,
-            connector_instance=None,
-            operator=operator,
-            target=target,
-            params=params,
-            connector_id=connector_id,
-            agent_preview=True,
-        )
+    connector, note = await _target_read_connector(
+        operator=operator,
+        connector_id=connector_id,
+        descriptor=descriptor,
+        target=target,
+        params=params,
     )
+    ctx = PreviewContext(
+        descriptor=descriptor,
+        connector_instance=connector,
+        operator=operator,
+        target=target,
+        params=params,
+        connector_id=connector_id,
+        agent_preview=True,
+        reads_target=connector is not None,
+    )
+    if connector is None:
+        proposed_effect = await build_proposed_effect(ctx)
+    else:
+        proposed_effect, note = await _read_target_effect(ctx)
     populated, _reason = describe_preview_provenance(proposed_effect, op_id=descriptor.op_id)
-    return proposed_effect if populated else None
+    return (proposed_effect, None) if populated else (None, note)
+
+
+def _plan_complete(proposed_effect: dict[str, Any]) -> bool:
+    """False when the builder says that the dry run did not check every part."""
+    preview = proposed_effect.get("preview")
+    return not (isinstance(preview, dict) and preview.get(_NOT_CHECKED_KEY))
 
 
 def _hide_free_form_map_values(value: Any, schema: Any) -> Any:
@@ -251,7 +427,7 @@ async def build_composite_preview(
         PARAMS_DIGEST_KEY: compute_params_hash(params),
     }
     envelope["preview_hash"] = compute_preview_hash(envelope)
-    proposed_effect = await _synthetic_proposed_effect(
+    proposed_effect, note = await _synthetic_proposed_effect(
         operator=operator,
         connector_id=connector_id,
         descriptor=descriptor,
@@ -260,8 +436,10 @@ async def build_composite_preview(
     )
     if proposed_effect is not None:
         envelope["proposed_effect"] = proposed_effect
-        envelope["plan_shown"] = True
+        envelope["plan_shown"] = _plan_complete(proposed_effect)
+        if not envelope["plan_shown"]:
+            envelope["plan_note"] = _PLAN_NOT_COMPLETE_NOTE
     else:
         envelope["plan_shown"] = False
-        envelope["plan_note"] = PLAN_NOT_SHOWN_NOTE
+        envelope["plan_note"] = note or PLAN_NOT_SHOWN_NOTE
     return envelope

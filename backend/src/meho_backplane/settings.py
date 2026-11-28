@@ -2846,6 +2846,19 @@ class Settings(BaseModel):
     #: (:mod:`meho_backplane.connectors.keycloak.answer_realm`). Off: the
     #: answers are as before. Set via ``KEYCLOAK_ANSWER_REALM``.
     keycloak_answer_realm: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: A dry run on the cluster in ``preview_operation`` for ``k8s.apply``,
+    #: behind a switch that is off by default. When on, the preview sends a
+    #: server-side apply with ``dryRun=All`` for every document of the
+    #: manifest, with the target's own cluster account, and shows for each
+    #: one whether the apply creates it, changes it or is refused
+    #: (:mod:`meho_backplane.connectors.kubernetes.ops_write_apply_dry_run`).
+    #: Every request that can change something carries ``dryRun=All``; the
+    #: other requests read the cluster's API list. Only a caller with the
+    #: role Operator or higher, whom the policy does not refuse the apply,
+    #: gets the dry run, and MEHO records it in one audit row of the class
+    #: read. Off: the preview never contacts the cluster. Set via
+    #: ``K8S_APPLY_PREVIEW_DRY_RUN``.
+    k8s_apply_preview_dry_run: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: Wider ``preview_operation`` for typed writes (#5074), behind a switch
     #: that is off by default. When on, a typed write previews also when it
     #: does not carry ``requires_approval``, and a credential write with its
@@ -4042,6 +4055,9 @@ def get_settings() -> Settings:
         ),
         keycloak_answer_realm=parse_bool_env(
             os.environ.get("KEYCLOAK_ANSWER_REALM"),
+        ),
+        k8s_apply_preview_dry_run=parse_bool_env(
+            os.environ.get("K8S_APPLY_PREVIEW_DRY_RUN"),
         ),
         preview_typed_writes=parse_bool_env(
             os.environ.get("PREVIEW_TYPED_WRITES"),

@@ -24,7 +24,7 @@ from typing import Any
 
 import yaml
 
-__all__ = ["NOT_SHOWN", "ApplyManifestError"]
+__all__ = ["NOT_SHOWN", "ApplyManifestError", "parse_numbered_manifest"]
 
 #: What the refusal shows in place of an ``apiVersion`` or ``kind`` that
 #: does not have the shape Kubernetes allows.
@@ -188,6 +188,14 @@ def _yaml_problem(exc: BaseException) -> tuple[str, str | None]:
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
 
+    The documents of :func:`parse_numbered_manifest`, without their numbers.
+    """
+    return [doc for _number, doc in parse_numbered_manifest(manifest)]
+
+
+def parse_numbered_manifest(manifest: str) -> list[tuple[int, dict[str, Any]]]:
+    """Parse a manifest into ``(number, doc)`` pairs; *number* is the place in the text.
+
     ``yaml.safe_load_all`` handles both JSON (a subset of YAML) and
     multi-doc YAML separated by ``---``. Empty documents (a trailing
     ``---`` or blank stanza) are dropped, but still counted, so the
@@ -217,7 +225,7 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     Raises :class:`ApplyManifestError` on any structural problem.
     """
     docs = iter(yaml.safe_load_all(manifest))
-    parsed: list[dict[str, Any]] = []
+    parsed: list[tuple[int, dict[str, Any]]] = []
     number = 0
     while True:
         number += 1
@@ -240,7 +248,7 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
         if doc is None:
             continue
         _check_document(number, doc)
-        parsed.append(doc)
+        parsed.append((number, doc))
     if not parsed:
         raise ApplyManifestError("the text has no documents")
     return parsed

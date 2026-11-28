@@ -215,7 +215,27 @@ so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
 blast-radius builder declines rather than dialling out. A declined plan is
 not silent (#4028): the envelope carries `plan_shown=false` and a plain
 `plan_note` that says the plan is built at send time and shown on the
-approval request. The policy gate (dispatch Step 4) runs in **decide-only**
+approval request. Only `k8s.apply` reads its target in a preview, with
+`K8S_APPLY_PREVIEW_DRY_RUN` on (`register_preview_target_read` in
+`_preview.py`; see [connectors-kubernetes.md](connectors-kubernetes.md)).
+Its builder sends a dry run: every request that can change something
+carries `dryRun=All`, and the only other requests are `GET` reads of the
+cluster's API list (`/version`, `/api`, `/apis` and the group paths). With
+the switch off, no preview contacts its target. The builder gets the
+target's connector only for a caller with the role Operator or higher whom
+the policy gate does not refuse. The build has
+`TARGET_READ_TIMEOUT_SECONDS` (10 seconds); after that the envelope carries
+`plan_shown=false` and the time-out note. Such a preview writes one audit
+row of the class read (`operations/_preview_audit.py`): `event_class`
+`operation_execution`, `method` `PREVIEW`, `path` the op id,
+`payload.op_class` `read`, with the caller, the tenant, the target and the
+number of documents. It writes this row also on a time-out or a failed
+login, and in both audit modes; with the wrapper rows retired the wrapper
+then adds no row, and with them kept it adds its request row as before.
+When the builder says that it could not check every part
+(`preview.not_checked`), `plan_shown` is false next to the
+`proposed_effect`, and the console and `meho operation preview` show the
+plan with the `plan_note`. The policy gate (dispatch Step 4) runs in **decide-only**
 mode (#4923): it returns the verdict and writes nothing — no audit row, no
 approval request, and no standing-grant use. A service principal whose
 standing grant would clear the call sees `auto-execute`, but the grant is

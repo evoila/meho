@@ -63,6 +63,11 @@ rules:
     action: redact
     reason: "labelled credential pair (api_key/token/refresh_token/auth_token/session_token/secret/secret_id/private_key/password/passwd/pwd/client_secret)"
 
+  - name: strip-vendor-token
+    pattern: vendor_token
+    action: redact
+    reason: "vendor access token with a clear prefix (GitHub, cloud access key id, chat bot, payment key)"
+
   - name: strip-kubeconfig
     pattern: kubeconfig
     action: redact

@@ -57,22 +57,25 @@ def _file_of(unit: str) -> bytes:
     return content
 
 
+#: Each unit, and whether a note made of it is refused. A private key begin
+#: line is refused on its own.
 _SLOW_SHAPES = [
-    pytest.param(_BEGIN, id="begin-lines"),
-    pytest.param(f"-----BEGIN RSA {_KEY_LINE}\n", id="begin-lines-with-label"),
-    pytest.param("-eyJaaaaaaaa", id="jwt-starts"),
-    pytest.param(f" {_HEADER}.{_PAYLOAD}", id="jwt-parts-without-end"),
+    pytest.param(_BEGIN, True, id="begin-lines"),
+    pytest.param(f"-----BEGIN RSA {_KEY_LINE}\n", True, id="begin-lines-with-label"),
+    pytest.param("-eyJaaaaaaaa", False, id="jwt-starts"),
+    pytest.param(f" {_HEADER}.{_PAYLOAD}", False, id="jwt-parts-without-end"),
 ]
 
 
 @pytest.mark.slow_runner_tolerant
-@pytest.mark.parametrize("unit", _SLOW_SHAPES)
-def test_a_large_file_of_secret_starts_is_checked_fast(unit: str) -> None:
+@pytest.mark.parametrize(("unit", "refused"), _SLOW_SHAPES)
+def test_a_large_file_of_secret_starts_is_checked_fast(unit: str, refused: bool) -> None:
     content = _file_of(unit)
     started = time.perf_counter()
     parsed = parse_settings_file(content)
     elapsed = time.perf_counter() - started
-    assert parsed.mistakes == []
+    assert bool(parsed.mistakes) is refused
+    assert all("looks like a private key" in mistake for mistake in parsed.mistakes)
     # Healthy time is a few milliseconds. The limit is wide so a busy runner
     # does not fail it; a check that grows with the square of the size takes
     # minutes on this file.
@@ -80,8 +83,10 @@ def test_a_large_file_of_secret_starts_is_checked_fast(unit: str) -> None:
 
 
 @pytest.mark.slow_runner_tolerant
-@pytest.mark.parametrize("unit", _SLOW_SHAPES)
-async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str) -> None:
+@pytest.mark.parametrize(("unit", "refused"), _SLOW_SHAPES)
+async def test_the_event_loop_stays_free_while_a_large_file_is_checked(
+    unit: str, refused: bool
+) -> None:
     content = _file_of(unit)
     largest_gap = 0.0
     done = asyncio.Event()
@@ -98,10 +103,11 @@ async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str
     beat = asyncio.create_task(heartbeat())
     await asyncio.sleep(0.02)
     try:
-        await asyncio.to_thread(parse_settings_file, content)
+        parsed = await asyncio.to_thread(parse_settings_file, content)
     finally:
         done.set()
         await beat
+    assert bool(parsed.mistakes) is refused
     check_time_limit(largest_gap, _LOOP_GAP_LIMIT_S, f"the event loop paused {largest_gap:.2f} s")
 
 
@@ -115,6 +121,9 @@ async def test_the_event_loop_stays_free_while_a_large_file_is_checked(unit: str
         _PEM_KEY,
         _BEGIN * 50 + f"\nabc\n{_END}",
         f"-----BEGIN EC {_KEY_LINE}x{_END}",
+        _BEGIN * 50,
+        f"{_END}\n{_BEGIN}",
+        _BEGIN + _END,
     ],
 )
 def test_secret_shapes_are_still_found(value: str) -> None:
@@ -130,9 +139,7 @@ def test_secret_shapes_are_still_found(value: str) -> None:
         f"eyJhbGc.{_PAYLOAD}.sig",
         f"{_HEADER}.eyJzdWIi.sig",
         "eyJub3RoaW5nIjoxfQ.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig",
-        _BEGIN * 50,
-        f"{_END}\n{_BEGIN}",
-        _BEGIN + _END,
+        _END * 50,
     ],
 )
 def test_near_misses_pass(value: str) -> None:

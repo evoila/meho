@@ -215,6 +215,31 @@ _API_KEY = re.compile(
     re.IGNORECASE,
 )
 
+# Vendor access tokens with a clear prefix. The prefix says what the text
+# is, so the token is hidden alone and inside a sentence, with no label in
+# front of it:
+#
+#   GitHub tokens (``ghp_``, ``gho_``, ``ghu_``, ``ghs_``, ``ghr_`` and
+#   ``github_pat_``), cloud access key ids (``AKIA`` / ``ASIA`` and 16
+#   capitals or digits), chat bot tokens (``xoxb-`` and the other ``xox?-``
+#   forms) and payment secret keys (``sk_live_``, ``rk_live_``).
+#
+# A text with no clear prefix stays visible unless a secret-like label
+# (``api_key``) or a secret-named key stands in front of it: a long hex
+# text, plain base64, three random parts with two dots. A long hex text is
+# also a commit id or a checksum, and a result shows those whole. A new
+# prefix of the same clear kind goes here, with its row in
+# ``tests/test_secret_shapes_table.py``.
+_VENDOR_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"gh[pousr]_[A-Za-z0-9]{36,255}"
+    r"|github_pat_[A-Za-z0-9_]{22,255}"
+    r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
+    r"|xox[abposr]-[A-Za-z0-9-]{10,255}"
+    r"|[rs]k_live_[A-Za-z0-9]{24,255}"
+    r")(?![A-Za-z0-9_])",
+)
+
 # PEM private keys: the whole block from the ``BEGIN`` line to the
 # matching ``END`` line (``RSA PRIVATE KEY``, ``EC PRIVATE KEY``,
 # ``ENCRYPTED PRIVATE KEY``, ``OPENSSH PRIVATE KEY``, plain ``PRIVATE
@@ -334,6 +359,7 @@ NAMED_PATTERNS: Final[dict[str, re.Pattern[str] | SecretFinder]] = {
     "bearer_token": _BEARER_TOKEN,
     "jwt": _JWT,
     "api_key": _API_KEY,
+    "vendor_token": _VENDOR_TOKEN,
     "kubeconfig": _KUBECONFIG,
     "pem_private_key": _PEM_PRIVATE_KEY,
     "password_hash": _PASSWORD_HASH,

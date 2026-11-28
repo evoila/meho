@@ -157,6 +157,23 @@
         {% include "connectors/_fingerprint_card.html" %}
       </div>
 
+      {# ---------- Credential card ---------- #}
+      {# Loaded from its own route when the page opens, so the page itself
+         never waits for the secret store. #}
+      <div
+        id="credential-card-slot"
+        hx-get="/ui/connectors/{{ target.name | urlencode }}/credential"
+        hx-trigger="load"
+        hx-swap="outerHTML"
+      >
+        <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Credential">
+          <div class="card-body">
+            <h2 class="card-title text-base">Credential</h2>
+            <p class="text-sm text-muted">Loading&hellip;</p>
+          </div>
+        </article>
+      </div>
+
       {# ---------- Recent ops card ---------- #}
       {% include "connectors/_recent_ops.html" %}
     </div>
@@ -174,4 +191,5 @@
    at the end of the body. #}
 {% block scripts %}
   <script src="/ui/static/src/app/recent-ops-refresh.js" defer></script>
+  <script src="/ui/static/src/app/credential-card.js" defer></script>
 {% endblock %}

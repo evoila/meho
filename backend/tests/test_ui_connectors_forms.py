@@ -417,8 +417,8 @@ def test_list_shows_create_button_for_tenant_admin_only() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_create_submit_persists_target_and_redirects_to_list() -> None:
-    """A valid create POST persists the row + returns HX-Redirect to the list."""
+def test_create_submit_persists_target_and_opens_its_page() -> None:
+    """A valid create POST persists the row + returns HX-Redirect to the new target's page."""
     _seed_tenant(_TENANT_A, "tenant-a")
     client, mock, csrf = _client_with_role(
         tenant_id=_TENANT_A,
@@ -442,7 +442,7 @@ def test_create_submit_persists_target_and_redirects_to_list() -> None:
     finally:
         mock.stop()
     assert response.status_code == 204, response.text
-    assert response.headers["HX-Redirect"] == "/ui/connectors"
+    assert response.headers["HX-Redirect"] == "/ui/connectors/new-target"
 
     row = _load_target(_TENANT_A, "new-target")
     assert row is not None
@@ -594,13 +594,13 @@ def test_create_submit_keycloak_with_a_realm_persists_it() -> None:
 
 
 def test_create_submit_keycloak_with_the_admin_realm_shows_the_warning() -> None:
-    """The target is saved, and the form shows the warning instead of the list."""
+    """The target is saved, and the form shows the warning before the target's page."""
     response = _post_keycloak_create("kc-admin", "master")
     assert response.status_code == 200, response.text
     assert "HX-Redirect" not in response.headers
     assert 'id="connectors-saved-warning-modal"' in response.text
     assert "admin realm of this Keycloak" in response.text
-    assert 'href="/ui/connectors"' in response.text
+    assert 'href="/ui/connectors/kc-admin"' in response.text
     row = _load_target(_TENANT_A, "kc-admin")
     assert row is not None
     assert row.extras == {"managed_realm": "master"}

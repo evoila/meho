@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# The alarm for the unit test map (#7103). After each nightly CI run, this
-# check is red when that run uploaded no `unit-test-map` artifact.
+# The alarm for the unit test map (#7103). After each nightly CI run (also
+# one started by hand on `main`), this check is red when that run uploaded
+# no `unit-test-map` artifact.
 #
 # Why: pull requests use the map to run only the unit tests that their
 # change can break (#5642, the `changes` job in ci.yml). With no new map,
@@ -33,9 +34,14 @@ permissions:
 jobs:
   check:
     name: The nightly run made the unit test map
-    # Only the nightly run makes the map. A pull request or merge queue run
-    # never does.
-    if: github.event.workflow_run.event == 'schedule'
+    # Only the nightly run makes the map: on its clock, or started by hand on
+    # `main` (#7236). A pull request or merge queue run never does. A run
+    # started by hand on another branch is not checked: pull requests take
+    # only a map of a run on `main`.
+    if: >-
+      github.event.workflow_run.event == 'schedule' ||
+      (github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

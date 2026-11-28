@@ -27,11 +27,17 @@ Each shard runs three test workers (#7103): serial shards hit their step
 limit every night, so no test map was made. The alarm workflow
 ``unit-test-map-check.yml`` is red after a nightly run without a map; its
 tests run the real step script with a fake ``gh``.
+
+A maintainer can start the nightly run by hand (#7236), for example after a
+night without a map. That run does what the nightly run does, has its own
+concurrency group, and the alarm checks it when it ran on ``main``. Pull
+requests take a map only from a run on ``main``.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -42,6 +48,7 @@ import pytest
 import yaml
 
 from tests import conftest
+from tests.test_ci_second_runner_site import _expression
 
 _WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 _CI_YML = _WORKFLOWS / "ci.yml"
@@ -72,6 +79,9 @@ def ci_workflow() -> dict[Any, Any]:
 @pytest.fixture(scope="module")
 def ci_jobs(ci_workflow: dict[Any, Any]) -> dict[str, Any]:
     return cast("dict[str, Any]", ci_workflow["jobs"])
+
+
+needs_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
 
 
 def _step(job: dict[str, Any], name: str) -> dict[str, Any]:
@@ -227,6 +237,7 @@ def test_coverage_jobs_run_on_the_schedule_and_the_label_only(
 ) -> None:
     condition = ci_jobs[job_id]["if"]
     assert "github.event_name == 'schedule'" in condition
+    assert "github.event_name == 'workflow_dispatch'" in condition, "the run started by hand"
     assert "github.event_name == 'pull_request'" in condition
     assert _VALIDATE_LABEL in condition
     assert _FORK_GUARD in condition, "a fork PR must not reach the internal pool"
@@ -240,6 +251,95 @@ def test_quality_gate_analyzes_only_green_nightly_runs() -> None:
     assert "github.event.workflow_run.conclusion == 'success'" in condition
     assert "github.event.workflow_run.event == 'schedule'" in condition
     assert "'push'" not in condition, "a push run has no python-coverage artifact"
+
+
+def test_ci_can_be_started_by_hand(ci_workflow: dict[Any, Any]) -> None:
+    assert _triggers(ci_workflow)["workflow_dispatch"] is None, "no inputs: the nightly run"
+
+
+def test_map_step_runs_on_the_nightly_run_also_started_by_hand(ci_jobs: dict[str, Any]) -> None:
+    condition = _step(ci_jobs["python-coverage-combine"], "Make the unit test map")["if"]
+    assert (
+        "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')" in condition
+    )
+    assert "pull_request" not in condition, "a labelled pull request makes no map"
+
+
+def _concurrency(ci_workflow: dict[Any, Any], event: str, ref: str) -> tuple[str, bool]:
+    context = {"github.event_name": event, "github.ref": ref}
+    group = re.sub(
+        r"\$\{\{ ([^}]*) \}\}",
+        lambda m: str(_expression("${{ " + m.group(1) + " }}", context)),
+        ci_workflow["concurrency"]["group"],
+    )
+    cancel = _expression(ci_workflow["concurrency"]["cancel-in-progress"], context)
+    return group, bool(cancel)
+
+
+def test_run_started_by_hand_has_its_own_concurrency_group(ci_workflow: dict[Any, Any]) -> None:
+    by_hand, _ = _concurrency(ci_workflow, "workflow_dispatch", "refs/heads/main")
+    others = {
+        _concurrency(ci_workflow, "schedule", "refs/heads/main")[0],
+        _concurrency(ci_workflow, "pull_request", "refs/pull/12/merge")[0],
+        _concurrency(ci_workflow, "merge_group", "refs/heads/gh-readonly-queue/main/pr-12-abc")[0],
+    }
+    assert by_hand not in others, "a run started by hand cancels no pull request or queue run"
+    assert _concurrency(ci_workflow, "merge_group", "refs/heads/x") == (
+        "ci-refs/heads/x-merge_group",
+        False,
+    ), "a merge queue run is never cancelled"
+
+
+def _pick_filter(ci_jobs: dict[str, Any]) -> str:
+    run = _step(ci_jobs["changes"], "Pick unit tests with the test map")["run"]
+    match = re.search(r"artifacts\?name=unit-test-map&per_page=20\" --jq '([^']+)'", run)
+    assert match is not None, "the pick step lists the map artifacts with a jq filter"
+    return match.group(1)
+
+
+def _map_artifact(
+    artifact_id: int, branch: str, event: str, *, fork: bool = False
+) -> dict[str, Any]:
+    return {
+        "id": artifact_id,
+        "expired": False,
+        "workflow_run": {
+            "head_branch": branch,
+            "event": event,
+            "repository_id": 1,
+            "head_repository_id": 2 if fork else 1,
+        },
+    }
+
+
+@needs_jq
+@pytest.mark.parametrize(
+    ("artifacts", "picked"),
+    [
+        (
+            [_map_artifact(9, "fix/x", "workflow_dispatch"), _map_artifact(8, "main", "schedule")],
+            "8",
+        ),
+        (
+            [_map_artifact(9, "main", "workflow_dispatch"), _map_artifact(8, "main", "schedule")],
+            "9",
+        ),
+        ([_map_artifact(9, "fix/x", "workflow_dispatch")], ""),
+        ([_map_artifact(9, "main", "workflow_dispatch", fork=True)], ""),
+    ],
+    ids=["by-hand-on-branch-skipped", "by-hand-on-main-taken", "only-branch", "fork"],
+)
+def test_pull_requests_take_a_map_only_from_a_run_on_main(
+    ci_jobs: dict[str, Any], artifacts: list[dict[str, Any]], picked: str
+) -> None:
+    run = subprocess.run(
+        ["jq", "-r", _pick_filter(ci_jobs)],
+        input=json.dumps({"artifacts": artifacts}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert run.stdout.strip() == picked
 
 
 def test_coverage_shards_run_three_workers_like_the_unit_shards(ci_jobs: dict[str, Any]) -> None:
@@ -267,7 +367,6 @@ def test_map_check_runs_after_every_nightly_ci_run() -> None:
     assert workflow["name"] != "CI"
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["check"]
-    assert job["if"] == "github.event.workflow_run.event == 'schedule'"
     assert job["permissions"] == {"actions": "read"}
     assert job["runs-on"] == "ubuntu-latest"
     assert "continue-on-error" not in job, "the alarm must be able to turn red"
@@ -327,7 +426,26 @@ _COVERAGE_JOBS_OF_A_RUN = [
     {"name": "Python unit shard 1/6", "conclusion": "failure"},
 ]
 
-needs_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+
+@pytest.mark.parametrize(
+    ("event", "branch", "checked"),
+    [
+        ("schedule", "main", True),
+        ("workflow_dispatch", "main", True),
+        ("workflow_dispatch", "fix/x", False),
+        ("pull_request", "main", False),
+        ("merge_group", "gh-readonly-queue/main/pr-12-abc", False),
+    ],
+)
+def test_map_check_checks_the_nightly_run_and_a_run_by_hand_on_main(
+    event: str, branch: str, checked: bool
+) -> None:
+    condition = _load(_MAP_CHECK_YML)["jobs"]["check"]["if"]
+    context = {
+        "github.event.workflow_run.event": event,
+        "github.event.workflow_run.head_branch": branch,
+    }
+    assert bool(_expression("${{ " + condition + " }}", context)) is checked
 
 
 @needs_jq

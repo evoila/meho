@@ -2617,7 +2617,8 @@ run, not a broken `main`.
   `coverage.xml`. Each coverage shard also writes
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
-  (kept 8 days). It does this only on the `schedule` run, and only when all
+  (kept 8 days). It does this only on the nightly run (`schedule`, or
+  `workflow_dispatch` when started by hand), and only when all
   ten shards delivered their data. A crashed worker leaves a junit file
   but no coverage data (the worker writes its data only at the end of its
   session), and the download of that shard still works. In the coverage
@@ -2697,9 +2698,17 @@ run, not a broken `main`.
   (only `python-outside-backend` runs), or an earlier failed step of the
   `changes` job (then every unit test job skips). An old map gives one
   more warning, `Old unit test map`.
+- **Start the nightly run by hand.** After a night with no map (the alarm
+  below is red), start the nightly run by hand on `main`: Actions -> CI ->
+  Run workflow, or `gh workflow run ci.yml --ref main`. It runs the same
+  jobs as the nightly run and has its own concurrency group, so it cancels
+  no pull request or merge queue run (#7236). A run started by hand on
+  another branch also makes a map, but pull requests take only a map of a
+  run on `main`, and `quality-gate.yml` still analyzes only the nightly run
+  on its clock.
 - **The alarm.** `.github/workflows/unit-test-map-check.yml` runs after
-  each nightly CI run. It is red when that run uploaded no `unit-test-map`
-  artifact, and its summary lists the coverage jobs that did not pass.
+  each nightly CI run, and after a run started by hand on `main`. It is
+  red when that run uploaded no `unit-test-map` artifact, and its summary lists the coverage jobs that did not pass.
   When it cannot read the artifacts of that run, it is red too, with the
   title `Could not check the unit test map`. It
   says only what it found in that run: pull requests may still use an

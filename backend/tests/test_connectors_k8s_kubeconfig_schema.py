@@ -404,7 +404,7 @@ def test_exec_config_never_reaches_library_client_build(
 
     async def _check() -> None:
         with patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
         ) as client_factory:
             with pytest.raises(UnsupportedKubeconfigError):

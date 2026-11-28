@@ -25,6 +25,7 @@ import base64
 import datetime
 import json
 import ssl
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -53,6 +54,10 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     KubernetesTargetLike,
     WcpSsoCredential,
     load_kubernetes_credential,
+)
+from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
+    UnsupportedKubeconfigError,
+    enforce_passive_kubeconfig,
 )
 from meho_backplane.connectors.kubernetes.wcp import (
     DEFAULT_WCP_TOKEN_TTL_SECONDS,
@@ -442,6 +447,107 @@ async def test_wcp_login_message_never_echoes_credentials() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_wcp_api_configuration — the answer's kube_config passes the
+# passive-only check before the library loads it
+# ---------------------------------------------------------------------------
+
+
+def _answer_with_user(user: dict[str, Any]) -> dict[str, Any]:
+    """A made-up ``/wcp/login`` answer whose kubeconfig user is *user*."""
+    kube_config = _kube_config(ca_data=base64.standard_b64encode(b"ca").decode())
+    kube_config["users"] = [{"name": "u", "user": user}]
+    return {"session_id": _make_jwt(exp=time.time() + 36_000), "kube_config": kube_config}
+
+
+def _active_user_entries(marker: Path) -> dict[str, dict[str, Any]]:
+    """User entries that would run a command or read a local file if loaded."""
+    token_file = marker.with_name("token-file")
+    token_file.write_text("token-from-file")
+    id_token = _make_jwt(exp=time.time() + 36_000)
+    return {
+        "exec": {
+            "exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": sys.executable,
+                "args": ["-c", f"open({str(marker)!r}, 'w').close()"],
+            }
+        },
+        "auth-provider": {
+            "auth-provider": {
+                "name": "oidc",
+                "config": {"id-token": id_token, "idp-issuer-url": "https://idp.test"},
+            }
+        },
+        "tokenFile": {"tokenFile": str(token_file)},
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["exec", "auth-provider", "tokenFile"])
+async def test_build_configuration_refuses_active_kubeconfig_in_login_answer(
+    entry: str, tmp_path: Path
+) -> None:
+    marker = tmp_path / "marker"
+    user = _active_user_entries(marker)[entry]
+    respx.route(method="POST").mock(return_value=httpx.Response(200, json=_answer_with_user(user)))
+    loader = AsyncMock()
+    with (
+        patch("kubernetes_asyncio.config.load_kube_config_from_dict", loader),
+        pytest.raises(UnsupportedKubeconfigError, match=entry),
+    ):
+        await build_wcp_api_configuration(
+            host="supervisor.alias.test",
+            api_port=6443,
+            username="u",
+            password="p",
+            verify_tls=False,
+            ca_pem=None,
+        )
+    loader.assert_not_called()
+    assert not marker.exists()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_build_configuration_refuses_exec_without_running_it(tmp_path: Path) -> None:
+    # The real library loader stays in place: the refusal happens before it,
+    # so the exec command never runs.
+    marker = tmp_path / "marker"
+    user = _active_user_entries(marker)["exec"]
+    respx.route(method="POST").mock(return_value=httpx.Response(200, json=_answer_with_user(user)))
+    with pytest.raises(UnsupportedKubeconfigError, match="exec"):
+        await build_wcp_api_configuration(
+            host="supervisor.alias.test",
+            api_port=6443,
+            username="u",
+            password="p",
+            verify_tls=False,
+            ca_pem=None,
+        )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "kube_config",
+    [
+        _kube_config(),
+        _kube_config(ca_data=base64.standard_b64encode(b"ca").decode()),
+        wcp._synthesise_kube_config(
+            host="sup.test", api_port=6443, session_id="s", verify_tls=True, ca_pem="PEM"
+        ),
+        wcp._synthesise_kube_config(
+            host="sup.test", api_port=6443, session_id="s", verify_tls=False, ca_pem=None
+        ),
+    ],
+)
+def test_normal_supervisor_kube_config_passes_passive_check(kube_config: dict[str, Any]) -> None:
+    # A normal Supervisor answer holds a server, a CA (or the skip flag) and
+    # a token: the passive-only check keeps every field of it.
+    assert enforce_passive_kubeconfig(kube_config) == kube_config
+
+
+# ---------------------------------------------------------------------------
 # Live TLS — the login leg verifies the cert against tls_server_name, not the
 # dial host, so a NAT-fronted Supervisor (host != cert SAN) works (#3832)
 # ---------------------------------------------------------------------------
@@ -812,7 +918,7 @@ async def test_build_configuration_tls_knobs() -> None:
     login = AsyncMock(return_value=(WcpToken("sess", time.monotonic() + 9000), _kube_config()))
     with (
         patch(f"{_WCP_MODULE}.wcp_login", login),
-        patch(f"{_WCP_MODULE}.load_kube_config_from_dict", _fake_lkcfd),
+        patch("kubernetes_asyncio.config.load_kube_config_from_dict", _fake_lkcfd),
     ):
         secure = await build_wcp_api_configuration(
             host="alias.test",
@@ -849,7 +955,7 @@ async def test_build_configuration_verify_tls_overrides_embedded_insecure_skip()
     login = AsyncMock(return_value=(WcpToken("sess", time.monotonic() + 9000), _kube_config()))
     with (
         patch(f"{_WCP_MODULE}.wcp_login", login),
-        patch(f"{_WCP_MODULE}.load_kube_config_from_dict", _fake_lkcfd),
+        patch("kubernetes_asyncio.config.load_kube_config_from_dict", _fake_lkcfd),
     ):
         cfg = await build_wcp_api_configuration(
             host="alias.test",
@@ -1140,7 +1246,7 @@ async def test_legacy_kubeconfig_loader_still_works() -> None:
 
     connector = KubernetesConnector(kubeconfig_loader=_kube)
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new=AsyncMock(return_value=MagicMock(close=AsyncMock())),
     ) as ctor:
         await connector._get_api_client(_WCP_TARGET, _make_operator())

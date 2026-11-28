@@ -162,7 +162,7 @@ def _patch_api(
     else:
         core_v1.read_namespaced_pod_log = AsyncMock(return_value=log_body)
     config_patch = patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=api_client_mock,
     )

@@ -332,7 +332,7 @@ async def test_execute_about_dispatches_through_descriptor_and_returns_ok() -> N
 
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -404,7 +404,7 @@ async def test_execute_wraps_handler_exception_in_connector_error_envelope() -> 
     boom = RuntimeError("simulated VersionApi crash")
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),

@@ -376,7 +376,7 @@ async def test_kubernetes_connector_discover_topology_returns_hints_with_operato
         patch("meho_backplane.connectors.kubernetes.connector.client.VersionApi") as mock_version,
         patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as mock_core,
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new=AsyncMock(return_value=MagicMock()),
         ),
     ):
@@ -418,7 +418,7 @@ async def test_kubernetes_connector_discover_topology_default_operator_is_system
         patch("meho_backplane.connectors.kubernetes.connector.client.VersionApi") as mock_version,
         patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as mock_core,
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new=AsyncMock(return_value=MagicMock()),
         ),
     ):

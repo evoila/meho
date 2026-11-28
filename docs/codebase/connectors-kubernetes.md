@@ -522,17 +522,32 @@ reach that loader. It:
   `username`/`password`, and inline `client-certificate-data` /
   `client-key-data` / cluster `certificate-authority-data`.
 
-Enforcement sits at the trust boundary — the Vault/GSM read — in **both**
-production loaders (`load_kubernetes_credential`, the default, and the
-legacy-injectable `load_kubeconfig_from_vault`), immediately after
-`parse_kubeconfig_yaml`. `parse_kubeconfig_yaml` itself stays a pure
-parse; the injectable `kubeconfig_loader=` / `credential_loader=` test
-seams build dicts directly and are trusted (never a tenant secret).
+The check runs at two points:
 
-The **WCP SSO path is unaffected**: a Supervisor secret carries
-`username`/`password`, resolves to a `WcpSsoCredential`, and never
-constructs a kubeconfig dict — so `enforce_passive_kubeconfig` is not on
-that path.
+- **At the Vault/GSM read**, in both production loaders
+  (`load_kubernetes_credential`, the default, and the legacy-injectable
+  `load_kubeconfig_from_vault`), right after `parse_kubeconfig_yaml`. A bad
+  secret fails at credential load. `parse_kubeconfig_yaml` itself stays a
+  pure parse.
+- **At every load into the library.** Two helpers in the same module are
+  the only code in `backend/src` that hands a kubeconfig mapping to
+  `kubernetes_asyncio`: `load_passive_kubeconfig(config, configuration)`
+  (wraps `load_kube_config_from_dict`) and `new_passive_api_client(config)`
+  (wraps `new_client_from_config_dict`). Each runs
+  `enforce_passive_kubeconfig` first and loads only the rebuilt mapping.
+  The connector's read client and exec client (static kubeconfig) and the
+  vSphere Supervisor path (`build_wcp_api_configuration`) all use them. So
+  the `kube_config` in a `/wcp/login` answer, which comes from the
+  Supervisor and not from a tenant secret, passes the same check and fails
+  with the same `UnsupportedKubeconfigError`. A normal Supervisor answer
+  holds only a server, a CA (or the skip flag) and a token, so it passes;
+  the mapping MEHO builds when the answer has no `kube_config` passes too.
+
+The guard test `tests/test_k8s_kubeconfig_loader_one_place.py` scans
+`backend/src` and fails when any other code calls or imports a
+`kubernetes_asyncio` kubeconfig loader. Tests that stub the library patch
+`kubernetes_asyncio.config.<loader>`, which the helpers call through the
+module, so the check still runs in those tests.
 
 No executable-provider facility is retained: `exec` is rejected
 unconditionally, with no parameter or elevation re-enabling it. A

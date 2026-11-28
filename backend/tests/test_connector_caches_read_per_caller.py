@@ -433,7 +433,7 @@ async def _kubernetes_rest_login(connector: Any, target: _Target, operator: Oper
         return MagicMock(close=AsyncMock(), login=config["users"][0]["user"]["token"])
 
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=_build,
     ):

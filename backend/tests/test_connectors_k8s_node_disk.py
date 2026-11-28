@@ -200,7 +200,7 @@ async def _run(
     api_client.call_api = _raise_or(cluster.summary)
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),
@@ -375,7 +375,7 @@ async def test_disk_follows_node_pages() -> None:
     api_client = MagicMock(close=AsyncMock(), call_api=AsyncMock(return_value=_summary()))
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),
@@ -528,7 +528,7 @@ async def test_images_pod_list_beyond_the_page_cap_is_unknown() -> None:
     api_client = MagicMock(close=AsyncMock())
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),
@@ -604,7 +604,7 @@ async def test_images_same_image_on_two_nodes_is_judged_per_node() -> None:
     api_client = MagicMock(close=AsyncMock())
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=api_client,
         ),

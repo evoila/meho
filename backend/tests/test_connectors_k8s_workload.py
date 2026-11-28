@@ -338,7 +338,7 @@ def _deployment_list(
 def _patch_kubeconfig() -> Any:
     """Patch the kubeconfig client builder so the connector's cache wires up."""
     return patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=MagicMock(close=AsyncMock()),
     )

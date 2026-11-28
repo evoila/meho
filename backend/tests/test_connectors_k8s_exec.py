@@ -243,7 +243,7 @@ def _patch_exec(
     core_v1.connect_get_namespaced_pod_exec = AsyncMock(return_value=ws_ctx)
 
     config_patch = patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=api_client_mock,
     )

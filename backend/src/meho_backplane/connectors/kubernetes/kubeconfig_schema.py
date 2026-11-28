@@ -53,9 +53,14 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlsplit
 
+from kubernetes_asyncio import config as kube_config_lib
+from kubernetes_asyncio.client import ApiClient, Configuration
+
 __all__ = [
     "UnsupportedKubeconfigError",
     "enforce_passive_kubeconfig",
+    "load_passive_kubeconfig",
+    "new_passive_api_client",
 ]
 
 
@@ -177,6 +182,35 @@ def enforce_passive_kubeconfig(config: dict[str, Any]) -> dict[str, Any]:
         ]
 
     return clean
+
+
+async def load_passive_kubeconfig(
+    config: dict[str, Any], client_configuration: Configuration
+) -> None:
+    """Check *config* with :func:`enforce_passive_kubeconfig`, then load it.
+
+    The one place in ``backend/src`` that hands a kubeconfig mapping to
+    ``kubernetes_asyncio``'s loader into an existing ``Configuration``.
+    Only the checked, rebuilt mapping reaches the library. Raises
+    :exc:`UnsupportedKubeconfigError` before anything is loaded.
+    """
+    await kube_config_lib.load_kube_config_from_dict(
+        config_dict=enforce_passive_kubeconfig(config),
+        client_configuration=client_configuration,
+    )
+
+
+async def new_passive_api_client(config: dict[str, Any]) -> ApiClient:
+    """Check *config* with :func:`enforce_passive_kubeconfig`, then build a client.
+
+    The ``ApiClient`` twin of :func:`load_passive_kubeconfig`: the one
+    place that calls ``new_client_from_config_dict``. Raises
+    :exc:`UnsupportedKubeconfigError` before anything is loaded.
+    """
+    client: ApiClient = await kube_config_lib.new_client_from_config_dict(
+        enforce_passive_kubeconfig(config)
+    )
+    return client
 
 
 def _require_list(value: Any, section: str) -> list[Any]:

@@ -472,7 +472,7 @@ async def test_fingerprint_builds_canonical_shape() -> None:
 
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=MagicMock(close=AsyncMock()),
         ),
@@ -687,7 +687,7 @@ async def test_api_client_reused_for_same_target() -> None:
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     op = _make_operator()
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=MagicMock(close=AsyncMock()),
     ) as factory:
@@ -709,7 +709,7 @@ async def test_api_clients_per_target_are_distinct() -> None:
     op = _make_operator()
 
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ):
@@ -754,7 +754,7 @@ async def test_api_client_same_secret_ref_different_tenants_get_distinct_clients
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     op = _make_operator()
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ) as factory:
@@ -773,11 +773,12 @@ async def test_api_client_same_secret_ref_different_tenants_get_distinct_clients
 def _ws_build_patches(built: list[MagicMock]) -> tuple[Any, Any]:
     """Patch the WsApiClient build path so ``_get_ws_api_client`` needs no real config.
 
-    Mirrors :mod:`tests.test_connectors_k8s_exec`: the connector does a
-    local ``from kubernetes_asyncio.config import load_kube_config_from_dict``
-    inside :meth:`_get_ws_api_client`, so patching the module attribute is
-    picked up on each call. ``WsApiClient`` is patched on the connector
-    module (where it was imported) and records each built client.
+    Mirrors :mod:`tests.test_connectors_k8s_exec`: the connector loads the
+    kubeconfig through ``load_passive_kubeconfig``, which calls
+    ``kubernetes_asyncio.config.load_kube_config_from_dict`` through the
+    module, so patching the module attribute is picked up on each call.
+    ``WsApiClient`` is patched on the connector module (where it was
+    imported) and records each built client.
     """
 
     def _make(**_kwargs: Any) -> MagicMock:
@@ -853,7 +854,7 @@ async def test_rest_warm_cache_not_served_to_system_operator() -> None:
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ):
@@ -903,7 +904,7 @@ async def test_rest_system_operator_fails_closed_against_warm_cache() -> None:
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ):
@@ -936,7 +937,7 @@ async def test_real_operator_reuse_unchanged_after_system_operator_call() -> Non
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ):
@@ -966,7 +967,7 @@ async def test_invalidate_credentials_drops_and_closes_both_caches() -> None:
     load_patch, ws_patch = _ws_build_patches(built_ws)
     with (
         patch(
-            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            "kubernetes_asyncio.config.new_client_from_config_dict",
             new_callable=AsyncMock,
             return_value=rest_client,
         ),
@@ -1008,7 +1009,7 @@ async def test_loader_receives_operator_and_target() -> None:
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     op = _make_operator()
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=MagicMock(close=AsyncMock()),
     ):
@@ -1029,7 +1030,7 @@ async def test_aclose_closes_every_cached_client_and_clears_cache() -> None:
     op = _make_operator()
 
     with patch(
-        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        "kubernetes_asyncio.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=[client_a, client_b],
     ):
@@ -1155,7 +1156,7 @@ def test_fingerprint_with_route_operator_forwards_to_kubeconfig_loader() -> None
     async def _run() -> None:
         with (
             patch(
-                "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+                "kubernetes_asyncio.config.new_client_from_config_dict",
                 new=AsyncMock(return_value=MagicMock()),
             ),
             patch(
@@ -1232,7 +1233,7 @@ def test_fingerprint_without_operator_still_synthesises_system_operator() -> Non
     async def _run() -> None:
         with (
             patch(
-                "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+                "kubernetes_asyncio.config.new_client_from_config_dict",
                 new=AsyncMock(return_value=MagicMock()),
             ),
             patch(

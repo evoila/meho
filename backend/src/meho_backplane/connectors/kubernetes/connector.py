@@ -62,7 +62,7 @@ from typing import Any
 
 import httpx
 import structlog
-from kubernetes_asyncio import client, config
+from kubernetes_asyncio import client
 from kubernetes_asyncio.stream.ws_client import WsApiClient
 
 from meho_backplane.auth.operator import Operator
@@ -94,6 +94,10 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     KubernetesTargetLike,
     WcpSsoCredential,
     load_kubernetes_credential,
+)
+from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
+    load_passive_kubeconfig,
+    new_passive_api_client,
 )
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_core import (
@@ -2291,7 +2295,7 @@ class KubernetesConnector(Connector):
                     configuration=await self._wcp_configuration(target, credential)
                 )
             else:
-                api_client = await config.new_client_from_config_dict(
+                api_client = await new_passive_api_client(
                     _kubeconfig_dialing_target(credential.config, target)
                 )
             try:
@@ -2374,7 +2378,6 @@ class KubernetesConnector(Connector):
         # Local import: pulled only on the exec path so the read-only
         # ops don't drag the stream sub-package into every import.
         from kubernetes_asyncio.client.configuration import Configuration
-        from kubernetes_asyncio.config import load_kube_config_from_dict
 
         key = self._cache_key(target)
         async with self._lock:
@@ -2391,9 +2394,8 @@ class KubernetesConnector(Connector):
                 ws_config = await self._wcp_configuration(target, credential)
             else:
                 ws_config = type.__call__(Configuration)
-                await load_kube_config_from_dict(
-                    config_dict=_kubeconfig_dialing_target(credential.config, target),
-                    client_configuration=ws_config,
+                await load_passive_kubeconfig(
+                    _kubeconfig_dialing_target(credential.config, target), ws_config
                 )
             ws_client = WsApiClient(configuration=ws_config)
             try:

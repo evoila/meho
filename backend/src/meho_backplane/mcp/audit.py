@@ -77,6 +77,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.request_usage.collector import current_request_id, note_request_status
+from meho_backplane.settings import get_settings
 
 __all__ = ["SESSION_OPEN_OP_ID", "write_mcp_audit_row", "write_mcp_session_open_row"]
 
@@ -164,6 +165,7 @@ async def write_mcp_audit_row(
     payload: dict[str, Any],
     request_id: uuid.UUID | None = None,
     audit_id: uuid.UUID | None = None,
+    with_email: bool = True,
 ) -> uuid.UUID:
     """Commit one ``AuditLog`` row for an MCP tool call or resource read.
 
@@ -241,7 +243,7 @@ async def write_mcp_audit_row(
     # convention (e.g. a future delegation-aware path) wins on collision.
     # The name itself is set inside the session below: an agent token has
     # no ``name`` claim, so it is looked up there (#3885).
-    if operator.email is not None:
+    if with_email and operator.email is not None:
         payload.setdefault("principal_email", operator.email)
     # The login client, channel and sign-in of the caller, when
     # AUDIT_CLIENT_IDENTITY is on (:mod:`meho_backplane.auth.client_identity`).
@@ -355,9 +357,22 @@ async def write_mcp_session_open_row(
     tool says these things about itself and MEHO cannot check them, so
     the payload marks them ``"self_declared": true``.
 
+    With ``AUDIT_CLIENT_IDENTITY`` off (the row is then written for
+    ``CUSTOM_POLICY``), the row keeps only ``client_name``: no client
+    version, no user agent and no e-mail.
+
     Raises when the commit fails, like :func:`write_mcp_audit_row`; the
     caller then fails the ``initialize``.
     """
+    identity = get_settings().audit_client_identity
+    payload: dict[str, Any] = {
+        "op_id": SESSION_OPEN_OP_ID,
+        "client_name": clean_client_text(client_info.get("name")),
+        "self_declared": True,
+    }
+    if identity:
+        payload["client_version"] = clean_client_text(client_info.get("version"))
+        payload["user_agent"] = clean_client_text(user_agent)
     return await write_mcp_audit_row(
         event_class=AuditEventClass.SECURITY_EVENT,
         operator=operator,
@@ -365,12 +380,7 @@ async def write_mcp_session_open_row(
         path=MCP_SESSION_OPEN_PATH,
         status_code=200,
         duration_ms=0.0,
-        payload={
-            "op_id": SESSION_OPEN_OP_ID,
-            "client_name": clean_client_text(client_info.get("name")),
-            "client_version": clean_client_text(client_info.get("version")),
-            "user_agent": clean_client_text(user_agent),
-            "self_declared": True,
-        },
+        payload=payload,
         request_id=current_request_id(),
+        with_email=identity,
     )

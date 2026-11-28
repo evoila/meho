@@ -234,6 +234,45 @@ async def test_switch_off_writes_no_row(
     assert await _session_open_rows() == []
 
 
+@pytest.fixture
+def mail_client() -> Iterator[TestClient]:
+    """A login with an e-mail address."""
+    operator = build_operator(TenantRole.READ_ONLY).model_copy(
+        update={"email": "person@example.invalid"},
+    )
+    yield from _client_for(operator)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [False, True])
+async def test_custom_policy_alone_keeps_only_the_client_name(
+    mail_client: TestClient, monkeypatch: pytest.MonkeyPatch, identity: bool
+) -> None:
+    """``CUSTOM_POLICY`` writes the row for the tool name; the rest stays with
+    ``AUDIT_CLIENT_IDENTITY``."""
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    monkeypatch.setenv("AUDIT_CLIENT_IDENTITY", "true" if identity else "false")
+    get_settings.cache_clear()
+
+    post_mcp(
+        mail_client,
+        _initialize({"name": "claude-code", "version": "1.2.3"}),
+        headers={"User-Agent": "claude-code/1.2.3"},
+    )
+
+    (row,) = await _session_open_rows()
+    assert row.payload["client_name"] == "claude-code"
+    identity_part = {
+        "client_version": "1.2.3",
+        "user_agent": "claude-code/1.2.3",
+        "principal_email": "person@example.invalid",
+    }
+    if identity:
+        assert {key: row.payload.get(key) for key in identity_part} == identity_part
+    else:
+        assert not set(identity_part) & set(row.payload)
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("switch_on")
 async def test_long_and_control_character_texts_are_cleaned(

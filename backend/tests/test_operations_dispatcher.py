@@ -3238,12 +3238,15 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     target = _FakeTarget(product="vault", name="vault-main")
     target.extras = {"vault_role": "meho-writer"}  # type: ignore[attr-defined]
 
+    # A credential write always waits for a person, so the run is the one
+    # after the approval (the approval-queue resume sets ``_approved``).
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
         op_id="vault.kv.put",
         target=target,
         params={"path": "meho/test/x", "data": {"k": "v"}},
+        _approved=True,
     )
     assert result.status == "error"
     assert result.error is not None

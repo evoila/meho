@@ -15,9 +15,11 @@ step the operation may run, reads too, and on some connectors more than
 one way to do the work. The preview cannot know which steps the call will
 run, because it never contacts the target. So it checks every listed step
 that is not a plain ``GET`` / ``HEAD`` read, and the call reads as
-covered only when each of them is. That can say "waits" for a call that
-then does not need the step; it never says "runs at once" for a call
-whose step will wait.
+covered only when each of them is. A ``GET`` / ``HEAD`` step that writes
+or makes a credential (its declared class) is checked too, because the
+step gate makes it wait. That can say "waits" for a call that then does
+not need the step; it never says "runs at once" for a call whose step
+will wait.
 
 A listed step can itself be a multi-step operation with its own list.
 The check then goes into that list too, at every level.
@@ -61,7 +63,7 @@ from meho_backplane.operations.deny_reasons import (
     is_agent_no_grant,
 )
 from meho_backplane.operations.governed_subops import governed_subops_for, steps_declared
-from meho_backplane.operations.op_policy import apply_step_policy
+from meho_backplane.operations.op_policy import apply_step_policy, writes_a_credential
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -85,7 +87,9 @@ def _write_steps(op_id: str) -> list[str]:
     example a host evacuation runs a VM migration, which runs a relocate
     step). Its steps are listed too. Each operation is visited once, so a
     list that loops back cannot run forever. Plain ``GET`` / ``HEAD``
-    reads are left out.
+    reads are left out; such a step that writes or makes a credential
+    (:func:`~meho_backplane.operations.op_policy.writes_a_credential`)
+    stays in.
     """
     steps: list[str] = []
     seen: set[str] = {op_id}
@@ -100,7 +104,7 @@ def _write_steps(op_id: str) -> list[str]:
             seen.add(step_op_id)
             # A step with its own list: check its steps too.
             pending.append(step_op_id)
-            if not step_op_id.upper().startswith(_READ_PREFIXES):
+            if not step_op_id.upper().startswith(_READ_PREFIXES) or writes_a_credential(step_op_id):
                 steps.append(step_op_id)
     return steps
 

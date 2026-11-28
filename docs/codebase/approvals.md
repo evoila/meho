@@ -971,9 +971,15 @@ the person approves the step, the multi-step run goes on with this step
 cleared; when the person rejects it, the run ends and the step never runs.
 A child call (`dispatch_child`) that waits is its own request. When a
 person approves it, only the child runs, and the multi-step run does not
-go on. An install or tenant override does not turn
-off the approval that the code turns on for an operation that writes or
-makes a credential. Details:
+go on. An operation that writes or makes a credential always has the
+approval flag: MEHO turns it on when the operation is looked up and when
+an API description is ingested, also when the connector registered it
+without the flag. A step of a multi-step operation whose operation writes
+or makes a credential gets the flag too, whatever flag the step declares
+(`apply_step_policy`): the step waits for a person, also at level `safe`
+and in the web console, and its risk level stays as it is. No install or tenant override turns it off. So a
+person's call waits too, with a token and in the web console, at every
+risk level. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
 [run-approvals.md](run-approvals.md),
 [agent-permission-grants.md](agent-permission-grants.md).

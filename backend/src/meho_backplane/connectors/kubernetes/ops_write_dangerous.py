@@ -458,7 +458,7 @@ async def k8s_apply(
     dry_run_mode: str = params.get("dry_run", "none")
     is_dry_run = dry_run_mode == "server"
     force_conflicts = params.get("force_conflicts") is True
-    docs = _parse_manifest(manifest)
+    docs = _parse_manifest(manifest, shared=False)
 
     api_client = await connector._get_api_client(target, operator)
     dyn = await DynamicClient(api_client)

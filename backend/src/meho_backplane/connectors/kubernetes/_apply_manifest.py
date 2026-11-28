@@ -15,16 +15,43 @@ manifest, and any YAML error text, is never shown: an invalid value is
 the fixed mark :data:`NOT_SHOWN`. A document that is not valid YAML or
 JSON is named with the line and the column where the YAML reader stopped,
 and one fixed phrase for the kind of problem (:func:`_yaml_problem`).
+
+Each document is measured before YAML builds it (:func:`_written_out_size`).
+When the sum of the sizes of the documents of one text, with each alias
+and merge key written out, is larger than :data:`WRITTEN_OUT_LIMIT`, the
+text is refused, and the document that goes over the limit is never built.
 """
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
+from contextvars import ContextVar
 from typing import Any
 
 import yaml
 
-__all__ = ["NOT_SHOWN", "ApplyManifestError"]
+__all__ = ["NOT_SHOWN", "WRITTEN_OUT_LIMIT", "ApplyManifestError", "manifest_size_problem"]
+
+#: The largest size of all documents of one manifest text, in characters,
+#: as JSON with each YAML alias and merge key written out. The Kubernetes
+#: API server refuses a request body larger than 3 MiB by default
+#: (``MaxRequestBodyBytes``).
+WRITTEN_OUT_LIMIT = 3 * 1024 * 1024
+
+_TOO_LARGE = (
+    f"takes the manifest over {WRITTEN_OUT_LIMIT} characters when its YAML aliases are written out"
+)
+
+_STR_TAG = "tag:yaml.org,2002:str"
+_SCALARS = yaml.constructor.SafeConstructor()
+
+#: The last manifest text parsed in this task and its documents, so the
+#: check before the wait and the preview copy share one parse.
+_LAST_PARSE: ContextVar[tuple[str, list[dict[str, Any]]] | None] = ContextVar(
+    "k8s_apply_last_parse", default=None
+)
 
 #: What the refusal shows in place of an ``apiVersion`` or ``kind`` that
 #: does not have the shape Kubernetes allows.
@@ -185,7 +212,121 @@ def _yaml_problem(exc: BaseException) -> tuple[str, str | None]:
     return phrase, None
 
 
-def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
+def _scalar_size(node: yaml.ScalarNode, *, key: bool = False) -> int:
+    """The length of *node* in the JSON that the cluster client writes.
+
+    A text counts its quotes and escapes. Any other value (null, a yes/no
+    value, a number, a date) counts the JSON text of the value YAML builds
+    from this one scalar; a key that is not a text counts two quotes more,
+    as JSON writes each key as a text. A scalar YAML cannot build counts
+    as a text (the parse refuses it later).
+    """
+    if node.tag == _STR_TAG:
+        return len(json.dumps(node.value))
+    construct = yaml.SafeLoader.yaml_constructors.get(node.tag)
+    try:
+        value = construct(_SCALARS, node) if construct is not None else node.value
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            value = value.isoformat()
+        text = json.dumps(value)
+    except Exception:
+        return len(json.dumps(node.value))
+    if key and not isinstance(value, str):
+        return len(text) + 2
+    return len(text)
+
+
+def _written_out_size(root: yaml.Node, limit: int = WRITTEN_OUT_LIMIT) -> int:
+    """The JSON size of *root* with each alias and merge key written out, capped above *limit*.
+
+    Each node counts at least its length in the JSON that the cluster
+    client writes: a list or a mapping its two brackets and the ``", "``
+    before each entry after the first, a key its own size and the ``": "``
+    after it, and a scalar its size from :func:`_scalar_size`. A node that
+    aliases name many times is measured once and its size is reused, so
+    the cost follows the number of nodes in the text, not the written-out
+    size. A merge list counts each mapping it names, as often as it names
+    it. A node that holds itself has no end, so it counts as over the
+    limit. Returns at most ``limit + 1``.
+    """
+    over = limit + 1
+    sizes: dict[int, int] = {}
+    open_nodes: set[int] = set()
+
+    def size(node: yaml.Node) -> int:
+        key = id(node)
+        if key in sizes:
+            return sizes[key]
+        if key in open_nodes:
+            return over
+        if isinstance(node, yaml.ScalarNode):
+            total = _scalar_size(node)
+        else:
+            open_nodes.add(key)
+            total = 2 + 2 * max(len(node.value) - 1, 0)
+            pairs = (
+                [(None, child) for child in node.value]
+                if isinstance(node, yaml.SequenceNode)
+                else node.value
+            )
+            for name, child in pairs:
+                if name is not None:
+                    total += 2
+                    total += (
+                        _scalar_size(name, key=True)
+                        if isinstance(name, yaml.ScalarNode)
+                        else size(name)
+                    )
+                total += size(child)
+                if total >= over:
+                    total = over
+                    break
+            open_nodes.discard(key)
+        sizes[key] = min(total, over)
+        return sizes[key]
+
+    return size(root)
+
+
+def _check_size(number: int, node: yaml.Node, used: int) -> int:
+    """The size of the text up to and with document *number*; refuse it over the limit."""
+    total = used + _written_out_size(node, WRITTEN_OUT_LIMIT - used)
+    if total > WRITTEN_OUT_LIMIT:
+        raise ApplyManifestError(_TOO_LARGE, number=number)
+    return total
+
+
+def manifest_size_problem(manifest: str) -> ApplyManifestError | None:
+    """The refusal of the document at which *manifest* goes over :data:`WRITTEN_OUT_LIMIT`.
+
+    Adds up the sizes of all documents of the text. Reads the YAML
+    structure only: no document is built, so no alias or merge key is
+    written out. Returns ``None`` when the whole text fits, and also at a
+    YAML error, which :func:`_parse_manifest` names.
+    """
+    try:
+        loader = yaml.SafeLoader(manifest)
+    except yaml.reader.ReaderError:
+        return None
+    try:
+        number = used = 0
+        while True:
+            number += 1
+            try:
+                if not loader.check_node():
+                    return None
+                node = loader.get_node()
+            except Exception:
+                return None
+            try:
+                used = _check_size(number, node, used)
+            except ApplyManifestError as exc:
+                return exc
+    finally:
+        loader.dispose()
+
+
+def _parse_manifest(manifest: str, *, shared: bool = True) -> list[dict[str, Any]]:
     """Parse a single- or multi-document YAML/JSON manifest into doc dicts.
 
     ``yaml.safe_load_all`` handles both JSON (a subset of YAML) and
@@ -214,33 +355,65 @@ def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
     YAML reader. A character that the YAML reader refuses gives "the text
     has a character that YAML does not allow, for example a control
     character", with no document number.
+
+    A text whose documents together are larger than
+    :data:`WRITTEN_OUT_LIMIT` characters as JSON, with their YAML aliases
+    and merge keys written out, is refused with "document N takes the
+    manifest over ... characters when its YAML aliases are written out",
+    before YAML builds document N (:func:`_written_out_size`).
+
+    The documents of the last text parsed in this task are kept, so a
+    second call with the same text does not parse it again. The caller
+    gets a new list; the documents in it are shared and must not be
+    changed. With ``shared=False`` (the run) the text is parsed again and
+    the documents are the caller's own.
     Raises :class:`ApplyManifestError` on any structural problem.
     """
-    docs = iter(yaml.safe_load_all(manifest))
-    parsed: list[dict[str, Any]] = []
-    number = 0
-    while True:
-        number += 1
-        try:
-            doc = next(docs)
-        except StopIteration:
-            break
-        except yaml.reader.ReaderError:
-            # The reader checks the whole text before document 1, so no
-            # document number would be right.
-            raise ApplyManifestError(
-                "the text has a character that YAML does not allow, for example a control character"
-            ) from None
-        except Exception as exc:
-            # Any class: a value YAML cannot build may be a ValueError, a KeyError or more.
-            reason, position = _yaml_problem(exc)
-            raise ApplyManifestError(
-                _NOT_VALID, number=number, reason=reason, position=position
-            ) from None
-        if doc is None:
-            continue
-        _check_document(number, doc)
-        parsed.append(doc)
+    if not shared:
+        return _parse_documents(manifest)
+    last = _LAST_PARSE.get()
+    if last is not None and last[0] == manifest:
+        return list(last[1])
+    parsed = _parse_documents(manifest)
+    _LAST_PARSE.set((manifest, parsed))
+    return list(parsed)
+
+
+def _parse_documents(manifest: str) -> list[dict[str, Any]]:
+    """The work of :func:`_parse_manifest`: each document is measured, then built."""
+    try:
+        loader = yaml.SafeLoader(manifest)
+    except yaml.reader.ReaderError:
+        # The reader checks the whole text before document 1, so no
+        # document number would be right.
+        raise ApplyManifestError(
+            "the text has a character that YAML does not allow, for example a control character"
+        ) from None
+    try:
+        parsed: list[dict[str, Any]] = []
+        number = used = 0
+        while True:
+            number += 1
+            try:
+                if not loader.check_node():
+                    break
+                node = loader.get_node()
+                used = _check_size(number, node, used)
+                doc = loader.construct_document(node)
+            except ApplyManifestError:
+                raise
+            except Exception as exc:
+                # Any class: a value YAML cannot build may be a ValueError, a KeyError or more.
+                reason, position = _yaml_problem(exc)
+                raise ApplyManifestError(
+                    _NOT_VALID, number=number, reason=reason, position=position
+                ) from None
+            if doc is None:
+                continue
+            _check_document(number, doc)
+            parsed.append(doc)
+    finally:
+        loader.dispose()
     if not parsed:
         raise ApplyManifestError("the text has no documents")
     return parsed

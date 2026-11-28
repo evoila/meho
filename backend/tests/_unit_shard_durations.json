@@ -788,6 +788,7 @@
   "tests/test_inventory_shapes.py": 0.7,
   "tests/test_jsonflux_query_contract.py": 2.95,
   "tests/test_jsonflux_query_engine_sandbox.py": 0.3,
+  "tests/test_k8s_apply_written_out_size.py": 15.0,
   "tests/test_k8s_delete_label_annotate_namespace_create_wait.py": 17.27,
   "tests/test_k8s_subresource_writes_wait.py": 5.83,
   "tests/test_kb_file_walker.py": 0.89,

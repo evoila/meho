@@ -111,8 +111,10 @@ from kubernetes_asyncio import client
 
 from meho_backplane.broadcast.events import is_secret_name_value_pair, is_secret_param_name
 from meho_backplane.connectors.kubernetes._apply_manifest import (
+    WRITTEN_OUT_LIMIT,
     ApplyManifestError,
     _parse_manifest,
+    manifest_size_problem,
 )
 from meho_backplane.connectors.kubernetes.op_classes import (
     PLAIN_SETTINGS,
@@ -128,6 +130,7 @@ from meho_backplane.operations._preview import (
     register_person_only_preview_keys,
     register_preview_builder,
 )
+from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.redaction.command_line import HIDDEN
 
 #: Put in place of a value the approver must not see.
@@ -872,12 +875,37 @@ async def _apply_park_check(ctx: PreviewContext) -> str | None:
     return None
 
 
+def _apply_size_check(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Params check of ``k8s.apply``: refuse a manifest over the written-out size limit.
+
+    Runs on every call and every preview, before the policy gate, so the
+    call never waits and nothing is sent or stored. Reads only the YAML
+    structure of the text (:func:`manifest_size_problem`): no document is
+    built, so no alias or merge key is written out. A param that is not a
+    text is left to the schema check; any other problem of the manifest
+    is left to :func:`_apply_park_check` and the run.
+    """
+    manifest = params.get("manifest")
+    if not isinstance(manifest, str):
+        return None
+    problem = manifest_size_problem(manifest)
+    if problem is None:
+        return None
+    return params_problem(
+        "manifest",
+        f"all documents together at most {WRITTEN_OUT_LIMIT} characters as JSON "
+        "with their YAML aliases written out",
+        problem.text(),
+    )
+
+
 def _register_kubernetes_write_preview_builders() -> None:
     """Wire the Secret, Job create and CronJob run previews. Called at import time."""
     register_preview_builder("k8s.secret.create", _secret_create_preview)
     register_preview_builder("k8s.job.create", _job_create_preview)
     register_preview_builder("k8s.cronjob.run", _cronjob_run_preview)
     register_park_check("k8s.apply", _apply_park_check)
+    register_params_check("k8s.apply", _apply_size_check)
     register_person_only_preview_keys(
         "k8s.apply",
         _run_commands_shown_to_agents,

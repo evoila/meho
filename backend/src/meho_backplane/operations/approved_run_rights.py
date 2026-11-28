@@ -80,6 +80,7 @@ __all__ = [
     "approved_run_refusal",
     "approved_step_refusal_now",
     "bind_approved_run",
+    "run_approver_may_approve",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -176,6 +177,21 @@ async def _approver_may_approve_high_risk(run: ApprovedRun) -> bool:
                     return payload[_HIGH_RISK_KEY] is True
                 return payload.get("approval_rule") in _HIGH_RISK_RULES
     return False
+
+
+async def run_approver_may_approve(level: str) -> bool:
+    """True when the person who approved the run that goes on now may approve *level*.
+
+    ``safe`` and ``caution`` need no more than an approver. A higher level
+    needs a person who may approve another person's ``dangerous`` change,
+    read off the decision of the bound approval
+    (:func:`_approver_may_approve_high_risk`). With no bound approval the
+    answer is ``False`` for such a level.
+    """
+    if level in _RISK_ORDER[:2]:
+        return True
+    run = _approved_run_var.get()
+    return run is not None and await _approver_may_approve_high_risk(run)
 
 
 async def _risk_refusal(run: ApprovedRun | None, descriptor: EndpointDescriptor) -> str | None:

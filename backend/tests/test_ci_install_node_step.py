@@ -72,7 +72,7 @@ def test_node_step_has_the_same_pin_as_plugin_test() -> None:
 
 def _drop_node_step(text: str) -> str:
     """Drop the Install Node step of python-unit-shard and its alias in the second-site job."""
-    text = text.replace("      - *unit-node\n", "", 1)
+    text = text.replace("      - *unit-node\n", "")
     return re.sub(
         r"\n      - &unit-node\n        name: Install Node\n"
         r"(?:        .*\n|\n(?=        ))*?(?=\n      - )",

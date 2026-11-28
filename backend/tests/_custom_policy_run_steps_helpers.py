@@ -326,7 +326,12 @@ def console_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def approve_with_token(
-    client: httpx.AsyncClient, key: Any, request_id: UUID, *, sub: str = APPROVER_SUB
+    client: httpx.AsyncClient,
+    key: Any,
+    request_id: UUID,
+    *,
+    sub: str = APPROVER_SUB,
+    role: TenantRole = TenantRole.OPERATOR,
 ) -> httpx.Response:
     """``POST /api/v1/approvals/{id}/approve`` with a fresh token; the route runs the rest."""
     async with get_sessionmaker()() as s:
@@ -336,7 +341,7 @@ async def approve_with_token(
     token = mint_token(
         key,
         sub=sub,
-        tenant_role=TenantRole.OPERATOR.value,
+        tenant_role=role.value,
         tenant_id=str(h.TENANT_ID),
         fresh_sign_in=True,
     )

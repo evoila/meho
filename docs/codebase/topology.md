@@ -219,6 +219,13 @@ writes (`_service_safety_gate_reason` in `operations/_validate.py`), and
 so does a person's call made with a token. A person in the web interface
 runs them at once.
 
+`topology.delete_node` carries `hard_to_undo: deletes`. A node made again
+with the same kind and name gets a new id, and the edges of the old node do
+not come back (`tests/test_topology_delete_node_hard_to_undo.py`). With the
+switch `CUSTOM_POLICY` on, a standing grant does not cover a service
+login's call of it: the call waits for a person. With the switch off, the
+grant covers it as before.
+
 **The REST graph writes are for people, and a token call waits for
 approval.** `POST /edges`, `POST /edges/bulk`, `DELETE /edges/{edge_id}`
 and `DELETE /nodes/{node_id}` use one gate, `_require_admin_person` in

@@ -26,10 +26,13 @@ Initiative's CI wiring lands under T6) sets
 from __future__ import annotations
 
 import contextlib
+import io
 import os
+import tarfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -42,6 +45,8 @@ from meho_backplane.connectors.kubernetes import (
     KubernetesTargetLike,
     parse_kubeconfig_yaml,
 )
+
+from ._k3s_node_images import load_into_node, pause_image
 
 # ---------------------------------------------------------------------------
 # Docker availability — mirrors tests/integration/conftest.py heuristic
@@ -169,9 +174,15 @@ def k3s_kubeconfig_and_target(request: pytest.FixtureRequest) -> Any:
     image = request.param
     try:
         container = K3SContainer(image=image)
+        # The node gets its pause image from load_into_node, under this name.
+        container.with_command(
+            "server --disable traefik"
+            f" --tls-san={container.get_container_host_ip()} --pause-image={pause_image()}"
+        )
         container.start()
     except Exception as exc:
         pytest.skip(f"k3s container failed to start ({type(exc).__name__}): {exc}")
+    load_into_node(container, [pause_image(), _busybox_image()])
 
     try:
         kubeconfig_text = container.config_yaml()
@@ -871,8 +882,9 @@ async def busybox_pod(
             break
         await _asyncio.sleep(1.0)
     else:
+        pod_warnings = await _pod_warnings(api_client, namespace, pod_name)
         await v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
-        pytest.skip("busybox pod did not reach Running within 60s")
+        pytest.skip(f"busybox pod did not reach Running within 60s; pod warnings={pod_warnings!r}")
 
     try:
         yield connector, target, pod_name
@@ -1020,7 +1032,9 @@ async def test_apply_server_dry_run_then_real_against_k3s(
         "  selector:\n    matchLabels:\n      app: nginx\n"
         "  template:\n"
         "    metadata:\n      labels:\n        app: nginx\n"
-        "    spec:\n      containers:\n      - name: nginx\n        image: nginx:1.27-alpine\n"
+        "    spec:\n      containers:\n      - name: nginx\n"
+        f"        image: {_busybox_image()}\n"
+        '        command: ["sleep", "3600"]\n'
     )
     # Dry-run preview: returns the would-be object but persists nothing.
     preview = await connector.k8s_apply(op, target, {"manifest": manifest, "dry_run": "server"})
@@ -1237,18 +1251,38 @@ def _busybox_image() -> str:
     return _DEFAULT_BUSYBOX_IMAGE
 
 
+async def _pod_warnings(api_client: Any, namespace: str, pod_name: str) -> list[str]:
+    """The last three warning events of the pod (for example a failed image pull).
+
+    Each message stays whole: the step that hides the proxy name in the CI
+    test reports matches only a whole name, so a message is never cut.
+    """
+    from kubernetes_asyncio import client as _client
+
+    events = await _client.CoreV1Api(api_client).list_namespaced_event(
+        namespace=namespace, field_selector=f"involvedObject.name={pod_name}"
+    )
+    return [
+        f"{event.reason}: {event.message or ''}"
+        for event in events.items
+        if event.type == "Warning"
+    ][-3:]
+
+
 async def _newest_pod_reasons(
     connector: KubernetesConnector, target: _K3sTarget, info: dict[str, Any]
 ) -> list[str | None]:
-    """Return the container waiting / terminated reasons of the Job's newest pod."""
+    """Return the container reasons and the warning events of the Job's newest pod."""
     if not info["pods"]:
         return []
+    operator = _make_k3d_operator()
+    pod_name = info["pods"][0]["name"]
     detail = await connector.k8s_pod_info(
-        _make_k3d_operator(),
-        target,
-        {"pod_name": info["pods"][0]["name"], "namespace": "default"},
+        operator, target, {"pod_name": pod_name, "namespace": "default"}
     )
-    return [cs["reason"] for cs in detail["container_statuses"]]
+    api_client = await connector._get_api_client(target, operator)
+    reasons: list[str | None] = [cs["reason"] for cs in detail["container_statuses"]]
+    return [*reasons, *await _pod_warnings(api_client, "default", pod_name)]
 
 
 async def _wait_for_job_to_finish(
@@ -1419,3 +1453,89 @@ async def test_cronjob_run_against_k3s_creates_a_job_owned_by_the_cronjob(
                 namespace="default",
                 body=_client.V1DeleteOptions(propagation_policy="Background"),
             )
+
+
+# ---------------------------------------------------------------------------
+# load_into_node -- no Docker needed: a fake container stands in for k3s.
+# ---------------------------------------------------------------------------
+
+
+class _FakeNode:
+    def __init__(self, import_exit_code: int = 0) -> None:
+        self.archives: list[tuple[str, bytes]] = []
+        self.commands: list[list[str]] = []
+        self._import_exit_code = import_exit_code
+
+    def put_archive(self, path: str, data: bytes) -> bool:
+        self.archives.append((path, data))
+        return True
+
+    def exec_run(self, cmd: list[str]) -> Any:
+        self.commands.append(cmd)
+        failed = self._import_exit_code if "import" in cmd else 0
+        output = b"unpacking layers\nctr: import refused " + b"x" * 400 + b"\n"
+        return SimpleNamespace(exit_code=failed, output=output)
+
+
+class _FakeK3s:
+    def __init__(self, node: _FakeNode, broken: frozenset[str] = frozenset()) -> None:
+        import docker
+
+        def _pull(name: str) -> None:
+            if name in broken:
+                raise docker.errors.ImageNotFound(name)
+
+        self.pulled: list[str] = []
+        images = SimpleNamespace(pull=lambda name: (self.pulled.append(name), _pull(name)))
+        api = SimpleNamespace(get_image=lambda name: iter([b"saved:", name.encode()]))
+        self._client = SimpleNamespace(images=images, api=api)
+        self._node = node
+
+    def get_docker_client(self) -> Any:
+        return SimpleNamespace(client=self._client)
+
+    def get_wrapped_container(self) -> _FakeNode:
+        return self._node
+
+
+def test_load_into_node_copies_and_imports_each_image() -> None:
+    node = _FakeNode()
+    fake = _FakeK3s(node)
+    load_into_node(fake, ["image-a", "image-b"])
+
+    assert fake.pulled == ["image-a", "image-b"]
+    for index, (path, data) in enumerate(node.archives):
+        assert path == "/"
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            member = tar.extractfile(f"meho-node-image-{index}.tar")
+            assert member is not None
+            assert member.read() == f"saved:image-{'ab'[index]}".encode()
+    imports = [cmd for cmd in node.commands if "import" in cmd]
+    assert imports == [
+        [
+            "ctr",
+            "--address",
+            "/run/k3s/containerd/containerd.sock",
+            "-n",
+            "k8s.io",
+            "images",
+            "import",
+            f"/meho-node-image-{i}.tar",
+        ]
+        for i in range(2)
+    ]
+
+
+def test_load_into_node_warns_when_the_node_refuses_the_import() -> None:
+    node = _FakeNode(import_exit_code=1)
+    # The last whole line, never cut: a cut could split the proxy name.
+    with pytest.warns(UserWarning, match=r"import failed: ctr: import refused x{400}$"):
+        load_into_node(_FakeK3s(node), ["image-a"])
+
+
+def test_load_into_node_warns_and_goes_on_when_a_pull_fails() -> None:
+    node = _FakeNode()
+    with pytest.warns(UserWarning, match=r"copy failed \(ImageNotFound\)"):
+        load_into_node(_FakeK3s(node, broken=frozenset({"image-a"})), ["image-a", "image-b"])
+    assert len(node.archives) == 1
+    assert [cmd[-1] for cmd in node.commands if "import" in cmd] == ["/meho-node-image-1.tar"]

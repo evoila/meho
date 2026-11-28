@@ -272,9 +272,13 @@ def test_ci_reads_the_secrets_in_each_job_that_uses_them() -> None:
         uses = "MEHO_TEST_" in json.dumps(job.get("steps", [])) or "secrets.CI_IMAGE_PROXY" in (
             json.dumps(job)
         )
-        # The second-site shard job sets the public test images from the same
-        # lines with no secret (tests/test_ci_second_runner_site.py).
-        expected = job_id in _read_step_ids() or job_id == "python-unit-shard-second-site"
+        # The second-site and hosted-trial shard jobs set the public test
+        # images from the same lines with no secret
+        # (tests/test_ci_second_runner_site.py).
+        expected = job_id in _read_step_ids() or job_id in (
+            "python-unit-shard-second-site",
+            "python-unit-shard-hosted-trial",
+        )
         assert uses is expected, job_id
     assert "secrets.CI_IMAGE_PROXY ||" not in text
 

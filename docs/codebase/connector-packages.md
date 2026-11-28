@@ -814,23 +814,16 @@ start (see "The kit range at start").
   new inputs. A package keeps working.
 
 The kit also has `check_before_send` and `PrincipalBlockedStepError` (kit
-1.8). `check_before_send` is the check of the caller's block that the core's
-own clients run before each request (`auth/principal_block.py`); it also
-notes that the call sends a request. The rule for a package: every client it
-builds itself carries the check. An `httpx.AsyncClient` gets it as a request
-hook (`event_hooks={"request": [kit.check_before_send]}`, which also covers
-redirect hops and each retry that the package sends again through the
-client). The kit supports this way for `httpx`. The template's
-`tests/test_httpx_clients_have_the_check.py` reports every other `httpx`
-client it finds, also a synchronous `httpx.Client`. A file that uses another
-client goes into `EXCEPTIONS` in that test file, with one line that says where
-the file calls `kit.check_before_send()`. Such a client calls
-`await kit.check_before_send()` right before each call that sends. A blocking
-library that runs in a thread is checked in the event loop, right before the
-thread starts. A check before the thread starts does not cover the redirects
-that the library follows by itself: turn them off and check before each
-request, or use `httpx.AsyncClient` with the hook. A client from the core needs
-nothing. Clients that are not `httpx` need a test that runs them.
+1.8), and `build_http_client` (kit 1.9). `check_before_send` is the check of
+the caller's block that the core's own clients run before each request
+(`auth/principal_block.py`); it also notes that the call sends a request.
+`build_http_client` (`connectors/_shared/http_client.py`) returns an
+`httpx.AsyncClient` with that check as its last request hook, and refuses a
+transport that retries by itself. It is the one way a package builds an
+`httpx` client. The template's `tests/test_httpx_clients_have_the_check.py`
+reports every other way, by what each name means in the file's imports. The
+rules for a package, also for blocking and non-`httpx` clients, are in
+[Write a connector package, "A client your package builds"](../../docs-site/extend/connector-kit.md#a-client-your-package-builds).
 
 For three classes, the kit also promises some of their insides:
 `HttpConnector` (`__init__`, `auth_headers`, `aclose`,

@@ -3,6 +3,9 @@
 
 """A connector package checks the caller's block before each request of its own client.
 
+The ``httpx`` clients come from ``kit.build_http_client``, the one way a
+package builds them.
+
 The test connector below uses only names of the connector kit. Each test
 drives a real dispatch of a typed operation against the migrated SQLite
 engine, blocks the caller in the middle of the call, and counts what reached
@@ -52,11 +55,8 @@ async def _after_first() -> None:
 
 
 def _client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        base_url="https://target.test",
-        transport=httpx.MockTransport(handler),
-        event_hooks={"request": [kit.check_before_send]},
-        **kwargs,
+    return kit.build_http_client(
+        base_url="https://target.test", transport=httpx.MockTransport(handler), **kwargs
     )
 
 
@@ -85,8 +85,9 @@ async def redirect_handler(target: Any, params: dict[str, Any]) -> dict[str, Any
         if response.request.url.path == "/hop-1":
             await _after_first()
 
-    client = _client(_answer, follow_redirects=True)
-    client.event_hooks["response"] = [_block_after_first_hop]
+    client = _client(
+        _answer, follow_redirects=True, event_hooks={"response": [_block_after_first_hop]}
+    )
     async with client:
         await client.get("/hop-1")
     return {"ok": True}
@@ -317,3 +318,43 @@ async def test_core_client_carries_the_kit_function_as_its_request_hook() -> Non
         assert client.event_hooks["request"] == [kit.check_before_send]
     finally:
         await client.aclose()
+
+
+async def test_kit_client_adds_the_check_as_the_last_request_hook() -> None:
+    async def _sign(_request: httpx.Request) -> None:
+        return None
+
+    async def _log(_response: httpx.Response) -> None:
+        return None
+
+    hooks = {"request": [_sign], "response": [_log]}
+    client = kit.build_http_client(event_hooks=hooks)
+    try:
+        assert client.event_hooks["request"] == [_sign, kit.check_before_send]
+        assert client.event_hooks["response"] == [_log]
+        assert hooks["request"] == [_sign]
+        assert client.follow_redirects is False
+    finally:
+        await client.aclose()
+
+
+async def test_kit_client_takes_a_transport_that_does_not_retry() -> None:
+    client = kit.build_http_client(
+        transport=httpx.AsyncHTTPTransport(retries=0),
+        mounts={"https://other.test": httpx.AsyncHTTPTransport()},
+    )
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("given", "named"),
+    [
+        ({"transport": httpx.AsyncHTTPTransport(retries=2)}, "transport"),
+        ({"mounts": {"https://t.test": httpx.AsyncHTTPTransport(retries=1)}}, "mounts"),
+    ],
+)
+async def test_kit_client_refuses_a_transport_that_retries(
+    given: dict[str, Any], named: str
+) -> None:
+    with pytest.raises(ValueError, match=f"{named}.*retries by itself"):
+        kit.build_http_client(**given)

@@ -162,6 +162,30 @@ the gateway, static route, alias, alias member and NAT deletes. A read with
 a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
 is not marked: it does not change the host.
 
+## The steps of an approved multi-step operation, with `CUSTOM_POLICY` on
+
+This is a different approval: a person approves one whole multi-step
+operation, and its steps go ahead under that approval. With the switch
+`CUSTOM_POLICY` off, a step keeps its own approval when it is
+`destructive`, marked `requires_approval`, "always wait" or a credential
+call. With the switch on, a step keeps its own approval also when one of
+these holds (`operations/run_step_rules.py`):
+
+- a fixed rule (`policy/fixed_rules.fixed_rule_for`), asked as a caller
+  who is not in the web console: a change of rights or of the policy keeps
+  its own approval whoever approved the run;
+- a rule that no run approval covers (`never_covered_reason`, plus the
+  root shell mark above, the same check as `_never_covered` here).
+
+`fixed_rule_for` alone is not enough: it has no root-shell rule. A step
+with only the plain "always ask" mark goes ahead under the run's approval.
+These rules hold for a step of the step gate, which reads the stored facts
+of the step's operation (the built-in row and the caller's tenant's row
+both count), and for a child call. In a run after an approval they hold
+also when the step's policy answer lets it run at once, and the stored
+reason of the wait names the rule.
+Details: [approvals.md](approvals.md#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
+
 ## Never covered: a call a person approves one by one
 
 A connector marks an operation with `declare_per_call_approval(op_ids)`

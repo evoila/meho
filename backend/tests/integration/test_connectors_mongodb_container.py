@@ -45,7 +45,7 @@ from meho_backplane.settings import get_settings
 
 from .._container_ready import ping_mongodb, start_until_ready
 from .._vault_fakes import install_fake_client
-from ._image_tags import ImageRun, image_param, major_of_image
+from ._image_tags import ImageRun, image_param, image_without_registry, major_of_image
 
 
 def _docker_socket_present() -> bool:
@@ -145,7 +145,9 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
         )
 
     try:
-        mongo = start_until_ready(start, ping, what=f"mongodb ({run.label}, image {image})")
+        mongo = start_until_ready(
+            start, ping, what=f"mongodb ({run.label}, image {image_without_registry(image)})"
+        )
     except _DockerAPIError as exc:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:

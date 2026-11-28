@@ -251,6 +251,7 @@ async def import_settings(
         structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_IMPORT, audit_op_class="read")
         bind_attempt(content)
         result = await apply_import(session, operator, content)
+        await session.commit()
     except SettingsForbiddenError as exc:
         drop_saved_change_keys(keys_before)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc

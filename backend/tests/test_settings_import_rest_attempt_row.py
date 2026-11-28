@@ -6,7 +6,8 @@
 The gate is turned on with a token (it needs no reason and no web console).
 The revision write fails, so MEHO rolls back: the gate stays as it was, no
 revision exists, and the one audit row names the operation, the file hash and
-the tenants, and no change. Both audit modes.
+the tenants, and no change. This holds when the revision write fails and when
+the final commit fails. Both audit modes.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
+from sqlalchemy.orm import Session
 
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
@@ -90,6 +92,35 @@ _FILE = yaml.safe_dump(
 )
 
 
+def _post_file(client: TestClient) -> Any:
+    key = make_rsa_keypair("kid-settings-attempt")
+    token = mint_token(
+        key, sub="admin-person", tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT)
+    )
+    with respx.mock as mock:
+        mock_discovery_and_jwks(mock, public_jwks(key))
+        return client.post(
+            _URL,
+            content=_FILE.encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/yaml"},
+        )
+
+
+async def _assert_one_attempt_row(status_code: int) -> None:
+    """Nothing was saved, and the one row names the attempt and no change."""
+    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
+    assert tenant.announce_gate_enabled is False
+    assert await _rows(InstanceSettingsRevision) == []
+    rows = [r for r in await _rows(AuditLog) if r.payload.get("op_id") == "settings.import"]
+    (row,) = rows
+    assert row.status_code == status_code
+    assert set(row.payload) - _MIDDLEWARE_KEYS == _ATTEMPT_PAYLOAD_KEYS
+    assert row.payload["op_class"] == "write"
+    assert row.payload["settings_import"] is True
+    assert row.payload["settings_file_sha256"] == hashlib.sha256(_FILE.encode()).hexdigest()
+    assert row.payload["settings_tenant_ids"] == [str(_TENANT)]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
 async def test_a_failed_rest_import_leaves_one_row_with_the_attempt_keys_only(
@@ -103,31 +134,42 @@ async def test_a_failed_rest_import_leaves_one_row_with_the_attempt_keys_only(
         # An HTTP error, so the failure is answered and not logged as a crash.
         raise HTTPException(status_code=503, detail="the revision cannot be written")
 
-    key = make_rsa_keypair("kid-settings-attempt")
-    token = mint_token(
-        key, sub="admin-person", tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT)
-    )
     event.listen(InstanceSettingsRevision, "before_insert", _broken)
     try:
-        with respx.mock as mock:
-            mock_discovery_and_jwks(mock, public_jwks(key))
-            resp = client.post(
-                _URL,
-                content=_FILE.encode(),
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/yaml"},
-            )
+        resp = _post_file(client)
     finally:
         event.remove(InstanceSettingsRevision, "before_insert", _broken)
 
     assert resp.status_code == 503, resp.text
-    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
-    assert tenant.announce_gate_enabled is False
-    assert await _rows(InstanceSettingsRevision) == []
-    rows = [r for r in await _rows(AuditLog) if r.payload.get("op_id") == "settings.import"]
-    (row,) = rows
-    assert row.status_code == 503
-    assert set(row.payload) - _MIDDLEWARE_KEYS == _ATTEMPT_PAYLOAD_KEYS
-    assert row.payload["op_class"] == "write"
-    assert row.payload["settings_import"] is True
-    assert row.payload["settings_file_sha256"] == hashlib.sha256(_FILE.encode()).hexdigest()
-    assert row.payload["settings_tenant_ids"] == [str(_TENANT)]
+    await _assert_one_attempt_row(503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
+async def test_a_rest_import_whose_commit_fails_leaves_one_row_with_the_attempt_keys_only(
+    cutover: bool, request: pytest.FixtureRequest, client: TestClient
+) -> None:
+    if cutover:
+        request.getfixturevalue("cutover_on")
+    await _seed()
+    revision_written: list[bool] = []
+
+    def _mark(*_args: Any) -> None:
+        revision_written.append(True)
+
+    def _broken_commit(_session: Session) -> None:
+        # Only the commit that would save the revision fails.
+        if revision_written:
+            revision_written.clear()
+            raise HTTPException(status_code=503, detail="the commit failed")
+
+    event.listen(InstanceSettingsRevision, "before_insert", _mark)
+    event.listen(Session, "before_commit", _broken_commit)
+    try:
+        resp = _post_file(client)
+    finally:
+        event.remove(Session, "before_commit", _broken_commit)
+        event.remove(InstanceSettingsRevision, "before_insert", _mark)
+
+    assert resp.status_code == 503, resp.text
+    await _assert_one_attempt_row(503)

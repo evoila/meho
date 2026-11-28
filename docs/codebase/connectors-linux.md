@@ -165,6 +165,7 @@ dispatch path's `JsonFluxReducer` wraps set-shaped results.
 | `linux.firewall.show` | `firewall` | — | `{rows, total, backend}` |
 | `linux.mount.list` | `storage` | — | `{rows, total}` (each row `kind` = `mount` / `export`) |
 | `linux.journal.tail` | `log` | `unit?`, `since?`, `until?`, `priority?`, `lines?` | `{rows, total, truncated}` (+ `warning?`); row = `{ts, unit, priority, message, message_truncated}` |
+| `linux.logs.read` | `logs` | `source`, `since?`, `until?`, `lines?`, `filter?` | `{rows, total, truncated, covered, continuation}`; row = `{time, line, line_truncated}` (see "Shared log read") |
 | `linux.fs.usage` | `storage` | `path` | `{path, filesystem, fstype, size_bytes, used_bytes, avail_bytes, inodes_total, inodes_used}` |
 | `linux.dir.list` | `file` | `path`, `depth?`, `include_hidden?` | `{rows, total, path, exists, truncated, incomplete}`; row = `{name, type, size_bytes, mtime, mode, owner}` |
 | `linux.tool.which` | `system` | `names` (1 to 20 program names) | `{tools: [{name, found, path}]}` |
@@ -194,6 +195,73 @@ the host does not answer is `null`.
 back with no content. Those files always report size 0, so empty content is
 the kernel's empty answer, not an empty file. An empty regular file has
 `size_bytes: 0` and `zero_length: false`.
+
+### Shared log read (`ops_logs_read.py`)
+
+`linux.logs.read` (group `logs`, risk level `safe`) is the log read with
+the parameters and the answer that every connector shares
+(`connectors/log_read.py`). `linux.log.tail` and `linux.journal.tail`
+stay, with their own names and parameters.
+
+- `source` is an absolute path (a file, confined like `log.tail`),
+  `journal` (the whole systemd journal) or a systemd unit name.
+- A file has no times. `since` and `until` on a file raise an error
+  instead of being ignored. A file that is missing, cannot be opened, or
+  gives no content although it is not empty raises an error too. Only an
+  empty file gives an empty answer.
+- For the journal and a unit, `since` is a span (`15m`) or an RFC 3339
+  time, and `until` an RFC 3339 time. Both reach `journalctl` as exact
+  UTC times with microseconds, the precision of the journal. A `since`
+  with nanoseconds is rounded up, an `until` down.
+- With `since` the journal is read forward and the oldest `lines`
+  (default 200, at most 5000) stay. Without it, the newest stay.
+  `logs_journal.py` counts the lines itself: what `journalctl -n` means
+  together with `--since` differs between systemd versions.
+- `continuation` is the journal's own cursor at the end of the page. Pass
+  it as `since` after a read with `since`, and as `until` after a read
+  without it. `truncated` says whether there is more to read: the read
+  saw more. Reaching a limit alone does not make it true. The entry of
+  the cursor is not repeated and takes nothing from the byte limit of the
+  page. When the journal does not give that entry any more, the read
+  fails and does not start again somewhere else.
+- `filter` is a plain text match, case counts. With a filter the handler
+  reads up to 10000 lines (the cap of the older ops) and filters them.
+- The answer: `rows` of `{time, line, line_truncated}` (oldest first;
+  `time` is `null` for a file), `total`, `truncated`, `covered` and
+  `continuation` (`null` for a file), and `warning` when `journalctl`
+  printed one or text was hidden that can be part of a key. `covered` is the time span (`{from, to}`) of all entries
+  the read looked at, also when none matches; `null` without times.
+- A line is returned up to 4096 characters. A longer one is cut around
+  the match, and `line_truncated` is true. The filter looks at the whole
+  line. One read returns at most 8 MiB of the journal or of the file. The
+  rest stays for another read of the journal; a file read keeps the newest
+  lines. A single entry or last line that is larger raises an error.
+- Secrets in the lines are hidden before the filter and the line limit
+  run. The lines go through the redaction of the result boundary as one
+  text (`redact_entries` in `connectors/log_read.py`), so a private key
+  over many lines is found whole. The read also takes up to 256 lines from
+  before the first line, because a page or a time window can start inside
+  a key. They are only for the redaction and are never
+  returned. The host sends long ones cut short, with the last `BEGIN` or
+  `END` mark in them, so they do not fill the output limit of SSH.
+- The file is read in one pass (`logs_file.py`). The journal takes a
+  second command for the lines before the page (`logs_journal.py`).
+- A key can start even further back: other messages can stand between its
+  lines, and a rotated log can start inside it. So text that can be part
+  of a key body is always hidden (`hide_key_text` in
+  `connectors/log_key_text.py`), also when no `BEGIN` or `END` line was
+  read. Hidden are lines that are only base64 text, and long mixed base64
+  text inside a line. Words, lower case paths and lower case hex values
+  stay. Other long values, for example a key fingerprint or a request id
+  in mixed case, are hidden too. `warning` then says in how many lines,
+  because the filter does not see that text. A key whose first lines are
+  not there is also found by its `END` line.
+- The output of SSH is read as UTF-8. In a line of a file that is not
+  UTF-8, the host puts `?` for each byte that is not ASCII.
+- The filter never matches a value that the answer hides. The result
+  boundary still redacts the answer (`docs/codebase/redaction.md`).
+- The handler builds no result handle. The normal result reduction
+  makes one when the rows are many.
 
 ### Journal, filesystem usage and directory listing (`ops_inspect.py`)
 

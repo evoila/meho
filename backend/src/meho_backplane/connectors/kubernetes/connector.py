@@ -1507,6 +1507,17 @@ class KubernetesConnector(Connector):
 
         return await k8s_logs(self, target, operator, params)
 
+    async def logs_read(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.logs.read`` op (shared log read shape)."""
+        from meho_backplane.connectors.kubernetes.ops_logs_read import k8s_logs_read
+
+        return await k8s_logs_read(self, target, operator, params)
+
     async def exec_command(
         self,
         operator: Operator,

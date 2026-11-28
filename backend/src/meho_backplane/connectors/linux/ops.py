@@ -442,6 +442,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     from meho_backplane.connectors.linux.ops_firewall_rollback import FIREWALL_ROLLBACK_OPS
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
     from meho_backplane.connectors.linux.ops_inspect_ops import INSPECT_OPS
+    from meho_backplane.connectors.linux.ops_logs_read import LOGS_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.linux.ops_user import USER_OPS
     from meho_backplane.connectors.linux.ops_write import WRITE_OPS
@@ -453,6 +454,7 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
         *FIREWALL_OPS,
         *STORAGE_OPS,
         *INSPECT_OPS,
+        *LOGS_OPS,
         *DIAGNOSE_OPS,
         *USER_OPS,
         *WRITE_OPS,
@@ -512,6 +514,16 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lowest priority) -- the only place kernel, nfsd, XFS and block layer "
         "messages are on a systemd host. Large tails "
         "spill to a result handle paged with "
+        "``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
+    ),
+    "logs": (
+        "Use to read what the host logged, with the same parameters as on every "
+        "connector: ``linux.logs.read`` takes a ``source`` (an allow-listed log file, "
+        "a systemd unit or ``journal``), a time window (``since`` / ``until``; journal "
+        "and unit only), ``lines`` and a plain text ``filter``, and returns "
+        "``{time, line}`` rows with the time span they cover. The older "
+        "``linux.log.tail`` and ``linux.journal.tail`` (group ``log``) still work. "
+        "Large answers spill to a result handle paged with "
         "``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
     ),
     "service": (

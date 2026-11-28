@@ -199,7 +199,10 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         openbao.start()
     except Exception as exc:
         network.remove()
-        pytest.skip(f"a container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"a container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(keycloak, "Listening on:", timeout=240)
         kc_url = f"http://{keycloak.get_container_host_ip()}:{keycloak.get_exposed_port(8080)}/auth"

@@ -5869,7 +5869,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ClassificationRequestResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ClassificationRequestResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PolicyEditRequestResponse"
+                    }
+                  ],
+                  "title": "Response 202 Edit Op Endpoint Api V1 Connectors  Connector Id  Operations  Op Id  Patch"
                 }
               }
             }

@@ -55,12 +55,11 @@ POLICY_EDIT_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
 }
 
-#: The extra answer of the operation PATCH route. The schema is the one of a
-#: category / labels change. With CUSTOM_POLICY on, a risk level / approval
-#: edit answers 202 with the body of :class:`PolicyEditRequestResponse`.
+#: The extra answer of the operation PATCH route: the body of a category /
+#: labels change, or with CUSTOM_POLICY on the one of a risk level / approval edit.
 OP_PATCH_RESPONSES: dict[int | str, dict[str, Any]] = {
     202: {
-        "model": ClassificationRequestResponse,
+        "model": ClassificationRequestResponse | PolicyEditRequestResponse,
         "description": (
             "category / labels were sent: the change waits until a tenant admin approves "
             "it in the web console. With CUSTOM_POLICY on, safety_level / requires_approval "

@@ -60285,8 +60285,10 @@ type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse struct 
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *EditOpResponse
-	JSON202      *ClassificationRequestResponse
-	JSON422      *HTTPValidationError
+	JSON202      *struct {
+		union json.RawMessage
+	}
+	JSON422 *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -78181,7 +78183,9 @@ func ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rs
 		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
-		var dest ClassificationRequestResponse
+		var dest struct {
+			union json.RawMessage
+		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

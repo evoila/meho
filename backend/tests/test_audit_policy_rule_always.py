@@ -273,6 +273,26 @@ def test_when_the_evaluator_disagrees_the_row_names_the_gate(
     assert (stored["source"], stored["rule_id"], stored["decided"]) == ("gate", "wait", True)
 
 
+def _wait_answer(**_kwargs: Any) -> Decision:
+    rule = RuleRef(source="default", rule_id="person.web.caution", text="made up for the test")
+    return Decision(verdict=Verdict.WAIT, rule=rule)
+
+
+def test_when_the_evaluator_disagrees_on_a_call_that_runs_the_row_names_the_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row of a call that runs is written by the dispatcher, not the approval queue."""
+    _switches(monkeypatch, custom=True, shadow=False)
+    _seed()
+
+    with patch(_EVALUATE, side_effect=_wait_answer):
+        assert _console_run(_CAUTION_OP) == "ok"
+
+    row = _one_row()
+    assert (row.policy_decision, row.policy_rule) == ("auto-execute", "gate:run")
+    assert row.payload["policy_rule_shadow"] == "default:person.web.caution (shadow)"
+
+
 def test_when_the_shadow_fails_the_row_names_the_gate(
     monkeypatch: pytest.MonkeyPatch, token_caller: Any
 ) -> None:

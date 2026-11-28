@@ -334,6 +334,7 @@ async def test_an_approved_run_refused_by_the_params_check_writes_its_audit_row(
         rows = (await session.execute(select(AuditLog))).scalars().all()
     assert len(rows) == 1
     assert rows[0].payload.get("result_status") == "error", rows[0].payload
+    assert rows[0].policy_decision == "needs-approval"
     assert made not in json.dumps(result.model_dump(), default=str)
     assert made not in await _stored_text()
 

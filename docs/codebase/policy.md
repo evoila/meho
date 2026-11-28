@@ -651,8 +651,10 @@ before.
   `requires_approval` waits as a whole, with its `custom_description` and
   `is_enabled`. A PATCH with only `custom_description` or `is_enabled`
   runs as before. `DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}`
-  waits. Both answer `202` with `status`, `approval_request_id` and
-  `message`. The MCP tool `meho_connector_edit_op` waits too and still
+  waits. Both answer `202` with the body `ClassificationRequestResponse`,
+  the one `202` shape of the PATCH route: `status` (`awaiting_approval`),
+  `approval_request_id`, `message`, `matched_operations` (1) and
+  `changed_operations` (0). The MCP tool `meho_connector_edit_op` waits too and still
   refuses a looser edit first. `meho connector edit-op` and
   `remove-override` print the request id and who approves it.
 - Every check of the edit runs before the request waits, as for a person
@@ -667,13 +669,15 @@ before.
   the scope and the tenant of the operation row, the old and new risk
   level and approval (both, also when one stays the same), the other
   fields, the reason and `ends_approval`.
-- The approved run checks the card's record of who asked again. Then it
-  builds the card again with the values of that moment, with the same
-  function and the scope on the card. When the two differ, it writes
-  nothing and says "The policy changed since this request was made. Send
-  the edit again." Else it runs `apply_policy_edit` or `remove_override`
-  with the person who clicked as the operator. With the switch off at the
-  click, it writes nothing.
+- The approved run checks the card's record of who asked again, also when
+  the person who asked clicks. Then it runs `apply_policy_edit` or
+  `remove_override` with the person who clicked as the operator, in the
+  scope on the card. In that same transaction, under the lock of the
+  operation, it builds the card of the effect with the same function as at
+  the ask and compares it once with the stored card. When the two differ,
+  or the override to remove is gone, it rolls back, writes nothing and
+  says "The policy changed since this request was made. Send the edit
+  again." With the switch off at the click, it writes nothing.
 - An ask that names an override of another tenant is refused before
   anything waits (`403` on REST).
 - The web console keeps its own path in this part.

@@ -45,9 +45,10 @@ from meho_backplane.connectors.policy.op_edit import (
     request_policy_edit,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
+from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.connector_admin import _edit_op_handler
+from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
 from meho_backplane.operations.approval_queue import UnauthorizedApprovalError
 from meho_backplane.operations.ingest import ReviewService
 from meho_backplane.operations.typed_register import (
@@ -219,8 +220,15 @@ def _refused_as_changed(request: Any) -> None:
 def _waits(response: Any) -> uuid.UUID:
     assert response.status_code == 202, response.text
     body = response.json()
-    assert set(body) == {"status", "approval_request_id", "message"}
+    assert set(body) == {
+        "status",
+        "approval_request_id",
+        "message",
+        "matched_operations",
+        "changed_operations",
+    }
     assert body["status"] == "awaiting_approval"
+    assert (body["matched_operations"], body["changed_operations"]) == (1, 0)
     return uuid.UUID(body["approval_request_id"])
 
 
@@ -624,6 +632,141 @@ async def test_an_edit_of_a_tenant_copy_is_refused_when_the_copy_goes(
     assert await _overrides(_RESTART) == []
     (request,) = await h.requests()
     _refused_as_changed(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_copy_that_goes_after_the_run_starts_is_refused_in_the_write(
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tenant copy goes after the run starts and before the write: nothing is written."""
+    await _setup(embedding)
+    await _tenant_copy(_RESTART)
+    write = ReviewService.edit_op
+
+    async def drop_then_write(self: ReviewService, *args: Any, **kwargs: Any) -> Any:
+        await _drop_tenant_copy(_RESTART)
+        return await write(self, *args, **kwargs)
+
+    key = make_rsa_keypair("kid-opedit-copy-race")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = {"safety_level": "dangerous", "is_enabled": False}
+        request_id = _waits(_patch(client, _token(key), _RESTART, body))
+        monkeypatch.setattr(ReviewService, "edit_op", drop_then_write)
+        await h.console_approve(client, key, request_id, sub="platform-b")
+    assert await _enabled_rows(_RESTART) == [(None, True)]
+    assert await _overrides(_RESTART) == []
+    (request,) = await h.requests()
+    _refused_as_changed(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_the_second_of_two_waiting_removals_is_refused_as_changed(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    await _raise_now(h.person("admin-a", platform_admin=False), _RESTART, "dangerous")
+    key = make_rsa_keypair("kid-opedit-two-removals")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        first = _waits(_delete(client, _token(key), _RESTART, tenant_id=str(h.TENANT)))
+        second = _waits(_delete(client, _token(key), _RESTART, tenant_id=str(h.TENANT)))
+        clicked = await h.console_approve(client, key, first, sub="admin-b", platform_admin=False)
+        assert clicked.status_code == 200, clicked.text
+        assert await _overrides(_RESTART) == []
+        await h.console_approve(client, key, second, sub="admin-b", platform_admin=False)
+    assert await _overrides(_RESTART) == []
+    _refused_as_changed(next(r for r in await h.requests() if r.id == second))
+
+
+async def _change_requester_record(request_id: uuid.UUID, record: dict[str, Any] | None) -> None:
+    """Replace the card's record of who asked; ``None`` removes it."""
+    async with get_sessionmaker()() as session, session.begin():
+        request = await session.get(ApprovalRequest, request_id)
+        assert request is not None
+        effect = dict(request.proposed_effect)
+        effect.pop(AGENT_REQUESTER_RECORD_KEY, None)
+        preflight = dict(effect.get("permission_preflight") or {})
+        preflight.pop("requester", None)
+        if record is not None:
+            effect[AGENT_REQUESTER_RECORD_KEY] = record
+            preflight["requester"] = record
+            request.principal_kind = record["principal_kind"]
+        effect["permission_preflight"] = preflight
+        request.proposed_effect = effect
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize("record", ["missing", "agent"])
+async def test_the_person_who_asked_clicks_and_the_record_is_checked(
+    client: TestClient, embedding: AsyncMock, record: str
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair(f"kid-opedit-own-click-{record}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        request_id = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
+        changed = None
+        if record == "agent":
+            changed = {
+                "sub": "admin-a",
+                "principal_kind": PrincipalKind.AGENT.value,
+                "client_id": None,
+                "tenant_role": TenantRole.TENANT_ADMIN.value,
+                "act": None,
+            }
+        await _change_requester_record(request_id, changed)
+        await h.console_approve(client, key, request_id, sub="admin-a", platform_admin=False)
+    assert await _overrides(_RESTART) == []
+    (request,) = await h.requests()
+    assert EDIT_NEEDS_PERSON in json.dumps(request.resume_result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_the_person_who_asked_may_click_their_own_request(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-opedit-own-click")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        request_id = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
+        clicked = await h.console_approve(
+            client, key, request_id, sub="admin-a", platform_admin=False
+        )
+        assert clicked.status_code == 200, clicked.text
+    (override,) = await _overrides(_RESTART)
+    assert (override.tenant_id, override.safety_level) == (h.TENANT, "dangerous")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_waiting_patch_and_delete_answer_the_five_fields(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    await _raise_now(h.person("admin-a", platform_admin=False), _STOP, "destructive")
+    key = make_rsa_keypair("kid-opedit-five-fields")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        patched = _patch(client, _token(key), _RESTART, {"safety_level": "dangerous"})
+        deleted = _delete(client, _token(key), _STOP, tenant_id=str(h.TENANT))
+    ids = {r.id for r in await h.requests()}
+    for answer in (patched, deleted):
+        assert answer.status_code == 202, answer.text
+        body = answer.json()
+        assert uuid.UUID(body["approval_request_id"]) in ids
+        assert body == {
+            "status": "awaiting_approval",
+            "approval_request_id": body["approval_request_id"],
+            "message": "The edit waits for approval. An Admin approves it in the web console.",
+            "matched_operations": 1,
+            "changed_operations": 0,
+        }
 
 
 @pytest.mark.asyncio

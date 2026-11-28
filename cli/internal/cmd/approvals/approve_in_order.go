@@ -45,7 +45,9 @@ const inOrderHelp = "With --filter-work-ref REF --in-order, approve takes every 
 	"At each pending step it shows what the step does (the operation, " +
 	"the connector and its version, the target, the risk level and the " +
 	"parameters) and asks you about it. Type yes to approve that one " +
-	"step and go on; anything else stops the run. One sign-in covers " +
+	"step and go on; anything else stops the run. A step that runs a " +
+	"script takes yes only from a terminal, or the script's matching " +
+	"SHA-256 from a terminal or a pipe. One sign-in covers " +
 	"the steps; a destructive step gets a sign-in of its own.\n\n" +
 	"Run it again after a stop: steps that were approved and ran OK " +
 	"are skipped. A step that was approved but whose run failed " +
@@ -166,7 +168,8 @@ func runInOrder(cmd *cobra.Command, opts inOrderOpts) error {
 	}
 	r := &inOrderRunner{
 		cmd: cmd, client: client, opts: opts, in: bufio.NewReader(cmd.InOrStdin()),
-		total: len(items), signIn: newApprovalSignIn(client, cmd.ErrOrStderr()),
+		terminal: inputIsTerminal(cmd.InOrStdin()),
+		total:    len(items), signIn: newApprovalSignIn(client, cmd.ErrOrStderr()),
 	}
 	var stop *stepStop
 	for i := range items {
@@ -214,7 +217,10 @@ type inOrderRunner struct {
 	client *api.AuthedClient
 	opts   inOrderOpts
 	in     *bufio.Reader
-	total  int
+	// terminal says whether a person types the answers (a plain yes for
+	// a script counts only then).
+	terminal bool
+	total    int
 	// signIn is the one approval sign-in of the run (#5515).
 	signIn *approvalSignIn
 }
@@ -253,12 +259,12 @@ func (r *inOrderRunner) runStep(ctx context.Context, item *api.ApprovalRequestVi
 			"this step is %s. The steps after it may need it, so the run stops here", item.Status)}
 	}
 
-	ok, err := r.confirm(ctx, item, step)
+	why, err := r.confirm(ctx, item, step)
 	if err != nil {
 		return &stepStop{detail: "could not read the step before asking for a yes", err: err}
 	}
-	if !ok {
-		return &stepStop{detail: "you did not type yes for this step"}
+	if why != "" {
+		return &stepStop{detail: why}
 	}
 
 	body := api.DecideRequestBody{Decision: "approved"}
@@ -366,11 +372,14 @@ func (r *inOrderRunner) waitForStoredResult(ctx context.Context, id uuid.UUID, s
 }
 
 // confirm shows a pending step and asks for a yes on stdin. The text
-// goes to stderr so --json output on stdout stays clean.
-func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestView, step *inOrderStep) (bool, error) {
+// goes to stderr so --json output on stdout stays clean. It returns ""
+// when the person may approve, or why the run stops. A step that runs a
+// script gets the same check as a one-id approve: yes only from a
+// terminal, or the script's matching SHA-256.
+func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestView, step *inOrderStep) (string, error) {
 	detail, err := fetchDetail(ctx, r.client, item.Id)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if detail == nil {
 		detail = item
@@ -381,7 +390,14 @@ func (r *inOrderRunner) confirm(ctx context.Context, item *api.ApprovalRequestVi
 		level = "of unknown risk level"
 	}
 	showRequest(w, fmt.Sprintf("Step %d of %d is %s. Approving it runs it at once.", step.Step, r.total, output.SafeText(level)), detail)
-	return askYes(r.in, w, fmt.Sprintf("Type yes to approve step %d and go on. Anything else stops here: ", step.Step)), nil
+	if preview := scriptPreview(detail.ProposedEffect); preview != nil {
+		return askScript(r.in, r.terminal, w, preview, fmt.Sprintf(
+			"Type yes, or the script's SHA-256, to approve step %d and go on. Anything else stops here: ", step.Step)), nil
+	}
+	if !askYes(r.in, w, fmt.Sprintf("Type yes to approve step %d and go on. Anything else stops here: ", step.Step)) {
+		return "you did not type yes for this step", nil
+	}
+	return "", nil
 }
 
 func newInOrderStep(n int, item *api.ApprovalRequestView) inOrderStep {

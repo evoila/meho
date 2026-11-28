@@ -1449,7 +1449,7 @@ func runApprove(t *testing.T, routes map[string]mockHandler, opts decisionOpts) 
 	old := waitPollInterval
 	waitPollInterval = time.Millisecond
 	t.Cleanup(func() { waitPollInterval = old })
-	srv := mockBackplane(t, routes)
+	srv := mockBackplane(t, withPendingFirstRead(t, routes))
 	t.Cleanup(srv.Close)
 	stubSignIn(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -1469,6 +1469,31 @@ func runApprove(t *testing.T, routes map[string]mockHandler, opts decisionOpts) 
 	opts.BackplaneOverride = srv.URL
 	err = runDecision(cmd, stubID, "approve", "", opts)
 	return stdout.String(), stderr.String(), err
+}
+
+// withPendingFirstRead makes the first read of the request answer a plain
+// pending request without a script: a one-id approve reads the request
+// before it decides. Later reads go to the handler of the test.
+func withPendingFirstRead(t *testing.T, routes map[string]mockHandler) map[string]mockHandler {
+	key := "GET /api/v1/approvals/" + stubID
+	out := make(map[string]mockHandler, len(routes)+1)
+	for k, v := range routes {
+		out[k] = v
+	}
+	inner, first := out[key], true
+	out[key] = func(w http.ResponseWriter, r *http.Request) {
+		if first {
+			first = false
+			writeJSON(t, w, http.StatusOK, newApprovalView(t, "pending", ""))
+			return
+		}
+		if inner == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		inner(w, r)
+	}
+	return out
 }
 
 // acceptedDecide answers the approve with HTTP 202: the operation runs

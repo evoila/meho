@@ -5032,8 +5032,37 @@ does, operation, connector with its version, target, risk level,
 requester, and the parameters and preview from `proposed_effect`) and
 asks for `yes`; anything else skips that request. A request that is not
 pending is skipped. It stops at the first refusal. `--json` prints one
-`{id, outcome, detail, request}` entry per id. One id alone asks no
-question, as before.
+`{id, outcome, detail, request}` entry per id. An id given twice stops
+the command with a usage error (exit 1) before any request is read.
+
+One id asks no question, except when the request runs a script (#6630,
+`approve_script_check.go`). Then `approve` reads the request first and
+prints a short block on stderr: the script size, the SHA-256 (or one line
+saying why there is none: `script_values_hidden` or `script_unavailable`),
+the reviewed copy and the check result, and where to read the whole
+script (`meho approvals show <id>` and the approvals page of the console).
+It asks: "Type yes, or the script's SHA-256, to approve. Anything else
+stops." From a terminal, `yes` approves. The full SHA-256 approves when it
+matches the script's SHA-256 (any case, spaces around it ignored). When
+input is not a terminal, only the matching SHA-256 approves; `yes` from a
+pipe does not. A wrong SHA-256, any other answer, or no answer approves
+nothing: no decision call is sent and the command ends with a usage error
+(exit 1). When there is no SHA-256, only `yes` from a terminal approves.
+There is no `--yes` flag. A person's own wrapper script passes the SHA-256
+of the copy it reviewed: `printf '%s\n' "$REVIEWED_SHA256" | meho approvals
+approve <id>`. The browser sign-in still asks the person. A request
+without a script, and `reject`, ask nothing. If the read of the request
+fails, or MEHO answers with something that is not a request (for example
+an HTML page), the command stops with an error and sends no decision.
+
+The same rule holds on the two other approve paths (`askScript` in
+`approve_script_check.go`). With several ids, and at each step of
+`--in-order`, a request that runs a script is shown with its SHA-256 and
+the question "Type yes, or the script's SHA-256, to approve request N of
+M" (or "step N"). `yes` counts only from a terminal; the matching SHA-256
+counts from a terminal or a pipe. A refused answer skips that request
+(several ids) or stops the run (`--in-order`), with the reason. A request
+without a script still takes a plain `yes`, also from a pipe.
 
 The Keycloak side — the public client `meho-cli-approve` with standard
 flow, PKCE and `http://127.0.0.1:*` only, no device flow, no

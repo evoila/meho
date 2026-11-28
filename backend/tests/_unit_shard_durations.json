@@ -877,6 +877,7 @@
   "tests/test_mcp_short_tool_texts.py": 1.86,
   "tests/test_mcp_short_tool_texts_session.py": 7.23,
   "tests/test_mcp_startup_guard.py": 2.13,
+  "tests/test_mcp_strict_tool_schemas.py": 28.29,
   "tests/test_mcp_structured_content.py": 4.8,
   "tests/test_mcp_structured_results.py": 5.68,
   "tests/test_mcp_surface_conformance.py": 15.3,

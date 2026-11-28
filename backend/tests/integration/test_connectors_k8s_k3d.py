@@ -1032,7 +1032,9 @@ async def test_apply_server_dry_run_then_real_against_k3s(
         "  selector:\n    matchLabels:\n      app: nginx\n"
         "  template:\n"
         "    metadata:\n      labels:\n        app: nginx\n"
-        "    spec:\n      containers:\n      - name: nginx\n        image: nginx:1.27-alpine\n"
+        "    spec:\n      containers:\n      - name: nginx\n"
+        f"        image: {_busybox_image()}\n"
+        '        command: ["sleep", "3600"]\n'
     )
     # Dry-run preview: returns the would-be object but persists nothing.
     preview = await connector.k8s_apply(op, target, {"manifest": manifest, "dry_run": "server"})

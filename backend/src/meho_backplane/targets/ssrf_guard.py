@@ -97,6 +97,8 @@ from typing import Final, NamedTuple
 
 import httpx
 
+from meho_backplane.input_refusal import FixedMessageError
+
 __all__ = [
     "TARGET_SSRF_ALLOWLIST_ENV",
     "TargetDestinationBlockedError",
@@ -121,10 +123,11 @@ _REMEDIATION: Final[str] = (
 )
 
 
-class TargetDestinationBlockedError(ValueError):
+class TargetDestinationBlockedError(FixedMessageError):
     """A target destination is (or resolves to) a non-public address.
 
-    Subclasses :class:`ValueError` so the schema validators can let it
+    Its message is fixed text, so a refusal keeps it. Subclasses
+    :class:`ValueError` (through :class:`FixedMessageError`) so the schema validators can let it
     propagate straight into pydantic's validation machinery — FastAPI
     renders it as a structured 422. The connect path catches it
     explicitly and re-raises as a transport-level error (see

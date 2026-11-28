@@ -47,9 +47,11 @@ import httpx
 import pytest
 import respx
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.connectors_ingest import (
     router as connectors_ingest_router,
 )
@@ -4637,6 +4639,49 @@ def test_ingest_empty_body_returns_422_underspecified(
     detail = response.json()["detail"]
     messages = [e["msg"] for e in detail]
     assert any("ingest_request_underspecified" in m for m in messages), messages
+
+
+_INGEST_QUADRUPLE: dict[str, Any] = {
+    "product": "vmware",
+    "version": "9.0",
+    "impl_id": "vmware-rest",
+    "specs": [{"uri": "/abs/spec.yaml"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("body", "error_name"),
+    [
+        ({"catalog_entry": "vmware/9.0", **_INGEST_QUADRUPLE}, "catalog_entry_conflict"),
+        (
+            {"catalog_entry": "vmware/9.0", "spec_info_versions_compatible": [">=9.0"]},
+            "catalog_entry_conflict",
+        ),
+        ({"catalog_entry": "vmware/9.0", "auth_scheme": "basic"}, "catalog_entry_conflict"),
+        ({}, "ingest_request_underspecified"),
+        (
+            {**_INGEST_QUADRUPLE, "auth_secret_fields": ["password"]},
+            "ingest_request_underspecified",
+        ),
+        ({"product": "vmware", "version": "9.0"}, "ingest_request_underspecified"),
+    ],
+)
+def test_ingest_request_check_keeps_its_error_name_in_the_422(
+    body: dict[str, Any],
+    error_name: str,
+) -> None:
+    """Each check of the request shape keeps its documented error name in ``detail[].msg``."""
+    app = _build_app()
+    app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = TestClient(app).post(
+            "/api/v1/connectors/ingest", json=body, headers=_authed(token)
+        )
+    assert response.status_code == 422, response.text
+    messages = [error["msg"] for error in response.json()["detail"]]
+    assert any(error_name in message for message in messages), messages
 
 
 def test_ingest_catalog_entry_malformed_ref_returns_422(

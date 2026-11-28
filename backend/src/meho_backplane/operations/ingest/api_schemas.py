@@ -68,6 +68,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from meho_backplane.connectors.profile import AuthSchemeName
+from meho_backplane.input_refusal import FixedMessageError
 from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
 from meho_backplane.operations.ingest.job_phase import IngestJobPhase
 
@@ -422,7 +423,7 @@ class IngestRequest(BaseModel):
             or len(self.specs) > 0
         )
         if catalog_set and quadruple_set:
-            raise ValueError(
+            raise FixedMessageError(
                 "catalog_entry_conflict: 'catalog_entry' is mutually exclusive "
                 "with 'product' / 'version' / 'impl_id' / 'specs[]'; "
                 "supply only one request shape. "
@@ -434,14 +435,14 @@ class IngestRequest(BaseModel):
             # explicit one on a catalog-driven body would be silently
             # discarded during resolution, so reject it loudly rather
             # than let the operator believe their override took effect.
-            raise ValueError(
+            raise FixedMessageError(
                 "catalog_entry_conflict: 'spec_info_versions_compatible' is "
                 "the explicit-quadruple counterpart of the catalog row's own "
                 "compatibility band; drop it when using 'catalog_entry'. "
                 "See docs/codebase/error-message-shape.md.",
             )
         if not catalog_set and not quadruple_set:
-            raise ValueError(
+            raise FixedMessageError(
                 "ingest_request_underspecified: supply either "
                 "'catalog_entry' (catalog-driven shape) or "
                 "'product' + 'version' + 'impl_id' + 'specs[]' "
@@ -453,7 +454,7 @@ class IngestRequest(BaseModel):
             # stamping (#2288); an operator-selected ``auth_scheme`` is the
             # non-catalog on-ramp (#2289). Mixing them would silently discard
             # the selection during catalog resolution, so reject it loudly.
-            raise ValueError(
+            raise FixedMessageError(
                 "catalog_entry_conflict: 'auth_scheme' is the non-catalog "
                 "ingest on-ramp; a catalog row binds its own profile via "
                 "profile_resource. Drop 'auth_scheme' when using "
@@ -462,7 +463,7 @@ class IngestRequest(BaseModel):
         if self.auth_secret_fields is not None and self.auth_scheme is None:
             # Naming the secret fields without selecting a scheme is a
             # caller-side bug: there is no extractor to read them.
-            raise ValueError(
+            raise FixedMessageError(
                 "ingest_request_underspecified: 'auth_secret_fields' names the "
                 "secret keys the selected auth scheme reads, so it requires "
                 "'auth_scheme' to be set. See docs/codebase/error-message-shape.md.",
@@ -484,7 +485,7 @@ class IngestRequest(BaseModel):
             if not self.specs:
                 missing.append("specs")
             if missing:
-                raise ValueError(
+                raise FixedMessageError(
                     "ingest_request_underspecified: explicit-quadruple shape "
                     f"requires {missing}. Supply the missing field(s), or use "
                     "the catalog-driven shape via 'catalog_entry'. "

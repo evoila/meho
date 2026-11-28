@@ -249,6 +249,15 @@ compares it with the evaluator's verdict:
   the evaluator's rule with `(shadow)`. The approval request stores the
   `gate` rule. The mismatch line is logged as before.
 - The shadow failed: `gate:<verdict>`, never an empty rule.
+- The gate let the call run, then a check after the gate refused it
+  (the announce rule, a connector that takes no generic operations, a
+  blocked login of a step, a refused step of a multi-step operation):
+  the `denied` row names `gate:deny`, and `policy_rule_shadow` holds the
+  evaluator's rule (`refused_rule` in `policy/stamp.py`, applied by the
+  audit writer). The row of a refused call never names a rule that
+  allows.
+- A verdict of the gate that is none of `run`, `wait` and `deny` counts
+  as `deny`: the call is refused and writes its row.
 - An Admin's change of rights in the web console keeps
   `default:rights_change.admin_in_web_console`, as before.
 

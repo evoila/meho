@@ -59,7 +59,7 @@ from meho_backplane.operations.audit_row_safe import (
     storable_and_changed,
 )
 from meho_backplane.operations.caller_gone import caller_gone_at
-from meho_backplane.policy.stamp import RuleStamp
+from meho_backplane.policy.stamp import RuleStamp, refused_rule
 from meho_backplane.request_usage.collector import current_request_id
 from meho_backplane.work_ref import normalize_work_ref
 
@@ -318,22 +318,32 @@ reveal_secret_var: ContextVar[bool | None] = ContextVar(
 )
 
 
-def policy_rule_columns() -> dict[str, Any]:
-    """``policy_rule`` and ``policy_version`` of an audit row, from :data:`policy_rule_var`."""
+def _row_stamp(result_status: str | None) -> RuleStamp | None:
+    """The rule of :data:`policy_rule_var` for a row with *result_status*.
+
+    A ``denied`` row of a call whose gate said ``run`` names ``gate:deny``
+    (:func:`~meho_backplane.policy.stamp.refused_rule`).
+    """
     stamp = policy_rule_var.get()
+    return refused_rule(stamp) if result_status == "denied" else stamp
+
+
+def policy_rule_columns(result_status: str | None = None) -> dict[str, Any]:
+    """``policy_rule`` and ``policy_version`` of an audit row, from :data:`policy_rule_var`."""
+    stamp = _row_stamp(result_status)
     if stamp is None:
         return {"policy_rule": None, "policy_version": None}
     return {"policy_rule": stamp.label(), "policy_version": stamp.policy_version}
 
 
-def policy_rule_payload() -> dict[str, str]:
+def policy_rule_payload(result_status: str | None = None) -> dict[str, str]:
     """``{"policy_rule_shadow": ...}`` when the gate decided against the evaluator.
 
     Only with ``CUSTOM_POLICY`` on: the row's ``policy_rule`` is then
     ``gate:<verdict>``, and this key keeps the evaluator's rule with the
     ``(shadow)`` mark. Empty for every other row.
     """
-    stamp = policy_rule_var.get()
+    stamp = _row_stamp(result_status)
     if stamp is None or stamp.shadow is None:
         return {}
     return {"policy_rule_shadow": stamp.shadow.label()}
@@ -692,7 +702,7 @@ def _build_core_payload(
     # correlation, credential_read reveal choice) for the broadcast-event
     # surface; the canonical values live in dedicated ``audit_log`` columns.
     _apply_contextvar_lineage_mirrors(payload)
-    payload.update(policy_rule_payload())
+    payload.update(policy_rule_payload(result_status))
     payload.update(op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor))
     return payload
 
@@ -917,7 +927,7 @@ async def write_audit_row(
     # is added by migration ``0051``. ``None`` when no gate ran for this row.
     if hasattr(AuditLog, "policy_decision"):
         runbook_kwargs["policy_decision"] = policy_decision_var.get()
-    runbook_kwargs.update(policy_rule_columns())
+    runbook_kwargs.update(policy_rule_columns(result_status))
     row_fields: dict[str, Any] = {
         "id": audit_id,
         "occurred_at": datetime.now(UTC),

@@ -26,7 +26,15 @@ from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.settings import get_settings
 
-__all__ = ["RuleStamp", "deciding_rule", "forget_rule", "keep_rule", "row_rule", "take_rule"]
+__all__ = [
+    "RuleStamp",
+    "deciding_rule",
+    "forget_rule",
+    "keep_rule",
+    "refused_rule",
+    "row_rule",
+    "take_rule",
+]
 
 #: The gate's verdict in the words of the evaluator (``policy.evaluate.Verdict``).
 _EVALUATOR_VERDICT: dict[PermissionVerdict, str] = {
@@ -100,6 +108,33 @@ def row_rule(kept: RuleStamp | None, verdict: PermissionVerdict) -> RuleStamp | 
         return kept
     known = isinstance(verdict, PermissionVerdict)
     return deciding_rule(kept, _EVALUATOR_VERDICT.get(verdict, "deny") if known else "deny")
+
+
+def refused_rule(stamp: RuleStamp | None) -> RuleStamp | None:
+    """The rule for the row of a refused call whose gate said ``run``.
+
+    A check after the gate (for example the announce rule) can refuse a
+    call that the gate let run. With ``CUSTOM_POLICY`` on, the row then
+    names ``gate:deny``, and the evaluator's rule goes to ``shadow``, so
+    the row of a refused call never names a rule that allows. Every other
+    stamp stays as it is: a rule that did not decide (the switch is off),
+    and a rule that decided another answer.
+    """
+    if stamp is None or not stamp.decided:
+        return stamp
+    if stamp.source == "gate" and stamp.rule_id == "run":
+        evaluator = stamp.shadow
+    elif stamp.source != "gate" and stamp.verdict == "run":
+        evaluator = replace(stamp, decided=False)
+    else:
+        return stamp
+    return RuleStamp(
+        source="gate",
+        rule_id="deny",
+        text="a check after the policy gate refused the call",
+        decided=True,
+        shadow=evaluator,
+    )
 
 
 #: The rule of the last policy gate in this context, until :func:`take_rule`.

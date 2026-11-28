@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from dataclasses import replace
 from typing import Any
 from unittest.mock import patch
 
@@ -38,6 +39,12 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, AuditLog, PermissionVerdict
 from meho_backplane.main import app as main_app
 from meho_backplane.op_classes import declare_op_classes
+from meho_backplane.operations._audit import (
+    policy_rule_columns,
+    policy_rule_payload,
+    policy_rule_var,
+)
+from meho_backplane.operations.rights_change_console import CONSOLE_RUN_POLICY_RULE
 from meho_backplane.policy.evaluate import (
     Asked,
     Asker,
@@ -420,3 +427,59 @@ def test_row_rule_leaves_the_kept_rule_with_the_switch_off(
     kept = _kept("run")
     assert row_rule(kept, PermissionVerdict.NEEDS_APPROVAL) is kept
     assert row_rule(None, PermissionVerdict.NEEDS_APPROVAL) is None
+
+
+# ------------------------------------- a check after the gate refuses the call
+
+_RUN_RULE = RuleStamp(source="default", rule_id="agent.safe", text="t", verdict="run")
+_WAIT_RULE = RuleStamp(source="floor", rule_id="destructive_waits", text="t", verdict="wait")
+
+
+def _refused_row(stamp: RuleStamp | None, result_status: str = "denied") -> tuple[Any, ...]:
+    """The rule columns and payload key that ``write_audit_row`` writes for *stamp*."""
+    token = policy_rule_var.set(stamp)
+    try:
+        columns = policy_rule_columns(result_status)
+        return columns["policy_rule"], policy_rule_payload(result_status).get("policy_rule_shadow")
+    finally:
+        policy_rule_var.reset(token)
+
+
+@pytest.mark.parametrize(
+    ("kept", "verdict_shadow"),
+    [
+        (_RUN_RULE, "default:agent.safe (shadow)"),
+        (_WAIT_RULE, "floor:destructive_waits (shadow)"),
+        (None, None),
+    ],
+    ids=["evaluator-agrees", "evaluator-disagrees", "shadow-failed"],
+)
+def test_a_refused_call_whose_gate_said_run_names_gate_deny(
+    monkeypatch: pytest.MonkeyPatch, kept: RuleStamp | None, verdict_shadow: str | None
+) -> None:
+    """The announce rule, a refused generic operation, a blocked step login and
+    a refused step of a multi-step operation all write a ``denied`` row through
+    ``write_audit_row`` while the gate's ``run`` rule is bound."""
+    _switches(monkeypatch, custom=True, shadow=True)
+    stamp = row_rule(kept, PermissionVerdict.AUTO_EXECUTE)
+
+    assert stamp is not None
+    assert _refused_row(stamp) == ("gate:deny", verdict_shadow)
+    # A row that is not a refusal keeps the rule the gate decided.
+    assert _refused_row(stamp, "ok") == (stamp.label(), stamp.shadow and stamp.shadow.label())
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        _RUN_RULE,  # the switch is off: the rule did not decide
+        replace(_WAIT_RULE, decided=True),  # a wait rule decided
+        deciding_rule(_RUN_RULE, "deny"),  # the gate refused
+        CONSOLE_RUN_POLICY_RULE,
+        None,
+    ],
+    ids=["switch-off", "wait-decided", "gate-deny", "console-run", "no-rule"],
+)
+def test_a_refused_row_keeps_every_other_rule(stamp: RuleStamp | None) -> None:
+    expected = (stamp.label(), stamp.shadow and stamp.shadow.label()) if stamp else (None, None)
+    assert _refused_row(stamp) == expected

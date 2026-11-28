@@ -288,6 +288,14 @@ the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
 
+**A model's refusal names the field and the rule, never the input.**
+When a handler lets a `pydantic.ValidationError` through,
+`result_connector_error` builds `extras.exception_message` with
+`validation_error_text`: for each error the field path, the message and
+the kind (`extras.depth: Value error, ... (value_error)`). `str()` of a
+`ValidationError` is never used, because it shows the start and the end
+of the refused input, and the input can hold a sent value.
+
 **An operation that sends a secret keeps no vendor text (#4854).** Some
 operations send a secret: a licence key, a new password, a secret value.
 The vendor's error text can repeat it (for example "the license key

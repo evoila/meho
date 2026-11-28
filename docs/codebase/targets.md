@@ -53,6 +53,20 @@ console ([settings.md](settings.md)). The guard
 the target registry that makes or changes a target can be covered by a
 standing grant, a run approval or an agent grant.
 
+**A call the target model refuses is refused at once.** `targets.register`
+and `targets.update` each register a params check
+(`model_params_problem` in `connectors/targets/ops.py`). It runs
+`TargetCreate` or `TargetUpdate` on the params before the policy gate,
+so such a call gets `invalid_params` and no approval request is stored.
+The check skips only the destination check with the port, because that
+check can look up a name in DNS and a params check does no I/O
+(`NO_DESTINATION_SCREEN` in `targets/schemas.py`). The handler runs the
+model again with every check. Each refusal names the field, the message
+and the kind of error, never the sent input (`model_refusal`), because
+the text reaches the answer, the stored result and the audit row. The
+MCP tools add each `validation_errors` entry to the error message. Tests:
+`tests/test_targets_model_refusal_stores_no_value.py`.
+
 `vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every

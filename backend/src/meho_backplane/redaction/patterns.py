@@ -222,9 +222,12 @@ _API_KEY = re.compile(
 #   GitHub tokens (``ghp_``, ``gho_``, ``ghu_``, ``ghs_``, ``ghr_``, and
 #   ``github_pat_`` + 22 letters or digits + ``_`` + 59 letters or digits),
 #   cloud access key ids (``AKIA`` / ``ASIA`` and 16 capitals or digits),
-#   chat tokens (``xox`` + one letter + ``-``, then at least 10 letters,
-#   digits, ``-`` or ``%`` that hold a digit) and payment secret keys
-#   (``sk_live_``, ``rk_live_``).
+#   chat tokens (``xox`` + one letter + ``-``, then a number, up to three
+#   more numbers and a last part of 20 to 255 letters or digits, all joined
+#   by ``-``; the same after ``xoxe.``; and the cookie ``xoxd-`` + 40 to
+#   1000 letters, digits or ``%`` codes) and payment secret keys
+#   (``sk_live_``, ``rk_live_``). Every repeat has an upper bound, so the
+#   scan time grows in step with the length of the text.
 #
 # A text with no clear prefix stays visible unless a secret-like label
 # (``api_key``) or a secret-named key stands in front of it: a long hex
@@ -237,7 +240,8 @@ _VENDOR_TOKEN = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{36,255}"
     r"|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
     r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
-    r"|xox[a-z]-(?=[A-Za-z%-]*[0-9])[A-Za-z0-9%-]{10,255}"
+    r"|(?:xoxe\.)?xox[a-z]-[0-9]{1,20}(?:-[0-9]{1,20}){0,3}-[A-Za-z0-9]{20,255}"
+    r"|xoxd-(?:[A-Za-z0-9]|%[0-9A-Fa-f]{2}){40,1000}"
     r"|[rs]k_live_[A-Za-z0-9]{24,255}"
     r")(?![A-Za-z0-9_])",
 )

@@ -885,6 +885,49 @@ _PATTERN_TEST_ROWS: list[tuple[str, str, bool]] = [
 ]
 
 
+def _top_level_branches(pattern: str) -> list[str]:
+    """Split the outer ``(?:...)`` group of *pattern* at its own ``|`` signs."""
+    branches: list[str] = []
+    current = ""
+    depth = 0
+    in_class = False
+    escaped = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 1:
+            branches.append(current)
+            current = ""
+            continue
+        current += char
+    branches.append(current)
+    return branches
+
+
+def test_the_chat_token_branches_read_a_bounded_text() -> None:
+    pattern = get_pattern("vendor_token")
+    assert isinstance(pattern, re.Pattern)
+    chat = [b for b in _top_level_branches(pattern.pattern) if "xox" in b]
+    assert len(chat) == 2
+    for branch in chat:
+        after_prefix = branch[branch.index("xox") :]
+        assert "*" not in after_prefix
+        assert "+" not in after_prefix
+        assert re.search(r"\{\d*,\}", after_prefix) is None
+        assert "(?=" not in after_prefix
+        assert "(?!" not in after_prefix
+
+
 # ---------------------------------------------------------------------------
 # Full-value capture through the engine (redaction hardening)
 # ---------------------------------------------------------------------------

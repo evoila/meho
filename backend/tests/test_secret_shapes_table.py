@@ -178,6 +178,8 @@ SHAPES = (
     Shape("payment sk_live_", lambda: "sk_" + "live_" + _word(24), **_SURE),
     Shape("payment rk_live_", lambda: "rk_" + "live_" + _word(24), **_SURE),
     Shape("not a token: xoxo- and letters", lambda: "xoxo-" + "hugs-and-kisses", **_SHOWN),
+    Shape("not a token: xoxo- and a release name", lambda: "xoxo-" + "release-2026", **_SHOWN),
+    Shape("not a token: xoxa- and a short name", lambda: "xoxa-" + "build-7", **_SHOWN),
     Shape(
         "not a token: github_pat_ and a setting name",
         lambda: "github_pat_" + "expiry_notification_days",
@@ -305,6 +307,20 @@ def test_a_shape_in_a_sentence(shape: Shape, place: Place) -> None:
     assert (value in left) is (place.name not in shape.caught)
     if place.name != "free_text":
         assert left.startswith("the run on Monday used ")
+
+
+@pytest.mark.parametrize(
+    ("shape", "place"),
+    [
+        pytest.param(shape, place, id=f"{shape.name}-{place.name}")
+        for shape in SHAPES
+        for place in PLACES
+        if shape.name.startswith("chat ") and place.name != "free_text"
+    ],
+)
+def test_a_chat_token_is_hidden_whole(shape: Shape, place: Place) -> None:
+    left = place.run(_sentence(shape.make()))
+    assert left == _sentence("[REDACTED:vendor_token]")
 
 
 @pytest.mark.parametrize(

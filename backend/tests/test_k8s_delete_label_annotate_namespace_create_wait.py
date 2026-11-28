@@ -51,6 +51,7 @@ from meho_backplane.op_classes import (
 )
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._lookup import lookup_descriptor
+from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._validate import policy_gate
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.operations.governed_subops import classify_subop_grantability
@@ -688,7 +689,8 @@ async def test_the_four_operations_keep_their_rows() -> None:
 @pytest.mark.parametrize(("op_id", "params"), list(_FOUR.items()), ids=list(_FOUR))
 async def test_the_card_line_is_for_a_person_only(op_id: str, params: dict[str, Any]) -> None:
     row = await _stored_request(op_id, params)
-    stored = dict(row.proposed_effect)
+    # Every view hides the internal keys, so compare with the stored request without them.
+    stored = without_internal_effect_keys(dict(row.proposed_effect))
     assert stored["credential_wait"] == CREDENTIAL_CARD_LINE
     for view in (
         _row_to_dict(row)["proposed_effect"],

@@ -2029,13 +2029,11 @@ these workflows:
   `chart.yml` a push to `main` has its own group per commit, so nothing
   cancels it (see "Every main commit gets its image and chart").
 - **The runs of a dropped group are cancelled.** GitHub does not stop the
-  runs of a group that leaves the queue. Two helpers do it, so the runs
-  stop using our runners:
-  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
-    run about a minute after the drop.
-  - `merge-queue-cleanup.yml` (#5292) runs
+  runs of a group that leaves the queue. `merge-queue-cleanup.yml` (#5292)
+  does it, so the runs stop using our runners. It runs
     `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
-    runner and covers every workflow. It cancels an open merge-queue run
+    runner and covers every workflow. A dropped group's run goes on until
+    the next sweep cancels it. It cancels an open merge-queue run
     only when the run's commit is not in the queue (GraphQL `mergeQueue`),
     its queue branch is gone, and its commit is not on `main` (the merge
     base of the commit and `main` is not the commit itself). Right before
@@ -2044,6 +2042,12 @@ these workflows:
     sweep. The reads and the cancel are separate calls, so a wrong cancel
     is very unlikely, not impossible. Only the sweep job may cancel; the
     dry run on a pull request has a read-only token.
+  - No job of a merge-queue run waits on a runner only to watch the run.
+    Before, a `merge-queue-watchdog` job in `ci.yml` did that. It held a runner of the main pool for the whole queue run (about
+    1,040 runner-minutes a day), and once it cancelled a run whose other
+    jobs had passed, so the pull request fell out of the queue.
+    `test_no_merge_group_job_only_watches_the_run` in
+    `backend/tests/test_ci_merge_queue_cleanup.py` keeps it so.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event
@@ -2779,7 +2783,7 @@ shard of the second-site job still has no runner, it reads the jobs again.
 It cancels the run only when that fresh read shows at least one shard with a
 waiting status (queued, waiting, requested or pending). A failed read, or a
 shard with no status, never leads to a cancel. Only this job
-and `merge-queue-watchdog` have `actions: write`.
+has `actions: write` in `ci.yml`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check
 that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to
@@ -3185,8 +3189,7 @@ the test map, and sysmon cannot record that (see
 
 Every job that runs on a pull request, except the six hosted jobs named
 below, carries the same `if:` guard the publish workflows use (the integration fan-in wraps
-it in `always() && ...`; `merge-queue-watchdog` runs only on
-`merge_group`):
+it in `always() && ...`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -3438,8 +3441,7 @@ hosted runner. Once a maintainer adds that pull request to the merge
 queue, its merge-queue run does use the own pool (the jobs that stay in
 the queue, such as the unit shards and Semgrep, run the code of the merged
 commit). So a fork pull request enters the queue only after review.
-Own pools have no `gh` program: a job that needs it installs it in a step (the merge-queue
-watchdog does, and prints a `::warning::` line when that fails).
+Own pools have no `gh` program: a job that needs it installs it in a step.
 
 Every workflow that runs on `pull_request` also has `concurrency` with
 `cancel-in-progress`, so a new push cancels the run of the old commit.

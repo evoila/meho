@@ -337,7 +337,6 @@
   "tests/test_ci_measure_test_map.py": 0.27,
   "tests/test_ci_memory_sampler.py": 0.96,
   "tests/test_ci_merge_queue_cleanup.py": 4.14,
-  "tests/test_ci_merge_queue_watchdog.py": 4.54,
   "tests/test_ci_redaction_compare_summary_only.py": 6.54,
   "tests/test_ci_repo_secrets.py": 31.06,
   "tests/test_ci_runner_allow_list.py": 1.0,

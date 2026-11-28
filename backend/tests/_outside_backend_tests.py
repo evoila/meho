@@ -106,7 +106,6 @@ OUTSIDE_BACKEND_TESTS: tuple[str, ...] = (
     "tests/test_ci_measure_test_map.py",
     "tests/test_ci_memory_sampler.py",
     "tests/test_ci_merge_queue_cleanup.py",
-    "tests/test_ci_merge_queue_watchdog.py",
     "tests/test_ci_redaction_compare_summary_only.py",
     "tests/test_ci_repo_secrets.py",
     "tests/test_ci_runner_allow_list.py",

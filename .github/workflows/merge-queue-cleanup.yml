@@ -11,8 +11,8 @@
 # docs leave that to us: on a destroyed group you "may want to cancel any
 # checks that are running on the head SHA"
 # (https://docs.github.com/en/webhooks/webhook-events-and-payloads#merge_group).
-# The watchdog in ci.yml (#4732) stops only its own CI run. The other
-# workflows that run in the queue went on to the end: from 27 Oct 17:00 to
+# Before this sweep, the queue runs of most workflows went on to the end:
+# from 27 Oct 17:00 to
 # 28 Oct 18:25 UTC, 114 of their runs were still going after the queue had
 # dropped their group (median 9 minutes, up to 92 minutes), and most of
 # their jobs took a runner from the main pool only after the drop.
@@ -21,6 +21,11 @@
 # when a new run joins the same concurrency group. Every queue group has its
 # own branch, so a dropped group never gets a new run that cancels the old
 # one.
+#
+# This sweep is the only thing that cancels a dropped group's run.
+# The `merge-queue-watchdog` job of ci.yml did it for the CI run, but it
+# held a runner for the whole queue run. A dropped group's run now goes on
+# until the next sweep cancels it.
 #
 # What a sweep does is in scripts/ci/merge_queue_cleanup.sh. In short: it
 # cancels an open merge-queue run only when the run's commit is not in the

@@ -57,6 +57,7 @@ from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
 from meho_backplane.operations.approval_queue import UnauthorizedApprovalError
 from meho_backplane.operations.ingest import ReviewService
 from meho_backplane.operations.typed_register import (
+    clear_typed_op_snapshot,
     operation_catalog_write,
     register_typed_operation,
 )
@@ -923,8 +924,12 @@ async def test_the_switch_off_at_the_click_writes_nothing(
         request_id = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
         monkeypatch.setenv("CUSTOM_POLICY", "false")
         get_settings.cache_clear()
-        async with operation_catalog_write(embedding_service=embedding):
-            pass
+        clear_typed_op_snapshot()
+        try:
+            async with operation_catalog_write(embedding_service=embedding):
+                pass
+        finally:
+            clear_typed_op_snapshot()
         await h.console_approve(client, key, request_id, sub="admin-b", platform_admin=False)
     assert await _overrides(_RESTART) == []
     (request,) = await h.requests()
@@ -941,8 +946,12 @@ async def test_with_the_switch_off_a_token_raise_runs_at_once_and_the_ops_do_not
     client: TestClient, embedding: AsyncMock
 ) -> None:
     await _setup(embedding)
-    async with operation_catalog_write(embedding_service=embedding):
-        pass
+    clear_typed_op_snapshot()
+    try:
+        async with operation_catalog_write(embedding_service=embedding):
+            pass
+    finally:
+        clear_typed_op_snapshot()
     async with get_sessionmaker()() as session:
         rows = await session.execute(
             select(EndpointDescriptor.op_id).where(

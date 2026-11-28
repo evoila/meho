@@ -19,12 +19,17 @@ The caller says whether the ``CUSTOM_POLICY`` switch is on
 * With the switch on, the install's file may hold ``limits``. The diff, the
   export and :func:`personal_agent_limit` show and use the stored part.
 * With the switch off, a file that holds the key ``limits`` is refused,
-  whatever its value. A stored ``limits`` part is ignored: the export
-  writes no ``limits`` part, the diff has no ``limits`` section, an
-  approved import keeps the stored part as it is, and
-  :func:`personal_agent_limit` answers ``safe``.
+  whatever its value, with :data:`LIMITS_NEED_CUSTOM_POLICY`. A stored
+  ``limits`` part is ignored: the export writes no ``limits`` part, the
+  diff has no ``limits`` section, an approved import keeps the stored part
+  as it is, and :func:`personal_agent_limit` answers ``safe``.
 * A tenant's file that holds the key ``limits`` is refused, with the switch
   on or off.
+
+A stored value that MEHO cannot read (not a mapping, or not a limit level)
+never counts as a looser limit: the answer is ``safe``, the strictest
+limit, and one warning names the stored place.
+:func:`install_personal_agent_limit` reads the install's stored policy.
 
 No call decision reads the part in this version of MEHO.
 """
@@ -34,14 +39,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
+import structlog
 from pydantic import BaseModel, ConfigDict, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.policy.classification import Scope
+from meho_backplane.policy.store import _documents
 
 __all__ = [
     "DEFAULT_PERSONAL_AGENT_LIMIT",
+    "LIMITS_NEED_CUSTOM_POLICY",
     "LIMIT_LEVELS",
     "PolicyLimits",
+    "install_personal_agent_limit",
     "limits_diff",
     "limits_mistakes",
     "not_read_mistake",
@@ -53,6 +63,14 @@ LIMIT_LEVELS: Final[tuple[str, ...]] = ("safe", "caution", "dangerous")
 
 #: The limit when the install's file has no ``limits`` part.
 DEFAULT_PERSONAL_AGENT_LIMIT: Final[str] = "safe"
+
+#: The refusal of ``limits`` in the install's file while the switch is off.
+LIMITS_NEED_CUSTOM_POLICY: Final[str] = (
+    "`limits` needs CUSTOM_POLICY: the outer limit counts only while the CUSTOM_POLICY "
+    "setting is on. Remove the part, or ask the person who runs MEHO to turn the setting on."
+)
+
+_log = structlog.get_logger(__name__)
 
 
 class PolicyLimits(BaseModel):
@@ -92,7 +110,7 @@ def limits_mistakes(document: Mapping[str, Any], *, scope: Scope, custom_policy:
             "the outer limit; a tenant's file stays inside it."
         ]
     if not custom_policy:
-        return [not_read_mistake("limits")]
+        return [LIMITS_NEED_CUSTOM_POLICY]
     return []
 
 
@@ -130,11 +148,45 @@ def personal_agent_limit(install_document: Any, *, custom_policy: bool = False) 
     """The highest level a tenant's personal agent rule may let run at once.
 
     *install_document* is the install's stored policy. With the switch off,
-    the answer is ``safe``. Without a ``limits`` part, or with a stored
-    value that is not a mapping or not a limit level, the answer is
-    ``safe``, the lowest level.
+    the answer is ``safe``. Without a ``limits`` part, the answer is
+    ``safe``, the lowest level. A stored value that is not a mapping or not
+    a limit level also answers ``safe``, with one warning that names the
+    stored place.
     """
     if not custom_policy:
         return DEFAULT_PERSONAL_AGENT_LIMIT
-    level = _mapping(_mapping(install_document).get("limits")).get("personal_agent_up_to")
-    return level if level in LIMIT_LEVELS else DEFAULT_PERSONAL_AGENT_LIMIT
+    limits = _mapping(install_document).get("limits")
+    if limits is None:
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    if not isinstance(limits, Mapping):
+        _unreadable("install:limits")
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    level = limits.get("personal_agent_up_to")
+    if level is None:
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    if not isinstance(level, str) or level not in LIMIT_LEVELS:
+        _unreadable("install:limits.personal_agent_up_to")
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    return level
+
+
+def _unreadable(place: str) -> None:
+    _log.warning(
+        "policy_limit_not_readable",
+        place=place,
+        used=DEFAULT_PERSONAL_AGENT_LIMIT,
+        message=(
+            f"MEHO cannot read the stored value at {place}, so the limit is "
+            f"{DEFAULT_PERSONAL_AGENT_LIMIT}. Import the install's policy file again."
+        ),
+    )
+
+
+async def install_personal_agent_limit(session: AsyncSession, *, custom_policy: bool) -> str:
+    """:func:`personal_agent_limit` of the install's stored policy (``tenant_id IS NULL``)."""
+    if not custom_policy:
+        return DEFAULT_PERSONAL_AGENT_LIMIT
+    install, _ = await _documents(session, None)
+    return personal_agent_limit(
+        None if install is None else install.document, custom_policy=custom_policy
+    )

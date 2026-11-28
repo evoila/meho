@@ -57,6 +57,7 @@ from meho_backplane.mcp.tools.broadcast import (
     _handler_announce,
     _handler_recent,
 )
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 from tests.broadcast_admission_helpers import (
@@ -239,7 +240,8 @@ def test_read_only_tools_call_announce_is_rejected(
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "forbidden" in body["error"]["message"].lower()
+    # An announce is a write, so a Reader reads the plain sentence.
+    assert body["error"]["message"] == f"insufficient_role: {READER_CHANGE_SENTENCE}"
 
 
 # ---------------------------------------------------------------------------

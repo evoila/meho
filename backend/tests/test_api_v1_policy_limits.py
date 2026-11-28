@@ -8,7 +8,7 @@
   approved import keeps the stored part.
 * ``apply_policy`` plans with the switch value it is given: the run after
   the approval refuses a file with ``limits`` while the switch is off.
-* The six refused keys, in any form, are refused with one sentence.
+* The five refused keys, in any form, are refused with one sentence.
 * A file that holds the key ``limits`` is refused whatever its value, where
   ``limits`` is not allowed; nothing waits.
 * The refusal is the same sentence whether the environment sets
@@ -45,8 +45,9 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.agent_rules import AGENTS_IN_INSTALL_FILE, AGENTS_NEED_CUSTOM_POLICY
 from meho_backplane.policy.document import file_sha256
-from meho_backplane.policy.limits import personal_agent_limit
+from meho_backplane.policy.limits import LIMITS_NEED_CUSTOM_POLICY, personal_agent_limit
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.validate import check_document
 from meho_backplane.settings import get_settings
@@ -270,15 +271,15 @@ async def test_the_approved_run_refuses_limits_with_the_switch_off(embedding: As
 
     run = await _approve(request.id)
     assert run.status != "ok", run
-    assert _not_read("limits") in str(run.error) + str(run.extras)
+    assert LIMITS_NEED_CUSTOM_POLICY in str(run.error) + str(run.extras)
     assert await _stored_install() is None
 
 
 # ---------------------------------------------------------------------------
-# The six refused keys
+# The five refused keys
 # ---------------------------------------------------------------------------
 
-_SIX = ["agents", "approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
+_FIVE = ["approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
 _FORMS = ["{example-name: example-value-7}", "[example-value-7]", "example-value-7", "null"]
 
 
@@ -289,7 +290,7 @@ def test_each_refused_key_in_each_form_is_one_sentence(client: TestClient, scope
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         token = _token(key, platform_admin=scope == "install")
-        for name in _SIX:
+        for name in _FIVE:
             for form in _FORMS:
                 content = f"policy: v1\n{name}: {form}\n"
                 for path, extra in (("validate", {}), ("import", {"preview": "true"})):
@@ -299,7 +300,7 @@ def test_each_refused_key_in_each_form_is_one_sentence(client: TestClient, scope
                     assert resp.json()["mistakes"] == [_not_read(name)]
                     assert "example-value-7" not in resp.text
                     answers += 1
-    assert answers == 6 * 4 * 2
+    assert answers == 5 * 4 * 2
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +314,7 @@ _EMPTY_FORMS = ["limits: {}", "limits: null", "limits:", "limits: {personal_agen
 @pytest.mark.usefixtures("switch")
 @pytest.mark.parametrize(
     ("scope", "sentence"),
-    [("tenant", _TENANT_SENTENCE), ("install", _not_read("limits"))],
+    [("tenant", _TENANT_SENTENCE), ("install", LIMITS_NEED_CUSTOM_POLICY)],
 )
 async def test_an_empty_limits_part_is_refused_and_nothing_waits(
     client: TestClient, embedding: AsyncMock, scope: str, sentence: str
@@ -369,17 +370,18 @@ async def test_a_limits_part_of_the_wrong_type_is_refused(
 
 
 # ---------------------------------------------------------------------------
-# One refusal sentence, true with the switch on and off
+# The five refused keys are one sentence with the switch on and off; ``limits`` follows it
 # ---------------------------------------------------------------------------
 
 _SEVEN_FILES = {
     "limits": "limits: {personal_agent_up_to: caution}",
-    **{name: f"{name}: {{example-name: example-value-7}}" for name in _SIX},
+    "agents": "agents: [example-value-7]",
+    **{name: f"{name}: {{example-name: example-value-7}}" for name in _FIVE},
 }
 
 
 @pytest.mark.parametrize("environment", [None, "true"])
-def test_the_refusal_is_the_same_sentence_whatever_the_environment(
+def test_the_five_keys_are_refused_whatever_the_environment_and_limits_follows_it(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, environment: str | None
 ) -> None:
     if environment is None:
@@ -395,18 +397,25 @@ def test_the_refusal_is_the_same_sentence_whatever_the_environment(
             content = f"policy: v1\n{line}\n"
             for path, extra in (("validate", {}), ("import", {"preview": "true"})):
                 resp = _post(client, path, install, content, scope="install", **extra)
-                assert resp.json()["ok"] is False
-                assert resp.json()["mistakes"] == [_not_read(name)]
-                assert "it is off" not in resp.text
-                assert "needs CUSTOM_POLICY" not in resp.text
+                if name == "limits" and environment == "true":
+                    assert resp.json()["ok"] is True, resp.text
+                    assert resp.json()["mistakes"] == []
+                elif name == "limits":
+                    assert resp.json()["mistakes"] == [LIMITS_NEED_CUSTOM_POLICY]
+                elif name == "agents":
+                    sentence = AGENTS_IN_INSTALL_FILE if environment else AGENTS_NEED_CUSTOM_POLICY
+                    assert resp.json()["mistakes"] == [sentence]
+                else:
+                    assert resp.json()["mistakes"] == [_not_read(name)]
         tenant = _post(client, "validate", _token(key), f"policy: v1\n{_SEVEN_FILES['limits']}\n")
     assert tenant.json()["mistakes"] == [_TENANT_SENTENCE]
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
 async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
     async with get_sessionmaker()() as session:
-        for name in _SIX:
+        for name in _FIVE:
             plan = await build_plan(
                 session,
                 scope="install",
@@ -423,7 +432,7 @@ async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
     document = plan.document
     assert document is not None
     assert check_document(document, scope="install", install_document=document, ops=[]) == [
-        _not_read("limits")
+        LIMITS_NEED_CUSTOM_POLICY
     ]
     assert (
         check_document(

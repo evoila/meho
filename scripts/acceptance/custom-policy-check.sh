@@ -69,7 +69,9 @@ What it does:
   The script never approves or decides a request. Its one approve call is
   the agent's attempt in check 6, which MEHO must refuse. MEHO gives back a
   request that already waits (extras.approval_request_reused) only for a
-  call with the same work reference while APPROVAL_SAME_CALL_REUSE is on.
+  call with the same work reference while APPROVAL_SAME_CALL_REUSE is on,
+  and for a retry with the same idempotency_key. The script sends no
+  idempotency_key, on REST, MCP or the meho command line.
   Each request of a run is sent with a work reference of its own, so MEHO
   never gives the first request of check 10 back for its second call. A
   request given back that is on this run's list is this run's. One that is
@@ -107,6 +109,13 @@ What it does:
   their targets are disposable systems. A [skip] line never counts as
   passed.
 
+  A line of checks 1 to 6, 10 and 11 that expects a caller kind is never
+  [ok] while its audit row holds no caller_kind field. It is [FAIL] when
+  another part of the line failed, else one "[skip] ... the caller kind)"
+  line. The summary counts these lines as "caller kind not proven: N". A
+  caller_kind of null, a wrong caller kind and an audit row that is not
+  found are [FAIL].
+
 Exit codes:
   0  every check passed
   1  at least one check failed
@@ -136,6 +145,10 @@ policy.apply over MCP, and MEHO refuses it before anything waits
 ("Only a person can ask for a policy import"). An Operator's token is
 refused too ("needs the tenant_admin role"). The same call with the
 Admin's token waits. Check 7 probes the policy import of all three logins.
+CPC_PARAMS_POLICY_CHANGE holds the params of the policy import: scope
+(tenant), file (the whole policy file as text), file_sha256 and based_on.
+Take the last two from a preview of the same file
+(POST /api/v1/policy/import?preview=true).
 
 Environment (live run). Each CPC_OP_* value is "<connector_id> <op_id> [<target>]";
 without a target the call has no target. A CPC_PARAMS_<name> value (for
@@ -152,12 +165,16 @@ default is {}.
   CPC_AGENT_TOKEN         A login of kind agent.
   CPC_METRICS_TOKEN       Optional: the install's METRICS_AUTH_TOKEN, when it is set,
                           so /ready shows the switch.
-  CPC_BASELINE            The file of --record-baseline.
+  CPC_BASELINE            The file of --record-baseline. Record it again with
+                          this version of the script: a file of an earlier
+                          version does not hold every probe of check 7.
   CPC_CUSTOM_ROLE         check 5: the name of the custom role the person makes.
   CPC_OP_LOWERED          check 1: a dangerous operation an Admin lowers to caution.
   CPC_OP_RELEVELLED       check 2: a former caution operation with the plain mark.
   CPC_OP_ALWAYS_WAIT      check 3: an operation with a saved "always wait".
-  CPC_OP_AGENT_RULE       check 4: a caution operation for the personal agent rule.
+  CPC_OP_AGENT_RULE       check 4: a caution write for the personal agent rule. A
+                          service login without a grant waits for it by the rule
+                          default:service.caution_write, which check 4 expects.
   CPC_OP_APPROVER         check 5: a dangerous operation on the approver policy's connector.
   CPC_OP_CREDENTIAL_READ  check 6: an operation that reads a credential.
   CPC_OP_CREDENTIAL_WRITE check 6: an operation that writes a credential.
@@ -173,6 +190,12 @@ default is {}.
   CPC_OP_WRITE            check 8 and 9: a caution write.
   CPC_OP_OWN_AGENT        check 10: an operation that waits for the person's own agent.
   CPC_SENSOR_ID           check 11: a sensor whose check the runner runs.
+  CPC_NO_RESULT_HISTORY   check 11, optional: set it to 1 only when the install keeps
+                          no result history (CHECKS_EVIDENCE_RETENTION_DAYS=0). Then an
+                          empty list of the sensor's results counts the sensor's
+                          last_evaluated_at as its fresh result. Without it, an empty
+                          list is no fresh result. Any other value stops the script
+                          (exit code 2).
 HELP
 }
 
@@ -200,6 +223,10 @@ BACKPLANE="${BACKPLANE%/}"
 stop() { echo "custom-policy-check.sh: $1" >&2; exit 2; }
 
 command -v jq >/dev/null || stop "jq is needed"
+case "${CPC_NO_RESULT_HISTORY:-}" in
+    ""|1) ;;
+    *) stop "CPC_NO_RESULT_HISTORY must be 1 or not set" ;;
+esac
 
 OP_VARS=(CPC_OP_LOWERED CPC_OP_RELEVELLED CPC_OP_ALWAYS_WAIT CPC_OP_AGENT_RULE
     CPC_OP_APPROVER CPC_OP_CREDENTIAL_READ CPC_OP_CREDENTIAL_WRITE CPC_OP_RIGHTS_CHANGE
@@ -536,7 +563,9 @@ on_list() {
 # PATH is rest, mcp or cli. Sets CALL_STATUS, CALL_CODE, CALL_REASON, CALL_AUDIT,
 # CALL_REQUEST and CALL_REUSED. MEHO gives back a request that already waits
 # (extras.approval_request_reused) for a second identical call while
-# APPROVAL_SAME_CALL_REUSE is on. A request given back that is on this run's
+# APPROVAL_SAME_CALL_REUSE is on, and for a retry with the same
+# idempotency_key, which the script never sends (op_body has no such key, and
+# the meho command line gets none). A request given back that is on this run's
 # list is this run's. Any other one waited before this run: CALL_REUSED names
 # it, CALL_REQUEST stays empty, and the script never withdraws it.
 CALL_STATUS=""; CALL_CODE=""; CALL_REASON=""; CALL_AUDIT=""; CALL_REQUEST=""; CALL_REUSED=""
@@ -704,6 +733,7 @@ expect() {
     local got problems=()
     got="$(verdict_of "$CALL_STATUS")"
     row_by_id "$step" "$CALL_AUDIT"
+    KIND_WAITS=""
     [[ "$got" == "$want" ]] || problems+=("expected $want")
     [[ -z "$CALL_REUSED" ]] || problems+=("$(reused_problem "$CALL_REUSED")")
     [[ -n "$ROW_ID" ]] || problems+=("no audit row")
@@ -713,12 +743,43 @@ expect() {
     if [[ -n "$want_reason" && "$CALL_REASON" != *"$want_reason"* ]]; then
         problems+=("expected the reason \"$want_reason\"")
     fi
-    if [[ -n "$want_kind" && "$ROW_KIND" != "$want_kind" ]]; then
+    if [[ -n "$want_kind" ]] && ! kind_ok "$want_kind"; then
         problems+=("expected caller kind $want_kind")
     fi
     local line
     line="check $check ($who, $path): $got${CALL_CODE:+ ($CALL_CODE)}, rule ${ROW_RULE:-none}, caller kind ${ROW_KIND:-none}, audit row ${ROW_ID:-none}"
-    report "$line" ${problems[@]+"${problems[@]}"}
+    report_kind "$line" "check $check ($who, $path" ${problems[@]+"${problems[@]}"}
+}
+
+# kind_ok WANT: true when the audit row read last has the caller kind WANT.
+# While the audit row has no caller_kind field at all (#6962 writes it),
+# it is true too, and KIND_WAITS is set: report_kind then never prints
+# [ok] for the line, and the rest of the line is still checked. A row that
+# was not found, a caller_kind of null and a wrong caller kind are never
+# true.
+KIND_WAITS=""
+KIND_UNPROVEN=0
+kind_ok() {
+    KIND_WAITS=""
+    if [[ -n "$ROW_ID" && -z "$ROW_HAS_KIND" ]]; then
+        KIND_WAITS=yes
+        return 0
+    fi
+    [[ "$ROW_KIND" == "$1" ]]
+}
+
+# report_kind LINE LINE_START [PROBLEM...]: report, for a line that expects
+# a caller kind, after kind_ok. While its audit row holds no caller_kind
+# field, the line is never [ok]: it is [FAIL] when another part failed,
+# else one [skip] line for its caller kind part that names the audit row
+# the line read (ROW_ID), and it counts in "caller kind not proven".
+# LINE_START is the line's start without its closing bracket.
+report_kind() {
+    local line="$1" start="$2"; shift 2
+    if [[ -z "$KIND_WAITS" ]]; then report "$line" "$@"; return; fi
+    KIND_UNPROVEN=$((KIND_UNPROVEN + 1))
+    if [[ $# -gt 0 ]]; then report "$line" "$@"; return; fi
+    check_skip "$start, the caller kind): not run: waits for #6962, audit row ${ROW_ID:-none}"
 }
 
 # report LINE [PROBLEM...]: [ok] without problems, else [FAIL] with them.
@@ -1052,9 +1113,20 @@ check_1() {
           and ((.set_at // "") | not_before($s)) and (.set_by_sub as $b | any($e[]; . == $b)))][0] // empty' \
         <<<"$REPLY_BODY" 2>/dev/null || true)"
     # The edit row of that override: the newest edit of its Admin (of any
-    # Admin when no override of this run was found).
-    edit_ts="$(jq -r --arg b "$(jq -r '.set_by_sub // ""' <<<"${override:-null}")" \
-        "$JQ_TIME"'[.[] | select($b == "" or .principal_sub == $b) | .ts // empty] | sort_by(at) | last // ""' \
+    # Admin when no override of this run was found) on the connector of
+    # CPC_OP_LOWERED that lowered the risk level to caution: its new level
+    # is caution and its old level is higher (safe, caution, dangerous,
+    # destructive). An edit of another connector's operation with the same
+    # id, one that changed something else, one that left the level at
+    # caution and a raise to caution are not the start.
+    edit_ts="$(jq -r --arg b "$(jq -r '.set_by_sub // ""' <<<"${override:-null}")" --arg c "$connector" \
+        "$JQ_TIME"'[.[] | select(($b == "" or .principal_sub == $b)
+          and (.payload.connector_id // "") == $c
+          and (.payload.override_removed // false) != true
+          and .payload.changes.safety_level.new? == "caution"
+          and ((.payload.changes.safety_level.old? // "") as $o
+            | ["dangerous", "destructive"] | index($o) != null)) | .ts // empty]
+        | sort_by(at) | last // ""' \
         <<<"$EDITS" 2>/dev/null || true)"
     # The console run of the operation: a row of the Operator of
     # CPC_PERSON_TOKEN, of the connector and target of CPC_OP_LOWERED, after
@@ -1070,13 +1142,15 @@ check_1() {
     local problems=() set_by
     set_by="$(jq -r '.set_by_sub // ""' <<<"${override:-null}")"
     [[ -n "$person_sub" ]] || problems+=("the login of PERSON_TOKEN could not be read at the start")
+    [[ -n "$edit_ts" ]] || problems+=("no edit row of the Admin on $connector lowered the risk level to caution")
     [[ -n "$ROW_ID" ]] || problems+=("no run row of the Operator of PERSON_TOKEN on $connector ${target:-without a target} after the edit row")
     [[ "$ROW_STATUS" == ok ]] || problems+=("expected runs")
     [[ -n "$override" ]] || problems+=("no override of this run, set by the Admin of its edit row, lowers it to caution")
     # Table row: an Admin's edit of the operation; the rule's source is "override".
     rule_ok "$ROW_RULE" "override:" || problems+=("expected a rule of the source override")
-    [[ "$ROW_KIND" == person ]] || problems+=("expected caller kind person")
-    report "check 1 (the Operator, a person, web console): $(verdict_of "${ROW_STATUS:-none}"), rule ${ROW_RULE:-none}, override by ${set_by:-none}, edit rows $(jq -r '[.[].id] | join(",") | if . == "" then "none" else . end' <<<"$EDITS"), caller kind ${ROW_KIND:-none}, audit row ${ROW_ID:-none}" ${problems[@]+"${problems[@]}"}
+    kind_ok person || problems+=("expected caller kind person")
+    report_kind "check 1 (the Operator, a person, web console): $(verdict_of "${ROW_STATUS:-none}"), rule ${ROW_RULE:-none}, override by ${set_by:-none}, edit rows $(jq -r '[.[].id] | join(",") | if . == "" then "none" else . end' <<<"$EDITS"), caller kind ${ROW_KIND:-none}, audit row ${ROW_ID:-none}" \
+        "check 1 (the Operator, a person, web console" ${problems[@]+"${problems[@]}"}
 }
 
 # The refusals MEHO shows at a refused click (approval_queue.py).
@@ -1129,8 +1203,8 @@ check_4() {
     # Table row: "tenant_rule", a rule of the tenant's agent policy.
     expect c4-agent-row 4 "an Operator's AI tool, a personal agent" MCP runs "tenant_rule:" personal_agent
     call_op c4-service rest CPC_SERVICE_TOKEN CPC_OP_AGENT_RULE
-    # Table row: "default", the default for a service agent.
-    expect c4-service-row 4 "a service login without a grant, a service agent" REST waits "default:" service_agent
+    # Table row: "default", a service login's caution write waits (_service_ladder).
+    expect c4-service-row 4 "a service login without a grant, a service agent" REST waits "default:service.caution_write" service_agent
 }
 
 check_5() {
@@ -1466,11 +1540,14 @@ check_10() {
 # answer (the server's time, compared in full, with the fractions of a
 # second), with the sensor's operation, target and login. It counts only
 # with a fresh result of the named sensor: one evaluated at or after
-# next_fire_at (GET /api/v1/sensors/{id}/results).
+# next_fire_at (GET /api/v1/sensors/{id}/results). An install that keeps no
+# result history (CHECKS_EVIDENCE_RETENTION_DAYS=0) answers that route with
+# no row; then the sensor's last_evaluated_at of the sensor list counts.
 SENSOR_PAGE=500
 SENSOR=""
-find_sensor() { # find_sensor: sets SENSOR from the sensor list, and REPLY_CODE of its last page
-    local offset=0 step=c11-sensors count
+find_sensor() { # find_sensor [STEP]: sets SENSOR from the sensor list, and REPLY_CODE of its last page
+    local offset=0 first="${1:-c11-sensors}" step count
+    step="$first"
     SENSOR=""
     while :; do
         rest "$step" GET "/api/v1/sensors?limit=$SENSOR_PAGE&offset=$offset" CPC_ADMIN_TOKEN
@@ -1480,40 +1557,59 @@ find_sensor() { # find_sensor: sets SENSOR from the sensor list, and REPLY_CODE 
         count="$(jq -r '[.items[]?] | length' <<<"$REPLY_BODY" 2>/dev/null || echo 0)"
         [[ -z "$SENSOR" && "$count" -ge "$SENSOR_PAGE" && $offset -lt 100000 ]] || return 0
         offset=$((offset + SENSOR_PAGE))
-        step="c11-sensors-$offset"
+        step="$first-$offset"
     done
+}
+
+# fresh_result DUE: sets FRESH to the time of a result of the named sensor
+# evaluated at or after DUE, or empty. Only with CPC_NO_RESULT_HISTORY=1
+# (the install keeps no result history) does an empty list of the results
+# route lead to the sensor's last_evaluated_at of the sensor list.
+FRESH=""
+fresh_result() {
+    local due="$1" from
+    from="$(jq -rn --arg d "$due" '$d | @uri')"
+    FRESH=""
+    rest c11-results GET "/api/v1/sensors/${CPC_SENSOR_ID}/results?from=$from&limit=500" CPC_ADMIN_TOKEN
+    [[ "$REPLY_CODE" == 200 ]] || return 0
+    FRESH="$(jq -r --arg i "${CPC_SENSOR_ID:-}" --arg d "$due" "$JQ_TIME"'[.items[]?
+        | select(.sensor_id == $i and ((.evaluated_at // "") | not_before($d)))][0].evaluated_at // ""' \
+        <<<"$REPLY_BODY" 2>/dev/null || true)"
+    if [[ -z "$FRESH" && "${CPC_NO_RESULT_HISTORY:-}" == 1 ]] \
+        && jq -e '.items | type == "array" and length == 0' <<<"$REPLY_BODY" >/dev/null 2>&1; then
+        find_sensor c11-sensors-now
+        FRESH="$(jq -r --arg d "$due" "$JQ_TIME"'.last_evaluated_at // ""
+            | if not_before($d) then . else "" end' <<<"${SENSOR:-null}" 2>/dev/null || true)"
+    fi
 }
 
 check_11_runner() {
     local tries=0 sensor op target identity code due="" line fresh=""
-    line="check 11 (the check runner, a sensor run started over REST)"
+    line="check 11 (the check runner, a sensor run started over REST"
     find_sensor
     sensor="$SENSOR"
     op="$(jq -r '.op_id // ""' <<<"${sensor:-null}")"
     target="$(jq -r '.target.name // ""' <<<"${sensor:-null}")"
     identity="$(jq -r '.identity_sub // ""' <<<"${sensor:-null}")"
     if [[ -z "$op" || -z "$identity" ]]; then
-        check_fail "$line: could not read the sensor ${CPC_SENSOR_ID:-none} from the sensor list (HTTP $REPLY_CODE)"
+        check_fail "$line): could not read the sensor ${CPC_SENSOR_ID:-none} from the sensor list (HTTP $REPLY_CODE)"
         return 0
     fi
     rest c11-run POST "/api/v1/sensors/${CPC_SENSOR_ID}/run" CPC_ADMIN_TOKEN '{}'
     code="$REPLY_CODE"
     due="$(jq -r '.next_fire_at // ""' <<<"$REPLY_BODY" 2>/dev/null || true)"
     if [[ ! "$code" =~ ^2 || -z "$due" ]]; then
-        check_fail "$line: the sensor run did not start: HTTP $code"
+        check_fail "$line): the sensor run did not start: HTTP $code"
         return 0
     fi
-    local filter found from
+    local filter found
     filter="$(jq -nc --arg o "$op" --arg s "$due" '{op_id:$o, since:$s, limit:1000}')"
-    from="$(jq -rn --arg d "$due" '$d | @uri')"
     clear_row
     while :; do
         # A fresh result of the named sensor: evaluated at or after the run call.
         if [[ -z "$fresh" ]]; then
-            rest c11-results GET "/api/v1/sensors/${CPC_SENSOR_ID}/results?from=$from&limit=500" CPC_ADMIN_TOKEN
-            fresh="$(jq -r --arg i "${CPC_SENSOR_ID:-}" --arg d "$due" "$JQ_TIME"'[.items[]?
-                | select(.sensor_id == $i and ((.evaluated_at // "") | not_before($d)))][0].evaluated_at // ""' \
-                <<<"$REPLY_BODY" 2>/dev/null || true)"
+            fresh_result "$due"
+            fresh="$FRESH"
         fi
         audit_rows c11-row "$filter"
         # The row of this sensor's run: after the run call, its operation, its target and its login.
@@ -1525,19 +1621,16 @@ check_11_runner() {
         tries=$((tries + 1))
         sleep 5
     done
-    if [[ -n "$ROW_ID" && -n "$fresh" && -z "$ROW_HAS_KIND" ]]; then
-        check_skip "check 11: not run: waits for #7073"
-        return 1
-    fi
     local problems=()
     [[ -n "$fresh" ]] || problems+=("no fresh result of sensor ${CPC_SENSOR_ID:-none} after the run call")
     [[ -n "$ROW_ID" ]] || problems+=("no audit row of the sensor's run")
-    [[ "$ROW_KIND" == system ]] || problems+=("expected caller kind system")
-    report "$line: HTTP $code, result at ${fresh:-none}, caller kind ${ROW_KIND:-none}, rule ${ROW_RULE:-none}, audit row ${ROW_ID:-none}" ${problems[@]+"${problems[@]}"}
+    kind_ok system || problems+=("expected caller kind system")
+    report_kind "$line): HTTP $code, result at ${fresh:-none}, caller kind ${ROW_KIND:-none}, rule ${ROW_RULE:-none}, audit row ${ROW_ID:-none}" \
+        "$line" ${problems[@]+"${problems[@]}"}
 }
 
 check_11() {
-    check_11_runner || return 0
+    check_11_runner
     # The web console reader stands for the person: the console run of check 1.
     if [[ -z "$PERSON_STEP_1_DONE" ]]; then
         waits_for "check 11 (the web console reader)" 1
@@ -1546,8 +1639,9 @@ check_11() {
         read_row_body "${C1_ROW:-null}"
         local problems=()
         [[ -n "$ROW_ID" ]] || problems+=("no audit row of the console run of check 1")
-        [[ "$ROW_KIND" == person ]] || problems+=("expected caller kind person")
-        report "check 11 (the web console reader, the console run of check 1): caller kind ${ROW_KIND:-none}, audit row ${ROW_ID:-none}" ${problems[@]+"${problems[@]}"}
+        kind_ok person || problems+=("expected caller kind person")
+        report_kind "check 11 (the web console reader, the console run of check 1): caller kind ${ROW_KIND:-none}, audit row ${ROW_ID:-none}" \
+            "check 11 (the web console reader, the console run of check 1" ${problems[@]+"${problems[@]}"}
     fi
     check_skip "check 11 (the event intake): not run: the script cannot send an event to the install"
     check_skip "check 11 (the findings investigator): not run: it needs a sensor change and an AI model on the install"
@@ -1938,7 +2032,7 @@ take_back_changes
 check_7
 
 echo
-echo "custom-policy-check.sh: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT not run, $LEFT_COUNT not taken back"
+echo "custom-policy-check.sh: $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT not run, $LEFT_COUNT not taken back, caller kind not proven: $KIND_UNPROVEN"
 if [[ $FAIL_COUNT -gt 0 ]]; then exit 1; fi
 if [[ $SKIP_COUNT -gt 0 || $LEFT_COUNT -gt 0 ]]; then exit 3; fi
 exit 0

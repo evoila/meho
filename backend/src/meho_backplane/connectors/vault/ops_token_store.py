@@ -525,6 +525,8 @@ TOKEN_STORE_OP_SPECS: tuple[dict[str, Any], ...] = (
         ),
         "parameter_schema": VAULT_TOKEN_CREATE_AND_STORE_PARAMETER_SCHEMA,
         "response_schema": VAULT_TOKEN_CREATE_AND_STORE_RESPONSE_SCHEMA,
+        "hard_to_undo": "overwrites",
+        "changes_rights": True,
         "tags": ["write", "credential-mint", "token", "identity"],
         "safety_level": "dangerous",
         "requires_approval": True,

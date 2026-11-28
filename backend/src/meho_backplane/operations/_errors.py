@@ -53,6 +53,12 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
+from meho_backplane.connectors._shared.log_host import (
+    REDIRECT_TEXT_WITHHELD,
+    followed_redirect_status_text,
+    redirect_status_text,
+    redirect_text_withheld,
+)
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -64,9 +70,11 @@ from meho_backplane.connectors.base import (
     ConnectorResourceNotFoundError,
     ConnectorUpstreamError,
 )
+from meho_backplane.operations._left_out import left_out_op
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
     AGENT_STEPS_NOT_DECLARED,
+    INSUFFICIENT_ROLE,
     READ_SCOPE_DENIED,
     deny_reason_code,
     is_agent_no_grant,
@@ -116,12 +124,14 @@ __all__ = [
     "result_denied",
     "result_handler_unreachable",
     "result_idempotency_key_conflict",
+    "result_if_left_out",
     "result_invalid_op_schema",
     "result_invalid_params",
     "result_license_read_off",
     "result_no_connector",
     "result_no_target",
     "result_object_changed_since_approval",
+    "result_operation_left_out",
     "result_park_check_refused",
     "result_preview_changed_since_approval",
     "result_probe_pool_busy",
@@ -340,6 +350,50 @@ def result_connector_package_not_installed(
             "connector_id": connector_id,
             "package": package,
         },
+    )
+
+
+def result_operation_left_out(
+    op_id: str, connector_id: str, package: str | None, duration_ms: float
+) -> OperationResult:
+    """Registration left the op out at the start: its mark does not fit its risk level.
+
+    MEHO wrote and deleted nothing for the op, so a row an earlier start
+    stored stays, hidden, with the operator's settings on it. A later
+    start without the fault uses it again.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"operation_left_out: operation {op_id!r} of connector {connector_id!r} was "
+            "left out at the start: its mark does not fit its risk level. The MEHO log "
+            "line 'operation_left_out' names the reason. A fix of the connector code "
+            "brings the operation back at the next start."
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "operation_left_out",
+            "connector_id": connector_id,
+            "package": package,
+        },
+    )
+
+
+def result_if_left_out(
+    *, product: str, version: str, impl_id: str, op_id: str, duration_ms: float
+) -> OperationResult | None:
+    """The ``operation_left_out`` answer when registration left *op_id* out, else ``None``.
+
+    For a path that finds no visible row to run: the connector shims call
+    it the way the dispatcher's miss answer does
+    (:mod:`meho_backplane.operations._op_miss`).
+    """
+    left_out = left_out_op(product=product, version=version, impl_id=impl_id, op_id=op_id)
+    if left_out is None:
+        return None
+    return result_operation_left_out(
+        op_id, f"{impl_id}-{version}", left_out.owner_package, duration_ms
     )
 
 
@@ -764,7 +818,9 @@ def result_denied(
     ``agent_no_grant`` when an agent has no grant and the
     ``AGENT_GRANT_REQUIRED`` switch is on (#6189), or
     ``agent_steps_not_declared`` when an agent calls a multi-step operation
-    whose steps are not declared and the switch is on (#6298).
+    whose steps are not declared and the switch is on (#6298), or
+    ``insufficient_role`` when a caller with the Reader role asks for a
+    change.
 
     ``reason_code`` says which rule refused the call
     (:mod:`~meho_backplane.operations.deny_reasons`). When the caller does
@@ -779,6 +835,8 @@ def result_denied(
         error_code = AGENT_NO_GRANT
     elif reason.startswith(f"{AGENT_STEPS_NOT_DECLARED}:"):
         error_code = AGENT_STEPS_NOT_DECLARED
+    elif reason.startswith(f"{INSUFFICIENT_ROLE}:"):
+        error_code = INSUFFICIENT_ROLE
     return OperationResult(
         status="denied",
         op_id=op_id,
@@ -1671,8 +1729,20 @@ def result_connector_error(
     #3567: ``extras.upstream_fault`` is set from the response body as above,
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
+
+    A 3xx answer gets the text of :func:`redirect_status_text`, with
+    host names only. For a 3xx other than a 304, ``upstream_message`` is
+    :data:`REDIRECT_TEXT_WITHHELD` in place of the vendor's text, and the
+    answer has no ``upstream_fault``. An error answer after a followed
+    redirect gets the text of :func:`followed_redirect_status_text`, with the
+    host name only.
     """
-    msg = _sanitize_free_text(str(exc))
+    msg = _sanitize_free_text(
+        redirect_status_text(exc) or followed_redirect_status_text(exc) or str(exc)
+    )
+    withheld = isinstance(exc, httpx.HTTPStatusError) and redirect_text_withheld(
+        exc.response.status_code
+    )
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,
@@ -1685,8 +1755,11 @@ def result_connector_error(
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
-        extras["upstream_message"] = _http_upstream_message(exc.response)
-        _add_upstream_fault(extras, exc.response)
+        if withheld:
+            extras["upstream_message"] = REDIRECT_TEXT_WITHHELD
+        else:
+            extras["upstream_message"] = _http_upstream_message(exc.response)
+            _add_upstream_fault(extras, exc.response)
     elif isinstance(exc, ConnectorUpstreamError):
         extras["http_status"] = exc.http_status
         extras["upstream_message"] = (
@@ -1694,7 +1767,8 @@ def result_connector_error(
             if exc.upstream_message
             else None
         )
-    _add_attached_upstream_fault(extras, exc)
+    if not withheld:
+        _add_attached_upstream_fault(extras, exc)
     remediation = getattr(exc, "remediation", None)
     if isinstance(remediation, str) and remediation:
         # MEHO's own next step, set by the raising connector. It stays when the

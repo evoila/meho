@@ -56,6 +56,10 @@ from meho_backplane.connectors._shared.cache_key import (
     target_entry_keys,
     target_secret_cache_key,
 )
+from meho_backplane.connectors._shared.log_host import (
+    followed_redirect_status_text,
+    redirect_status_text,
+)
 from meho_backplane.connectors._shared.secret_readers import SecretReaders
 from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
@@ -114,6 +118,11 @@ def _is_acceptable_auth_model(value: Any) -> bool:
     if value is AuthModel.SHARED_SERVICE_ACCOUNT:
         return True
     return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
+
+
+def _error_text(exc: BaseException) -> str:
+    """Return the text of *exc*; an answer after a redirect names host names only."""
+    return redirect_status_text(exc) or followed_redirect_status_text(exc) or str(exc)
 
 
 class ProxmoxConnector(HttpConnector):
@@ -302,7 +311,8 @@ class ProxmoxConnector(HttpConnector):
         ``operator=None`` runs under the synthesised system operator; on a
         Vault backend that fails closed at the live JWT round-trip →
         ``reachable=False``. Transport / auth / credential failures map to
-        ``reachable=False`` with ``extras["error"]`` — the credential arm
+        ``reachable=False`` with ``extras["error"]`` (a 3xx answer, and an
+        error answer after a followed redirect, name host names only) — the credential arm
         catches the backend-neutral ``CredentialsReadError``, so a ``gsm:``
         read failure degrades the same way a Vault one does.
         """
@@ -325,7 +335,7 @@ class ProxmoxConnector(HttpConnector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method=_PROBE_METHOD,
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+                extras={"error": f"{type(exc).__name__}: {_error_text(exc)}"},
             )
 
         version_data = version_payload.get("data") if isinstance(version_payload, dict) else None
@@ -533,6 +543,8 @@ class ProxmoxConnector(HttpConnector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
         _log.info(

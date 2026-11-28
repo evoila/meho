@@ -294,3 +294,53 @@ func TestHistoryLimitIsChecked(t *testing.T) {
 		t.Fatalf("err=%v stderr=%s", err, stderr)
 	}
 }
+
+func TestDiffPrintsTheRuleChangesAndWhatRunsAtOnceForEachRole(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
+		`"no_change":false,"file_sha256":"a","based_on":"b","diff":{`+
+		`"classifications":{"added":[],"changed":[],"removed":[]},`+
+		`"agents":{"added":[{"entry":{"name":"helper","caller":"personal_agent"}}],`+
+		`"changed":[{"before":{"name":"night"},"after":{"name":"night","up_to":"caution"}}],`+
+		`"removed":[{"entry":{"name":["x"]}}]},`+
+		`"runs_at_once":{"Reader":[],"Operator":[{"connector_id":"inslim-1.x",`+
+		`"op_id":"inslim.vm.restart","risk":"caution","rule":"tenant_rule:helper"}],`+
+		`"Admin":[{"connector_id":"inslim-1.x","op_id":"inslim.vm.restart","risk":"caution",`+
+		`"rule":"tenant_rule:helper"}]},"operations_changed":0}}`, &got)
+	stdout, stderr, err := run(t, "diff", writeFile(t), "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("diff: %v; stderr=%s", err, stderr)
+	}
+	for _, want := range []string{
+		"+ agents: helper\n",
+		"~ agents: night\n",
+		"- agents: {\"name\":[\"x\"]}\n",
+		"runs at once for Operator: inslim-1.x inslim.vm.restart (caution, tenant_rule:helper)\n",
+		"runs at once for Admin: inslim-1.x inslim.vm.restart (caution, tenant_rule:helper)\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "runs at once for Reader") {
+		t.Errorf("unexpected Reader line:\n%s", stdout)
+	}
+}
+
+func TestDiffOfAFileThatChangesNoRulePrintsNoRuleLine(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
+		`"no_change":false,"file_sha256":"a","based_on":"b","diff":{`+
+		`"description":{"added":[],"changed":[{"before":"a","after":"b"}],"removed":[]},`+
+		`"agents":{"added":[],"changed":[],"removed":[]},`+
+		`"runs_at_once":{"Reader":[],"Operator":[],"Admin":[]},"operations_changed":0}}`, &got)
+	stdout, stderr, err := run(t, "diff", writeFile(t), "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("diff: %v; stderr=%s", err, stderr)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "agents:") || strings.HasPrefix(line, "runs at once") {
+			t.Errorf("unexpected rule line %q", line)
+		}
+	}
+}

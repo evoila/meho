@@ -30,7 +30,9 @@ each time.
   person's click in the web console.
 - MEHO gives back a request that already waits
   (`extras.approval_request_reused: true`) only for a call with the same
-  work reference while `APPROVAL_SAME_CALL_REUSE` is on. Each request of a
+  work reference while `APPROVAL_SAME_CALL_REUSE` is on, and for a retry
+  with the same `idempotency_key`. The script sends no idempotency_key, on
+  REST, MCP or the meho command line. Each request of a
   run is sent with a work reference of its own, so MEHO never gives the
   first request of check 10 back for its second call. A request given back
   that is on this run's list is this run's: the check goes on as usual. Any
@@ -173,20 +175,36 @@ These lines are always `[skip]`, also in a run where every check passes:
 - `check 8 (an Admin, a person, web console, the reason of the write rule):
   not run: waits for #6966`. For a `caution` write, the console refuses
   the lowering because the level is lower than the classification. The
-  write rule has no reason of its own yet.
+  write rule has no reason of its own yet. This line prints only when the
+  person step of check 8 was done.
 - `check 8 (an Admin's token, REST, a policy file preview): not run: waits
   for #6966`, while MEHO's policy check has no mistake text of its own for
   "a write stays at least caution". It still fails when the refusal is the
   one for an operation that shows a secret or calls an address the caller
   gives.
-- `check 11: not run: waits for #7073`, as long as the audit row has no
-  caller kind. With it, check 11 still prints `[skip]` for the event
-  intake, the findings investigator and the runner executor, because the
-  script cannot start their work on a sandbox install.
+- `check ... (..., the caller kind): not run: waits for #6962, audit row
+  <id>`, as long as the audit row holds no `caller_kind` field. The id is
+  the audit row the line read. Each line that expects a
+  caller kind (checks 1 to 6, 10 and 11) still checks the rest: the
+  answer, the rule, the audit row and the fresh result. Such a line never
+  prints `[ok]`: it prints `[FAIL]` when another part failed, and else
+  only this `[skip]` line. The summary line counts these lines as "caller
+  kind not proven: N". A `caller_kind` of null, a wrong caller kind and a
+  row that is not found still fail.
+- Check 11 always prints `[skip]` for the event intake, the findings
+  investigator and the runner executor, because the script cannot start
+  their work on a sandbox install.
 
 A `[skip]` line never counts as passed.
 
 ## How to run it
+
+Set `CPC_OP_POLICY_CHANGE` to `policy-registry-1.x policy.apply`, and
+`CPC_PARAMS_POLICY_CHANGE` to the params of the policy import: `scope`
+(`tenant`), `file` (the whole policy file, as text), `file_sha256` and
+`based_on`. Take the last two from a preview of the same file
+(`POST /api/v1/policy/import?preview=true`). Record the baseline with the
+same params.
 
 1. With the switch `CUSTOM_POLICY` still off, save the answers that check 7
    compares with:
@@ -194,6 +212,10 @@ A `[skip]` line never counts as passed.
    ```bash
    bash scripts/acceptance/custom-policy-check.sh --record-baseline baseline.tsv
    ```
+
+   A baseline file recorded with an earlier version of the script must be
+   recorded again, because check 7 has probes that an older file does not
+   hold.
 
    It saves the file only when every probe got HTTP 200, a valid answer,
    and its audit row. A preview that answers `status: "error"` is no valid
@@ -228,7 +250,8 @@ exit code 1, and the `[left]` lines are printed.
 Exit code 0 needs the three open parts of check 11 (the event intake, the
 findings investigator and the runner executor, which wait for #7073 and the
 logins it names), the two parts of check 8 that need the write rule's own
-reason (#6966), and the owner's own approval in check 7 (#7132). Until
+reason (#6966), the owner's own approval in check 7 (#7132), and the
+caller kind on the audit row (#6962). Until
 those are done, a run where every check passes ends with exit code 3. So does a run
 where the person did checks 4 and 5, while MEHO has no route that reads
 the agent rule and the custom role.
@@ -240,7 +263,7 @@ the agent rule and the custom role.
 | 1 | An Admin lowers a `dangerous` operation to `caution` with a reason and a fresh sign-in. A person in the console runs it at once. The audit row names the override made in this run. |
 | 2 | A former `caution` operation with the plain mark is now `dangerous` (read first). An Operator cannot approve another person's request for it; an Admin can. |
 | 3 | A saved "always wait" from before the switch is now `destructive`: without a preview the call is refused; with a preview it waits. |
-| 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it. |
+| 4 | A personal agent rule lets a person's AI tool run one `caution` operation at once. A service login without a grant still waits for it, by the rule `default:service.caution_write`. |
 | 5 | A custom role approves requests on one connector. A person without the role is refused at the click. |
 | 6 | A credential read, a credential write, a change of rights, a change of the policy (with the Admin's token), a `destructive` operation, a delete (also after a lowering) and a call to an address the caller gives all wait. A service login's root command on a host waits by the rule `default:service.root_shell`. A service login with a delete grant runs the delete (sandbox mode). An agent's policy import (`policy.apply`) is refused before anything waits, and so is an Operator's (it needs the tenant_admin role). An agent's approve attempt is refused. |
 | 8 | A write is never lowered below `caution`: in the console and with a token (a policy file preview). |
@@ -267,9 +290,16 @@ What makes a check pass:
   operation, level `caution`, `set_at` after the step began, and
   `set_by_sub` equal to the login of the Admin's edit row
   (`meho_connector_edit_op`) of that operation. `rule_ref` of the override
-  list names a classification entry, so the script does not use it. It
-  takes only the run row of the Operator of `CPC_PERSON_TOKEN`, with the
-  connector and target of `CPC_OP_LOWERED`, after that edit row. The run's
+  list names a classification entry, so the script does not use it. The
+  edit row is the Admin's edit on the connector of `CPC_OP_LOWERED` that
+  lowered the risk level to `caution`: its new level is `caution`, and its
+  old level is higher (in the order `safe`, `caution`, `dangerous`,
+  `destructive`). An edit that leaves the level at `caution`, a raise to
+  `caution`, an edit of an operation with the same id on another
+  connector, an edit of another setting, or the removal of an override is
+  not that row. It takes only the run row of
+  the Operator of `CPC_PERSON_TOKEN`, with the connector and target of
+  `CPC_OP_LOWERED`, after that edit row. The run's
   audit row must carry a rule of the source `override`.
 - A click in the web console passes on the request's status and the audit
   row of the click (`POST /ui/approvals/{id}/approve`). Every click row
@@ -325,7 +355,15 @@ What makes a check pass:
   full, with the fractions of a second): the sensor's operation, target
   and login. It counts only with a fresh result of the named sensor: one
   that `GET /api/v1/sensors/{id}/results` shows evaluated at or after
-  `next_fire_at`.
+  `next_fire_at`. An install that keeps no result history
+  (`CHECKS_EVIDENCE_RETENTION_DAYS=0`) answers that route with no row.
+  For such an install, set `CPC_NO_RESULT_HISTORY=1`. Only then does an
+  empty list lead the script to read the sensor list again, and the
+  sensor's `last_evaluated_at` counts when it is at or after
+  `next_fire_at`. Without the setting, an empty list is no fresh result,
+  and the check runner line fails. Any other value than `1` stops the
+  script with exit code 2 before any call. A fresh result row counts in
+  both cases. The audit row of the run is still needed.
 
 Check 7 runs last, because it turns the switch off. The script reads the
 switch again first and fails when it is still on or cannot be read. Then
@@ -374,4 +412,4 @@ python3 -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py'
 
 CI runs both, and `shellcheck` on the script, in the workflow
 `linux-server-test.yml`, on each pull request that changes the script, its
-two test files or its fixture.
+two test files, its fixture or this page.

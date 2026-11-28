@@ -130,7 +130,7 @@ human decision).
 | `mssql.ha.fci` | ha | safe | `sys.dm_os_cluster_nodes` + `SERVERPROPERTY('IsClustered')` |
 | `mssql.ha.sync-health` | ha | safe | `sys.dm_hadr_database_replica_states` |
 | `mssql.backup.history` | backup | safe | `msdb.dbo.backupset` |
-| `mssql.backup.database` | backup | **caution** | `BACKUP DATABASE ... TO DISK` |
+| `mssql.backup.database` | backup | **caution** | `BACKUP DATABASE ... TO DISK`. It overwrites an older backup at the same path: that older backup is gone. |
 | `mssql.backup.restore` | backup | **dangerous + approval** | `RESTORE DATABASE ... FROM DISK` (overwrites) |
 
 The `ha` group is the migration-validation surface: an operator confirms an
@@ -142,7 +142,8 @@ Note the two deliberate tier choices, per the issue text: **`create` is
 mutation on a governed instance that consumes resources and can collide with
 existing state, so policy treats it as dangerous alongside `drop`; **`restore`
 is `dangerous`+approval** because it overwrites the target database, while
-`backup` is only `caution` (it produces a file and is recoverable).
+`backup` is only `caution` (it produces a file and is recoverable). It
+overwrites an older backup at the same path: that older backup is gone.
 
 Every list op returns the `{rows, total}` envelope the JSONFlux reducer keys
 on (it detects the single `rows` collection and materialises it into a result

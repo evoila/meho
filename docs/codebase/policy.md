@@ -106,37 +106,138 @@ routing:
 - The one switch `POLICY_APPROVER_ROUTING` turns on both: the bindings at
   sign-in and the routing at the click.
 - The file reserves seven top-level keys (`RESERVED_KEYS` in
-  `policy/document.py`): `limits`, and six refused keys, `agents`,
+  `policy/document.py`): `limits`, `agents`, and five refused keys,
   `approvers`, `role_bindings`, `risk_levels`, `custom_roles` and
-  `baseline`. A file that holds one of the six is refused, whatever its
+  `baseline`. A file that holds one of the five is refused, whatever its
   value, in a tenant's file and in the install's file, with one sentence:
-  "This version of MEHO does not read `agents` in a policy file; remove
+  "This version of MEHO does not read `approvers` in a policy file; remove
   it."
 - `limits` (the install's file only) is the outer limit of the tenants'
   policies: `limits.personal_agent_up_to` is the highest risk level
   (`safe`, `caution` or `dangerous`) that a tenant's rule for personal
   agents may let run at once. `destructive` is not a value: it always
   waits. Without the part the limit is `safe`; the shipped "small team"
-  file has no such part. The caller says whether the `CUSTOM_POLICY`
-  switch is on: it passes `custom_policy` to `build_plan`, `apply_policy`,
-  `check_document`, `export_policy`, `limits_diff` and
-  `personal_agent_limit`, default off. No route and no operation passes
-  it, so every path runs with the switch off.
-- A file that holds the key `limits` is refused whatever its value
-  (`limits: {}`, `limits: null` and `limits:` too). A tenant's file gets
-  "`limits` belongs to the install's policy file. Only a platform admin
-  sets the outer limit; a tenant's file stays inside it." The install's
-  file with the switch off gets the sentence of the six refused keys:
-  "This version of MEHO does not read `limits` in a policy file; remove
-  it." A `limits` value of the wrong type gets its type sentence first,
-  for example "`limits` must be a mapping of named keys."
+  file has no such part. With the switch `CUSTOM_POLICY` on, a platform
+  admin imports it with `meho policy import --scope install`; the import
+  is a change of the policy like every `policy.apply`: in the web console
+  it runs at once after a fresh sign-in, with a token it waits for a
+  platform admin's click in the web console, and an agent login, a
+  service login or a hosted agent run is refused before anything waits.
+  The routes (`/api/v1/policy/validate`, `import`, `export`, the file of
+  `explain`) and `policy.apply` (its approval card and its run) read the
+  switch with `custom_policy_on(get_settings())` and pass it as
+  `custom_policy` to `build_plan`, `apply_policy` and `export_policy`.
+  The run reads the switch when it runs, not when it was asked.
+- A tenant's file that holds the key `limits` is refused whatever its
+  value, with the switch on or off: "`limits` belongs to the install's
+  policy file. Only a platform admin sets the outer limit; a tenant's file
+  stays inside it." The install's file with the switch off is refused the
+  same way (also `limits: {}`, `limits: null` and `limits:`): "`limits`
+  needs CUSTOM_POLICY: the outer limit counts only while the
+  CUSTOM_POLICY setting is on. Remove the part, or ask the person who
+  runs MEHO to turn the setting on." With the switch on, an empty part
+  means the same as no part. A `limits` value of the wrong type gets its
+  type sentence first, for example "`limits` must be a mapping of named
+  keys."; an unknown key gets "`limits.<key>` is not a known key."; and
+  `destructive` or another unknown level gets "`limits.personal_agent_up_to`
+  is not a level a limit can have; use safe, caution or dangerous. A
+  destructive operation always waits."
+- With the switch on, the export of the install's file writes `limits`,
+  and the exported file imports again with "No change.".
 - With the switch off, a stored `limits` part is ignored: the export
   writes no `limits` part, so the exported file imports again; the diff
   has no `limits` section; a file that equals the stored policy apart from
   that part is "No change."; an approved import keeps the stored part as
-  it is; `personal_agent_limit` answers `safe`. A stored value that is not
-  a mapping counts as no limit. No call decision reads `limits` in this
-  version.
+  it is; `personal_agent_limit` answers `safe`. Classification reads the
+  stored policy key by key, so a stored `limits` part does not change it.
+- `install_personal_agent_limit(session, custom_policy=...)` in
+  `policy/limits.py` reads the install's stored policy (`tenant_id IS
+  NULL`) and answers with `personal_agent_limit`. A stored value that
+  MEHO cannot read (not a mapping, or not a limit level) never counts as a
+  looser limit: the answer is `safe`, the strictest limit, and one warning
+  `policy_limit_not_readable` names the stored place (`install:limits` or
+  `install:limits.personal_agent_up_to`). No call decision reads the limit
+  in this version.
+
+## Personal agent rules (`agents`)
+
+`policy/agent_rules.py` holds the rule shape, its checks and the rule
+match, as pure functions. `policy/agent_rules_plan.py` adds the rules to
+the import plan. The user guide is the part "Rules for personal agents"
+of `docs-site/guides/policy-file.md`.
+
+- The parser (`parse_policy_file(content, custom_policy=...)` in
+  `policy/document.py`): with the switch off, it refuses the key `agents`
+  like the five refused keys (`AGENTS_NEED_CUSTOM_POLICY`), so that
+  sentence comes back also when the file has other mistakes, and the
+  checks after the parse do not run. With the switch on, `agents` is a
+  list of at most 200 rules (`Field(max_length=200)`, like the other lists
+  of the file), each kept as written; `document_of` stores the rules with
+  only the keys that are set (`stored_agents`), and `agents: null` as
+  `[]`, so the checks still see the key. The order of the rules does not
+  count in `canonical_sha256`.
+- `agent_rules_mistakes`, called by `check_document`: with the switch off,
+  a document that holds the key `agents` is refused whatever its value
+  (`AGENTS_NEED_CUSTOM_POLICY`); the install's file never holds it
+  (`AGENTS_IN_INSTALL_FILE`); then the shape of each rule, with its place
+  (`agents[N].caller`, ...); `caller: person` and `caller: service_agent`
+  are "not in this version"; `rights_changes: allow` needs `connectors`;
+  a repeated name; and a rule whose `up_to` is above
+  `personal_agent_limit(install_document, ...)`.
+- A stored tenant file that is now above a lowered limit is refused on its
+  next import, also when it did not change: the checks run before "No
+  change." is decided. So the tenant admin must lower the rule; the file
+  does not import again as it is.
+- How a rule is read (`rule_for`, `allowed_level`, `rule_lets_run`): a
+  rule that names the connector wins over one without `connectors`;
+  between rules that match equally, the lower `up_to` wins, then the rule
+  without `rights_changes`. What counts is the lowest of the rule, the
+  outer limit and the role's limit (`ROLE_LIMITS`: Reader `safe`,
+  Operator `caution`, Admin `dangerous`). A `changes_rights` operation
+  runs only under a rule that names its connector with
+  `rights_changes: allow`. The rule id is `tenant_rule:<name>` (`rule_ref`).
+- `agents_plan` (switch on only): a tenant's plan gets `agents` (rules
+  added, changed, removed, by name) and `runs_at_once`, both only when one
+  side has a rule. `agents_diff` keys a stored rule on its name; a stored
+  rule that is not a mapping, or whose `name` is not text, keys on its
+  whole text, so the plan shows it as removed and a valid file replaces it.
+- `runs_at_once` holds, for each role, the operations that run at once
+  under the file's rules and the file's classifications, and wait under
+  the stored rules and the stored classifications
+  (`runs_at_once_by_role(..., before=..., before_ops=...)`; `_rule_ops`
+  runs once for each side of the plan). An edit that changes neither the
+  rules nor what waits lists none. `_rule_ops` reads the operations with the functions
+  dispatch uses (`lookup_descriptor`): `visible_scope_clause` (the
+  tenant's own copy of a connector in place of the built-in rows, so each
+  operation once), `enabled_for_tenant_clause` (the tenant's own on/off
+  choice), `installed_owner_clause` and `row_code_missing`. The values
+  are `policy_in_force` with the overrides of `load_overrides` (an admin's
+  per-operation risk level and approval) and the classification of that
+  side. An operation is never listed when it is `safe` (a token runs it
+  at once today), or when a check that no rule lowers makes it wait:
+  `destructive` (by code, edit or policy), "always wait" or a
+  classification conflict, `never_covered_reason` (credential, per-call
+  approval, caller address, delete sign), a MEHO change of rights or of
+  the policy, a root shell, `hard_to_undo`, a multi-step operation, or
+  approval in force that is not the plain mark. An operation is not
+  listed for a role below its role floor (`role_floor_for`), because a
+  person of that role cannot call it at all. An operation with the plain
+  mark (`has_plain_mark`) in force counts as `dangerous`. An install plan
+  gets `agents_above_limit` (each tenant with a stored rule above the
+  file's limit, one warning each) only when there is such a tenant.
+- The command line (`printAgents` in `cli/internal/cmd/policy/file.go`):
+  `meho policy diff` and the import output print `+ agents: <name>`,
+  `~ agents: <name>` and `- agents: <name>` (a rule without a readable
+  name shows its whole text), and for each role
+  `runs at once for <role>: <connector> <op> (<risk>, <rule>)`. A file
+  that changes no rule prints no rule line.
+- `rules_from_document` reads the stored rules; a part MEHO cannot read
+  gives no rule and one warning `policy_agent_rules_not_readable`.
+- With the switch off, a stored `agents` part is ignored like `limits`:
+  the export leaves it out, the diff has no `agents` section, and the
+  planned document keeps the stored part.
+- No call decision reads the rules: every call gets the same answer with
+  or without them.
 
 ## The shipped "small team" file
 
@@ -231,7 +332,8 @@ is one sentence that names the entry:
 - **Limits** (`policy/limits.py`, `limits_mistakes`): the check reads
   whether the file has the key `limits`, not whether it has a value. A
   tenant's file that holds it is refused, and so is the install's file
-  that holds it while the `CUSTOM_POLICY` switch is off.
+  that holds it while the `CUSTOM_POLICY` switch is off ("`limits` needs
+  CUSTOM_POLICY: ...").
 
 At most 50 mistakes are listed, then one line says how many more there
 are.
@@ -471,6 +573,52 @@ it.
   the file and plans again. If the stored policy changed after the plan:
   "The policy changed after this import was planned. Run the preview
   again." Nothing is written then.
+- The approval card of an import planned with `CUSTOM_POLICY` on (of the
+  install's file or of a tenant's file) holds
+  `planned_with_custom_policy: true`, because the switch decides whether
+  the `limits` part of the install's file and the `agents` part of a
+  tenant's file are read. A card planned with the switch off has only the
+  keys it had before the switch existed, also in `meho_approvals_get` and
+  `meho_approvals_list`. A card without the field counts as planned with
+  the switch off; so does a card that waited during an upgrade. After the
+  approval, the run reads the switch again. When it is not the same as on
+  the card, the run writes nothing and gives the same sentence.
+- The stored card of a tenant import planned with `CUSTOM_POLICY` on
+  also holds `planned_with_install_limits`: the hash of the install's
+  stored `limits` and `classifications` (`install_limits_sha256`). At the
+  run after the approval, MEHO compares this recorded value with the
+  install's stored policy and refuses the run when they differ: "The
+  install's policy changed since this request was planned. Ask again."
+  Nothing is written, and the audit row of the run holds the sentence.
+  Only the run reads the recorded value, from the stored card.
+- How each reader sees a stored import card:
+  `connectors/policy/apply_card.py` (`policy_card_as_read`, registered
+  with `register_card_view` in `operations/platform_admin_card.py`). Every
+  view shapes the card in one call of `card_for_reader`: the REST
+  approval views, the console (`project_request_to_view`) and the MCP
+  approval tools. It runs the card view first and then the filter of the
+  parts only a platform admin reads (`card_without_tenant_parts`, which
+  also empties `agents_above_limit` and drops its `Tenant <id>:`
+  warnings). The stored row never changes. With `CUSTOM_POLICY` off,
+  every view shows the card without `agents`, `runs_at_once`,
+  `agents_above_limit` and its warnings, `planned_with_custom_policy` and
+  `planned_with_install_limits`. With it on, no reader gets
+  `planned_with_install_limits` in any view (the REST approvals answers,
+  `meho_approvals_get`, `meho_approvals_list`, `preview_operation`, the
+  console detail page and the bell panel); it stays in the stored card,
+  where the run reads it. A person over REST and in
+  the console reads each role's whole `runs_at_once` list; every MCP
+  answer (the approval tools and `preview_operation`, also for a person)
+  and an agent or service login over REST get, for each role, `count`,
+  the first 50 `items`, and `more` ("N more") when there are more. The
+  policy history (`GET /api/v1/policy/history`) shapes each entry's
+  `diff` the same way (`diff_as_read`); the stored revision never
+  changes. A runner login
+  reads no approval card. This is how the approvals tools hold the size
+  rule (no agent sees a big raw answer): an approval card is not an
+  operation result, so it has no result link. An admin's
+  own run in the web console has no card and plans with the switch as it
+  is.
 - A run without an approval, or a run by the login that asked for it (for
   example its re-run of a failed request, `POST /api/v1/approvals/{id}/rerun`),
   writes only for an admin in the web console. Any other such run writes
@@ -521,7 +669,7 @@ import is human-only.
 | `POST /api/v1/policy/import` | `meho policy import FILE` | 202 with the approval request; 200 "No change."; 422 with mistakes; 409 with the switch off |
 | `GET /api/v1/policy/export` | `meho policy export [-o FILE]` | the stored policy as a file |
 | `GET /api/v1/policy/history` | `meho policy history` | the last 20 imported files, newest first |
-| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
+| `POST /api/v1/policy/explain` | `meho policy explain` | why a call runs, waits or is denied, and who may approve; with `CUSTOM_POLICY` on, also whether the person who asked may approve their own request (`own_approval`); runs nothing ([policy-evaluator.md](policy-evaluator.md)) |
 | `GET /api/v1/policy/carry-over/dry-run` | `meho policy carry-over --dry-run` | every saved "always wait" and what changes if MEHO reads it as `destructive`; writes only its audit row; an agent login gets 403 (`policy/carry_over.py`) |
 
 Code: `backend/src/meho_backplane/api/v1/policy.py`,
@@ -553,4 +701,11 @@ of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
 (who may run it, every table the same, an override keeps waiting),
 `backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
 warning exactly when the step check makes the step wait, in both scopes),
+`backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
+`CUSTOM_POLICY` on: import, export and import again, who may ask and
+approve, the audit rows, a wrong part, a stored value MEHO cannot read,
+the approval table with no part, the switch turned off again),
+`backend/tests/test_api_v1_policy_install_limits_card.py` (the `limits`
+part on the approval card of an install import, and a run with the switch
+not the same as on the card),
 `cli/internal/cmd/policy/file_test.go`, `cli/internal/cmd/policy/carry_over_test.go`.

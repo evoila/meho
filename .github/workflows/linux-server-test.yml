@@ -43,7 +43,7 @@
 # (scripts/ci), with fake commands and no network.
 #
 # The custom policy check script (scripts/acceptance/custom-policy-check.sh)
-# is a trigger too: job test runs shellcheck on it, and job
+# and its docs page are triggers too: job test runs shellcheck on it, and job
 # custom-policy-check runs its tests against recorded answers and stand-in
 # curl and meho programs. They contact no install and use no secret.
 #
@@ -69,6 +69,7 @@ on:
       - 'scripts/tests/test_custom_policy_check.py'
       - 'scripts/tests/test_custom_policy_check_live.py'
       - 'scripts/tests/custom_policy_check_fixture.py'
+      - 'docs/acceptance/custom-policy-check.md'
   workflow_dispatch:
 
 permissions:

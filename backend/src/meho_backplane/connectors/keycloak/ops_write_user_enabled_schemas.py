@@ -117,6 +117,7 @@ USER_ENABLED_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_DISABLE,
             "when_to_call": "When a person leaves, and their account must stop working but stay.",
@@ -142,6 +143,7 @@ USER_ENABLED_OPS: tuple[KeycloakOp, ...] = (
         tags=("write", "user", "keycloak"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions={
             "when_to_use": _WHEN_TO_USE_ENABLE,
             "when_to_call": "When a person returns, and their disabled account must work again.",

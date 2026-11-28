@@ -425,28 +425,26 @@ def who_can_approve(approver_roles: Any) -> str | None:
 
 
 def routing_refusal(
-    operator: Operator, approver_roles: Any, approver_rule: str | None
+    operator: Operator, approver_roles: Any, approver_rule: str | None, *, place: bool = True
 ) -> str | None:
     """One sentence when *operator* is not in the stored kinds, else ``None``.
 
     ``None`` too while the switch is off, or when the request has no
-    stored kinds (today's rule).
+    stored kinds (today's rule). With *place* ``False`` the sentence does
+    not name the routing rule (the places of its entries in the policy).
     """
     if not routing_enabled():
         return None
     kinds = stored_kinds(approver_roles)
     if kinds is None:
         return None
-    rule = approver_rule or DEFAULT_RULE
+    rule = f" (routing rule `{approver_rule or DEFAULT_RULE}`)" if place else ""
     if not kinds:
-        return (
-            f"No group may approve this change (routing rule `{rule}`), so it waits until "
-            "it expires."
-        )
+        return f"No group may approve this change{rule}, so it waits until it expires."
     if in_kinds(operator, kinds):
         return None
     return (
-        f"Only {group_names(kinds)} may approve this change (routing rule `{rule}`). "
+        f"Only {group_names(kinds)} may approve this change{rule}. "
         f"You are in MEHO-{kind_of(operator)}."
     )
 

@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
+from meho_backplane.connectors.policy.apply_card import diff_as_read
 from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import ApprovalNotFoundError
@@ -80,6 +81,8 @@ from meho_backplane.policy.service import (
     list_history,
 )
 from meho_backplane.policy.store import InvalidStoredPolicyError, classification_enabled
+from meho_backplane.policy.switches import custom_policy_on
+from meho_backplane.settings import get_settings
 
 __all__ = ["router"]
 
@@ -210,6 +213,18 @@ def _plan_response(
     )
 
 
+async def _plan(
+    session: AsyncSession, operator: Operator, scope: PolicyScope, content: bytes
+) -> PolicyPlan:
+    return await build_plan(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        content=content,
+        custom_policy=custom_policy_on(get_settings()),
+    )
+
+
 def _bind_audit(op_id: str, op_class: str) -> None:
     structlog.contextvars.bind_contextvars(audit_op_id=op_id, audit_op_class=op_class)
 
@@ -224,9 +239,7 @@ async def validate(
     """Check the file: its shape, its categories and levels, and the floors. Writes nothing."""
     _bind_audit("policy.file.validate", "read")
     _check_scope(operator, scope)
-    plan = await build_plan(
-        session, scope=scope, tenant_id=operator.tenant_id, content=await _read_file(request)
-    )
+    plan = await _plan(session, operator, scope, await _read_file(request))
     return PolicyValidateResponse(
         ok=not plan.mistakes, scope=scope, mistakes=plan.mistakes, warnings=plan.warnings
     )
@@ -282,13 +295,13 @@ async def import_policy(
     content = await _read_file(request)
     if preview:
         _bind_audit("policy.file.preview", "read")
-        plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+        plan = await _plan(session, operator, scope, content)
         return _plan_response(plan, preview=True, message=NO_CHANGE if plan.no_change else None)
 
     _bind_audit("policy.file.import", "write")
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=SWITCH_OFF_IMPORT)
-    plan = await build_plan(session, scope=scope, tenant_id=operator.tenant_id, content=content)
+    plan = await _plan(session, operator, scope, content)
     if plan.mistakes:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -315,7 +328,12 @@ async def export(
     """The stored policy of *scope* as a ``policy: v1`` file."""
     _bind_audit("policy.file.export", "read")
     _check_scope(operator, scope)
-    text = await export_policy(session, scope=scope, tenant_id=operator.tenant_id)
+    text = await export_policy(
+        session,
+        scope=scope,
+        tenant_id=operator.tenant_id,
+        custom_policy=custom_policy_on(get_settings()),
+    )
     return Response(
         content=text,
         media_type="application/yaml",
@@ -330,11 +348,20 @@ async def history(
     scope: Annotated[PolicyScope, Query()] = "tenant",
     limit: Annotated[int, Query(ge=1, le=KEEP_REVISIONS)] = KEEP_REVISIONS,
 ) -> list[PolicyRevisionView]:
-    """The imported policy files of *scope*, newest first (MEHO keeps the last 20)."""
+    """The imported policy files of *scope*, newest first (MEHO keeps the last 20).
+
+    Each entry's ``diff`` reads as an approval card's plan
+    (:func:`~meho_backplane.connectors.policy.apply_card.diff_as_read`): a
+    person gets each role's whole list, every other caller the short form.
+    """
     _bind_audit("policy.file.history", "read")
     _check_scope(operator, scope)
     rows = await list_history(session, scope=scope, tenant_id=operator.tenant_id, limit=limit)
-    return [PolicyRevisionView.model_validate(row) for row in rows]
+    whole = is_human_principal(operator)
+    return [
+        PolicyRevisionView.model_validate({**row, "diff": diff_as_read(row["diff"], whole=whole)})
+        for row in rows
+    ]
 
 
 @router.get("/carry-over/dry-run", response_model=CarryOverDryRun)
@@ -450,12 +477,7 @@ async def _file_document(
     _check_scope(operator, body.scope)
     if not classification_enabled():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FILE_NEEDS_CLASSIFICATION)
-    plan = await build_plan(
-        session,
-        scope=body.scope,
-        tenant_id=operator.tenant_id,
-        content=body.file.encode("utf-8"),
-    )
+    plan = await _plan(session, operator, body.scope, body.file.encode("utf-8"))
     # The plan only read; end that transaction before explain opens its own.
     await session.rollback()
     if plan.mistakes:

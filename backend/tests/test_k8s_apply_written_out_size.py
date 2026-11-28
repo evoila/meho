@@ -58,7 +58,7 @@ from tests.test_connectors_k8s_finalizer_remove import _StubTarget
 
 _OP = "k8s.apply"
 _CONNECTOR_ID = "k8s-1.x"
-_TENANT_ID = UUID("00000000-0000-0000-0000-000000001949")
+_TENANT_ID = UUID("abcdefab-cdef-abcd-efab-cdefabcdefab")
 _TARGET = _StubTarget(tenant_id=_TENANT_ID)
 
 _HEAD = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\ndata:\n"
@@ -67,14 +67,14 @@ _TOO_LARGE = (
 )
 
 
-def _nested_aliases(levels: int) -> str:
+def _grows_by_aliases(levels: int) -> str:
     """Each level is a list that names the level below ten times."""
     lines = ["  l0: &a0 [xxxxxxxxxx]"]
     lines += [f"  l{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 10)}]" for i in range(1, levels)]
     return _HEAD + "\n".join(lines) + "\n"
 
 
-def _merge_lists(levels: int) -> str:
+def _grows_by_merge_keys(levels: int) -> str:
     """Each level is a map whose merge list names the level below ten times."""
     lines = ["  l0: &m0 {k: v}"]
     lines += [f"  l{i}: &m{i} {{<<: [{', '.join([f'*m{i - 1}'] * 10)}]}}" for i in range(1, levels)]
@@ -82,8 +82,8 @@ def _merge_lists(levels: int) -> str:
 
 
 _LARGE: dict[str, str] = {
-    "nested-aliases": _nested_aliases(8),
-    "merge-lists": _merge_lists(8),
+    "too-large-by-aliases": _grows_by_aliases(8),
+    "too-large-by-merge-keys": _grows_by_merge_keys(8),
 }
 
 
@@ -271,19 +271,19 @@ async def test_a_call_that_runs_at_once_reaches_the_cluster_for_a_normal_manifes
 ) -> None:
     _runs_at_once(monkeypatch)
 
-    await _call({"manifest": _nested_aliases(3), "dry_run": "server"})
+    await _call({"manifest": _grows_by_aliases(3), "dry_run": "server"})
 
     cluster.assert_awaited()
 
 
-@pytest.mark.parametrize("manifest", [_nested_aliases(5), _merge_lists(5)])
+@pytest.mark.parametrize("manifest", [_grows_by_aliases(5), _grows_by_merge_keys(5)])
 def test_a_manifest_with_aliases_under_the_limit_parses_as_yaml_reads_it(manifest: str) -> None:
     assert manifest_size_problem(manifest) is None
     assert _parse_manifest(manifest) == list(yaml.safe_load_all(manifest))
 
 
 def test_the_document_number_is_named() -> None:
-    manifest = _HEAD + "  a: b\n---\n" + _LARGE["merge-lists"]
+    manifest = _HEAD + "  a: b\n---\n" + _LARGE["too-large-by-merge-keys"]
 
     problem = manifest_size_problem(manifest)
     with pytest.raises(ApplyManifestError) as raised:
@@ -318,7 +318,7 @@ def test_a_document_over_the_limit_without_aliases_is_refused() -> None:
 
 
 async def test_the_preview_parses_the_manifest_once(cluster: AsyncMock) -> None:
-    manifest = _nested_aliases(3)
+    manifest = _grows_by_aliases(3)
     with patch.object(
         apply_manifest, "_parse_documents", wraps=apply_manifest._parse_documents
     ) as parse:
@@ -336,7 +336,7 @@ def test_the_card_hiding_reads_a_shared_mapping_once() -> None:
 
 
 def test_the_run_gets_its_own_documents() -> None:
-    manifest = _nested_aliases(2)
+    manifest = _grows_by_aliases(2)
 
     shown = _parse_manifest(manifest)
     own = _parse_manifest(manifest, shared=False)

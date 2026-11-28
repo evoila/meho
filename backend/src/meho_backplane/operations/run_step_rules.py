@@ -192,6 +192,7 @@ def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> 
     )
     row.policy_always_wait = step.policy_always_wait
     row.credential_call = step.credential_call
+    row.delete_call_reason = step.delete_call_reason
     row.code_safety_level = step.code_safety_level
     row.code_requires_approval = step.code_requires_approval
     row.code_parameter_schema = stored.parameter_schema

@@ -390,6 +390,8 @@ async def test_lock_status_trace_and_agent_copy_hold_no_failure_ip(
 
 
 _OTHER_REALM_MARKER = "made-up-display-name-of-another-realm"
+#: A plain setting: the shared trace engine masks no field by this name.
+_OTHER_REALM_SENDER = "made-up-sender-name-of-another-realm"
 
 
 @pytest.mark.asyncio
@@ -408,7 +410,7 @@ async def test_realm_name_check_with_another_realm_stores_nothing_of_its_answer(
             json={
                 "realm": "Example-Realm",
                 "displayName": _OTHER_REALM_MARKER,
-                "smtpServer": {"password": _MADE_UP_SMTP_PASSWORD},
+                "smtpServer": {"fromDisplayName": _OTHER_REALM_SENDER},
             },
         )
         users_route = mock.get(f"/admin/realms/{_MANAGED_REALM}/users").respond(200, json=[])
@@ -429,7 +431,7 @@ async def test_realm_name_check_with_another_realm_stores_nothing_of_its_answer(
     _, spans = await _stored_spans(operator.tenant_id)
     stored = json.dumps([span.attributes for span in spans])
     assert _OTHER_REALM_MARKER not in stored
-    assert _MADE_UP_SMTP_PASSWORD not in stored
+    assert _OTHER_REALM_SENDER not in stored
     realm_calls = [span for span in spans if span.span_kind == "vendor_call"]
     assert len(realm_calls) == 1
     assert not isinstance(realm_calls[0].attributes["response_body"], dict)

@@ -119,7 +119,7 @@ from meho_backplane.connectors.keycloak._paths import (
 from meho_backplane.connectors.keycloak.answer_realm import answer_realm_on, name_the_realm
 from meho_backplane.connectors.keycloak.managed_realm_check import (
     ManagedRealmChecks,
-    reading_realm_name,
+    realm_answer_unchecked,
 )
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
@@ -668,13 +668,14 @@ class KeycloakConnector(HttpConnector):
         (:func:`~meho_backplane.connectors.keycloak.redaction.redact_trace_fields`),
         so the stored trace and the agent copy hold ``***REDACTED***`` there.
         An empty body is recorded as it is. A body that is not JSON is
-        replaced by a fixed marker. The answer of the realm name check is left
-        out the same way: the realm it names is not yet known to be the
-        managed realm. Never raises.
+        replaced by a fixed marker. A realm answer whose name MEHO has not
+        checked yet (the realm name check, and the realm reads of an operation
+        inside :func:`.unchecked_realm_answer`) is left out the same way: the
+        realm it names is not yet known to be the managed realm. Never raises.
         """
         if not response.content:
             return None
-        if reading_realm_name():
+        if realm_answer_unchecked():
             # JSON text: the trace engine reads it back as the marker string.
             return json.dumps(_TRACE_BODY_WITHHELD)
         try:

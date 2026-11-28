@@ -56,6 +56,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _AUTH_FLOWS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.managed_realm_check import unchecked_realm_answer
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
 from meho_backplane.connectors.keycloak.ops_authflow_passkey_schemas import (
     ENSURE_PASSKEY_CODE_SKIP_OP_ID,
@@ -310,8 +311,12 @@ async def _finish_copy(
     target: KeycloakTargetLike,
     realm: str,
     source: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
-    """Give the copy the step, in the right place. Returns ``(steps, step_added)``."""
+) -> tuple[list[dict[str, Any]], bool, bool]:
+    """Give the copy the step, in the right place.
+
+    Returns ``(steps, step_added, written)``: *written* is ``True`` when this
+    call wrote to the copy (the step, its settings or its place).
+    """
     rows = await _read_steps(connector, operator, target, realm, PASSKEY_FLOW_ALIAS)
     sub = _code_subflow(rows)
     difference = _copy_difference(
@@ -354,9 +359,10 @@ async def _finish_copy(
             f"the condition step in flow {PASSKEY_FLOW_ALIAS!r} has other settings. Nothing "
             "more was changed and the realm still uses its old browser flow.",
         )
-    await _set_up_condition(connector, operator, target, realm, row, has_config=has_config)
-    await _move_after_user_configured(connector, operator, target, realm, rows, sub)
-    return await _check_copy(connector, operator, target, realm), step_added
+    set_up = await _set_up_condition(connector, operator, target, realm, row, has_config=has_config)
+    moved = await _move_after_user_configured(connector, operator, target, realm, rows, sub)
+    written = step_added or set_up or moved
+    return await _check_copy(connector, operator, target, realm), step_added, written
 
 
 async def _set_up_condition(
@@ -367,8 +373,8 @@ async def _set_up_condition(
     row: dict[str, Any],
     *,
     has_config: bool,
-) -> None:
-    """Make the condition step required and give it the passkey config."""
+) -> bool:
+    """Make the condition step required and give it the passkey config. ``True`` when it wrote."""
     # Keycloak makes the new step DISABLED; it must be required.
     if row.get("requirement") != "REQUIRED":
         path = fill_path(
@@ -396,6 +402,7 @@ async def _set_up_condition(
             json={"alias": _CONDITION_CONFIG_ALIAS, "config": dict(_CONDITION_CONFIG)},
             idempotent_conflict=False,
         )
+    return row.get("requirement") != "REQUIRED" or not has_config
 
 
 async def _move_after_user_configured(
@@ -405,8 +412,11 @@ async def _move_after_user_configured(
     realm: str,
     rows: list[dict[str, Any]],
     sub: int,
-) -> None:
-    """Raise the condition step until it is right after ``conditional-user-configured``."""
+) -> bool:
+    """Raise the condition step until it is right after ``conditional-user-configured``.
+
+    ``True`` when it moved the step.
+    """
     children = _children(rows, sub)
     names = [_name(rows[child]) for child in children]
     position = names.index(_CONDITION)
@@ -419,6 +429,7 @@ async def _move_after_user_configured(
         await connector._write_admin(
             target, "POST", path, operator=operator, idempotent_conflict=False
         )
+    return position > wanted
 
 
 async def _condition_in_place(
@@ -489,30 +500,53 @@ async def _check_copy(
     return rows
 
 
+async def _read_realm(
+    connector: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    realm_path: str,
+) -> dict[str, Any]:
+    """Read the realm. The trace stores none of the answer: the caller checks its name after."""
+    with unchecked_realm_answer():
+        return await connector._get_admin_json(target, realm_path, operator=operator)
+
+
+def _flow_state(flow_written: bool) -> str:
+    """What this call did to the passkey flow, for an error text."""
+    if flow_written:
+        return f"MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step"
+    return f"Flow {PASSKEY_FLOW_ALIAS!r} with the step was in place; MEHO did not change it"
+
+
 async def _bind(
     connector: KeycloakConnector,
     operator: Operator,
     target: KeycloakTargetLike,
     realm_path: str,
     expected_flow: str,
+    *,
+    flow_written: bool,
 ) -> list[str]:
     """Bind the copy as the realm's browser flow. Returns the unrequested changes.
 
     The realm is read again right before the write: the flow setup takes
     several requests, and a realm setting another operator changed meanwhile
     must not be written back to its old value. The op stops when the realm's
-    browser flow is no longer *expected_flow*.
+    browser flow is not *expected_flow* now.
+
+    *flow_written* says whether this call wrote to the flow; the error texts
+    name it.
     """
     managed = resolve_realm_config(target).managed_realm
-    before = await connector._get_admin_json(target, realm_path, operator=operator)
+    before = await _read_realm(connector, operator, target, realm_path)
     try:
         check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
     except ValueError:
         raise KeycloakPasskeyFlowError(
             "realm_changed",
             f"Keycloak did not answer with the realm {managed!r} right before the bind. "
-            f"MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step, and did not bind "
-            "the realm's browser flow to it. Check the managed realm of the target.",
+            f"{_flow_state(flow_written)}, and did not bind the realm's browser flow to it. "
+            "Check the managed realm of the target.",
         ) from None
     if before.get("browserFlow") != expected_flow:
         raise KeycloakPasskeyFlowError(
@@ -530,15 +564,15 @@ async def _bind(
         json=merge_representation(before, requested),
         idempotent_conflict=False,
     )
-    after = await connector._get_admin_json(target, realm_path, operator=operator)
+    after = await _read_realm(connector, operator, target, realm_path)
     try:
         check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, after, target)
     except ValueError:
         raise KeycloakPasskeyFlowError(
             "check_failed",
             f"Keycloak did not answer with the realm {managed!r} when MEHO read it back "
-            f"after the bind. MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step, and "
-            f"has sent the bind of the realm's browser flow to {PASSKEY_FLOW_ALIAS!r}. MEHO "
+            f"after the bind. {_flow_state(flow_written)}, and has sent the bind of the "
+            f"realm's browser flow to {PASSKEY_FLOW_ALIAS!r}. MEHO "
             "could not check which realm the bind reached. Check the managed realm of the "
             "target and its browser flow.",
         ) from None
@@ -562,7 +596,7 @@ async def keycloak_authflow_ensure_passkey_code_skip(
     del params  # the op takes no params; the schema refuses any
     realm = resolve_realm_config(target).managed_realm
     realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realm})
-    before = await self._get_admin_json(target, realm_path, operator=operator)
+    before = await _read_realm(self, operator, target, realm_path)
     check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
     bound = before.get("browserFlow")
     if not isinstance(bound, str) or not bound:
@@ -613,8 +647,10 @@ async def keycloak_authflow_ensure_passkey_code_skip(
             json={"newName": PASSKEY_FLOW_ALIAS},
             idempotent_conflict=False,
         )
-    copy_rows, step_added = await _finish_copy(self, operator, target, realm, rows)
-    unrequested = await _bind(self, operator, target, realm_path, bound)
+    copy_rows, step_added, written = await _finish_copy(self, operator, target, realm, rows)
+    unrequested = await _bind(
+        self, operator, target, realm_path, bound, flow_written=copied or written
+    )
     return {
         **answer,
         "browser_flow": PASSKEY_FLOW_ALIAS,

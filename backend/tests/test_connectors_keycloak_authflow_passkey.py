@@ -45,22 +45,35 @@ import pytest
 import respx
 from sqlalchemy import select
 
+import meho_backplane.flight_recorder.agent_read as agent_read_mod
+import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors.keycloak import KeycloakConnector
+from meho_backplane.connectors.keycloak.connector import _TRACE_BODY_WITHHELD
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakClientCredentials,
     KeycloakTargetLike,
 )
+from meho_backplane.connectors.result_handle_store import ResultHandleStore
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    DispatchTrace,
+    DispatchTraceSpan,
+    EndpointDescriptor,
+    Tenant,
+)
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.flight_recorder.agent_read import AGENT_TRACE_HANDLE_EXTRA_KEY
+from meho_backplane.flight_recorder.config import reset_flight_recorder_config_cache_for_testing
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
+from meho_backplane.operations.result_query import read_result_window
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
 
@@ -76,6 +89,7 @@ _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000005663")
 _COPY = "browser with passkeys"
 _CODE_SUB = "Browser - Conditional 2FA"
 _MADE_UP_SMTP_PASSWORD = "made-up-smtp-password-5663"
+_OTHER_REALM = "made-up-display-name-of-another-realm-5663"
 
 #: The provider display names Keycloak 26.8.1 lists (``getDisplayType``).
 _DISPLAY = {
@@ -677,6 +691,93 @@ async def test_other_realm_answered_after_the_bind_is_an_error(kc: KeycloakConne
     assert "has sent the bind" in text
 
 
+def _other_realm_from_get(fake: FakeKeycloak, first: int) -> Callable[[httpx.Request], Any]:
+    """Answer the realm reads with another realm, from the *first* read of the realm on.
+
+    The realm name check is stubbed here, so the op's reads are: 1 at the start,
+    2 right before the bind, 3 after the bind.
+    """
+    gets = 0
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        nonlocal gets
+        if request.method == "GET":
+            gets += 1
+            if gets >= first:
+                other = {**fake.realm, "realm": "Example-Realm", "displayName": _OTHER_REALM}
+                return httpx.Response(200, json=other)
+        return fake._realm(request)
+
+    return answer
+
+
+async def _flow_in_place(fake: FakeKeycloak) -> int:
+    """Run once, then set the realm back to ``browser``; returns the count of writes so far."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        first = await _run()
+    assert first["status"] == "ok", first
+    fake.realm["browserFlow"] = "browser"
+    return len(fake.writes)
+
+
+async def test_flow_in_place_other_realm_before_the_bind_names_no_flow_write(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _fake()
+    writes = await _flow_in_place(fake)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=_ADMIN).mock(side_effect=_other_realm_from_get(fake, 2))
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "realm_changed" in text
+    assert "has written flow" not in text
+    assert "was in place; MEHO did not change it" in text
+    assert "did not bind" in text
+    assert len(fake.writes) == writes
+
+
+async def test_flow_in_place_other_realm_after_the_bind_names_no_flow_write(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _fake()
+    writes = await _flow_in_place(fake)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=_ADMIN).mock(side_effect=_other_realm_from_get(fake, 3))
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "check_failed" in text
+    assert "has written flow" not in text
+    assert "was in place; MEHO did not change it" in text
+    assert "has sent the bind" in text
+    assert [(method, path) for method, path, _ in fake.writes[writes:]] == [("PUT", _ADMIN)]
+
+
+async def test_half_finished_copy_set_up_then_other_realm_names_the_flow_write(
+    kc: KeycloakConnector,
+) -> None:
+    """The copy has the step, not yet set up: the call writes its settings, and says so."""
+    fake = _fake()
+    fake._copy("browser", _COPY)
+    step = _ex("conditional-credential", "DISABLED")
+    fake._new_id(step)
+    fake.flows[_COPY_CODE_SUB]["steps"].append(step)
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=_ADMIN).mock(side_effect=_other_realm_from_get(fake, 2))
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "realm_changed" in text
+    assert "has written flow" in text
+    assert fake.writes
+    assert not any(path == _ADMIN for _, path, _ in fake.writes)
+
+
 async def test_realm_with_the_step_is_not_changed(kc: KeycloakConnector) -> None:
     fake = _fake(with_condition=True)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
@@ -895,3 +996,133 @@ async def test_result_and_errors_carry_no_realm_secret(kc: KeycloakConnector) ->
         ok = await _run()
     assert ok["status"] == "ok", ok
     assert _MADE_UP_SMTP_PASSWORD not in json.dumps(ok)
+
+
+# ---------------------------------------------------------------------------
+# The stored trace, with the recorder on
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedis:
+    """In-memory async Valkey stand-in for the result handle store."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+
+    async def set(self, name: str, value: Any, ex: int | None = None) -> None:
+        self.store[name] = value if isinstance(value, bytes) else str(value).encode()
+
+    async def get(self, name: str) -> bytes | None:
+        return self.store.get(name)
+
+
+@pytest.fixture
+async def recorder_on(
+    kc: KeycloakConnector, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[KeycloakConnector]:
+    """The tenant records traces; one result store backs the agent copy and its read."""
+    store = ResultHandleStore(_FakeRedis())  # type: ignore[arg-type]
+    monkeypatch.setattr(agent_read_mod, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    async with get_sessionmaker()() as session:
+        tenant = await session.get(Tenant, _TENANT_ID)
+        if tenant is None:
+            session.add(
+                Tenant(
+                    id=_TENANT_ID,
+                    slug="kc-passkey-trace",
+                    name="Keycloak passkey trace",
+                    flight_recorder_enabled=True,
+                )
+            )
+        else:
+            tenant.flight_recorder_enabled = True
+        await session.commit()
+    reset_flight_recorder_config_cache_for_testing()
+    yield kc
+    reset_flight_recorder_config_cache_for_testing()
+
+
+async def _stored_trace() -> tuple[DispatchTrace, list[DispatchTraceSpan]]:
+    async with get_sessionmaker()() as session:
+        header = (
+            await session.execute(
+                select(DispatchTrace).where(DispatchTrace.tenant_id == _TENANT_ID)
+            )
+        ).scalar_one()
+        spans = (
+            (
+                await session.execute(
+                    select(DispatchTraceSpan)
+                    .where(DispatchTraceSpan.trace_id == header.id)
+                    .order_by(DispatchTraceSpan.seq.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return header, list(spans)
+
+
+async def _agent_copy(result: dict[str, Any]) -> str:
+    """The agent's copy of the trace, as JSON text; the call must carry its link."""
+    handle = result["extras"][AGENT_TRACE_HANDLE_EXTRA_KEY]
+    window = await read_result_window(
+        _operator(), uuid.UUID(handle["handle_id"]), offset=0, limit=200
+    )
+    assert window["total_rows"] >= 1
+    return json.dumps([handle, window])
+
+
+def _realm_reads(spans: list[DispatchTraceSpan]) -> list[DispatchTraceSpan]:
+    return [
+        span
+        for span in spans
+        if span.span_kind == "vendor_call"
+        and span.attributes.get("method") == "GET"
+        and str(span.attributes.get("url", span.name)).split("?")[0].endswith(_ADMIN)
+    ]
+
+
+@pytest.mark.parametrize(
+    "first_other_read",
+    [
+        pytest.param(1, id="the-first-read"),
+        pytest.param(2, id="the-read-before-the-bind"),
+        pytest.param(3, id="the-read-after-the-bind"),
+    ],
+)
+async def test_other_realm_answer_is_not_in_the_trace_or_the_agent_copy(
+    recorder_on: KeycloakConnector, first_other_read: int
+) -> None:
+    fake = _fake()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=_ADMIN).mock(side_effect=_other_realm_from_get(fake, first_other_read))
+        result = await _run()
+    assert result["status"] != "ok"
+    assert _OTHER_REALM not in json.dumps(result)
+
+    header, spans = await _stored_trace()
+    assert header.redaction_uncertain is False
+    stored = json.dumps([[span.name, span.attributes] for span in spans])
+    assert _OTHER_REALM not in stored
+    assert "Example-Realm" not in stored
+    assert _OTHER_REALM not in await _agent_copy(result)
+
+
+async def test_managed_realm_run_keeps_the_trace_link(recorder_on: KeycloakConnector) -> None:
+    fake = _fake()
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] == "ok", result
+    assert result["result"]["changed"] is True
+    assert fake.realm["browserFlow"] == _COPY
+
+    header, spans = await _stored_trace()
+    assert header.redaction_uncertain is False
+    reads = _realm_reads(spans)
+    assert len(reads) == 3
+    assert all(span.attributes["response_body"] == _TRACE_BODY_WITHHELD for span in reads)
+    assert _COPY in await _agent_copy(result)

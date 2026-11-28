@@ -18,6 +18,11 @@ the stored rows.
   imports again with "No change.".
 * With routing off, the export has no bindings and no comment about them,
   as before.
+* A stored row with the old kinds ``SA-Operators`` and ``Approvers`` exports
+  them as stored, and the import answers "No change.": they mean
+  ``Operators`` and ``Readers``.
+* A file near the import's size limit: the comment gets shorter, so the
+  export still imports again with "No change.".
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -35,7 +40,7 @@ from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, PolicyRevision, TenantPolicy
-from meho_backplane.policy.document import document_of, parse_policy_file
+from meho_backplane.policy.document import MAX_POLICY_BYTES, document_of, parse_policy_file
 from meho_backplane.policy.service import NO_CHANGE, export_policy
 from meho_backplane.settings import get_settings
 
@@ -234,3 +239,86 @@ async def test_with_every_switch_off_the_export_is_as_before(
         "policy: v1\ndescription: Network team\nclassifications:\n"
         "- match:\n    connector: inslim-1.x\n  category: network\n"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switches", [_CUSTOM, _ROUTING], ids=["custom", "routing"], indirect=True)
+async def test_a_stored_row_with_the_old_kinds_imports_its_export_with_no_change(
+    client: TestClient, switches: bool
+) -> None:
+    # A row stored before the old kinds were read as the new ones keeps them as written.
+    old_kinds = {
+        **_NO_BINDINGS,
+        "bindings": [
+            {"match": {"group": "/MEHO-SA-Ops/Net"}, "kind": "SA-Operators", "categories": ["*"]},
+            {"match": {"group": "/MEHO-Approvers/Net"}, "kind": "Approvers", "categories": ["*"]},
+        ],
+    }
+    await _store(old_kinds)
+    before = await _rows()
+
+    text, answer = _round_trip(client)
+
+    _assert_no_change(answer)
+    assert await _rows() == before
+    assert "  kind: SA-Operators\n" in text
+    assert "  kind: Approvers\n" in text
+
+
+def _big_document(count: int, description: str = "x") -> dict[str, Any]:
+    """A tenant document with *count* classification entries of the same long size."""
+    return {
+        "description": description,
+        "classifications": [
+            {
+                "match": {
+                    "connector": f"{index:04d}-" + "c" * 190,
+                    "group": "g" * 200,
+                    "op": "o" * 200,
+                },
+                "category": "network",
+            }
+            for index in range(count)
+        ],
+    }
+
+
+async def _export_size(document: dict[str, Any]) -> int:
+    """The bytes of the tenant's export with routing off: the file without any note."""
+    await _store(document)
+    async with get_sessionmaker()() as session:
+        return len((await export_policy(session, scope="tenant", tenant_id=TENANT)).encode())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switches", [_CUSTOM], ids=["custom"], indirect=True)
+@pytest.mark.parametrize(
+    ("room", "short"), [(400, True), (20, False)], ids=["short-note", "no-room-for-a-note"]
+)
+async def test_a_file_near_the_size_limit_imports_its_export_with_no_change(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    switches: bool,
+    room: int,
+    short: bool,
+) -> None:
+    # Size the file with routing off, so the export holds no note.
+    monkeypatch.delenv("CUSTOM_POLICY")
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+    one = await _export_size(_big_document(1))
+    per_entry = await _export_size(_big_document(2)) - one
+    count = 1 + (MAX_POLICY_BYTES - room - 1000 - one) // per_entry
+    description = "x" * (1 + MAX_POLICY_BYTES - room - await _export_size(_big_document(count)))
+    assert await _export_size(_big_document(count, description)) == MAX_POLICY_BYTES - room
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
+    before = await _rows()
+
+    text, answer = _round_trip(client)
+
+    _assert_no_change(answer)
+    assert await _rows() == before
+    assert len(text.encode()) <= MAX_POLICY_BYTES
+    assert _NOTE not in text
+    assert ("Shipped bindings in force: /MEHO-Readers (Readers)" in text) is short

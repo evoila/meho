@@ -89,6 +89,7 @@ __all__ = [
     "ParsedPolicy",
     "PolicyFile",
     "binding_dict",
+    "binding_meaning",
     "canonical_sha256",
     "document_of",
     "file_sha256",
@@ -497,6 +498,18 @@ def binding_dict(binding: PolicyBinding) -> dict[str, Any]:
     return out
 
 
+def binding_meaning(binding: dict[str, Any]) -> dict[str, Any]:
+    """A stored *binding* with its kind as MEHO reads it.
+
+    A row stored before the old kinds were read as new ones may still say
+    ``SA-Operators`` or ``Approvers``; it means ``Operators`` or ``Readers``.
+    """
+    kind = binding.get("kind")
+    if not isinstance(kind, str):
+        return binding
+    return {**binding, "kind": read_kind(kind)}
+
+
 def normalise_document(document: dict[str, Any] | None) -> dict[str, Any]:
     """*document* without empty values, so two documents with one meaning compare equal."""
     out: dict[str, Any] = {}
@@ -516,12 +529,17 @@ def canonical_sha256(document: dict[str, Any] | None) -> str:
 
     Key order, comments and empty keys do not count, and neither does the
     order of the classification entries or of the categories: the most
-    specific entry wins, not the first one. The order of the ``routing``
+    specific entry wins, not the first one. A binding's old kind counts as
+    the kind MEHO reads it as (:func:`binding_meaning`). The order of the ``routing``
     entries counts: the first entry that matches wins. The order of the
     bindings and of the ``agents`` rules does not count: every binding that
     matches a login counts, and the rule that fits best counts.
     """
     meaning = normalise_document(document)
+    if isinstance(meaning.get("bindings"), list):
+        meaning["bindings"] = [
+            binding_meaning(b) if isinstance(b, dict) else b for b in meaning["bindings"]
+        ]
     for key in ("classifications", "bindings", "agents"):
         if isinstance(meaning.get(key), list):
             meaning[key] = sorted(meaning[key], key=_json)

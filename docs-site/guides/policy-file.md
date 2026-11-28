@@ -295,7 +295,12 @@ bindings:
     - Your tenant has no stored bindings and the setting is off: nothing
       about bindings.
 
-    In each case the exported file imports again with "No change.".
+    When import is turned on, the exported file imports again with
+    "No change." in each case. A binding stored with an old kind
+    (`SA-Operators`, `Approvers`) is written as stored, and the import
+    reads it as the new kind, so it is no change. When the comment would
+    make the file larger than the import accepts (1 MiB), the comment is
+    one short line that names the shipped groups and their kinds.
 - To make the shipped bindings your own, remove the `# ` in front of the
   listed lines and import the file. They are then stored bindings, and
   they count for every person, also for a person with a tenant list,

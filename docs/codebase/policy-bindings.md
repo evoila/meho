@@ -169,12 +169,19 @@ What `meho policy export` writes for a tenant (`export_policy` in
 `policy/service.py`):
 
 - The tenant has stored bindings: the `bindings` part, as stored. The file
-  imports again with "No change.".
+  imports again with "No change.". A row stored with an old kind
+  (`SA-Operators`, `Approvers`) keeps it; `canonical_sha256` and the
+  bindings diff compare a binding by the kind MEHO reads it as
+  (`binding_meaning` in `policy/document.py`).
 - The tenant has no stored bindings and the switch is on: no `bindings`
   part. Where the part would be, a comment block lists the shipped
   bindings that are in force (`_shipped_bindings_note`). The import reads
   no comment, so the file imports again with "No change." and stores no
-  binding (`test_api_v1_policy_export_bindings.py`).
+  binding (`test_api_v1_policy_export_bindings.py`). When the block
+  would make the file larger than the import accepts
+  (`MAX_POLICY_BYTES`), the comment is one line with the shipped groups
+  and their kinds. When even that line does not fit, the file has no
+  comment: it must import again.
 - The tenant has no stored bindings and the switch is off: no `bindings`
   part and no comment, as before.
 

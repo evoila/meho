@@ -85,6 +85,7 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from meho_backplane.auth.caller_record import system_columns
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.runner_identity import check_runner_jwt
 from meho_backplane.auth.vault import VaultClientError
@@ -351,6 +352,8 @@ def _build_audit_row(
             "event_id": event_id,
             "dedupe_key": dedupe_key,
         },
+        # MEHO's own intake, the kind of its login (CUSTOM_POLICY).
+        **system_columns(),
     )
 
 

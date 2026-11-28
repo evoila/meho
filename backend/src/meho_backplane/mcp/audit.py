@@ -64,6 +64,11 @@ from typing import Any
 import structlog
 
 from meho_backplane.audit import _resolve_audit_payload
+from meho_backplane.auth.caller_record import (
+    MCP_SESSION_OPEN_PATH,
+    apply_caller_block,
+    caller_columns,
+)
 from meho_backplane.auth.client_identity import apply_client_block, clean_client_text
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
@@ -241,6 +246,8 @@ async def write_mcp_audit_row(
     # The login client, channel and sign-in of the caller, when
     # AUDIT_CLIENT_IDENTITY is on (:mod:`meho_backplane.auth.client_identity`).
     apply_client_block(payload, operator)
+    # The login client and MCP client name of a personal agent (CUSTOM_POLICY).
+    apply_caller_block(payload, operator)
 
     # G0.15-T3 #1212 — finding 5: hoist ``target_name`` from the
     # contextvar the targets resolver binds at its single exit point.
@@ -312,6 +319,7 @@ async def write_mcp_audit_row(
             duration_ms=Decimal(str(duration_ms)),
             payload=payload,
             **soft_fk_kwargs,
+            **caller_columns(operator),
         )
         session.add(row)
         try:
@@ -354,7 +362,7 @@ async def write_mcp_session_open_row(
         event_class=AuditEventClass.SECURITY_EVENT,
         operator=operator,
         method="MCP",
-        path="/mcp/initialize",
+        path=MCP_SESSION_OPEN_PATH,
         status_code=200,
         duration_ms=0.0,
         payload={

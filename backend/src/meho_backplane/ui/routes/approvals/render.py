@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi.responses import HTMLResponse
 
+from meho_backplane.auth.caller_record import CALLER_KIND_KEY, caller_record_on
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_outcome import (
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 __all__ = [
     "RESULT_STATE_PILL",
     "STATUS_PILL_CLASS",
+    "caller_line",
     "parked_request_chain",
     "project_outcome",
     "project_request_to_view",
@@ -235,6 +237,8 @@ def project_request_to_view(
 
     ``proposed_effect``: the card as *reader* reads it (:func:`card_for_reader`,
     without the platform admin parts when *reader* is ``None``).
+
+    ``caller_line`` names the kind of caller who asked (:func:`caller_line`).
     """
     result_state = approval_result_state(row)
     return {
@@ -267,7 +271,35 @@ def project_request_to_view(
         **_project_policy_rule(row),
         **_project_target_and_run_start(row, target_name),
         **_project_outcome_check(row),
+        "caller_line": caller_line(row, reader),
     }
+
+
+def caller_line(row: ApprovalRequest, reader: Operator | None) -> str | None:
+    """The line that names the kind of caller who asked, or ``None``.
+
+    Read from ``proposed_effect["caller_kind"]``, stored when the call
+    started to wait with ``CUSTOM_POLICY`` on. ``None`` with the switch off
+    and for a request with no kind. "Your personal agent asked" only for
+    the person behind it (*reader*); another reader sees that person named.
+    """
+    if not caller_record_on():
+        return None
+    kind = (row.proposed_effect or {}).get(CALLER_KIND_KEY)
+    who = row.principal_name or row.principal_sub
+    if kind == "personal_agent":
+        if reader is not None and reader.sub == row.principal_sub:
+            return "Your personal agent asked."
+        return f"The personal agent of {who} asked."
+    if kind == "service_agent":
+        return f"The service agent {row.principal_act or row.principal_sub} asked."
+    if kind == "person":
+        return f"{who} asked in the web console."
+    if kind == "runner":
+        return f"The runner {row.principal_sub} asked."
+    if kind == "system":
+        return "MEHO itself asked."
+    return None
 
 
 def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:

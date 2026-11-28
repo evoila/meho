@@ -484,6 +484,13 @@
         <dt class="shrink-0 text-subtle">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
+      {#- The kind of caller who asked (CUSTOM_POLICY). -#}
+      {% if request.caller_line %}
+        <div class="flex items-baseline justify-between gap-4" data-approval-caller-kind>
+          <dt class="shrink-0 text-subtle">Asked by</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">{{ request.caller_line }}</dd>
+        </div>
+      {% endif %}
       {#- The people behind an agent, service or runner login: they count as
           the requester, so the approver sees who is really asking. -#}
       {% if request.people_behind is not none %}

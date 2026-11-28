@@ -66,6 +66,11 @@
                 <span aria-hidden="true">&middot;</span>
                 <span>requested by {{ subject(req.requester) }}</span>
               </p>
+              {% if req.caller_line %}
+                <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-caller-kind>
+                  {{ req.caller_line }}
+                </p>
+              {% endif %}
               {% if req.people_behind_line %}
                 <p class="text-xs text-subtle [overflow-wrap:anywhere]" data-approval-people-behind-line>
                   {{ req.people_behind_line }}

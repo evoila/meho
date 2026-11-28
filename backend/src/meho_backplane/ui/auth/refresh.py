@@ -103,6 +103,7 @@ from authlib.integrations.base_client.errors import OAuthError
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.caller_record import bind_request_caller
 from meho_backplane.auth.client_identity import bind_request_client
 from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.auth.operator import Operator
@@ -516,6 +517,7 @@ async def _verify_session_token(
         web_session_id=decrypted.id,
     )
     bind_request_client(web_operator)
+    bind_request_caller(web_operator)
     return web_operator
 
 

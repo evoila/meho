@@ -93,6 +93,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.approval_sign_in import ApprovalAuth, approval_sign_in_max_age
+from meho_backplane.auth.caller_kind import caller_kind
+from meho_backplane.auth.caller_record import (
+    CALLER_KIND_KEY,
+    apply_caller_block,
+    caller_columns,
+    caller_record_on,
+)
 from meho_backplane.auth.client_identity import (
     CLIENT_PAYLOAD_KEY,
     apply_client_block,
@@ -1919,6 +1926,8 @@ async def _write_audit_row(
     # a "request" row, the reviewer on a "decision" row), when
     # AUDIT_CLIENT_IDENTITY is on.
     apply_client_block(payload, operator)
+    # The login client and tool of a personal agent who acted (CUSTOM_POLICY).
+    apply_caller_block(payload, operator)
     # Approver routing: the group kinds that may approve the request and
     # the routing entry that set them. Only on a request routed while the
     # POLICY_APPROVER_ROUTING switch was on.
@@ -2022,6 +2031,8 @@ async def _write_audit_row(
         run_id=run_id,
         step_id=step_id,
         **policy_kwargs,
+        # The kind of caller of who acted on this row (CUSTOM_POLICY).
+        **caller_columns(operator),
     )
     session.add(row)
     await session.flush()
@@ -2049,6 +2060,10 @@ class ResumeRequester(NamedTuple):
     #: The people behind the requester (:mod:`~meho_backplane.operations.people_behind`),
     #: so a re-park keeps the list of the first request. ``None`` for a person.
     people_behind: list[dict[str, Any]] | None = None
+    #: The requester's kind of caller from the stored effect
+    #: (``proposed_effect["caller_kind"]``, CUSTOM_POLICY). ``None`` when the
+    #: request has none.
+    caller_kind: str | None = None
 
 
 #: Where the card keeps the requester record (#3898, #6314).
@@ -2296,6 +2311,7 @@ async def create_pending_request(
         client = build_client_block(operator) if requester is None else requester.client
         if client is not None:
             proposed_effect = {**proposed_effect, CLIENT_PAYLOAD_KEY: client}
+    proposed_effect = _with_caller_kind(proposed_effect, operator, requester)
     proposed_effect = _with_requester_record(proposed_effect, operator, requester)
 
     # RFC 8693 ``act`` (#1481): the agent principal acting on the human
@@ -3862,6 +3878,7 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
     effect = request.proposed_effect or {}
     client = effect.get(CLIENT_PAYLOAD_KEY)
     subject = stored_requester_record(effect)
+    kind = effect.get(CALLER_KIND_KEY)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
@@ -3870,7 +3887,28 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
         client if isinstance(client, dict) else None,
         subject if isinstance(subject, dict) else None,
         request.people_behind,
+        kind if isinstance(kind, str) else None,
     )
+
+
+def _with_caller_kind(
+    proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
+) -> dict[str, Any]:
+    """Store the requester's kind of caller on the card (``CUSTOM_POLICY``).
+
+    The approval card shows it. A re-park on behalf of an earlier requester
+    keeps that requester's kind: *operator* is then the reviewer. The kind
+    only records who asked; no check reads it.
+    """
+    if not caller_record_on():
+        return proposed_effect
+    if requester is not None:
+        kind = requester.caller_kind
+    else:
+        kind = caller_kind(operator, resolve_actor_sub())
+    if kind is None:
+        return proposed_effect
+    return {**proposed_effect, CALLER_KIND_KEY: kind}
 
 
 def _with_requester_record(

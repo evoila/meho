@@ -85,11 +85,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
+from meho_backplane.auth.caller_record import caller_record_on
 from meho_backplane.auth.current_tenant import tenant_not_chosen_detail
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.audit import write_mcp_session_open_row
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.call_flow_guide import call_flow_guide
+from meho_backplane.mcp.caller_tool import bind_tool_name
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.profiles import (
     UnknownToolProfileError,
@@ -1516,6 +1518,8 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
         if is_notification:
             return Response(status_code=202)
         return _error_response(jrpc.id, INVALID_REQUEST, tenant_not_chosen_detail(operator))
+    # The MCP client name for the rows of a personal agent (CUSTOM_POLICY).
+    await bind_tool_name(jrpc.method, jrpc.params, operator)
     # Request usage (#3734): label this request with its JSON-RPC method.
     # ``tools/call`` / ``resources/read`` narrow it to the tool or the
     # resource template once the handler has matched one. An unregistered
@@ -1539,8 +1543,10 @@ async def _audit_session_open(
 ) -> Response:
     """Write the ``mcp.session_open`` row of a new session, or fail the ``initialize``.
 
-    Runs only with ``AUDIT_CLIENT_IDENTITY`` on and only when this
-    ``initialize`` got a new session id (*issued*, #6209); otherwise
+    Runs only with ``AUDIT_CLIENT_IDENTITY`` or ``CUSTOM_POLICY`` on (the
+    row keeps the MCP client name, :mod:`~meho_backplane.mcp.caller_tool`),
+    and only when this ``initialize`` got a new session id (*issued*,
+    #6209); otherwise
     *response* is returned as it is. The row commits before the response
     returns. If the write fails, the client gets a JSON-RPC internal error
     with no session id, as for every other MCP audit write.
@@ -1548,7 +1554,9 @@ async def _audit_session_open(
     A session with no current tenant (#5239) writes no row: its tenant
     fields hold only a placeholder, and no audit row may name it.
     """
-    if issued is None or not operator.tenant_chosen or not get_settings().audit_client_identity:
+    if issued is None or not operator.tenant_chosen:
+        return response
+    if not (get_settings().audit_client_identity or caller_record_on()):
         return response
     client_info = (jrpc.params or {}).get("clientInfo")
     try:

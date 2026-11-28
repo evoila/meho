@@ -6,7 +6,8 @@
 * A PATCH that sets ``safety_level`` or ``requires_approval`` and the
   DELETE of an override answer ``202`` and write nothing. After a click in
   the web console (``POST /ui/approvals/{id}/approve`` after a fresh
-  console sign-in) the edit runs, with the values of that moment.
+  console sign-in) the edit runs, when the card built again at the click
+  equals the stored card; else nothing is written.
 * Only a platform admin approves an edit that turns approval off.
 * An agent login, a service login and a hosted agent run are refused
   before anything waits; an Operator is refused by the role, as today.
@@ -35,9 +36,10 @@ from meho_backplane.auth.delegation import actor_delegation
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.policy.op_edit import (
     EDIT_NEEDS_PERSON,
+    OTHER_TENANT_REFUSAL,
+    POLICY_CHANGED_REFUSAL,
     POLICY_OP_EDIT_OP_ID,
     POLICY_OP_REMOVE_OVERRIDE_OP_ID,
-    SWITCH_OFF_REFUSAL,
     PolicyEditAskRefused,
     register_policy_op_edit_operations,
     request_policy_edit,
@@ -72,6 +74,7 @@ _CONNECTOR = "opedit-1.x"
 _RESTART = "opedit.vm.restart"  # caution, no approval in code
 _STOP = "opedit.vm.stop"  # dangerous, approval in code
 _OFF = {"requires_approval": False, "reason": "read-only in practice"}
+_TENANT_B = uuid.UUID("00000000-0000-4000-8000-00000000000b")
 
 
 async def _handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -150,6 +153,69 @@ async def _raise_now(operator: Operator, op_id: str, level: str) -> None:
     )
 
 
+def _person_in(tenant_id: uuid.UUID, sub: str, *, platform_admin: bool) -> Operator:
+    """A person with a token (no web session) who acts in *tenant_id*."""
+    return Operator(
+        sub=sub,
+        tenant_id=tenant_id,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+        platform_admin=platform_admin,
+        raw_jwt="header.payload.signature",
+        acr="1",
+        auth_time=int(time.time()),
+    )
+
+
+async def _install_approval_off(op_id: str) -> None:
+    """A platform admin turns approval off for the whole install, at once."""
+    await ReviewService(h.person("platform-c")).edit_op(
+        _CONNECTOR, op_id, tenant_id=None, person_present=True, **_OFF
+    )
+
+
+async def _tenant_copy(op_id: str) -> None:
+    """Give the tenant its own copy of the built-in row of *op_id*."""
+    async with get_sessionmaker()() as session, session.begin():
+        built_in = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id)
+            )
+        ).scalar_one()
+        columns = {
+            attr.key: getattr(built_in, attr.key)
+            for attr in EndpointDescriptor.__mapper__.column_attrs
+            if attr.key not in {"id", "tenant_id"}
+        }
+        session.add(EndpointDescriptor(**columns, tenant_id=h.TENANT))
+
+
+async def _drop_tenant_copy(op_id: str) -> None:
+    async with get_sessionmaker()() as session, session.begin():
+        copy = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == op_id, EndpointDescriptor.tenant_id == h.TENANT
+                )
+            )
+        ).scalar_one()
+        await session.delete(copy)
+
+
+async def _enabled_rows(op_id: str) -> list[tuple[uuid.UUID | None, bool]]:
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(EndpointDescriptor.tenant_id, EndpointDescriptor.is_enabled).where(
+                EndpointDescriptor.op_id == op_id
+            )
+        )
+        return [(tenant_id, enabled) for tenant_id, enabled in rows.all()]
+
+
+def _refused_as_changed(request: Any) -> None:
+    assert POLICY_CHANGED_REFUSAL in json.dumps(request.resume_result)
+
+
 def _waits(response: Any) -> uuid.UUID:
     assert response.status_code == 202, response.text
     body = response.json()
@@ -181,7 +247,11 @@ async def test_a_tenant_admins_raise_with_a_token_waits_then_runs_after_a_click(
         card = request.proposed_effect["preview"]
         assert card["scope"] == "tenant"
         assert card["ends_approval"] is False
-        assert card["changes"]["safety_level"] == {"old": "caution", "new": "dangerous"}
+        assert card["changes"] == {
+            "safety_level": {"old": "caution", "new": "dangerous"},
+            "requires_approval": {"old": False, "new": False},
+        }
+        assert card["row_tenant_id"] is None
 
         clicked = await h.console_approve(
             client, key, request_id, sub="admin-b", platform_admin=False
@@ -470,23 +540,124 @@ async def test_an_agent_a_service_login_and_a_runner_cannot_approve(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("switch_on")
-async def test_the_approved_run_decides_on_the_values_of_the_click(
+async def test_the_approved_run_refuses_when_the_policy_changed(
     client: TestClient, embedding: AsyncMock
 ) -> None:
-    """The level goes to destructive after the request: approval off is refused at the click."""
+    """Approval goes on after the request: the click writes nothing."""
     await _setup(embedding)
     key = make_rsa_keypair("kid-opedit-changed")
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
-        bearer = _token(key, sub="platform-a", platform_admin=True, **_fresh())
-        request_id = _waits(_patch(client, bearer, _STOP, _OFF))
-        await _raise_now(h.person("platform-c"), _STOP, "destructive")
-        clicked = await h.console_approve(client, key, request_id, sub="platform-b")
-    assert clicked.status_code == 200, clicked.text
-    (override,) = await _overrides(_STOP)
-    assert (override.safety_level, override.requires_approval) == ("destructive", None)
+        request_id = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
+        await ReviewService(h.person("admin-c", platform_admin=False)).edit_op(
+            _CONNECTOR, _RESTART, tenant_id=h.TENANT, requires_approval=True
+        )
+        await h.console_approve(client, key, request_id, sub="admin-b", platform_admin=False)
+    (override,) = await _overrides(_RESTART)
+    assert (override.safety_level, override.requires_approval) == (None, True)
     (request,) = await h.requests()
-    assert "it is a destructive operation" in json.dumps(request.resume_result)
+    _refused_as_changed(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_second_waiting_request_is_refused_after_the_first_is_approved(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    key = make_rsa_keypair("kid-opedit-second")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        first = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
+        second = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "destructive"}))
+        clicked = await h.console_approve(client, key, first, sub="admin-b", platform_admin=False)
+        assert clicked.status_code == 200, clicked.text
+        await h.console_approve(client, key, second, sub="admin-b", platform_admin=False)
+    (override,) = await _overrides(_RESTART)
+    assert override.safety_level == "dangerous"
+    _refused_as_changed(next(r for r in await h.requests() if r.id == second))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_an_approval_off_kept_by_an_install_override_is_refused_when_it_goes(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    """The card says approval stays off; the install override goes; the click writes nothing."""
+    await _setup(embedding)
+    await _install_approval_off(_STOP)
+    key = make_rsa_keypair("kid-opedit-install-gone")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        request_id = _waits(_patch(client, _token(key, **_fresh()), _STOP, _OFF))
+        (request,) = await h.requests()
+        card = request.proposed_effect["preview"]
+        assert (card["scope"], card["ends_approval"]) == ("tenant", False)
+        await ReviewService(h.person("platform-c")).remove_op_override(
+            _CONNECTOR, _STOP, override_tenant_id=None, reason="back to code", person_present=True
+        )
+        await h.console_approve(client, key, request_id, sub="platform-b")
+    assert await _overrides(_STOP) == []
+    (request,) = await h.requests()
+    _refused_as_changed(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_an_edit_of_a_tenant_copy_is_refused_when_the_copy_goes(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    """The click does not turn off the install's row, which the card never named."""
+    await _setup(embedding)
+    await _tenant_copy(_RESTART)
+    key = make_rsa_keypair("kid-opedit-copy-gone")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        body = {"safety_level": "dangerous", "is_enabled": False}
+        request_id = _waits(_patch(client, _token(key), _RESTART, body))
+        (request,) = await h.requests()
+        card = request.proposed_effect["preview"]
+        assert (card["scope"], card["row_tenant_id"]) == ("tenant", str(h.TENANT))
+        await _drop_tenant_copy(_RESTART)
+        await h.console_approve(client, key, request_id, sub="platform-b")
+    assert await _enabled_rows(_RESTART) == [(None, True)]
+    assert await _overrides(_RESTART) == []
+    (request,) = await h.requests()
+    _refused_as_changed(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+async def test_a_removal_of_another_tenants_override_is_refused_before_it_waits(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await _setup(embedding)
+    await ReviewService(_person_in(_TENANT_B, "admin-b", platform_admin=False)).edit_op(
+        _CONNECTOR, _RESTART, tenant_id=_TENANT_B, safety_level="dangerous"
+    )
+    key = make_rsa_keypair("kid-opedit-other-tenant")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        bearer = _token(key, sub="platform-a", platform_admin=True)
+        refused = _delete(client, bearer, _RESTART, tenant_id=str(_TENANT_B))
+    assert refused.status_code == 403, refused.text
+    assert OTHER_TENANT_REFUSAL in refused.text
+    assert await h.requests() == []
+    (override,) = await _overrides(_RESTART)
+    assert (override.tenant_id, override.safety_level) == (_TENANT_B, "dangerous")
+
+    params = {"connector_id": _CONNECTOR, "op_id": _RESTART, "override_tenant_id": str(_TENANT_B)}
+    with pytest.raises(PolicyEditAskRefused, match="another tenant"):
+        await request_policy_edit(h.person("platform-a"), POLICY_OP_REMOVE_OVERRIDE_OP_ID, params)
+    result, _ = await request_policy_edit(
+        _person_in(_TENANT_B, "platform-a", platform_admin=True),
+        POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+        params,
+    )
+    assert result["status"] == "awaiting_approval", result
+    (request,) = await h.requests()
+    assert request.tenant_id == _TENANT_B
+    assert len(await _overrides(_RESTART)) == 1
 
 
 @pytest.mark.asyncio
@@ -494,6 +665,7 @@ async def test_the_approved_run_decides_on_the_values_of_the_click(
 async def test_the_switch_off_at_the_click_writes_nothing(
     client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The switch goes off and the registrar runs before the click: the run is refused."""
     await _setup(embedding)
     key = make_rsa_keypair("kid-opedit-switch-off")
     with respx.mock as r:
@@ -501,10 +673,12 @@ async def test_the_switch_off_at_the_click_writes_nothing(
         request_id = _waits(_patch(client, _token(key), _RESTART, {"safety_level": "dangerous"}))
         monkeypatch.setenv("CUSTOM_POLICY", "false")
         get_settings.cache_clear()
+        async with operation_catalog_write(embedding_service=embedding):
+            pass
         await h.console_approve(client, key, request_id, sub="admin-b", platform_admin=False)
     assert await _overrides(_RESTART) == []
     (request,) = await h.requests()
-    assert SWITCH_OFF_REFUSAL in json.dumps(request.resume_result)
+    assert request.resume_result["status"] == "error", request.resume_result
 
 
 # ---------------------------------------------------------------------------

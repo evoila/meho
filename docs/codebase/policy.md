@@ -663,11 +663,19 @@ before.
 - An Admin approves with a click in the web console. Only a platform admin
   approves an edit that ends approval (`ends_approval: true` on the card)
   or changes the whole install.
-- The approved run checks the card's record of who asked again and runs
-  `apply_policy_edit` or `remove_override` again with the values of that
-  moment, with the person who clicked as the operator. The override goes
-  to the scope on the card. With the switch off at the click, it writes
-  nothing and says to send the edit again.
+- The approval card holds the full effect: the connector, the operation,
+  the scope and the tenant of the operation row, the old and new risk
+  level and approval (both, also when one stays the same), the other
+  fields, the reason and `ends_approval`.
+- The approved run checks the card's record of who asked again. Then it
+  builds the card again with the values of that moment, with the same
+  function and the scope on the card. When the two differ, it writes
+  nothing and says "The policy changed since this request was made. Send
+  the edit again." Else it runs `apply_policy_edit` or `remove_override`
+  with the person who clicked as the operator. With the switch off at the
+  click, it writes nothing.
+- An ask that names an override of another tenant is refused before
+  anything waits (`403` on REST).
 - The web console keeps its own path in this part.
 
 ## Versions: `policy_revision`

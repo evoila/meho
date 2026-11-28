@@ -18,10 +18,14 @@ such an edit (an override), is a change of the policy. The REST routes,
   console. Only a platform admin approves an edit that ends approval
   (``ends_approval`` on the card) or that changes the whole install
   (:func:`platform_admin_approves`);
-* the approved run checks the card's record of who asked again and runs
-  the edit again with the values of that moment, with the person who
-  clicked as the operator (:func:`policy_op_edit`,
-  :func:`policy_op_remove_override`). It stores the override where the
+* an ask that names an override of another tenant is refused before
+  anything waits (:data:`OTHER_TENANT_REFUSAL`);
+* the approved run checks the card's record of who asked again, then
+  builds the card again with the values of that moment, with the same
+  function and the card's scope. When the two differ, it writes nothing
+  (:data:`POLICY_CHANGED_REFUSAL`). Else it runs the edit with the person
+  who clicked as the operator (:func:`policy_op_edit`,
+  :func:`policy_op_remove_override`) and stores the override where the
   card says.
 
 The operations exist only while ``CUSTOM_POLICY`` is on. With the switch
@@ -61,6 +65,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "EDIT_NEEDS_PERSON",
+    "OTHER_TENANT_REFUSAL",
+    "POLICY_CHANGED_REFUSAL",
     "POLICY_FIELDS",
     "POLICY_OP_EDIT_OP_ID",
     "POLICY_OP_REMOVE_OVERRIDE_OP_ID",
@@ -101,6 +107,14 @@ EDIT_NEEDS_APPROVAL: Final[str] = (
 SWITCH_OFF_REFUSAL: Final[str] = (
     "The switch CUSTOM_POLICY is off now, so MEHO does not run this edit. Nothing was "
     "changed. Send the edit again."
+)
+
+POLICY_CHANGED_REFUSAL: Final[str] = (
+    "The policy changed since this request was made. Send the edit again."
+)
+
+OTHER_TENANT_REFUSAL: Final[str] = (
+    "This names an override of another tenant. Act in that tenant to change it."
 )
 
 _NO_SCOPE_ON_CARD: Final[str] = (
@@ -281,33 +295,60 @@ def _ends_approval(result: PolicyEditResult) -> bool:
     return bool(ended_here or result.approval_ended_for_tenants)
 
 
-async def check_op_edit(operator: Operator, params: dict[str, Any]) -> dict[str, Any]:
+def _refuse_other_tenant(operator: Operator, tenant_id: UUID | None) -> None:
+    """Refuse an ask that names an override of another tenant than the caller's."""
+    if tenant_id is not None and tenant_id != operator.tenant_id:
+        raise PolicyEditAskRefused(OTHER_TENANT_REFUSAL)
+
+
+def _card(
+    params: dict[str, Any],
+    result: PolicyEditResult,
+    scope_tenant_id: UUID | None,
+    row_tenant_id: UUID | None,
+) -> dict[str, Any]:
+    """The approval card: the full effect of an edit or removal, JSON-shaped."""
+    return {
+        "connector_id": params["connector_id"],
+        "op_id": params["op_id"],
+        "scope": "install" if scope_tenant_id is None else "tenant",
+        "scope_tenant_id": None if scope_tenant_id is None else str(scope_tenant_id),
+        "row_tenant_id": None if row_tenant_id is None else str(row_tenant_id),
+        "changes": result.changes,
+        "reason": params.get("reason"),
+        "ends_approval": _ends_approval(result),
+    }
+
+
+async def check_op_edit(
+    operator: Operator, params: dict[str, Any], *, card_scope: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Run every check of the edit in *params* and write nothing; return its approval card.
 
-    Raises the errors of
+    The override goes to the scope of *card_scope* (a stored card) when
+    given, else to the scope of *operator* (the person who asks). Raises
+    :class:`PolicyEditAskRefused` and the errors of
     :meth:`~meho_backplane.operations.ingest.service.ReviewService.edit_op`.
     """
     from meho_backplane.operations.ingest.service import ReviewService
 
-    result, scope_tenant_id = await ReviewService(operator).check_op_edit(
+    tenant_id = _uuid_or_none(params.get("tenant_id"))
+    _refuse_other_tenant(operator, tenant_id)
+    scope: dict[str, Any] = {}
+    if card_scope is not None:
+        scope["policy_scope_tenant_id"] = _uuid_or_none(card_scope.get("scope_tenant_id"))
+    result, scope_tenant_id, row_tenant_id = await ReviewService(operator).check_op_edit(
         params["connector_id"],
         params["op_id"],
-        tenant_id=_uuid_or_none(params.get("tenant_id")),
+        tenant_id=tenant_id,
         safety_level=params.get("safety_level"),
         requires_approval=params.get("requires_approval"),
         reason=params.get("reason"),
         row_edit=any(params.get(name) is not None for name in _ROW_FIELDS),
         tighten_only=bool(params.get("tighten_only")),
+        **scope,
     )
-    card: dict[str, Any] = {
-        "connector_id": params["connector_id"],
-        "op_id": params["op_id"],
-        "scope": "install" if scope_tenant_id is None else "tenant",
-        "scope_tenant_id": None if scope_tenant_id is None else str(scope_tenant_id),
-        "changes": result.changes,
-        "reason": params.get("reason"),
-        "ends_approval": _ends_approval(result),
-    }
+    card = _card(params, result, scope_tenant_id, row_tenant_id)
     card.update({name: params[name] for name in _ROW_FIELDS if params.get(name) is not None})
     return card
 
@@ -315,28 +356,20 @@ async def check_op_edit(operator: Operator, params: dict[str, Any]) -> dict[str,
 async def check_override_removal(operator: Operator, params: dict[str, Any]) -> dict[str, Any]:
     """Run every check of the removal in *params* and write nothing; return its approval card.
 
-    Raises the errors of
+    Raises :class:`PolicyEditAskRefused` and the errors of
     :meth:`~meho_backplane.operations.ingest.service.ReviewService.remove_op_override`.
     """
     from meho_backplane.operations.ingest.service import ReviewService
 
     override_tenant_id = _uuid_or_none(params.get("override_tenant_id"))
-    result = await ReviewService(operator).check_override_removal(
+    _refuse_other_tenant(operator, override_tenant_id)
+    result, row_tenant_id = await ReviewService(operator).check_override_removal(
         params["connector_id"],
         params["op_id"],
         override_tenant_id=override_tenant_id,
         reason=params.get("reason"),
     )
-    return {
-        "connector_id": params["connector_id"],
-        "op_id": params["op_id"],
-        "scope": "install" if override_tenant_id is None else "tenant",
-        "scope_tenant_id": None if override_tenant_id is None else str(override_tenant_id),
-        "override_removed": True,
-        "changes": result.changes,
-        "reason": params.get("reason"),
-        "ends_approval": _ends_approval(result),
-    }
+    return {**_card(params, result, override_tenant_id, row_tenant_id), "override_removed": True}
 
 
 async def build_op_edit_preview(ctx: PreviewContext) -> dict[str, Any]:
@@ -366,6 +399,7 @@ async def _refusal_of(check: Any, ctx: PreviewContext) -> str | None:
     try:
         await check(ctx.operator, ctx.params)
     except (
+        PolicyEditAskRefused,
         ValueError,
         OverrideNotFoundError,
         ConnectorNotFoundError,
@@ -392,7 +426,7 @@ async def remove_override_park_check(ctx: PreviewContext) -> str | None:
 
 
 class PolicyEditAskRefused(Exception):  # noqa: N818 - a refusal, not a fault
-    """Only a person asks for the edit; the caller is an agent, a service login or a hosted run."""
+    """The ask is refused before it waits: the caller is not a person, or names another tenant."""
 
 
 async def request_policy_edit(
@@ -450,13 +484,21 @@ def _check_who_runs(operator: Operator, params: dict[str, Any], op_id: str) -> d
     return approved_preview(op_id) or {}
 
 
+def _refuse_if_changed(card: dict[str, Any], now: dict[str, Any]) -> None:
+    """Refuse the approved run when the effect of now differs from the stored card."""
+    if now != card:
+        raise ValueError(POLICY_CHANGED_REFUSAL)
+
+
 async def policy_op_edit(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Run one approved risk level / approval edit.
 
-    Op-id: ``policy.op_edit``. Targetless. Runs the edit again with the
-    values of now, as a person in the web console (``person_present``),
-    with *operator* (the person who clicked) as the one who changes it.
-    After an approval, the override goes where the card says.
+    Op-id: ``policy.op_edit``. Targetless. After an approval, the run first
+    builds the card again with the values of now and the card's scope, and
+    writes nothing when it differs from the stored card. Then it runs the
+    edit as a person in the web console (``person_present``), with
+    *operator* (the person who clicked) as the one who changes it, and the
+    override goes where the card says.
     """
     del target
     from meho_backplane.operations.ingest.service import ReviewService
@@ -466,6 +508,7 @@ async def policy_op_edit(operator: Operator, target: Any, params: dict[str, Any]
     if approved_requester_sub() is not None:
         if card.get("scope") not in {"tenant", "install"}:
             raise ValueError(_NO_SCOPE_ON_CARD)
+        _refuse_if_changed(card, await check_op_edit(operator, params, card_scope=card))
         scope["policy_scope_tenant_id"] = _uuid_or_none(card.get("scope_tenant_id"))
     fields = {name: params[name] for name in (*POLICY_FIELDS, *_ROW_FIELDS) if name in params}
     warnings = await ReviewService(operator).edit_op(
@@ -496,7 +539,9 @@ async def policy_op_remove_override(
     del target
     from meho_backplane.operations.ingest.service import ReviewService
 
-    _check_who_runs(operator, params, POLICY_OP_REMOVE_OVERRIDE_OP_ID)
+    card = _check_who_runs(operator, params, POLICY_OP_REMOVE_OVERRIDE_OP_ID)
+    if approved_requester_sub() is not None:
+        _refuse_if_changed(card, await check_override_removal(operator, params))
     await ReviewService(operator).remove_op_override(
         params["connector_id"],
         params["op_id"],

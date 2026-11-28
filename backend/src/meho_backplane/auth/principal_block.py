@@ -190,9 +190,8 @@ async def _database_step[T](
 ) -> T:
     """Run *step*; on any error, log it and raise an error with the error type as its text.
 
-    A database error's text can hold values of the statement, so MEHO logs
-    only the step, the error type and the error code. The warning *event*
-    holds the step (*operation*), the type of the error and its fixed code
+    The warning holds the step, the error type and the error code.
+    The warning *event* holds the step (*operation*), the type of the error and its fixed code
     (:func:`_error_code`), and no traceback. The raised error is *error*;
     with *other_error*, an error that is not a database error
     (:class:`~sqlalchemy.exc.SQLAlchemyError`) raises *other_error*. It is

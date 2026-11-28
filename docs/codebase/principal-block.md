@@ -112,9 +112,8 @@ request (503 `principal_block_check_unavailable`); it never answers "not
 blocked" for an unknown state.
 
 When a read or a write of the block table fails, MEHO writes one warning.
-A database error's text can hold values of the statement, so MEHO logs
-only the step, the error type and the error code. The warning holds the
-step (`operation`), the type of the error (`error_type`) and a fixed
+The warning holds the step, the error type and the error code.
+The warning holds the step (`operation`), the type of the error (`error_type`) and a fixed
 code (`error_code`), and no traceback and no text of the error.
 `error_code` is the SQLSTATE of the driver error when there is one (for
 example `57014`), else the `errno` name of an operating system error (for

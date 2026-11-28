@@ -347,7 +347,7 @@ def test_the_approvals_list_names_the_kind(
     _switch(monkeypatch, on=True)
     _seed()
     agent = "agent:example"
-    tokens.call(_CAUTION_OP, tokens.token(agent, kind="agent"))
+    tokens.call(_CAUTION_OP, tokens.token(agent, kind="agent", azp=agent))
     assert _requests(), "the agent's call did not wait"
 
     clear_jwks_cache()

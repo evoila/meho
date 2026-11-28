@@ -1945,10 +1945,10 @@ take_back_changes() {
 }
 
 check_7() {
-    # MEHO's answer does not say yet whether the owner may approve their own
-    # request (#7132), so check 7 cannot compare it. Check 10 tests it while
-    # the switch is on.
-    check_skip "check 7 (the owner's own approval of the request of check 10, web console and command line): not run: waits for #7132"
+    # Check 7 runs with the switch off. MEHO's explain answer says whether the
+    # owner may approve their own request only while the switch is on, so
+    # check 7 cannot compare it. Check 10 tests it while the switch is on.
+    check_skip "check 7 (the owner's own approval of the request of check 10, web console and command line): not run: MEHO's explain answer says it only while the switch is on"
     if ! person p7 "Check 7. Turn the switch CUSTOM_POLICY off on the install and restart MEHO. Wait until /ready answers again."; then
         needs_person "check 7 (a person turns the switch off)"
         waits_for "check 7 (every probe, REST policy explain)" 7

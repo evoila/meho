@@ -72,7 +72,7 @@ def _names_the_check(call: ast.Call) -> bool:
                 item.arg == "request" and _has_the_check(item.value) for item in hooks.keywords
             )
         if not isinstance(hooks, ast.Dict):
-            return _has_the_check(hooks)
+            return False
         return any(
             isinstance(key, ast.Constant) and key.value == "request" and _has_the_check(value)
             for key, value in zip(hooks.keys, hooks.values, strict=True)
@@ -129,6 +129,16 @@ def test_check_finds_a_client_without_the_hook() -> None:
         "import httpx\nc = httpx.AsyncClient(event_hooks=dict(response=[kit.check_before_send]))\n"
     )
     assert clients_without_the_check(response_by_call) == [2]
+    response_by_merge = (
+        "import httpx\nc = httpx.AsyncClient(event_hooks=default_hooks"
+        ' | {"response": [kit.check_before_send]})\n'
+    )
+    assert clients_without_the_check(response_by_merge) == [2]
+    response_by_helper = (
+        "import httpx\nc = httpx.AsyncClient("
+        "event_hooks=make_hooks(response=[kit.check_before_send]))\n"
+    )
+    assert clients_without_the_check(response_by_helper) == [2]
 
 
 def test_check_passes_a_client_with_the_hook() -> None:

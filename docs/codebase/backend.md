@@ -104,8 +104,10 @@ this stage it exposes:
     there. An unknown tenant gives `403 tenant_not_found: …`; the
     lookup is read only, and the refusal happens before
     `verify_jwt_and_bind`, so `ensure_tenant` never sees the value and no
-    tenant row is made. `bind_tenant_role_source` (called by the REST and
-    MCP bind steps) puts `tenant_role_source: platform_admin` into the
+    tenant row is made. `bind_tenant_role_source` (called by the REST bind step
+    `_bind_operator` in `middleware.py`, the MCP bind step in `mcp/auth.py`
+    and the console's bind step `_verify_session_token` in
+    `ui/auth/refresh.py`) puts `tenant_role_source: platform_admin` into the
     payload of every audit row of such a request that the middleware or
     the MCP dispatcher writes. The audit cutover listener
     (`audit_cutover.py`) copies the same key onto every other audit row

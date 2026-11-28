@@ -143,9 +143,13 @@ _PLAN_NOT_COMPLETE_NOTE: Final[str] = (
 
 #: Added to the note when the list of parts that were not checked is cut.
 _NOT_CHECKED_CUT_NOTE: Final[str] = (
-    "`not_checked` holds only the first numbers and `not_checked_count` "
-    "counts them all; `result_query` on the handle in "
-    "`proposed_effect.preview.documents` gives every part with its `change`."
+    "`not_checked` holds only the first numbers and `not_checked_count` counts them all."
+)
+
+#: Added after the cut note when the result store kept every part.
+_ALL_PARTS_STORED_NOTE: Final[str] = (
+    "`result_query` on the handle in `proposed_effect.preview.documents` "
+    "gives every part with its `change`."
 )
 
 #: The note when the result store did not keep every part of the plan.
@@ -339,6 +343,8 @@ def _plan_not_complete_note(proposed_effect: dict[str, Any]) -> str | None:
         notes.append(_PLAN_NOT_COMPLETE_NOTE)
         if preview.get(_NOT_CHECKED_COUNT_KEY):
             notes.append(_NOT_CHECKED_CUT_NOTE)
+            if not preview.get(_NOT_STORED_KEY):
+                notes.append(_ALL_PARTS_STORED_NOTE)
     if preview.get(_NOT_STORED_KEY):
         notes.append(_PLAN_NOT_STORED_NOTE)
     return " ".join(notes) or None

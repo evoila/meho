@@ -735,6 +735,7 @@ def test_a_long_list_of_documents_not_checked_stays_short_in_the_answer(
     assert "not_stored" not in preview
     assert answer["plan_shown"] is False
     assert "not_checked_count" in answer["plan_note"]
+    assert _composite_preview._ALL_PARTS_STORED_NOTE in answer["plan_note"]
     handle_id = uuid.UUID(preview["documents"]["handle"]["handle_id"])
 
     async def _read_all() -> list[dict[str, Any]]:
@@ -750,6 +751,40 @@ def test_a_long_list_of_documents_not_checked_stays_short_in_the_answer(
     rows = asyncio.run(_read_all())
     not_checked = [row["document"] for row in rows if row["change"] == "not_checked"]
     assert not_checked == list(range(301, 401))
+
+
+def test_a_cut_list_with_rows_the_store_did_not_keep_promises_no_whole_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _switch_on(monkeypatch)
+    cluster = _StandInCluster()
+
+    async def _discover(*, api_version: str, kind: str) -> Any:
+        if kind == "Widget":
+            raise LookupError("no kind Widget is known")
+        return SimpleNamespace(kind=kind, namespaced=True)
+
+    cluster.resources = SimpleNamespace(get=_discover)
+    _setup(monkeypatch, cluster)
+    store = ResultHandleStore(_Valkey())  # type: ignore[arg-type]
+    reducer = JsonFluxReducer(store=store, max_spill_rows=100)
+    monkeypatch.setattr(dry_run_module, "_DOCUMENTS_REDUCER", reducer)
+    widgets = "---\n".join(
+        f"apiVersion: example.test/v1\nkind: Widget\nmetadata: {{name: w-{n}, namespace: prod}}\n"
+        for n in range(100)
+    )
+
+    answer = _preview(_config_maps(300) + "---\n" + widgets)
+
+    preview = answer["proposed_effect"]["preview"]
+    assert preview["not_checked_count"] == 100
+    assert preview["not_stored"] == 300
+    assert answer["plan_shown"] is False
+    note = answer["plan_note"]
+    assert _composite_preview._NOT_CHECKED_CUT_NOTE in note
+    assert _composite_preview._PLAN_NOT_STORED_NOTE in note
+    assert _composite_preview._ALL_PARTS_STORED_NOTE not in note
+    assert "gives every part" not in note
 
 
 def test_a_short_list_of_documents_stays_in_the_answer(

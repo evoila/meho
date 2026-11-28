@@ -290,10 +290,13 @@ from meho_backplane.topology import (
 )
 from meho_backplane.ui.auth import (
     UISessionMiddleware,
-    ui_session_expired_exception_handler,
 )
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.error_pages import (
+    web_http_exception_handler,
+    web_server_error_handler,
+)
 from meho_backplane.ui.fragment_guard import FragmentNavigationMiddleware
 from meho_backplane.ui.paths import (
     brand_css_dir,
@@ -1137,7 +1140,16 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # Starlette base class so the one registration covers
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
-app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# P2.8: a wrong *web* address gets a branded page; every machine
+# surface keeps its JSON, decided by route rather than by ``Accept``
+# so a browser pointed at ``/api/v1/...`` still gets JSON. The handler
+# wraps the session one above -- the two act on disjoint statuses
+# (401/400/409 there, 403/404 here), so neither can swallow the other.
+app.add_exception_handler(StarletteHTTPException, web_http_exception_handler)
+# An unhandled exception never becomes an HTTPException: Starlette's
+# ServerErrorMiddleware catches it, calls the handler registered for
+# ``Exception``, then re-raises so the server still logs the traceback.
+app.add_exception_handler(Exception, web_server_error_handler)
 # A 422 for a bad request body that encodes even when the refused input
 # holds a lone surrogate (FastAPI's stock handler answers that with a 500).
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)

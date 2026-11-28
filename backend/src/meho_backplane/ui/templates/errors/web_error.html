@@ -1,0 +1,48 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  The branded error page for web addresses: 404, 403 and 500.
+
+  A whole document, not a fragment and not an extension of
+  ``base.html``. Two reasons. An error can arrive before the session
+  middleware has bound anything -- a 404 for a signed-out visitor, a
+  500 raised inside the middleware itself -- so a page that needs the
+  session chrome would fail while rendering the failure. And the page
+  must stay renderable when the thing that broke is the console
+  itself.
+
+  It therefore depends on nothing but the brand: the theme attribute
+  and ``_head_assets.html``, exactly as ``tenant/refused.html`` and
+  ``auth/session_ended.html`` do.
+
+  ``status``, ``heading`` and ``message`` come from
+  ``meho_backplane.ui.error_pages``; the page never derives them from
+  anything the caller sent, so the address can never put text on
+  the page. The one link is a literal for the same reason.
+-#}
+<!doctype html>
+<html lang="en" data-theme="evoila-system" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ heading }} &middot; MEHO Operator Console</title>
+    {% include "_head_assets.html" %}
+  </head>
+  <body class="min-h-full bg-base-200 text-base-content antialiased">
+    <main class="mx-auto max-w-xl space-y-4 px-4 py-12" data-error-page="{{ status }}">
+      <p class="font-mono text-sm text-subtle" data-field="error-status">{{ status }}</p>
+      <h1 class="text-xl font-semibold" data-field="error-heading">{{ heading }}</h1>
+      <p class="text-sm" data-field="error-message">{{ message }}</p>
+      {#- The route's own explanation, when it gave one: which role is
+          required, which account to use. Escaped like any other value. -#}
+      {% if reason %}
+        <p class="font-mono text-sm text-subtle" data-field="error-reason">{{ reason }}</p>
+      {% endif %}
+      {#- A literal, not a variable: the only link on the page is the console
+         root, and nothing the caller sent may reach an href. -#}
+      <p><a class="link text-sm" href="/ui">Back to the console</a></p>
+    </main>
+  </body>
+</html>

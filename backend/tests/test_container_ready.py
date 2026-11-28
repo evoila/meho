@@ -9,12 +9,19 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 
 import bson
 import pytest
 
-from tests._container_ready import ContainerNotReadyError, ping_mongodb, wait_until_ready
+from tests._container_ready import (
+    ContainerNotReadyError,
+    ContainerStartRetryWarning,
+    ping_mongodb,
+    start_until_ready,
+    wait_until_ready,
+)
 
 
 class _FakeClock:
@@ -75,6 +82,124 @@ def test_fails_with_a_clear_message_when_the_probe_never_works() -> None:
     assert message.startswith("container not ready: mongodb gave no answer in 10 s")
     assert "ConnectionRefusedError" in message
     assert fake.now <= 11.0
+
+
+class _StandInContainer:
+    """A started container that answers or not, and records whether it was stopped."""
+
+    def __init__(self, name: str, *, ready: bool) -> None:
+        self.name = name
+        self.ready = ready
+        self.stopped = False
+
+    def get_logs(self) -> tuple[bytes, bytes]:
+        lines = "".join(f"{self.name} log line {n}\n" for n in range(1, 31))
+        return lines.encode(), b"stderr: still starting\n"
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _starter(*ready: bool) -> tuple[list[_StandInContainer], Callable[[], _StandInContainer]]:
+    started: list[_StandInContainer] = []
+
+    def start() -> _StandInContainer:
+        container = _StandInContainer(f"try{len(started) + 1}", ready=ready[len(started)])
+        started.append(container)
+        return container
+
+    return started, start
+
+
+def _probe(container: _StandInContainer) -> None:
+    if not container.ready:
+        raise ConnectionRefusedError("connection refused")
+
+
+def test_start_until_ready_starts_once_when_the_first_container_answers() -> None:
+    fake = _FakeClock()
+    started, start = _starter(True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ContainerStartRetryWarning)
+        container = start_until_ready(
+            start, _probe, what="mongodb", clock=fake.clock, sleep=fake.sleep
+        )
+
+    assert container is started[0]
+    assert len(started) == 1
+    assert not container.stopped
+
+
+def test_start_until_ready_starts_a_fresh_container_when_the_first_gives_no_answer() -> None:
+    fake = _FakeClock()
+    started, start = _starter(False, True)
+
+    with pytest.warns(ContainerStartRetryWarning) as record:
+        container = start_until_ready(
+            start,
+            _probe,
+            what="mongodb (mongo-7)",
+            timeout=60,
+            second_timeout=120,
+            interval=1,
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+
+    assert container is started[1]
+    assert started[0].stopped
+    assert not container.stopped
+    assert len(record) == 1
+    assert str(record[0].message) == (
+        "container not ready: mongodb (mongo-7) gave no answer in 60 s, "
+        "started a fresh container once more"
+    )
+
+
+def test_start_until_ready_names_both_tries_when_the_second_start_fails_too() -> None:
+    fake = _FakeClock()
+    started, start = _starter(False, False)
+
+    with (
+        pytest.warns(ContainerStartRetryWarning),
+        pytest.raises(ContainerNotReadyError) as excinfo,
+    ):
+        start_until_ready(
+            start,
+            _probe,
+            what="mongodb (mongo-7)",
+            timeout=60,
+            second_timeout=120,
+            interval=1,
+            log_lines=5,
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert message.startswith("container not ready: mongodb (mongo-7) failed on both tries")
+    assert "try 1: container not ready: mongodb (mongo-7) gave no answer in 60 s" in message
+    assert "try 2: container not ready: mongodb (mongo-7) gave no answer in 120 s" in message
+    assert "ConnectionRefusedError" in message
+    assert "stderr: still starting" in message
+    assert "try2 log line 27" in message
+    assert "try2 log line 26" not in message
+    assert all(container.stopped for container in started)
+    assert len(started) == 2
+
+
+def test_start_until_ready_stops_the_container_on_an_unexpected_error() -> None:
+    fake = _FakeClock()
+    started, start = _starter(True)
+
+    def probe(container: _StandInContainer) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        start_until_ready(start, probe, what="x", clock=fake.clock, sleep=fake.sleep)
+
+    assert started[0].stopped
 
 
 def test_real_port_that_opens_late_is_waited_for() -> None:

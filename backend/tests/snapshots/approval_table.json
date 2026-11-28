@@ -510,7 +510,7 @@
   {"class": "other", "connector_id": "rabbitmq-management-3.x", "needs_approval": false, "never_covered": null, "op_id": "rabbitmq.vhosts", "risk_level": "safe"},
   {"class": "read", "connector_id": "rke2-ssh-1.x", "needs_approval": false, "never_covered": null, "op_id": "rke2.about", "risk_level": "safe"},
   {"class": "read", "connector_id": "rke2-ssh-1.x", "needs_approval": false, "never_covered": null, "op_id": "rke2.etcd-snapshot.list", "risk_level": "safe"},
-  {"class": "write", "connector_id": "rke2-ssh-1.x", "needs_approval": false, "never_covered": null, "op_id": "rke2.etcd-snapshot.save", "risk_level": "safe"},
+  {"class": "write", "connector_id": "rke2-ssh-1.x", "needs_approval": true, "never_covered": null, "op_id": "rke2.etcd-snapshot.save", "risk_level": "caution"},
   {"class": "read", "connector_id": "rke2-ssh-1.x", "needs_approval": false, "never_covered": null, "op_id": "rke2.node.config.get", "risk_level": "safe"},
   {"class": "credential_write", "connector_id": "rke2-ssh-1.x", "needs_approval": true, "never_covered": "credential", "op_id": "rke2.node.config.update", "risk_level": "dangerous"},
   {"class": "write", "connector_id": "rke2-ssh-1.x", "needs_approval": true, "never_covered": null, "op_id": "rke2.node.service.restart", "risk_level": "dangerous"},

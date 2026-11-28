@@ -235,7 +235,8 @@ window:
   official Python client; no thread offload; loads kubeconfig from a
   dict).
 * `httpx` -- only used by the kubeconfig-free `probe()` against
-  `/readyz` / `/healthz`. The op dispatch path goes through
+  `/readyz` / `/healthz`. It checks the certificate when the target pins a
+  CA (see `connectors-kubernetes.md`, "The reachability check and TLS"). The op dispatch path goes through
   `kubernetes_asyncio.client.ApiClient`, not httpx.
 * `meho_backplane.operations.typed_register` -- the G0.6 registration
   helper.

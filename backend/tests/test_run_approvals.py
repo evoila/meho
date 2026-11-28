@@ -620,11 +620,11 @@ def snapshot_op() -> Iterator[str]:
 async def test_safe_root_command_waits_even_when_it_is_on_the_list(
     run_ref: str, snapshot_op: str
 ) -> None:
-    # The snapshot save is "safe" and needs no approval flag, so only the
-    # mark makes it wait for a service login.
+    # A "safe" marked operation with no approval flag: only the mark makes
+    # it wait for a service login.
     descriptor = _snapshot_descriptor()
-    assert descriptor.safety_level == "safe"
-    assert descriptor.requires_approval is False
+    descriptor.safety_level = "safe"
+    descriptor.requires_approval = False
     approval_id = uuid.uuid4()
     now = datetime.now(UTC)
     async with get_sessionmaker()() as s:
@@ -685,6 +685,27 @@ async def test_standing_grant_still_covers_a_safe_root_command(snapshot_op: str)
 
     assert verdict is PermissionVerdict.AUTO_EXECUTE
     assert reason == f"auto-granted by standing grant {grant_id}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.USER], ids=["agent", "person"])
+async def test_snapshot_save_waits_for_an_agent_login_and_a_person_token(
+    kind: PrincipalKind,
+) -> None:
+    """``rke2.etcd-snapshot.save`` writes all cluster data as root: each call waits."""
+    descriptor = _snapshot_descriptor()
+    assert descriptor.safety_level == "caution"
+    assert descriptor.requires_approval is True
+
+    verdict, reason = await policy_gate(
+        operator=_operator(sub=f"caller-{kind.value}", kind=kind),
+        descriptor=descriptor,
+        target=None,
+        connector_id=_RKE2_CONNECTOR,
+        decide_only=True,
+    )
+
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL, reason
 
 
 # ---------------------------------------------------------------------------

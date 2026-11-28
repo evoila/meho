@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Safe (non-gated) managed-etcd snapshot ops for :class:`Rke2SshConnector`.
+"""Managed-etcd snapshot ops for :class:`Rke2SshConnector`.
 
-Two safe, ``requires_approval=False`` snapshot ops share this module and
-the same embedded-etcd-server precondition guard:
+Two snapshot ops share this module and the same embedded-etcd-server
+precondition guard:
 
 * ``rke2.etcd-snapshot.save`` (G-Node/RKE2-T4 #2431) -- triggers an
-  on-demand RKE2 managed-etcd snapshot over SSH. Safe / non-gated because
-  it is read-only with respect to *running* cluster state (it copies the
-  embedded etcd store to a file on disk); its result carries only a
-  snapshot name + path, never secret material. It is *active* (it writes
-  a file), so it is deliberately NOT ``read-only``-tagged.
+  on-demand RKE2 managed-etcd snapshot over SSH. It is ``caution`` with
+  ``requires_approval=True``: it runs as root and writes a new file on the
+  node that holds all cluster data, Secrets too, so a person approves each
+  call. Its result carries only a snapshot name + path, never secret
+  material. It is *active* (it writes a file), so it is NOT
+  ``read-only``-tagged.
 * ``rke2.etcd-snapshot.list`` (#2853) -- enumerates the managed-etcd
   snapshots that already exist on a server node (``rke2 etcd-snapshot
   list``). It is a genuine read (it enumerates, mutates nothing), so it
@@ -499,9 +500,9 @@ _RKE2_ETCD_SNAPSHOT_SAVE_OP = Rke2Op(
         "embedded-etcd server (agent node, or one configuring an external "
         "``datastore-endpoint`` -- snapshots do not apply there). The "
         "result carries the snapshot name + path only; the snapshot FILE "
-        "holds etcd bootstrap data but the result does not. Safe tier, "
-        "non-gated: it copies etcd to disk without mutating running "
-        "cluster state."
+        "holds etcd bootstrap data but the result does not. Caution tier, "
+        "waits for approval: it runs as root and writes a file with all "
+        "cluster data, Secrets too, on the node."
     ),
     parameter_schema={
         "type": "object",
@@ -530,16 +531,17 @@ _RKE2_ETCD_SNAPSHOT_SAVE_OP = Rke2Op(
     },
     group_key="rke2-etcd-snapshot",
     tags=("etcd", "snapshot", "maintenance", "rke2"),
-    safety_level="safe",
-    requires_approval=False,
+    safety_level="caution",
+    requires_approval=True,
     llm_instructions={
         "when_to_use": (
             "Call to capture an on-demand managed-etcd snapshot on an RKE2 "
             "server node before a risky change (a config edit, a token "
             "rotation, an upgrade). Returns the snapshot name + on-disk "
             "path; it never returns etcd contents. Refuses non-server / "
-            "external-datastore nodes with a structured error. Safe and "
-            "non-mutating to running cluster state. " + SSH_TRANSPORT_NOTE
+            "external-datastore nodes with a structured error. The call waits "
+            "for a person to approve it: it runs as root and writes a file "
+            "with all cluster data on the node. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "name": (
@@ -637,8 +639,8 @@ _RKE2_ETCD_SNAPSHOT_LIST_OP = Rke2Op(
 )
 
 
-#: The safe (non-gated) snapshot tier: the *active* ``.save`` op (copies
-#: etcd to disk -- not ``read-only``-tagged) and the genuinely read-only
+#: The snapshot tier: the *active* ``.save`` op (copies etcd to disk as
+#: root and waits for approval -- not ``read-only``-tagged) and the read-only
 #: ``.list`` op (enumerates existing snapshots). Composed alongside the
 #: read ops + the approval-gated write ops in
 #: :func:`meho_backplane.connectors.rke2.ops._rke2_ops`.

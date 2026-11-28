@@ -48,11 +48,7 @@ _SECRET_CLASSES: Final[frozenset[str]] = frozenset(
 
 #: ``safe`` operations that are not plain reads. Each one makes the target do
 #: work, so it is pinned ``write`` in ``broadcast/events.py`` (``_WRITE_OPS``).
-_SAFE_OPERATIONS_THAT_CHANGE_THINGS: Final[frozenset[str]] = frozenset(
-    {
-        "rke2.etcd-snapshot.save",
-    }
-)
+_SAFE_OPERATIONS_THAT_CHANGE_THINGS: Final[frozenset[str]] = frozenset()
 
 #: Operations named in the bug reports, with the class they must get.
 _EXPECTED: Final[dict[str, str]] = {

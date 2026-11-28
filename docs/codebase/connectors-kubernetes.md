@@ -559,6 +559,22 @@ kubeconfig can cause code execution or file exposure
   and a proxy host. Through a proxy, MEHO sends only TLS requests; a
   plain HTTP request through a proxy is refused.
 
+## The reachability check and TLS (`probe()`, `_probe_tls`)
+
+`probe()` sends one `GET /readyz` (then `/healthz` on a 404) with no
+token, no client certificate and no cookie. A 401 counts as reachable.
+
+- **A target with a pinned CA** (`tls_ca_pin`): the probe checks the
+  server's certificate against that CA, by the same rule as the Supervisor
+  login (`_wcp_tls` in `wcp.py`). It checks the host name against
+  `tls_server_name`, else the target's host, and sends that name as SNI.
+  A certificate that does not match makes the target read as not
+  reachable.
+- **A target without a pinned CA**: the probe does not check the
+  certificate (`verify=False`). It runs before any kubeconfig is loaded,
+  so the cluster's own CA, often a private one, is not known yet. The
+  operation calls check the certificate with the kubeconfig's CA.
+
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
 The `Connector.fingerprint(target, operator=None)` ABC signature takes

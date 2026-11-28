@@ -33,6 +33,7 @@ Coverage matrix (per #321 acceptance criteria):
 from __future__ import annotations
 
 import asyncio
+import ssl
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -527,6 +528,7 @@ class _FakeAsyncClient:
         self._status_by_url = status_by_url or {}
         self._exc = exc
         self.calls: list[str] = []
+        self.extensions: list[dict[str, Any] | None] = []
 
     async def __aenter__(self) -> _FakeAsyncClient:
         return self
@@ -534,8 +536,9 @@ class _FakeAsyncClient:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    async def get(self, url: str) -> Any:
+    async def get(self, url: str, extensions: dict[str, Any] | None = None) -> Any:
         self.calls.append(url)
+        self.extensions.append(extensions)
         if self._exc is not None:
             raise self._exc
         resp = MagicMock()
@@ -571,9 +574,9 @@ async def test_probe_uses_default_port_when_target_port_is_none() -> None:
     captured: dict[str, str] = {}
 
     class _Capturing(_FakeAsyncClient):
-        async def get(self, url: str) -> Any:
+        async def get(self, url: str, extensions: dict[str, Any] | None = None) -> Any:
             captured["url"] = url
-            return await super().get(url)
+            return await super().get(url, extensions)
 
     with patch(
         "meho_backplane.connectors.kubernetes.connector.httpx.AsyncClient",
@@ -636,6 +639,88 @@ async def test_probe_reports_healthz_in_reason_when_both_endpoints_fail() -> Non
     assert result.reason is not None
     assert "503" in result.reason
     assert "/healthz" in result.reason
+
+
+@dataclass
+class _TlsStubTarget(_StubTarget):
+    """A stub target with the TLS fields of the concrete ``Target`` model."""
+
+    verify_tls: bool = True
+    tls_ca_pin: str | None = None
+    tls_server_name: str | None = None
+
+
+async def _probe_transport_verify(target: Any) -> tuple[Any, _FakeAsyncClient]:
+    """Run ``probe(target)``; return the ``verify`` given to the transport and the client."""
+    captured: dict[str, Any] = {}
+
+    def _transport(resolver: Any, *, verify: Any) -> MagicMock:
+        captured["verify"] = verify
+        return MagicMock()
+
+    stub = _FakeAsyncClient(status_code=200)
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.build_pinned_async_transport",
+            side_effect=_transport,
+        ),
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.httpx.AsyncClient",
+            return_value=stub,
+        ),
+    ):
+        result = await _make_connector_with_stub_kubeconfig().probe(target)
+    assert result.ok is True
+    return captured["verify"], stub
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_name", "expected_sni"),
+    [(None, "pinned.test.invalid"), ("cert-san.test.invalid", "cert-san.test.invalid")],
+    ids=["dial-host", "tls-server-name"],
+)
+async def test_probe_checks_the_certificate_against_a_pinned_ca(
+    server_name: str | None, expected_sni: str
+) -> None:
+    """A target with a pinned CA: the probe checks the certificate against it."""
+    from tests.test_targets_schemas import _make_ca_pem
+
+    target = _TlsStubTarget(
+        name="pinned",
+        host="pinned.test.invalid",
+        port=6443,
+        secret_ref="k8s/pinned",
+        tls_ca_pin=_make_ca_pem(),
+        tls_server_name=server_name,
+    )
+    verify, stub = await _probe_transport_verify(target)
+
+    assert isinstance(verify, ssl.SSLContext)
+    assert verify.verify_mode is ssl.CERT_REQUIRED
+    assert verify.check_hostname is True
+    assert verify.cert_store_stats()["x509_ca"] == 1
+    assert stub.extensions == [{"sni_hostname": expected_sni}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    [
+        _TARGET_A,
+        _TlsStubTarget(name="plain", host="plain.test.invalid", port=6443, secret_ref="k8s/p"),
+        _TlsStubTarget(
+            name="off", host="off.test.invalid", port=6443, secret_ref="k8s/o", verify_tls=False
+        ),
+    ],
+    ids=["no-tls-fields", "no-pinned-ca", "verify-tls-off"],
+)
+async def test_probe_without_a_pinned_ca_keeps_the_unchecked_probe(target: Any) -> None:
+    """A target without a pinned CA: the probe uses ``verify=False`` and no SNI name."""
+    verify, stub = await _probe_transport_verify(target)
+
+    assert verify is False
+    assert stub.extensions == [{}]
 
 
 # ---------------------------------------------------------------------------

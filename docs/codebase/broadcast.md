@@ -289,7 +289,7 @@ CSP does not allow.
   - Typed or multi-step operation with risk level `safe`: `read`, when
     `classify_op` has nothing better than `other`. The few `safe`
     operations that make the target do work
-    (`vmware.composite.datastore.refresh`, `rke2.etcd-snapshot.save`,
+    (`vmware.composite.datastore.refresh`,
     `vcfa.tenant.cloud_account.enumerate_images`,
     `hcx.service_mesh.diagnose`) are declared `write` in their
     connector's `op_classes.py`.

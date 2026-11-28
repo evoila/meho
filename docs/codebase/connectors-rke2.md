@@ -91,15 +91,18 @@ T3 (#2430) adds two more **approval-gated node-write ops**
   restart — it returns `restart_required: true` and changed key **names**
   only (never a value; the config body carries `token:` join credentials).
 
-T4 (#2431) + #2853 add the **safe, non-gated snapshot tier** (both in the
+The **snapshot tier** (both ops in the
 `rke2-etcd-snapshot` group), sharing one embedded-etcd-server precondition
 guard:
 
-- `rke2.etcd-snapshot.save` (T4 #2431) — triggers an on-demand managed-etcd
+- `rke2.etcd-snapshot.save` — triggers an on-demand managed-etcd
   snapshot on a server node (`rke2 etcd-snapshot save`, embedded-etcd only).
-  It is `safety_level="safe"` / `requires_approval=false` because it is
-  read-only with respect to *running* cluster state (it copies etcd to a file
-  on disk) and returns only a snapshot name + path, never etcd contents. An
+  It is `safety_level="caution"` / `requires_approval=true`: it runs as root
+  and writes a new file on the node that holds all cluster data, Secrets too.
+  So a person approves each call, also for an agent login and a person's
+  token. A standing grant of a service login still covers it; a run approval
+  does not (it runs as root). It returns only a snapshot name + path, never
+  etcd contents. An
   optional `name` param is charset-bounded to `^[A-Za-z0-9._-]+$` at the
   schema boundary AND re-checked in the handler. It is **active** (it writes a
   file), so it is deliberately NOT `read-only`-tagged.
@@ -153,12 +156,11 @@ argv itself.
 
 Nine ops total: four safe read-only (T1 `about` / `posture.show`, the #2852
 `node.service.status`, and the #2854 redacted `node.config.get` read), three
-`dangerous` / `requires_approval=true` write ops (T2 + T3), and two safe
-non-gated snapshot ops (`.save` T4 #2431, `.list` #2853). `.save` is safe /
-no-approval but active, so it is neither `read-only`-tagged nor in the
-dangerous write tier — it belongs to neither sweep set; `.list` is safe /
-no-approval and genuinely read-only, so it carries the `read-only` tag
-alongside the T1 read tier.
+`dangerous` / `requires_approval=true` write ops, and two snapshot ops
+(`.save`, `.list`). `.save` is `caution` / `requires_approval=true` and
+active, so it is not `read-only`-tagged; `.list` is safe / no-approval and
+genuinely read-only, so it carries the `read-only` tag alongside the read
+tier.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -491,8 +493,8 @@ log line.
   write-suffix added to `broadcast/events.py::_WRITE_SUFFIXES`; its params
   (a single unit) carry no secret.
 - `rke2.etcd-snapshot.save` is declared `write` in `rke2/op_classes.py`:
-  it is `safe`, but it makes the node save a snapshot file, so the broadcast
-  treats it as a write, not a read.
+  it makes the node save a snapshot file, and its name has no write word,
+  so the class is declared there.
 - `rke2.node.config.update` is declared `credential_write` in
   `rke2/op_classes.py` (its `patch` may carry a
   `token:` value), so the broadcast collapses to aggregate-only.

@@ -22,9 +22,8 @@ declare_op_classes(
     # class (the ``.update`` suffix) would broadcast a written token in
     # full. The op result itself returns key NAMES only.
     credential_write=("rke2.node.config.update",),
-    # A hand-written ``safe`` operation that is not a plain read: it makes
-    # the target save an etcd snapshot. Without this class it would get
-    # ``read`` from ``resolve_operation_op_class``.
+    # The snapshot save makes the node write a new file with all cluster
+    # data. Its name has no write word, so the class is declared here.
     write=("rke2.etcd-snapshot.save",),
 )
 

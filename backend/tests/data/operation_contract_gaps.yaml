@@ -1181,12 +1181,10 @@ rke2-ssh:
     - summary
     - llm_instructions
     - examples
-  # Writes a snapshot file on the node. Its connector keeps it 'safe' on purpose: it changes no cluster state.
   rke2.etcd-snapshot.save:
     - summary
     - llm_instructions
     - examples
-    - write_name
   rke2.node.config.get:
     - summary
     - llm_instructions

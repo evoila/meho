@@ -115,7 +115,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _USERS_PATH,
     fill_path,
 )
-from meho_backplane.connectors.keycloak.answer_realm import name_the_realm
+from meho_backplane.connectors.keycloak.answer_realm import answer_realm_on, name_the_realm
 from meho_backplane.connectors.keycloak.managed_realm_check import (
     ManagedRealmChecks,
     reading_realm_name,
@@ -137,6 +137,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.targets.keycloak_realm_warnings import REALM_NAME_DIFFERS
 
 __all__ = ["KeycloakAdminTokenError", "KeycloakConnector", "KeycloakWriteResult"]
 
@@ -1571,6 +1572,8 @@ class KeycloakConnector(HttpConnector):
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,
+                hard_to_undo=op.hard_to_undo,
+                changes_rights=op.changes_rights,
                 llm_instructions=op.llm_instructions,
             )
 
@@ -1615,6 +1618,7 @@ class KeycloakConnector(HttpConnector):
             raw_jwt="",
             tenant_id=UUID(int=0),
             tenant_role=TenantRole.OPERATOR,
+            in_code_kind="system",
         )
         connector_id = f"{self.impl_id}-{self.version}"
         # The inner call is a run of its own: its approval card and the check
@@ -1671,13 +1675,30 @@ def _realm_extras(realm_repr: Any, realms: RealmConfig) -> dict[str, Any]:
     ``GET /admin/realms/{realm}`` body and records the resolved
     admin-realm / managed-realm pair so an operator reading the
     fingerprint can see which realm was probed and where the admin client
-    authenticated. Tolerates a non-dict body defensively.
+    authenticated. When the ``KEYCLOAK_ANSWER_REALM`` switch is on and
+    Keycloak answers with a nonempty realm name that is not the managed
+    realm, it adds ``realm_name_differs``. A target read hides that line
+    again while the switch is off
+    (:func:`~meho_backplane.targets.keycloak_realm_warnings.shown_fingerprint`).
+    Tolerates a non-dict body defensively.
     """
     repr_dict = realm_repr if isinstance(realm_repr, dict) else {}
-    return {
+    extras: dict[str, Any] = {
         "realm": repr_dict.get("realm"),
         "enabled": repr_dict.get("enabled"),
         "ssl_required": repr_dict.get("sslRequired"),
         "login_theme": repr_dict.get("loginTheme"),
         **_realm_names(realms),
     }
+    answered = repr_dict.get("realm")
+    if (
+        answer_realm_on()
+        and isinstance(answered, str)
+        and answered
+        and (answered != realms.managed_realm)
+    ):
+        extras[REALM_NAME_DIFFERS] = (
+            "Keycloak answered with a realm name that is not the managed realm. "
+            "MEHO refuses operations on this target until the names match."
+        )
+    return extras

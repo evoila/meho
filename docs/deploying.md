@@ -293,25 +293,30 @@ targets whose credentials MEHO does not have to fetch per read.
 is **not** inert-until-you-provision-more. The `meho-mcp` JWT role this
 project documents
 ([`cross-repo/vault-provisioning.md`](cross-repo/vault-provisioning.md#2-role-meho-mcp))
-is `role_type=jwt user_claim=sub bound_audiences=<keycloak-audience>` with
-**no** `bound_subject` and **no** `bound_claims`, and the `meho-mcp` policy
-grants read on all of `secret/data/meho/*`. The runner mints its token with
-`audience=KEYCLOAK_AUDIENCE`, and the realm recipe just above tells you to
-add the matching audience mapper. Those two facts compose: Vault accepts
-the runner principal against the **existing** role with no further
-provisioning, and background dispatch inherits the role's entire policy.
+is bound to the backplane audience (`bound_audiences=<keycloak-audience>`)
+and to MEHO's addresses (`token_bound_cidrs`), with **no** `bound_subject`
+and **no** `bound_claims`. Its policy is the per-tenant policy of surface 3
+in the same guide: each login reads the secrets of the tenant its Vault entity belongs to.
+The runner mints its token with `audience=KEYCLOAK_AUDIENCE` from the same
+MEHO pods, and the realm recipe just above tells you to add the matching
+audience mapper. So Vault would accept the runner principal against the
+existing role. MEHO does not use the existing role for the runner: on a
+Vault install the check runner does not start unless
+`VAULT_CHECK_RUNNER_ROLE` names a role of its own, other than
+`VAULT_OIDC_ROLE`. Without one it logs `sensor_runner_refused` and
+evaluates no Sensor.
 
 Concretely, enabling `checkRunner.*` on a Vault install removes the
 "system-initiated calls cannot perform an operator-context Vault read"
 carve-out that the rest of this credential layer is built on — every
-scheduled evaluation can then read any target credential under
-`secret/meho/*`. That may be exactly what you want (it is what makes
-credentialed Sensors work on Vault), but it is a deliberate privilege
-decision, not a no-op.
+scheduled evaluation can then read the target credentials that the
+runner's own role grants. That may be exactly what you want (it is what
+makes credentialed Sensors work on Vault), but it is a deliberate choice
+about what MEHO may read, not a no-op.
 
-Bound the role first if it isn't:
+Give the runner its own role:
 
-- **Preferred** — give the runner client a **distinct** audience *instead
+- **Required** — give the runner client a **distinct** audience *instead
   of* the backplane audience mapper (Keycloak audience mappers add to `aud`
   rather than replace it, so a client carrying both still passes
   `meho-mcp`'s `bound_audiences`), provision it a **separate**, narrower
@@ -321,7 +326,8 @@ Bound the role first if it isn't:
   `VAULT_OIDC_ROLE`. The inbound event intake reads event source secrets
   with the same token and role, so the role's policy must also cover
   `secret/data/tenants/+/event-sources/*` (the recipe lists the paths).
-- **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
+- **Extra step** (the runner still needs its own role, as above) — add an
+  **exact-match** `bound_claims` to `meho-mcp` keyed
   on a claim value only operator tokens carry, e.g. a dedicated
   `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a
   restriction: it matches any present value, and the runner's
@@ -334,7 +340,7 @@ which one is in force, are in
 The chart prints the same warning in its `helm install` notes whenever
 `checkRunner.enabled: true` meets `config.credentialBackend: vault`.
 
-On a Vault install the backplane requires the preferred recipe: with a
+On a Vault install the backplane requires this recipe: with a
 runner principal and `VAULT_ADDR` set, the check runner does not start
 unless `VAULT_CHECK_RUNNER_ROLE` names a role of its own (not
 `VAULT_OIDC_ROLE`). Set it through `extraEnv`, or turn
@@ -482,7 +488,9 @@ on any deployment that uses credential-write operations:
    that Secret, then run `helm upgrade`.
 
 Check it with `GET /ready`: `features.approval_custody.custody` reads
-`configured`, `missing` or `malformed`. `helm install` and `helm upgrade`
+`configured`, `missing` or `malformed`. With `metricsAuth.enabled` on (the
+default), `/ready` shows this only to a caller that sends the metrics token;
+the command is in the part "The approval hand-off key" of the install guide. `helm install` and `helm upgrade`
 also print a warning while the block is off. Full steps, the pipe-in Secret
 command and key rotation:
 [Credential-write execution custody](codebase/approvals.md#required-set-the-custody-key-3712).

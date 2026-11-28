@@ -108,7 +108,7 @@ For the full parent/child **session-graph tree** (lineage between composite oper
 | `--target` | string (target name or alias) | Matches against `targets.name` scoped to your tenant. Unknown name returns zero rows, not an error. |
 | `--principal` | string | Substring `ILIKE` match on `operator_sub` or on the stored `principal_name`. Empty string is treated as no filter. |
 | `--op-id` | glob | `*` → SQL `%`. Literal `%` / `_` escaped. Matches both `payload->>'op_id'` (MCP / typed) and `http.{method}:{path}` (chassis). |
-| `--op-class` | enum | One of `read` / `write` / `credential_read` / `credential_write` / `credential_mint` / `audit_query` / `approval` / `checks` / `other`. Exact match against `payload->>'op_class'`. |
+| `--op-class` | enum | One of `read` / `write` / `credential_read` / `credential_write` / `credential_mint` / `credential_use` / `audit_query` / `approval` / `checks` / `other`. Exact match against `payload->>'op_class'`. |
 | `--result-status` | enum | One of `ok` / `error` / `denied` / `pending` / `withdrawn`. Most values map to status-code ranges. `withdrawn` matches the row where the sender took its approval request back; that operation never ran. `pending` is history: the run stopped to wait for approval, and the row stays `pending` after the decision. To see what waits now, use `meho approvals list`. |
 | `--since` / `--until` | duration shorthand or ISO-8601 | Shorthand grammar: `<N><unit>` where unit ∈ `{s, m, h, d, w}` and N ≤ 9999. ISO-8601 accepted via `datetime.fromisoformat` (Python 3.11+, including the `Z` suffix). |
 | `--audit-id` | UUID | Exact-id lookup. Combined with the tenant boundary, produces 0 or 1 row. |

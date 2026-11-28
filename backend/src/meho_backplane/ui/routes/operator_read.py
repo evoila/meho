@@ -44,4 +44,6 @@ async def require_ui_read_operator(
         raw_jwt="ui-session",
         tenant_id=session_ctx.tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        # The person of the web console session.
+        in_code_kind="person",
     )

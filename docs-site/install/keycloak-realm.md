@@ -838,7 +838,9 @@ To fill the groups from your company directory instead of by hand, see
 
 The policy file can say which group is which team, in `bindings`
 ([The policy file](../guides/policy-file.md#which-login-group-is-which-team)).
-This needs the setting `POLICY_APPROVER_ROUTING`. MEHO matches a team
+This needs the setting `CUSTOM_POLICY` or `POLICY_APPROVER_ROUTING`.
+Each older switch (`POLICY_CLASSIFICATION`, `POLICY_ENGINE_SHADOW`, `POLICY_APPROVER_ROUTING`) still turns on its own part alone.
+MEHO matches a team
 group by its full path or by a group attribute, never by its short name:
 a short name can belong to more than one group. So the token must carry
 one of the two:
@@ -980,9 +982,17 @@ console admin and points here. Make one once by hand:
 6. Optional: keep the login in a Secret, as a new install does:
 
     ```bash
-    kubectl -n <namespace> create secret generic <release>-core-console-admin \
-      --from-literal=username=console-admin \
-      --from-literal=password='<the temporary password>'
+    {
+      printf 'Temporary password (not shown): '; IFS= read -rs ADMIN_PASSWORD; echo
+      if [ -n "$ADMIN_PASSWORD" ]; then
+        printf '%s' "$ADMIN_PASSWORD" \
+          | kubectl -n <namespace> create secret generic <release>-core-console-admin \
+              --from-literal=username=console-admin --from-file=password=/dev/stdin
+      else
+        echo 'No password was typed. Nothing was made.'
+      fi
+      unset ADMIN_PASSWORD
+    }
     ```
 
     The next `helm upgrade` then prints `console admin: kept`.
@@ -1182,7 +1192,19 @@ person (the console's live stream and `GET /api/v1/feed`) ends within
 4 seconds.
 `<sub>` is the person's login id (the user id in Keycloak). To undo it,
 run `meho principal unblock <sub>`. `meho principal blocked` lists the
-blocks.
+blocks. The console page `/ui/blocked-people` ("Blocked people" in the
+menu) does the same for a person with the tenant admin role: it lists the blocks, blocks a
+person with a reason, and unblocks a person after a confirm step. The
+page never removes a block on your own login. A platform admin removes a
+block on their own login with `meho principal unblock <sub> --reason "<why>"`,
+run in the tenant of that block, with a fresh sign-in. It removes only the
+block of that tenant. A block in every tenant stays until another platform
+admin removes it. A tenant admin cannot remove a block on their own login.
+This holds on the page and with the command. Another tenant admin of that
+tenant removes a block of that tenant, and a platform admin with
+`tenant_admin` in the current tenant removes every block of another login,
+on the Blocked people page or with `meho principal unblock`. Only a platform
+admin removes a block in every tenant.
 
 Who blocks whom:
 
@@ -1195,6 +1217,7 @@ Who blocks whom:
   their own login: `meho principal unblock <sub> --reason "<why>"`. MEHO
   first asks for a fresh sign-in in the browser. The audit log keeps the
   reason and the sign-in.
+  A proxy in front of MEHO must pass the body of a DELETE call: `meho principal unblock` sends the reason in it.
 - The way back uses the approval sign-in client of the login server
   (`meho-cli-approve` in MEHO's own setup). An install without that
   client has no way back; another platform admin or a tenant admin of

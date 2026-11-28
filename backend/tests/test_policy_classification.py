@@ -28,7 +28,6 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
-    SWITCH_OFF_REFUSAL,
     policy_classify,
     register_policy_classify_operation,
 )
@@ -873,9 +872,14 @@ async def test_policy_classify_with_the_switch_off(
             )
         ).all()
     assert rows == []
-    with pytest.raises(ValueError, match="Classification is off"):
+    with pytest.raises(ValueError) as refused:
         await policy_classify(_admin(), None, {"match": {"op": "a"}, "category": "network"})
-    assert SWITCH_OFF_REFUSAL.endswith("POLICY_CLASSIFICATION setting.")
+    assert str(refused.value) == (
+        "Classification is off on this MEHO. An admin can turn it on in one of two ways. "
+        "The POLICY_CLASSIFICATION setting turns on classification only. The CUSTOM_POLICY "
+        "setting turns on all three policy parts: classification, the policy evaluator and "
+        "approver routing."
+    )
 
 
 @pytest.mark.asyncio

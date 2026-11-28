@@ -237,7 +237,14 @@ rejects a whitespace-only secret rather than setting an empty password.
   (`systemInfo.version`); a 404 there leaves `version=None` but keeps
   `reachable=True`. A `None` operator falls back to the synthesised
   system operator, which fails closed at the live Vault read (surfaced as
-  `reachable=False`).
+  `reachable=False`). With `KEYCLOAK_ANSWER_REALM` on and a nonempty
+  answered `realm` that is not the managed realm, `extras` also has
+  `realm_name_differs`. A target read (`meho targets describe`, the target
+  list) leaves that line out of a saved Keycloak probe while the switch is
+  off (`shown_fingerprint` in `targets/keycloak_realm_warnings.py`). The
+  saved probe's own `product` decides this, not the target's current
+  product. A probe of another product keeps its `extras` as they are. The
+  measurement of this probe field and its switch is tracked in #6639.
 - `probe(target)` — delegates to `fingerprint`; one admin round-trip
   covers reachability + admin-auth validity.
 - `register_operations()` — walks `READ_OPS`, `WRITE_OPS`,
@@ -2299,7 +2306,18 @@ check before an approved run) reads the realm first every time, so a call
 never uses a check of an earlier call. An operation that sends another one
 through the connector's `execute` shim starts a run for the inner call, so the
 inner approval card and the check before its approved run read the realm
-themselves. Every admin login can read the name. A
+themselves. Every admin login with at least one
+`realm-management` role in the realm can read the name. When Keycloak
+refuses this read with 403, also the read that `realm.update` makes before
+its write and the read that `events.list`, `admin_events.list` and
+`auth_flow.step.list` make before they ask for events or flow steps,
+nothing more is sent and the result is the usual
+`connector_http_403` result (`http_status` 403, `upstream_message`,
+`permission_headers`). Its `error` text starts with a fixed sentence: MEHO's
+read of the managed realm was refused, and the login needs at least one
+`realm-management` role in that realm, for example `view-realm`
+(`ManagedRealmReadRefusedError`). The sentence holds no vendor text, so an
+operation that sends a secret (`check_login`, `realm.update`) keeps it. A
 `keycloak.realm.create` that names no realm (no `realm` value, an empty
 name or a null name, also in `representation`) counts as a write in the
 login realm on every target, so a platform admin must approve it
@@ -2398,11 +2416,11 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
   card of every write on such a target; the console shows them as a
   "Check the target" box.
 
-To set the realm on an existing target (`--extra` replaces the whole
-`extras` map, so repeat the keys you keep):
+To set or correct the realm of an existing target, change that one key.
+Every other extra keeps its value:
 
 ```console
-$ meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>
+$ meho targets update <name> --set-extra managed_realm=<realm>
 ```
 
 ## Dependencies

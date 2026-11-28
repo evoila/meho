@@ -55,8 +55,9 @@ The rules:
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
 * **Credential write or mint.** An operation that writes or makes a
-  credential (class ``credential_write`` or ``credential_mint``) keeps the
-  approval its code turns on. No override removes it.
+  credential (class ``credential_write`` or ``credential_mint``) always
+  waits for approval, also when its connector registered it without the
+  approval flag. No override removes it.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -88,7 +89,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.op_classes import is_credential_capable
+from meho_backplane.op_classes import (
+    CREDENTIAL_CHANGE_OP_CLASSES,
+    is_credential_capable,
+    needs_per_call_approval,
+)
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -107,6 +112,7 @@ from meho_backplane.policy.store import (
     classify_rows,
     classify_step,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CLASSIFICATION_FIELDS",
@@ -122,12 +128,14 @@ __all__ = [
     "approval_classification",
     "effective_policy",
     "effective_policy_map",
+    "has_plain_mark",
     "hidden_classification_fields",
     "list_overrides",
     "load_overrides",
     "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
+    "writes_a_credential",
 ]
 
 #: Order of the four risk levels, lowest first.
@@ -138,11 +146,14 @@ SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "
 #: switch is off, so those answers stay exactly as they were.
 CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 
-#: The classes of an operation that writes or makes a credential. When the
-#: code turns approval on for such an operation, no override turns it off.
-_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_write", "credential_mint"}
-)
+#: The classes of an operation that writes or makes a credential. Such an
+#: operation always waits for approval: no connector and no override turns it off.
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = CREDENTIAL_CHANGE_OP_CLASSES
+
+
+def writes_a_credential(op_id: str, declared: str | None = None) -> bool:
+    """True when *op_id* writes or makes a credential (its resolved class)."""
+    return resolve_op_class(op_id, declared) in _CREDENTIAL_CHANGE_CLASSES
 
 
 def hidden_classification_fields() -> set[str]:
@@ -274,6 +285,54 @@ def effective_policy(
     safety = _max_level([code_safety, *(o.safety_level for o in present if o.safety_level)])
     approval = _approval(code_approval, present) or safety == "destructive"
     return EffectivePolicy(safety_level=safety, requires_approval=approval)
+
+
+def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
+    """Return ``True`` when *descriptor* waits only because of the code's plain approval mark.
+
+    Plain means: the code (or the import) turns ``requires_approval`` on,
+    and the operation has none of these reasons to wait: a credential
+    call, a field with an address the caller gives, a change of rights,
+    "approve each call", or a delete sign (the ``destructive`` level of
+    the code, the HTTP verb ``DELETE``, the ``destructive`` tag, a delete
+    name). It reads the code's own values (``code_requires_approval``,
+    ``code_safety_level``, ``code_parameter_schema``), so an admin's edit
+    or a switch that hides a field never looks like the code's mark.
+
+    It reads the delete names from the one setting
+    ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS``, as every other reader of
+    that setting does. No database.
+
+    ``has_plain_mark`` is read only where ``CUSTOM_POLICY`` is on; a
+    reader with the switch off is a fault.
+    """
+    from meho_backplane.operations.service_grants import (
+        delete_grant_reason,
+        descriptor_credential_reason,
+    )
+
+    code_approval = descriptor.code_requires_approval
+    if code_approval is None:
+        code_approval = descriptor.requires_approval
+    code_safety = descriptor.code_safety_level or descriptor.safety_level
+    schema = descriptor.code_parameter_schema
+    if schema is None:
+        schema = descriptor.parameter_schema
+    op_id = descriptor.op_id
+    patterns = get_settings().service_grant_delete_shaped_patterns
+    delete_sign = (
+        code_safety == "destructive"
+        or (descriptor.method or "").upper() == "DELETE"
+        or "destructive" in (descriptor.tags or [])
+        or delete_grant_reason(op_id, patterns) is not None
+    )
+    return bool(code_approval) and not (
+        delete_sign
+        or descriptor_credential_reason(descriptor) is not None
+        or has_caller_address(schema)
+        or is_rights_change_op(op_id)
+        or needs_per_call_approval(op_id)
+    )
 
 
 def _visible_scope(tenant_id: UUID | None) -> Any:
@@ -427,10 +486,13 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
     :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
-    An operation that writes or makes a credential keeps the approval its
-    code turns on, also when an install or tenant override turns it off. So
-    does an operation a connector marked with
-    :func:`~meho_backplane.op_classes.declare_credential_capable`.
+    An operation that writes or makes a credential always waits for
+    approval: also when its connector registered it without the approval
+    flag, and also when an install or tenant override turns it off. An
+    operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable` keeps the
+    approval its code turns on; each of its calls waits anyway
+    (:func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
@@ -439,9 +501,8 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if row.requires_approval and (
-        is_credential_capable(row.op_id)
-        or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    if writes_a_credential(row.op_id, stored_op_class) or (
+        row.requires_approval and is_credential_capable(row.op_id)
     ):
         requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(
@@ -481,6 +542,7 @@ async def apply_effective_policy(
     )
     policy = policies[OpKey.of(row)]
     session.expunge(row)
+    _keep_code_values(row)
     row.safety_level = policy.safety_level
     row.requires_approval = policy.requires_approval
     row.parameter_check_schema = checked_parameter_schema(row.parameter_schema)
@@ -512,6 +574,11 @@ async def apply_step_policy(
     standing grant and no approval of the run clears an "always wait"
     step. The category and labels of an override row count too, so the
     step's approval request is routed like a direct call's.
+
+    A step whose operation writes or makes a credential (class
+    ``credential_write`` or ``credential_mint``) always gets the approval
+    flag, the same as :func:`_with_floors` gives it to a called operation.
+    Its risk level stays as it is.
     """
     key = OpKey.of(step)
     async with get_sessionmaker()() as session:
@@ -531,10 +598,20 @@ async def apply_step_policy(
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
+    if writes_a_credential(step.op_id, getattr(step, "op_class", None)):
+        policy = replace(policy, requires_approval=True)
+    _keep_code_values(step)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval
     _set_classification(step, policy)
     return step
+
+
+def _keep_code_values(row: EndpointDescriptor) -> None:
+    """Keep the code's own risk level, approval flag and stored schema before they change."""
+    row.code_safety_level = row.safety_level
+    row.code_requires_approval = row.requires_approval
+    row.code_parameter_schema = row.parameter_schema
 
 
 def _set_classification(row: EndpointDescriptor, policy: EffectivePolicy) -> None:

@@ -1300,6 +1300,20 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         return
 
 
+def pytest_itemcollected(item: pytest.Item) -> None:
+    """Name the xdist worker of each test in the junit file of the CI coverage job.
+
+    The coverage shards run three xdist workers, and each worker writes its
+    own coverage data file. The test map builder
+    (``tests/_unit_test_map.py build``) reads this property from the junit
+    file, so it can check that every worker saved its data, not only one
+    worker of the shard. Only in a coverage worker: other runs are unchanged.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker and os.environ.get("COVERAGE_PROCESS_START"):
+        item.user_properties.append(("xdist_worker", worker))
+
+
 def _save_worker_coverage_data() -> None:
     """Write this xdist worker's coverage data file before the worker reports done.
 

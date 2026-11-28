@@ -264,3 +264,30 @@ def test_ambiguous_connector_exception_message_redacted() -> None:
     assert "candidates=[a, b]" in msg
     assert _BEARER_SECRET not in msg
     assert "[REDACTED:bearer_token]" in msg
+
+
+def test_a_model_refusal_names_the_field_and_rule_never_the_input() -> None:
+    """A handler's model refusal names each field and rule, never the sent value."""
+    from pydantic import BaseModel, ValidationError, field_validator
+
+    class _Body(BaseModel):
+        port: int
+        notes: dict[str, str]
+
+        @field_validator("notes")
+        @classmethod
+        def _short(cls, value: dict[str, str]) -> dict[str, str]:
+            raise ValueError("notes may hold at most one key")
+
+    made = "made" + "-value-7f3a"
+    with pytest.raises(ValidationError) as caught:
+        _Body.model_validate({"port": "not-a-port", "notes": {"a": "1", "b": made}})
+
+    result = result_connector_error("op.write", caught.value, 1.0)
+
+    text = json.dumps(result.extras, default=str) + str(result.error)
+    assert made not in text
+    assert "not-a-port" not in text
+    msg = result.extras["exception_message"]
+    assert "port: Input should be a valid integer" in msg
+    assert "notes: Value error, notes may hold at most one key (value_error)" in msg

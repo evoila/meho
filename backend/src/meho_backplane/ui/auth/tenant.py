@@ -189,6 +189,8 @@ async def fall_back_after_removal(
         expected_audience=expected_audience,
         allow_unchosen=True,
     )
+    # The person's own console request finds the tenant gone, in this moment.
+    operator = operator.model_copy(update={"in_code_kind": "person"})
     await save_session_tenant(
         decrypted.id,
         tenant_id=operator.tenant_id,

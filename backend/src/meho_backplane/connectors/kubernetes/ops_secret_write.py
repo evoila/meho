@@ -484,6 +484,8 @@ SECRET_WRITE_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "secret", "credential", "dangerous"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=_SECRET_UPDATE_LLM,
     ),
     KubernetesOp(
@@ -502,6 +504,8 @@ SECRET_WRITE_OPS: tuple[KubernetesOp, ...] = (
         tags=("write", "secret", "credential", "delete", "destructive"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
+        changes_rights=True,
         llm_instructions=_SECRET_DELETE_LLM,
     ),
 )

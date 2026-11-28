@@ -55,6 +55,7 @@ operator-only degrade).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from contextvars import ContextVar
@@ -64,6 +65,11 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.connectors._shared.log_host import (
+    FIRST_REQUEST_URL_EXTENSION,
+    REDIRECT_TEXT_WITHHELD,
+    redirect_text_withheld,
+)
 from meho_backplane.flight_recorder._capture_util import (
     approx_bytes,
     approx_span_bytes,
@@ -83,6 +89,7 @@ from meho_backplane.flight_recorder.store import SpanInput, record_trace
 from meho_backplane.redaction.flight_recorder import redact_span
 
 __all__ = [
+    "FIRST_REQUEST_URL_EXTENSION",
     "CaptureHandle",
     "SpanStart",
     "begin_dispatch_capture",
@@ -401,14 +408,16 @@ def record_vendor_call_error(start: SpanStart | None, *, method: str, exc: BaseE
     timed-out call is not a silent gap in the trace. It carries no header or
     body, so no vendor byte reaches the span. The URL is read from the
     exception inside this guarded function: ``httpx`` raises ``RuntimeError``
-    when no request is attached. Any error is logged and swallowed.
+    when no request is attached. After a followed redirect the URL is the
+    address MEHO asked for. Any error is logged and swallowed.
     """
     scope = _active_capture_var.get()
     if start is None or scope is None:
         return
     try:
         try:
-            url = safe_url(exc.request.url)  # type: ignore[attr-defined]
+            request = exc.request  # type: ignore[attr-defined]
+            url = safe_url(request.extensions.get(FIRST_REQUEST_URL_EXTENSION) or request.url)
         except Exception:
             url = "?"
         op = _op_context_var.get()
@@ -448,10 +457,23 @@ def _redact_vendor_call(
 ) -> tuple[Any, str, bool]:
     """Cap + redact one vendor call. Returns ``(redaction, safe_url, truncated)``."""
     op = _op_context_var.get()
-    request_url = getattr(getattr(response, "request", None), "url", None)
+    # After a followed redirect the last address is the vendor's choice, so
+    # the span names the address MEHO asked for.
+    extensions = getattr(response, "extensions", None)
+    request_url = (
+        extensions.get(FIRST_REQUEST_URL_EXTENSION) if isinstance(extensions, dict) else None
+    )
+    if request_url is None:
+        request_url = getattr(getattr(response, "request", None), "url", None)
     response_content_type = header_value(response, "content-type")
     req_body, req_truncated = cap_body(request_body)
     raw_response_body = response_content(response) if response_body is None else response_body
+    if redirect_text_withheld(getattr(response, "status_code", None)):
+        # A 3xx other than a 304 in the trace is one MEHO did not follow: its
+        # text is not kept. A 304 asks for no redirect; its body stays as sent.
+        # The fixed sentence goes in as a JSON string, so the span records it.
+        raw_response_body = json.dumps(REDIRECT_TEXT_WITHHELD)
+        response_content_type = "application/json"
     resp_body, resp_truncated = cap_body(raw_response_body)
     redaction = redact_span(
         op_id=op.op_id if op else None,

@@ -69,6 +69,7 @@ from meho_backplane.operations import (
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations._preview import without_internal_effect_keys
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
@@ -3237,12 +3238,15 @@ async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
     target = _FakeTarget(product="vault", name="vault-main")
     target.extras = {"vault_role": "meho-writer"}  # type: ignore[attr-defined]
 
+    # A credential write always waits for a person, so the run is the one
+    # after the approval (the approval-queue resume sets ``_approved``).
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
         op_id="vault.kv.put",
         target=target,
         params={"path": "meho/test/x", "data": {"k": "v"}},
+        _approved=True,
     )
     assert result.status == "error"
     assert result.error is not None
@@ -3984,7 +3988,8 @@ async def test_park_without_builder_uses_identifier_default(
         # preview_populated=False + a "connector_did_not_populate" reason so a
         # caller can refuse to auto-approve the blind, op-identity-only
         # request, and the uniform op_class metadata field (#2681).
-        assert row.proposed_effect == {
+        # The agent's record stays under an internal key no caller reads.
+        assert without_internal_effect_keys(row.proposed_effect) == {
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
@@ -4037,7 +4042,8 @@ async def test_park_keeps_the_catalog_risk_level_when_the_preview_build_fails(
     async with get_sessionmaker()() as fresh:
         row = await fresh.get(ApprovalRequest, approval_request_id)
         assert row is not None
-        assert row.proposed_effect == {
+        # The agent's record stays under an internal key no caller reads.
+        assert without_internal_effect_keys(row.proposed_effect) == {
             "op_id": "vault.kv.failing_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
@@ -4480,17 +4486,28 @@ async def test_composite_parent_row_keeps_its_own_verdict_after_step_gate(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("switch", "parent_rule"),
+    [
+        ("POLICY_ENGINE_SHADOW", "default:person.safe (shadow)"),
+        ("CUSTOM_POLICY", "default:person.safe"),
+    ],
+)
 async def test_composite_step_row_names_the_step_rule_and_the_parent_keeps_its_own(
-    stub_embedding_service: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    switch: str,
+    parent_rule: str,
 ) -> None:
     """#6044: the step gate binds the step's rule only for its own rows.
 
-    With POLICY_ENGINE_SHADOW on, the step's ``denied`` row names the rule
-    the evaluator matched for the step; the parent's row names the parent's.
+    The step's ``denied`` row names the rule the evaluator matched for the
+    step; the parent's row names the parent's. With CUSTOM_POLICY on, the
+    parent's rule decided; the step's rule is still marked ``(shadow)``.
     """
     from meho_backplane.operations._preview import _PERMISSION_PREFLIGHTS
 
-    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    monkeypatch.setenv(switch, "true")
     get_settings.cache_clear()
     register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
     await _seed_gated_composite(
@@ -4517,7 +4534,7 @@ async def test_composite_step_row_names_the_step_rule_and_the_parent_keeps_its_o
     assert len(parent_rows) == 1
     assert step_rows[0].policy_rule is not None
     assert step_rows[0].policy_rule.endswith(" (shadow)")
-    assert parent_rows[0].policy_rule == "default:person.safe (shadow)"
+    assert parent_rows[0].policy_rule == parent_rule
     assert step_rows[0].policy_rule != parent_rows[0].policy_rule
 
 

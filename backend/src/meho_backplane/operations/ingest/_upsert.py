@@ -304,6 +304,8 @@ def _build_new_descriptor(
         safety_level=ctx.proto.safety_level,
         requires_approval=ctx.proto.requires_approval,
         op_class=ctx.proto.op_class,
+        hard_to_undo=None,
+        changes_rights=None,
         is_enabled=False,
         needs_reingest=False,
         embedding=embedding,
@@ -347,7 +349,13 @@ def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> 
     A class from the floor is stored. When the floor gives none, the stored
     class stays, like the stored risk level: a re-ingest never weakens a row.
     A stored ``credential_read`` is never replaced by another class.
+
+    An imported operation has no ``hard_to_undo`` and no ``changes_rights``:
+    only the code of a typed operation sets them. So each re-import clears
+    both, also a value stored on the row before.
     """
+    existing.hard_to_undo = None
+    existing.changes_rights = None
     if ctx.proto.op_class is not None and existing.op_class != "credential_read":
         existing.op_class = ctx.proto.op_class
     if not _keeps_stored_policy(existing, ctx):

@@ -232,7 +232,10 @@ def harbor_core_addr() -> Iterator[str]:
         db_container.stop()
         redis_container.stop()
         network.remove()
-        pytest.skip(f"harbor-db/redis containers failed to start ({type(exc).__name__}): {exc}")
+        reason = f"harbor-db/redis containers failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         # Give DB time to reach ready state before starting core.
@@ -248,7 +251,10 @@ def harbor_core_addr() -> Iterator[str]:
         db_container.stop()
         redis_container.stop()
         network.remove()
-        pytest.skip(f"harbor-core container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"harbor-core container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         try:
@@ -734,7 +740,7 @@ async def test_robot_create_credential_mint_classification(
 
     # The executed (post-approval) op audits under the *requester* identity:
     # the resume re-dispatches as the original requester with ``_approved=True``
-    # (the committed approval is the authorization), so the executed dispatch
+    # (the approval is not asked for again), so the executed dispatch
     # row is keyed on the requester sub. The park writes a separate
     # ``approval.request`` row (not keyed on the op-id), so filtering on
     # ``path == "harbor.robot.create"`` + the requester sub selects exactly

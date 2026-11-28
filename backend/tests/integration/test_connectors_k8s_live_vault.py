@@ -155,7 +155,10 @@ def k3s_kubeconfig_text() -> Iterator[str]:
         container = K3SContainer(image=image)
         container.start()
     except Exception as exc:
-        pytest.skip(f"k3s container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         yield container.config_yaml()
@@ -183,7 +186,10 @@ def vault_container_and_token() -> Iterator[tuple[str, str]]:
         container = VaultContainer(image=image, root_token=root_token)
         container.start()
     except Exception as exc:
-        pytest.skip(f"Vault container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"Vault container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         yield container.get_connection_url(), root_token

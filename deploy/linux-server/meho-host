@@ -13,6 +13,9 @@
 #                     the console certificate (#4638)
 #   support-bundle    one file for evoila support, with no passwords in it
 #   admin-network     the addresses that may use SSH, in the MEHO firewall
+#   target-networks   the networks of the systems that MEHO manages: MEHO
+#                     accepts a target on a private address only inside
+#                     them (#6828)
 #   log-server        only on the appliance: send the logs of the machine to
 #                     the customer's log server, and open the MEHO firewall
 #                     to it (#5752)
@@ -34,10 +37,11 @@
 # a command, so it is not in the process list or the shell history, and
 # meho-host never prints it.
 #
-# meho-host sources two files of lib/, the files install.sh uses too:
+# meho-host sources three files of lib/, the files install.sh uses too:
 # lib/firewall.sh and lib/cis.sh, for their read-only functions
-# firewall_state and cis_state. In the download and in the repository they
-# are in lib/ next to meho-host. install.sh copies them to
+# firewall_state and cis_state, and lib/targets.sh, for the rule of the
+# target networks. In the download and in the repository they are in lib/
+# next to meho-host. install.sh copies them to
 # /usr/local/lib/meho-host, which is ../lib/meho-host from the folder of
 # /usr/local/sbin/meho-host.
 #
@@ -69,13 +73,13 @@ MEHO_HOST_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 MEHO_LIB_DIRS=("$MEHO_HOST_DIR/lib" "$(cd -- "$MEHO_HOST_DIR/.." && pwd -P)/lib/meho-host")
 MEHO_LIB_DIR=""
 for MEHO_LIB_CANDIDATE in "${MEHO_LIB_DIRS[@]}"; do
-    if [[ -f $MEHO_LIB_CANDIDATE/firewall.sh && -f $MEHO_LIB_CANDIDATE/cis.sh ]]; then
+    if [[ -f $MEHO_LIB_CANDIDATE/firewall.sh && -f $MEHO_LIB_CANDIDATE/cis.sh && -f $MEHO_LIB_CANDIDATE/targets.sh ]]; then
         MEHO_LIB_DIR=$MEHO_LIB_CANDIDATE
         break
     fi
 done
 if [[ -z $MEHO_LIB_DIR ]]; then
-    printf '[FAIL] meho-host cannot find firewall.sh and cis.sh: neither %s nor %s holds both. Fix: copy lib/firewall.sh and lib/cis.sh of the MEHO download to /usr/local/lib/meho-host/.\n' \
+    printf '[FAIL] meho-host cannot find firewall.sh, cis.sh and targets.sh: neither %s nor %s holds all three. Fix: copy lib/firewall.sh, lib/cis.sh and lib/targets.sh of the MEHO download to /usr/local/lib/meho-host/.\n' \
         "${MEHO_LIB_DIRS[0]}" "${MEHO_LIB_DIRS[1]}" >&2
     exit 1
 fi
@@ -84,6 +88,8 @@ readonly MEHO_HOST_DIR MEHO_LIB_DIRS MEHO_LIB_DIR
 source "$MEHO_LIB_DIR/firewall.sh"
 # shellcheck source=lib/cis.sh
 source "$MEHO_LIB_DIR/cis.sh"
+# shellcheck source=lib/targets.sh
+source "$MEHO_LIB_DIR/targets.sh"
 
 readonly MEHO_STATE_DIR=/var/lib/meho
 readonly MEHO_SUPPORT_DIR=/var/lib/meho/support
@@ -93,6 +99,10 @@ readonly MEHO_UNSEAL_KEY_FILE=/var/lib/meho/unseal-key
 # (lib/common.sh) and certificate writes again. It is not secret.
 readonly MEHO_CONSOLE_CA_FILE=/var/lib/meho/console-ca.crt
 readonly MEHO_INSTALL_RECORD=/etc/meho/install.json
+# The Helm values of this place, which install.sh writes from the install
+# record (render_place_values in lib/core.sh). target-networks changes its
+# last block.
+readonly MEHO_PLACE_VALUES=/etc/meho/values-place.yaml
 readonly MEHO_ETC_DIR=/etc/meho
 # The two commands install.sh puts on the machine, and the folder of the
 # files meho-host sources (lib/common.sh). The paths of the MEHO host firewall
@@ -100,6 +110,8 @@ readonly MEHO_ETC_DIR=/etc/meho
 readonly MEHO_CLI_PATH=/usr/local/bin/meho
 readonly MEHO_HOST_PATH=/usr/local/sbin/meho-host
 readonly MEHO_HOST_LIB_DIR=/usr/local/lib/meho-host
+# The lock that install.sh takes too (lib/common.sh), see take_host_lock.
+readonly MEHO_HOST_LOCK=/run/meho
 # uninstall leaves the firewall in place (ADR 0009). This removes it.
 readonly FIREWALL_REMOVE_COMMAND="systemctl disable $MEHO_FIREWALL_UNIT && rm -r $MEHO_FIREWALL_UNIT_FILE $MEHO_ETC_DIR && systemctl daemon-reload && nft delete table inet meho"
 # RKE2's own uninstall script of a tarball install
@@ -168,6 +180,11 @@ readonly CONSOLE_CERT_MIN_DAYS=30
 # certificate line of the list stays red.
 readonly CONSOLE_TRUST_CONFIGMAP=meho-console-trust
 readonly MEHO_DEPLOYMENT=meho
+# The ConfigMap of the chart that the meho pod reads as environment
+# variables (envFrom), and its key with the target networks
+# (config.targetSsrfAllowlist in the chart's values; #6828).
+readonly MEHO_CONFIGMAP=meho-config
+readonly TARGET_ALLOWLIST_KEY=MEHO_TARGET_SSRF_ALLOWLIST
 # One kubectl call prints both keys, decoded, with the marker line between
 # them: each call may wait 10 seconds, and meho doctor gives the whole check
 # 60 seconds (#4740).
@@ -272,6 +289,7 @@ Run it as root:
   sudo meho-host check
   sudo meho-host support-bundle
   sudo meho-host admin-network 10.0.50.0/24
+  sudo meho-host target-networks 10.20.0.0/16,10.30.0.5:443
   sudo meho-host log-server logs.example.com
   sudo meho-host uninstall
   sudo meho-host certificate --cert chain.pem --key key.pem
@@ -303,6 +321,19 @@ Commands:
                     the SSH rule changes; every other rule stays. Over
                     SSH, it asks first when the new range does not hold
                     your own address.
+  target-networks <list>
+  target-networks none
+                    Set the networks of the systems that MEHO manages,
+                    such as vCenter, NSX, switches and servers. MEHO
+                    accepts a target on a private address only inside
+                    them. The list has IPv4 ranges such as 10.20.0.0/16
+                    and addresses, with commas and no spaces between
+                    them. An address may carry a port, for example
+                    10.30.0.5:443. No host names, and no entry may hold
+                    the ranges of the built-in Kubernetes. none
+                    empties the list. When a check fails, nothing
+                    changes. An update keeps the list. MEHO restarts for
+                    this: the console is away for about a minute.
   log-server <host>[:<port>] [--tls <ca.pem>]
   log-server none
                     Only on the MEHO appliance. Send the logs of this
@@ -434,6 +465,39 @@ in_list() {
 check_root() {
     [[ $(id -u) == 0 ]] ||
         fail "meho-host does not run as root." "run it with sudo: sudo meho-host $COMMAND"
+}
+
+# take_host_lock: hold MEHO_HOST_LOCK until meho-host ends. It is a copy
+# of take_host_lock in lib/common.sh, which install.sh takes for its whole
+# run. So an update that waits for its backup answer cannot write an old
+# list of target networks back after this command changed it. A second run
+# does not wait: it stops at once, before it reads or changes anything.
+# flock holds the lock on the open folder, so it ends with the process,
+# also after a crash.
+take_host_lock() {
+    local lock="${HOST_ROOT}${MEHO_HOST_LOCK}"
+    command -v flock >/dev/null ||
+        fail "the command flock is missing, so meho-host cannot make sure that install.sh does not change the machine at the same time. Nothing was changed." \
+            "install the package util-linux, then run the command again."
+    # The lock is the folder itself, not a file in it: there is no file
+    # that a link or a second name could lead to, and nothing to clean up.
+    # flock takes a lock on a folder that is open only for reading, so only
+    # root may open it: root's, mode 0700, and no link. mkdir makes a new
+    # folder with mode 0700 at once. -m sets the mode of the last folder
+    # only, which is the one that counts: /run is root's and always there.
+    # A folder in another state is not repaired: the run stops.
+    if [[ ! -e $lock && ! -L $lock ]]; then
+        # shellcheck disable=SC2174
+        mkdir -p -m 0700 "$lock"
+    fi
+    if [[ -L $lock || ! -d $lock || ! -O $lock || $(stat -c %a "$lock") != 700 ]]; then
+        fail "the lock folder $MEHO_HOST_LOCK is not a folder that only root may open, so another account could hold the lock. Nothing was changed." \
+            "remove it with 'sudo rm -r $MEHO_HOST_LOCK' (it holds only the lock), then run the command again."
+    fi
+    exec {MEHO_HOST_LOCK_FD}<"$lock"
+    flock -n "$MEHO_HOST_LOCK_FD" ||
+        fail "another install.sh or meho-host command changes this machine now (lock $MEHO_HOST_LOCK). Nothing was changed." \
+            "run the command again after the other command ends."
 }
 
 # ask <question>: print the question and read one line. True only for "yes",
@@ -626,10 +690,14 @@ check_cis_profile() {
     fi
 }
 
-# install_hostname: the host name of the install, from the install record.
-install_hostname() {
-    awk -F'"' '$2 == "hostname" { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
+# install_option <key>: one value of the install record, or nothing.
+# install.sh writes one key per line (render_install_record in lib/core.sh).
+install_option() {
+    awk -F'"' -v key="$1" '$2 == key { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
 }
+
+# install_hostname: the host name of the install, from the install record.
+install_hostname() { install_option hostname; }
 
 # utc_day <seconds>: the day of a time, for example 2027-10-23.
 utc_day() { date -u -d "@$1" +%F; }
@@ -1121,6 +1189,22 @@ is_ipv4_network() {
     (((address & mask) == address))
 }
 
+# cidrs_overlap <range> <range> of lib/net.sh: true when the two ranges
+# share at least one address. An address without a prefix counts as a
+# range of one address. lib/targets.sh uses it.
+cidrs_overlap() {
+    local left=$1 right=$2
+    [[ $left == */* ]] || left+=/32
+    [[ $right == */* ]] || right+=/32
+    local left_prefix=${left#*/} right_prefix=${right#*/}
+    local prefix=$((left_prefix < right_prefix ? left_prefix : right_prefix))
+    local mask=$((prefix == 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF))
+    local left_int right_int
+    left_int=$(ipv4_to_int "${left%/*}")
+    right_int=$(ipv4_to_int "${right%/*}")
+    (((left_int & mask) == (right_int & mask)))
+}
+
 # range_holds <address or range> <address>: true when the range holds the
 # address. An address without a prefix is a range of one address.
 range_holds() {
@@ -1238,6 +1322,122 @@ command_admin_network() {
         ok "SSH is allowed from $range"
     else
         ok "SSH is closed for every address; only the console works"
+    fi
+}
+
+# record_with_target_networks <install record> <list>: print the install
+# record with the new list in its key target_networks. A record of an older
+# install.sh has no such key: the line goes in front of from_disk, the last
+# key that install.sh writes. Every other line stays as it is.
+record_with_target_networks() {
+    awk -v line="    \"target_networks\": \"$2\"," '
+        /^    "target_networks": / { if (!done) print line; done = 1; next }
+        /^    "from_disk": / && !done { print line; done = 1 }
+        { print }
+    ' "$1"
+}
+
+# values_with_target_networks <values file> <list>: print the Helm values
+# of this place with the new list in their last block, config, as
+# render_target_values in lib/core.sh writes it, or without the block for
+# an empty list. The block runs from its heading to the next top-level
+# line. Exit code 3 when the file is not in the form that install.sh
+# writes: the top-level keys start at the start of the line, so no
+# indented line comes before the first heading; every top-level line is a
+# comment or a plain heading such as "ingress:"; and the config block
+# holds the heading "config:" and then only the list line. Any other line,
+# for example a quoted heading ("config":), an indented top-level mapping,
+# or another key or an empty line in the config block, means that
+# install.sh did not write the file, and a rewrite could break it.
+values_with_target_networks() {
+    awk -v list="$2" '
+        /^config:/ {
+            if ($0 != "config:") foreign = 1
+            in_config = 1
+            heading = 1
+            next
+        }
+        in_config && /^[^[:space:]#]/ { in_config = 0 }
+        in_config && /^  targetSsrfAllowlist: "[^"]*"$/ { next }
+        in_config { foreign = 1; next }
+        /^[^[:space:]#]/ && !/^[A-Za-z][A-Za-z0-9]*:$/ { foreign = 1 }
+        /^[^[:space:]#]/ { heading = 1 }
+        /^[[:space:]]/ && !heading { foreign = 1 }
+        { print }
+        END {
+            if (foreign) exit 3
+            if (list != "") printf "config:\n  targetSsrfAllowlist: \"%s\"\n", list
+        }
+    ' "$1"
+}
+
+# set_target_allowlist <list>: the list goes into the key of the chart's
+# ConfigMap that the meho pod reads, in one merge patch, so every other key
+# stays. Helm keeps the value at the next update: the update renders the
+# same list from the install record. kubectl's messages are not shown.
+set_target_allowlist() {
+    printf '{"data":{"%s":"%s"}}\n' "$TARGET_ALLOWLIST_KEY" "$1" |
+        rke2_kubectl -n "$MEHO_NAMESPACE" patch configmap "$MEHO_CONFIGMAP" \
+            --type=merge --patch-file=/dev/stdin >/dev/null 2>&1
+}
+
+# command_target_networks <list|none>: the networks of the systems that
+# MEHO manages (#6828; the rule is in lib/targets.sh). The install record
+# keeps the list, so the update writes it again; the values file shows it;
+# the ConfigMap and a restart put it in force now. The two files are
+# checked before they take the old ones' place, so a file in another form
+# changes nothing. The lock of install.sh comes before the first read of
+# the record, so an update never runs in between.
+command_target_networks() {
+    (($# == 1)) ||
+        usage_error "target-networks takes one value: a list with commas and no spaces, such as 10.20.0.0/16,10.30.0.5:443, or none."
+    local record="${HOST_ROOT}${MEHO_INSTALL_RECORD}" values="${HOST_ROOT}${MEHO_PLACE_VALUES}"
+    local pod_range service_range new_record new_values status=0 line count
+    check_root
+    take_host_lock
+    pod_range=$(install_option cluster_cidr)
+    service_range=$(install_option service_cidr)
+    if [[ $pod_range != */* || $service_range != */* ]] ||
+        ! is_ipv4_range "$pod_range" || ! is_ipv4_range "$service_range"; then
+        fail "$MEHO_INSTALL_RECORD names no pod range and service range, so meho-host cannot check the list. Nothing was changed." \
+            "$SUPPORT_HINT"
+    fi
+    parse_target_networks "$1" "$pod_range" "$service_range" ||
+        usage_error "target-networks: $TARGET_NETWORKS_PROBLEM"
+    [[ -f $values ]] ||
+        fail "$MEHO_PLACE_VALUES does not exist, so meho-host cannot change it. Nothing was changed." "$SUPPORT_HINT"
+    new_record=$(mktemp "${record}.XXXXXX")
+    new_values=$(mktemp "${values}.XXXXXX")
+    record_with_target_networks "$record" "$TARGET_NETWORKS" >"$new_record"
+    line="    \"target_networks\": \"$TARGET_NETWORKS\","
+    count=$(awk -v line="$line" '$0 == line { n++ } END { print n + 0 }' "$new_record")
+    if ((count != 1)); then
+        rm -f "$new_record" "$new_values"
+        fail "$MEHO_INSTALL_RECORD is not in the form install.sh writes, so meho-host cannot change it. Nothing was changed." \
+            "$SUPPORT_HINT"
+    fi
+    values_with_target_networks "$values" "$TARGET_NETWORKS" >"$new_values" || status=$?
+    if ((status != 0)); then
+        rm -f "$new_record" "$new_values"
+        fail "$MEHO_PLACE_VALUES is not in the form install.sh writes, so meho-host cannot change it. Nothing was changed." \
+            "$SUPPORT_HINT"
+    fi
+    chmod 0600 "$new_record" "$new_values"
+    mv -f "$new_record" "$record"
+    mv -f "$new_values" "$values"
+    ok "wrote the target networks to $MEHO_INSTALL_RECORD and $MEHO_PLACE_VALUES"
+    if ! set_target_allowlist "$TARGET_NETWORKS"; then
+        warn "the ConfigMap $MEHO_CONFIGMAP could not be changed, so MEHO still uses the old target networks. Run the command again."
+        return 0
+    fi
+    if ! restart_meho; then
+        warn "MEHO could not be restarted, so it uses the new target networks only after its next restart. Run the command again."
+        return 0
+    fi
+    if [[ -n $TARGET_NETWORKS ]]; then
+        ok "MEHO restarts and then accepts a target on a private address only inside: $TARGET_NETWORKS. The console is away for about a minute."
+    else
+        ok "MEHO restarts and then accepts no target on a private address. The console is away for about a minute."
     fi
 }
 
@@ -1432,9 +1632,7 @@ remove_kernel_settings() {
 }
 
 # install_cluster_cidr: the pod range of the install, from the install record.
-install_cluster_cidr() {
-    awk -F'"' '$2 == "cluster_cidr" { print $4; exit }' "${HOST_ROOT}${MEHO_INSTALL_RECORD}" 2>/dev/null
-}
+install_cluster_cidr() { install_option cluster_cidr; }
 
 # remove_pod_routes: the blackhole routes inside the pod range of the
 # install. Canal, the pod network of RKE2, adds one for the pod addresses of
@@ -1639,6 +1837,14 @@ write_console_ca() {
     warn "$MEHO_CONSOLE_CA_FILE could not be written, so it may still hold the old CA. Give your own CA file to the browsers and laptops that use MEHO."
 }
 
+# restart_meho: restart the meho Deployment, so its pod reads its
+# ConfigMaps again. Kubernetes does not update the environment variables of
+# a running pod from a changed ConfigMap. kubectl's messages are not shown:
+# the customer never sees Kubernetes.
+restart_meho() {
+    rke2_kubectl -n "$MEHO_NAMESPACE" rollout restart "deployment/$MEHO_DEPLOYMENT" >/dev/null 2>&1
+}
+
 # trust_console_ca <CA certificate>: the CA of the new certificate goes to
 # the ConfigMap CONSOLE_TRUST_CONFIGMAP (key ca.crt), and the meho pod
 # restarts, so its first-start list trusts the CA (#6698). The restart is
@@ -1658,7 +1864,7 @@ trust_console_ca() {
         warn "the ConfigMap $CONSOLE_TRUST_CONFIGMAP could not be written, so the first-start list of MEHO does not trust your CA yet. Run the command again."
         return 0
     fi
-    if ! rke2_kubectl -n "$MEHO_NAMESPACE" rollout restart "deployment/$MEHO_DEPLOYMENT" >/dev/null 2>&1; then
+    if ! restart_meho; then
         warn "MEHO could not be restarted, so its first-start list trusts your CA only after its next restart. Run the command again."
         return 0
     fi
@@ -2074,6 +2280,7 @@ main() {
         check) command_check "$@" ;;
         support-bundle) command_support_bundle "$@" ;;
         admin-network) command_admin_network "$@" ;;
+        target-networks) command_target_networks "$@" ;;
         log-server) command_log_server "$@" ;;
         uninstall) command_uninstall "$@" ;;
         certificate) command_certificate "$@" ;;

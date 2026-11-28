@@ -79,7 +79,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from meho_backplane.op_classes import declared_op_class
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES, declared_op_class
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -748,9 +748,7 @@ def classify_op(op_id: str) -> str:
 
 #: Classes :func:`resolve_op_class` never lets a declared class replace:
 #: they decide that the broadcast shows only an aggregate (decision #3).
-_SECRET_SHAPE_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_mint", "credential_write", "audit_query"}
-)
+_SECRET_SHAPE_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES | {"audit_query"}
 
 
 def resolve_op_class(op_id: str, declared: str | None = None) -> str:
@@ -901,7 +899,8 @@ def redact_payload(
     pre-G6.3 default), the function falls back to decision #3 of
     ``docs/decisions/locked-decisions.md`` -- aggregate for sensitive
     classes (``credential_read`` / ``credential_mint`` /
-    ``credential_write`` / ``audit_query``), full for everything else.
+    ``credential_write`` / ``credential_use`` / ``audit_query``), full for
+    everything else.
     When ``"aggregate"`` or ``"full"`` is passed
     explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
     has already decided the effective detail and this function just
@@ -916,9 +915,7 @@ def redact_payload(
     """
     if detail is None:
         effective_detail: Literal["full", "aggregate"] = (
-            "aggregate"
-            if op_class in {"credential_read", "credential_mint", "credential_write", "audit_query"}
-            else "full"
+            "aggregate" if op_class in _SECRET_SHAPE_CLASSES else "full"
         )
     else:
         effective_detail = detail

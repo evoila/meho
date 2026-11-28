@@ -2233,6 +2233,7 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
         tags=("write", "record", "delete", "destructive", "atomic-apply"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS,
     ),
     Bind9Op(
@@ -2257,6 +2258,7 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
         tags=("write", "record", "delete", "destructive", "atomic-apply"),
         safety_level="destructive",
         requires_approval=True,
+        hard_to_undo="deletes",
         llm_instructions=BIND9_RECORD_DELETE_LLM_INSTRUCTIONS,
     ),
 )

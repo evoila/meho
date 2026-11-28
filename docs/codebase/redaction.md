@@ -1409,7 +1409,7 @@ issuance, password resets, key material — so their bodies are **never
 recorded**, regardless of the path config. The **primary** check is
 single-sourced: `classify_body_exclusion` delegates to the authoritative
 `broadcast.events.classify_op`, and any op it calls `credential_read` /
-`credential_mint` / `credential_write` (its curated `_CREDENTIAL_*_OPS`
+`credential_mint` / `credential_write` / `credential_use` (its curated `_CREDENTIAL_*_OPS`
 sets in `broadcast/events.py`, for example `vault.kv.read` and
 `vault.kv.put`, plus the ops a connector declares in its own
 `op_classes.py`, for example `harbor.robot.create` and

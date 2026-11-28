@@ -11,6 +11,10 @@
   caller can see (no operation rows, no registered class). Same test the
   ``list_operation_groups`` / ``search_operations`` meta-tools use. The
   error names up to 5 close ids (``extras.did_you_mean``, #4136).
+* ``operation_left_out`` -- registration left the op out at this start,
+  because its mark does not fit its risk level, and the caller can see no
+  row of other code under the same key
+  (:mod:`meho_backplane.operations._left_out`). Also when no row is stored.
 * ``connector_package_not_installed`` -- the enabled op exists, but the
   connector package that wrote it is not installed (#5037).
 * ``connector_code_not_installed`` -- the code of the connector is not in
@@ -54,9 +58,11 @@ from meho_backplane.operations._code_presence import (
 from meho_backplane.operations._errors import (
     result_connector_package_not_installed,
     result_license_read_off,
+    result_operation_left_out,
     result_unknown_connector,
     result_unknown_op,
 )
+from meho_backplane.operations._left_out import left_out_op
 from meho_backplane.operations._lookup import (
     close_connector_ids,
     connector_class_registered,
@@ -89,6 +95,13 @@ async def op_miss_result(
     ``None``; with a target, connectors that refuse it are not named.
     """
     product, version, impl_id = triple
+    left_out = left_out_op(product=product, version=version, impl_id=impl_id, op_id=op_id)
+    if left_out is not None and not await descriptor_exists_any_state(
+        tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=op_id
+    ):
+        return result_operation_left_out(
+            op_id, connector_id, left_out.owner_package, _elapsed_ms(started)
+        )
     package = await find_uninstalled_package_owner(
         tenant_id=tenant_id, product=product, version=version, impl_id=impl_id, op_id=op_id
     )

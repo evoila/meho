@@ -502,6 +502,7 @@ USER_WRITE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "users", "pfsense"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_llm_instructions(True),
     ),
     PfSenseOp(
@@ -515,6 +516,7 @@ USER_WRITE_OPS: tuple[PfSenseOp, ...] = (
         tags=("write", "users", "pfsense"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_llm_instructions(False),
     ),
 )

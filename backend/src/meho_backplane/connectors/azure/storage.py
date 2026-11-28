@@ -347,6 +347,8 @@ OPS: tuple[AzureTypedOp, ...] = (
         tags=("azure", "storage", "write", "blob", "file", "sas", "link"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions=_LINK_CREATE_GUIDANCE,
     ),
     AzureTypedOp(
@@ -365,6 +367,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         tags=(*_WRITE_TAGS, "grant"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_ROLE_CREATE_GUIDANCE,
     ),
     AzureTypedOp(
@@ -382,6 +385,7 @@ OPS: tuple[AzureTypedOp, ...] = (
         tags=(*_WRITE_TAGS, "revoke"),
         safety_level="dangerous",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_ROLE_DELETE_GUIDANCE,
     ),
 )

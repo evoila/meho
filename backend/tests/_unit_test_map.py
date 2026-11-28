@@ -28,7 +28,9 @@ Two commands:
     to the repository root) on stdin. Prints one line that says what runs
     and why. When the map can pick, it writes the picked tests (test files
     and pytest test ids, relative to ``backend/``) to ``--out``; when the
-    full suite must run, it writes nothing. Needs only the Python standard
+    full suite must run, it writes nothing. When the map is older than
+    :data:`STALE_DAYS` days, it writes a warning to ``--warning-out``: the
+    nightly run did not make a new map. Needs only the Python standard
     library, because the ``changes`` job does not install the project.
 
 The rules of ``pick``. Any doubt means the full suite:
@@ -89,7 +91,7 @@ import sys
 import zipfile
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeGuard
@@ -102,6 +104,8 @@ else:  # Run as a script: python3 backend/tests/_unit_test_map.py
 MAP_FORMAT = 1
 MAP_FILE = "unit-test-map.json"
 MAX_AGE_DAYS = 7
+# The nightly run makes a new map every night, so a map this old means it failed.
+STALE_DAYS = 2
 MAX_TESTS = 2000
 
 # Test folders that other jobs run, never the unit shards.
@@ -117,6 +121,10 @@ _DOCS = re.compile(r"(^docs/|\.md$)")
 _CRASHED = "crashed while running"
 
 
+# The junit property that names the xdist worker of a test (tests/conftest.py).
+WORKER_PROPERTY = "xdist_worker"
+
+
 @dataclass
 class Shard:
     """What the pytest junit file of one coverage shard says."""
@@ -124,6 +132,8 @@ class Shard:
     name: str
     test_ids: list[str]
     crashed: list[str]  # Test ids whose xdist worker died while running them.
+    # xdist worker -> the test ids it ran. "" holds tests that name no worker.
+    workers: dict[str, list[str]] = field(default_factory=dict)
 
 
 def read_junit(path: Path, backend_root: Path) -> Shard:
@@ -132,7 +142,8 @@ def read_junit(path: Path, backend_root: Path) -> Shard:
     A test case carries ``classname`` (the dotted file path plus the class
     names) and ``name`` (the function name with its parameters). The path
     is the longest dotted prefix of ``classname`` that is a ``.py`` file
-    under ``backend_root``.
+    under ``backend_root``. The property ``xdist_worker`` of a test case
+    names the worker that ran it.
     """
     from defusedxml.ElementTree import parse
 
@@ -140,11 +151,20 @@ def read_junit(path: Path, backend_root: Path) -> Shard:
     for case in parse(path).getroot().iter("testcase"):
         dotted = case.get("classname", "").split(".")
         name = case.get("name", "")
+        worker = next(
+            (
+                prop.get("value", "")
+                for prop in case.iter("property")
+                if prop.get("name") == WORKER_PROPERTY
+            ),
+            "",
+        )
         for cut in range(len(dotted), 0, -1):
             file = "/".join(dotted[:cut]) + ".py"
             if (backend_root / file).is_file():
                 test_id = "::".join([file, *dotted[cut:], name])
                 shard.test_ids.append(test_id)
+                shard.workers.setdefault(worker, []).append(test_id)
                 reports = (child.get("message", "") + (child.text or "") for child in case)
                 if any(_CRASHED in report for report in reports):
                     shard.crashed.append(test_id)
@@ -156,22 +176,31 @@ def _check_shard(shard: Shard, recorded: set[str]) -> None:
     """Refuse a shard that did not finish or whose coverage data is missing.
 
     xdist reports a crashed worker as a failed test, and the tests after
-    it never run. A worker writes its coverage data only at the end of its
-    session, so after a crash the shard has a junit file but no data. One
-    worker runs a whole shard (``-n 1``), so the data of a shard is there
-    when any of its tests is recorded.
+    it never run. Each xdist worker writes its own coverage data file, at
+    the end of its session, so a crashed or killed worker leaves junit
+    entries but no data. So every worker of the shard must have at least
+    one of its tests in the coverage data. A test that names no worker
+    makes that check impossible, so it refuses the shard too.
     """
     if shard.crashed:
         raise ValueError(
             f"{shard.name}: a worker crashed while running {shard.crashed[0]},"
             " so the shard did not finish"
         )
-    names = {context_name(function_id(test_id)) for test_id in shard.test_ids}
-    if not names & recorded:
+    if not shard.workers:
+        raise ValueError(f"{shard.name}: the junit file has no tests")
+    if "" in shard.workers:
         raise ValueError(
-            f"{shard.name}: none of its {len(names)} tests is in the coverage data,"
-            " so the shard did not save its coverage"
+            f"{shard.name}: test {shard.workers[''][0]} names no xdist worker,"
+            " so the check cannot see whether every worker saved its coverage"
         )
+    for worker, test_ids in sorted(shard.workers.items()):
+        names = {context_name(function_id(test_id)) for test_id in test_ids}
+        if not names & recorded:
+            raise ValueError(
+                f"{shard.name}: none of the {len(names)} tests of worker {worker}"
+                " is in the coverage data, so that worker did not save its coverage"
+            )
 
 
 def function_id(test_id: str) -> str:
@@ -591,6 +620,7 @@ class Picked:
 
     line: str
     tests: list[str]
+    warning: str = ""
 
 
 def _full_reason(path: str) -> str:
@@ -666,13 +696,22 @@ def _count(test_map: TestMap, selected: list[str], changed: set[str], backend: P
 def pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime) -> Picked:
     """Decide what the unit test job runs for a pull request."""
     try:
-        return _pick(changed, map_path, repo_root, now)
+        test_map = TestMap.load(map_path, now)
     except FullSuiteError as reason:
         return Picked(f"full suite: {reason}", [])
+    try:
+        picked = _pick(changed, test_map, repo_root)
+    except FullSuiteError as reason:
+        picked = Picked(f"full suite: {reason}", [])
+    if now - test_map.made_at > timedelta(days=STALE_DAYS):
+        picked.warning = (
+            f"the test map is older than {STALE_DAYS} days (made {test_map.made_at:%Y-%m-%d}):"
+            " the nightly run made no new map since then"
+        )
+    return picked
 
 
-def _pick(changed: Iterable[str], map_path: Path, repo_root: Path, now: datetime) -> Picked:
-    test_map = TestMap.load(map_path, now)
+def _pick(changed: Iterable[str], test_map: TestMap, repo_root: Path) -> Picked:
     backend = repo_root / "backend"
     numbers: set[int] = set()
     files: set[str] = set()
@@ -755,6 +794,9 @@ def _main(argv: list[str] | None = None) -> int:
         "--map", type=Path, required=True, help=f"the map: {MAP_FILE}, or the artifact zip"
     )
     pick_parser.add_argument("--out", type=Path, required=True)
+    pick_parser.add_argument(
+        "--warning-out", type=Path, help="where to write a warning about an old map"
+    )
     pick_parser.add_argument("--repo-root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
 
@@ -780,6 +822,8 @@ def _main(argv: list[str] | None = None) -> int:
         picked = Picked(f"full suite: the test map tool failed ({type(exc).__name__}: {exc})", [])
     if picked.tests:
         args.out.write_text("".join(f"{entry}\n" for entry in picked.tests), encoding="utf-8")
+    if picked.warning and args.warning_out:
+        args.warning_out.write_text(f"{picked.warning}\n", encoding="utf-8")
     print(picked.line)
     return 0
 

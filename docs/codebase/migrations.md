@@ -374,12 +374,13 @@ other pull requests still get their result.
 
 ### What to do when the check fails
 
-The last line of the check output says what to change. Example:
+The "What to do" line of the check output says what to change. Example:
 
 ```
 Migration chain check FAILED:
   - revision 0108 is used by 2 files: 0108_add_claims.py, 0108_add_scope.py
 What to do: main is at 0108. Rename your migration to 0109 and set down_revision to '0108'.
+Rule: each pull request with a migration must take the next free number and set down_revision to the newest migration on main. If the merge queue refuses your pull request, wait until the other migration is on main or its pull request has left the queue, then merge main and take the next free number again.
 ```
 
 1. Rename your migration file to the number the message gives
@@ -411,7 +412,8 @@ python3 scripts/ci/check_migration_heads.py --main /tmp/main-versions/backend/al
 
 Tests: `backend/tests/migrations/test_migration_heads.py` covers one head,
 two heads, two files with the same number, a stale parent, a branch that
-adds several migrations, and compares the script's heads with Alembic's
+adds several migrations, two pull requests in one merge-queue run that
+each add a migration on the same parent, and compares the script's heads with Alembic's
 own `ScriptDirectory.get_heads()` on the real tree.
 `backend/tests/migrations/test_recheck_migration_prs.py` covers the
 re-check: a fork pull request and a branch without the workflow file both
@@ -419,6 +421,38 @@ get a check run on their head commit, a migration after the first 100
 changed files is still found, and a pull request whose head moved, whose
 files cannot be read, or that cannot be fetched or unpacked is reported
 and skipped while the next one still gets its result.
+
+### Two pull requests with a migration
+
+Two pull requests can each add a migration with the same number, or with
+the same `down_revision`. Each one alone passes its own check. Together
+they give `main` two heads.
+
+The merge queue stops this. A merge-queue run tests the tree that holds
+`main` plus every pull request ahead of it in the queue. The check
+**Migration chain (single head)** runs there too (`merge_group` in
+`.github/workflows/migration-heads.yml`), and it is a required check. So
+the second pull request fails its merge-queue run and leaves the queue.
+`main` never gets the second head.
+
+What each author does:
+
+1. In the last push before you add the pull request to the merge queue,
+   take the next free number, and set `down_revision` to the newest
+   migration on `main`.
+2. If the merge queue refuses the pull request with "Migration chain
+   check FAILED", another migration got in first. The file names in the
+   message show the other migration. If that migration is not on `main`
+   yet, wait until it is on `main` or its pull request has left the
+   queue. Then merge `main` into your branch, take the next free number,
+   set `down_revision` to the newest migration on `main`, push, and add
+   the pull request to the queue again.
+
+Never build on a migration that is only in the merge queue. Only main counts.
+
+In the merge queue, the "What to do" line can name a migration of a pull
+request ahead of yours as if it were yours. The "Rule" line under it is
+true in every case.
 
 ## Additive-only constraint
 

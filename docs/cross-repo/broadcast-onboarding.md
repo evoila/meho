@@ -522,7 +522,8 @@ the feed. MEHO still sorts every call into an op class and records a
 detail level (`full` or `aggregate`) on the call's audit row, under
 `broadcast_detail_effective`. The operator console uses that level:
 for a row recorded as `aggregate` — the default for the credential
-classes (`credential_read`, `credential_mint`, `credential_write`) and
+classes (`credential_read`, `credential_mint`, `credential_write`,
+`credential_use`) and
 for `audit_query` — the audit drawer hides the request parameters.
 
 The per-call `X-Broadcast-Detail: full` header and the durable

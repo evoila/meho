@@ -2382,7 +2382,7 @@
           "policy"
         ],
         "summary": "History",
-        "description": "The imported policy files of *scope*, newest first (MEHO keeps the last 20).",
+        "description": "The imported policy files of *scope*, newest first (MEHO keeps the last 20).\n\nEach entry's ``diff`` reads as an approval card's plan\n(:func:`~meho_backplane.connectors.policy.apply_card.diff_as_read`): a\nperson gets each role's whole list, every other caller the short form.",
         "operationId": "history_api_v1_policy_history_get",
         "parameters": [
           {
@@ -2450,13 +2450,71 @@
         }
       }
     },
+    "/api/v1/policy/carry-over/dry-run": {
+      "get": {
+        "tags": [
+          "policy"
+        ],
+        "summary": "Carry Over",
+        "description": "Every saved \"always wait\" of *scope*, and what changes if MEHO reads it as ``destructive``.\n\nAn agent login gets 403, also one with the platform admin mark. Every\nother caller gets the export's answer. Writes only its audit row and\nreads no switch.",
+        "operationId": "carry_over_api_v1_policy_carry_over_dry_run_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "tenant",
+                "install"
+              ],
+              "type": "string",
+              "default": "tenant",
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarryOverDryRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/policy/explain": {
       "post": {
         "tags": [
           "policy"
         ],
         "summary": "Explain",
-        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with\n``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
+        "description": "Why a call runs, waits or is denied, and who may approve it. Runs nothing.\n\nThe answer is today's answer (the policy gate, decide-only), the policy\nevaluator's answer with every rule it matched (with ``CUSTOM_POLICY``\nor ``POLICY_ENGINE_SHADOW`` on), the classification entries that match, and\nthe groups that may approve. No audit row for a call, no approval\nrequest, no call to an outside system. A caller who is not a tenant\nadmin or a platform admin gets the answer without the policy's entries\n(:func:`~meho_backplane.policy.explain.without_policy`).",
         "operationId": "explain_api_v1_policy_explain_post",
         "parameters": [
           {
@@ -6127,7 +6185,7 @@
           "connectors"
         ],
         "summary": "List Operation Overrides",
-        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``POLICY_CLASSIFICATION`` switch on, the values include the\nclassification, and ``rule_ref`` names the entry that decided it.",
+        "description": "List the operator overrides of risk levels and approval flags.\n\n``reduced_approval=true`` keeps only the operations whose approval a\nplatform admin turned off and where approval is still off. Each row\nnames the connector, the operation, the risk level and approval that\napply in the row's scope, the scope, who set it, when, and the reason.\nWith the ``CUSTOM_POLICY`` or ``POLICY_CLASSIFICATION`` switch on, the\nvalues include the classification, and ``rule_ref`` names the entry that decided it.",
         "operationId": "list_operation_overrides_api_v1_connectors_operation_overrides_get",
         "parameters": [
           {
@@ -13460,7 +13518,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token is not a fresh approval sign-in (#3979, #5515): it\n  does not come from the approval client (``azp``), or its\n  ``auth_time`` is missing or older than\n  ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the\n  limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the\n  sign-in must not have approved anything else. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + approved-run checks + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 401 \u2014 the token is not a fresh approval sign-in (#3979, #5515): it\n  does not come from the approval client (``azp``), or its\n  ``auth_time`` is missing or older than\n  ``FRESH_SIGN_IN_MAX_AGE_SECONDS``. For a ``destructive`` request the\n  limit is ``PER_ACTION_SIGN_IN_MAX_AGE_SECONDS`` instead, and the\n  sign-in must not have approved anything else. The answer carries\n  ``WWW-Authenticate: Bearer error=\"insufficient_user_authentication\"``\n  with ``max_age`` (RFC 9470). Approve in the web interface, or sign in\n  again. The request stays pending.\n* 403 \u2014 caller lacks approvals-plane access (neither ``operator`` role\n  nor the ``approver`` capability, #3243), **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch, a reason over 2000 characters, or a\n  delegated reason (``Instructed-by:``) missing ``Instruction:`` /\n  ``Refs:`` (#3692).",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -13716,7 +13774,7 @@
           "approvals"
         ],
         "summary": "Rerun Approval Request",
-        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. Each re-run, and each\nrefused re-run, writes an ``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request.\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
+        "description": "Run an approved request again after its run failed (#5417).\n\nNot a decision, so this route is not on the approvals-plane gate and not\nhuman-only: the requester (a person, an agent or a service principal)\nmay re-run **its own** request. No new approval is needed when nothing\nchanged: same params, same target, same preview, same work reference\n(the ``Meho-Work-Ref`` header), the ``expires_at`` deadline has not\npassed, and MEHO was not updated since the request was made. Otherwise\nthe re-run is refused and the requester asks again. The re-run checks\nwhat the first run checks (the grants of an agent that asked, a revoked\nagent login, a blocked login and the risk level), and also the caller's\nrole and grants from the caller's token now, as for a new call: it\nneeds the ``operator`` role. A refused request stays approved and can\nrun again later. Each re-run, and each refused re-run, writes an\n``approval.rerun`` audit row.\n\nHTTP status codes:\n\n* 200 \u2014 the request ran again. ``dispatch_status`` is the run's status.\n* 403 \u2014 the caller did not make the request, the caller's role is too\n  low (``insufficient_role``; a Reader also gets the plain sentence in\n  ``message``), or a new call of the caller made now\n  would be refused (``approval_rerun_refused``).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 the last run did not fail, another re-run is running, or\n  something changed and a new approval is needed.\n* 422 \u2014 MEHO does not keep this request's params; send them again.",
         "operationId": "rerun_approval_request_api_v1_approvals__request_id__rerun_post",
         "parameters": [
           {
@@ -20555,13 +20613,33 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Index",
-        "operationId": "_index_ui_blocked_people_get",
+        "summary": "Blocked People Page",
+        "operationId": "blocked_people_page_ui_blocked_people_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
                 "schema": {
                   "type": "string"
                 }
@@ -20574,13 +20652,13 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Block",
-        "operationId": "_block_ui_blocked_people_post",
+        "summary": "Block Person",
+        "operationId": "block_person_ui_blocked_people_post",
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/Body__block_ui_blocked_people_post"
+                "$ref": "#/components/schemas/Body_block_person_ui_blocked_people_post"
               }
             }
           }
@@ -20588,6 +20666,41 @@
         "responses": {
           "303": {
             "description": "Done. The answer sends the browser back to the page."
+          },
+          "503": {
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The form comes from a page of another tenant. Reload the page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            }
           },
           "422": {
             "description": "The page again, with the error next to its field.",
@@ -20607,13 +20720,13 @@
         "tags": [
           "ui-principal-blocks"
         ],
-        "summary": " Unblock",
-        "operationId": "_unblock_ui_blocked_people_unblock_post",
+        "summary": "Unblock Person",
+        "operationId": "unblock_person_ui_blocked_people_unblock_post",
         "requestBody": {
           "content": {
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/Body__unblock_ui_blocked_people_unblock_post"
+                "$ref": "#/components/schemas/Body_unblock_person_ui_blocked_people_unblock_post"
               }
             }
           },
@@ -20624,7 +20737,7 @@
             "description": "Done. The answer sends the browser back to the page."
           },
           "200": {
-            "description": "The confirm page (the form has no confirm=yes).",
+            "description": "The confirm page: the form has no confirm=yes, or the blocks of the login are not the blocks the confirm page showed.",
             "content": {
               "text/html": {
                 "schema": {
@@ -20634,7 +20747,7 @@
             }
           },
           "403": {
-            "description": "The login is the admin's own login.",
+            "description": "The login is the admin's own login (JSON), or the admin's own login is blocked in this tenant (plain text, from the session check).",
             "content": {
               "application/json": {
                 "schema": {
@@ -20644,6 +20757,11 @@
                     }
                   },
                   "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -20664,7 +20782,27 @@
             }
           },
           "503": {
-            "description": "MEHO cannot read the block list now.",
+            "description": "MEHO cannot read the block list now. The page answers with JSON; the session check before the page answers with plain text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The form comes from a page of another tenant. Reload the page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25141,7 +25279,7 @@
           "ui-operations"
         ],
         "summary": "Operations Call",
-        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403\nbefore anything is dispatched or queued, like on REST); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\nBackground run (#5111): the call starts as a background run and the\nroute answers within about a second, however long the operation\ntakes. A quick run shows its result at once; a long one shows\n\"running\", and the dialog asks ``GET /ui/operations/runs/{run_id}``\nuntil it ends. A call with ``reveal_secret: true`` cannot run in\nthe background (its answer would be stored), so it runs inline.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
+        "description": "Dispatch the chosen op in-process; render the ``OperationResult`` inline.\n\nThe highest-blast-radius action the console gains -- it executes a\nreal connector op against a live target. CSRF-gated (a ``POST`` under\n``/ui/``) and ``require_ui_operator_for_call``-gated (``read_only``\ngets 403 before anything is dispatched or queued, like on REST; the\nanswer depends on the operation, see that check); calls\n:func:`~meho_backplane.operations.meta_tools.call_operation`\nin-process (the same BFF pattern the approvals decision POSTs use).\nThe structured envelope is surfaced verbatim\n(``ok`` / ``error`` / ``denied`` / ``awaiting_approval``); the one\n``ValueError`` the meta-tool raises (a missing target name) is mapped\nto an inline ``400`` form error so the operator stays in the modal.\n\nBackground run (#5111): the call starts as a background run and the\nroute answers within about a second, however long the operation\ntakes. A quick run shows its result at once; a long one shows\n\"running\", and the dialog asks ``GET /ui/operations/runs/{run_id}``\nuntil it ends. A call with ``reveal_secret: true`` cannot run in\nthe background (its answer would be stored), so it runs inline.\n\n``preview_hash`` comes from the run window's preview step. A\n``destructive`` op needs it, or MEHO refuses to store the approval\nrequest (#5015).",
         "operationId": "operations_call_ui_operations_call_post",
         "requestBody": {
           "content": {
@@ -30356,22 +30494,6 @@
         "title": "BlockRead",
         "description": "One block of the list."
       },
-      "Body__block_ui_blocked_people_post": {
-        "properties": {
-          "sub": {
-            "type": "string",
-            "title": "Sub",
-            "default": ""
-          },
-          "reason": {
-            "type": "string",
-            "title": "Reason",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "title": "Body__block_ui_blocked_people_post"
-      },
       "Body__create_ui_event_sources_post": {
         "properties": {
           "name": {
@@ -30530,26 +30652,6 @@
         "type": "object",
         "title": "Body__renew_delete_grants_ui_grants_service_renew_delete_grants_post"
       },
-      "Body__unblock_ui_blocked_people_unblock_post": {
-        "properties": {
-          "sub": {
-            "type": "string",
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Sub"
-          },
-          "confirm": {
-            "type": "string",
-            "title": "Confirm",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "sub"
-        ],
-        "title": "Body__unblock_ui_blocked_people_unblock_post"
-      },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {
           "from_name": {
@@ -30670,6 +30772,22 @@
           "work_ref"
         ],
         "title": "Body_approvals_in_order_run_ui_approvals_in_order_post"
+      },
+      "Body_block_person_ui_blocked_people_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub",
+            "default": ""
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_block_person_ui_blocked_people_post"
       },
       "Body_bulk_import_ui_topology_edges_bulk_post": {
         "properties": {
@@ -32445,6 +32563,31 @@
         "type": "object",
         "title": "Body_ui_scheduler_validate_cron_ui_scheduler_validate_cron_post"
       },
+      "Body_unblock_person_ui_blocked_people_unblock_post": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Sub"
+          },
+          "confirm": {
+            "type": "string",
+            "title": "Confirm",
+            "default": ""
+          },
+          "shown": {
+            "type": "string",
+            "title": "Shown",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub"
+        ],
+        "title": "Body_unblock_person_ui_blocked_people_unblock_post"
+      },
       "Body_upload_agent_session_api_v1_sessions_post": {
         "properties": {
           "archive": {
@@ -32671,6 +32814,7 @@
               "credential_read",
               "credential_write",
               "credential_mint",
+              "credential_use",
               "audit_query",
               "approval",
               "other"
@@ -33213,6 +33357,125 @@
         "title": "CapabilityRead",
         "description": "One persisted capability row, built from the ORM via ``model_validate``."
       },
+      "CarryOverDryRun": {
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "sandbox_mode": {
+            "type": "boolean",
+            "title": "Sandbox Mode"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverSetting"
+            },
+            "type": "array",
+            "title": "Settings"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "Dry run: nothing was changed."
+          }
+        },
+        "type": "object",
+        "required": [
+          "scope",
+          "sandbox_mode",
+          "settings"
+        ],
+        "title": "CarryOverDryRun",
+        "description": "The answer of the dry run: every saved \"always wait\" of ``scope``. Nothing is changed."
+      },
+      "CarryOverOperation": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "step_of": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Step Of"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "op_id",
+          "step_of"
+        ],
+        "title": "CarryOverOperation",
+        "description": "One operation a saved setting matches.\n\n``step_of`` lists every multi-step operation that runs it as a step,\nat every level, each once. It is empty when none does, or when the\nsetting makes only the direct call wait, not the step."
+      },
+      "CarryOverSetting": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "override",
+              "policy_file"
+            ],
+            "title": "Source"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "install",
+              "tenant"
+            ],
+            "title": "Scope"
+          },
+          "ref": {
+            "type": "string",
+            "title": "Ref"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Match"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/CarryOverOperation"
+            },
+            "type": "array",
+            "title": "Operations"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source",
+          "scope",
+          "ref",
+          "match",
+          "operations",
+          "warnings"
+        ],
+        "title": "CarryOverSetting",
+        "description": "One saved \"always wait\" and what the carry-over to ``destructive`` means for it.\n\n``source`` is ``override`` (an admin's approval on one operation) or\n``policy_file`` (an entry with ``always_wait: true``). ``ref`` names\nthe place: ``<scope>:override`` or ``<scope>:classifications[<index>]``.\n``match`` is what the setting matches (``connector``, ``group``,\n``op``). ``warnings`` say what changes if MEHO reads it as ``destructive``."
+      },
       "CatalogListResponse": {
         "properties": {
           "catalog": {
@@ -33400,7 +33663,7 @@
           "entries"
         ],
         "title": "ClassificationListResponse",
-        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``POLICY_CLASSIFICATION`` switch is\noff; then nothing is read and ``entries`` is empty."
+        "description": "The taxonomy and the stored entries of the caller's tenant and of the install.\n\n``enabled`` is ``false`` while the ``CUSTOM_POLICY`` and\n``POLICY_CLASSIFICATION`` switches are off; then nothing is read and ``entries`` is empty."
       },
       "ClassificationMatch": {
         "properties": {
@@ -37321,6 +37584,41 @@
         "title": "ExplainEvaluator",
         "description": "The answer of the policy evaluator. It decides nothing yet (shadow mode)."
       },
+      "ExplainOwnApproval": {
+        "properties": {
+          "web": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Web",
+            "description": "True when a click in the web console approves it. False for an agent or service login. Null for a person when it depends on the values of the call."
+          },
+          "web_reason": {
+            "type": "string",
+            "title": "Web Reason",
+            "description": "Why, in the words of the approve step."
+          },
+          "token": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Token",
+            "description": "True when an approve on the command line or REST does. False for an agent or service login. Null for a person when it depends on the values of the call."
+          },
+          "token_reason": {
+            "type": "string",
+            "title": "Token Reason",
+            "description": "Why, in the words of the approve step."
+          }
+        },
+        "type": "object",
+        "required": [
+          "web",
+          "web_reason",
+          "token",
+          "token_reason"
+        ],
+        "title": "ExplainOwnApproval",
+        "description": "May the person who asked approve the request that the call makes?\n\nThe answer of the approve step for that request, once for each way to\napprove: a click in the web console (``web``), and the command line or\nREST (``token``). Each reason is the text the approve step shows.\n\nFor an agent login or a service login, ``web`` and ``token`` are\n``false`` for every operation, with the text of the approve sign: only\na person approves. For a person, ``web`` and ``token`` are ``null``\nwhen the approve step reads facts that only the call has (its values,\nor what MEHO reads from them or from the target). Then both reasons\nsay so."
+      },
       "ExplainRule": {
         "properties": {
           "source": {
@@ -41220,6 +41518,11 @@
             "nullable": true,
             "description": "Who may approve; only when the answer is wait."
           },
+          "own_approval": {
+            "$ref": "#/components/schemas/ExplainOwnApproval",
+            "nullable": true,
+            "description": "Only with CUSTOM_POLICY on, and only when the answer is wait: whether the person who asked may approve their own request. Left out otherwise."
+          },
           "today": {
             "$ref": "#/components/schemas/ExplainToday",
             "nullable": true
@@ -41227,7 +41530,7 @@
           "evaluator": {
             "$ref": "#/components/schemas/ExplainEvaluator",
             "nullable": true,
-            "description": "Null while POLICY_ENGINE_SHADOW is off."
+            "description": "Null while CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off."
           },
           "classification": {
             "$ref": "#/components/schemas/ExplainClassification",
@@ -41606,7 +41909,7 @@
             "type": "object",
             "nullable": true,
             "title": "Policy Rule",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the rule the policy evaluator matched ({source, rule_id, text, decided}). decided is false: today's checks decide. Null when the evaluator failed."
           },
           "approvers": {
             "items": {
@@ -41615,7 +41918,7 @@
             "type": "array",
             "nullable": true,
             "title": "Approvers",
-            "description": "Only with POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
+            "description": "Only with CUSTOM_POLICY or POLICY_ENGINE_SHADOW on: the login groups that may approve the call when policy_verdict is needs-approval; empty otherwise."
           },
           "proposed_effect": {
             "additionalProperties": true,
@@ -47133,6 +47436,12 @@
             "nullable": true,
             "title": "Extras"
           },
+          "extras_changes": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras Changes"
+          },
           "notes": {
             "type": "string",
             "nullable": true,
@@ -48344,6 +48653,11 @@
             "type": "object",
             "nullable": true,
             "title": "Client"
+          },
+          "display_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Display Name"
           }
         },
         "type": "object",

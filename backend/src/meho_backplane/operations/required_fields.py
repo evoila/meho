@@ -12,7 +12,8 @@ operation detail does not show them and an admin's edit of the instructions
 does not remove them.
 
 The connector gives a function, so the fields can depend on a switch. With
-the switch off the function returns nothing, and the summary is as before.
+the switch off the function returns nothing, so the summary has no extra
+required field.
 """
 
 from __future__ import annotations

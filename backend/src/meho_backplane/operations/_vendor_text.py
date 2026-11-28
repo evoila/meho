@@ -44,6 +44,7 @@ from typing import Any, Final
 
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import OperationResult
+from meho_backplane.op_classes import SECRET_REQUEST_OP_CLASSES
 from meho_backplane.operations._errors import (
     MESSAGE_SOURCE_KEY,
     MESSAGE_SOURCE_MEHO,
@@ -83,12 +84,12 @@ def sends_secret(op_id: str, tags: Iterable[str] | None) -> bool:
     """Whether the operation sends a secret, so its vendor error text must not be kept.
 
     Yes when :func:`~meho_backplane.broadcast.events.classify_op` pins the op
-    as ``credential_write``, or when one of its tags has a secret token
+    as ``credential_write`` or ``credential_use``, or when one of its tags has a secret token
     (:data:`~meho_backplane.redaction.flight_recorder.families.SECRET_FAMILY_TAGS`,
     for example the ``key`` of ``license-key``). The flight recorder uses the
     same tag list, so both agree.
     """
-    return classify_op(op_id) == "credential_write" or bool(secret_tag_tokens(tags or ()))
+    return classify_op(op_id) in SECRET_REQUEST_OP_CLASSES or bool(secret_tag_tokens(tags or ()))
 
 
 def _summary_without_vendor_text(error: str | None) -> str | None:

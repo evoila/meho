@@ -49,6 +49,7 @@ from sqlalchemy import func, select
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.role_refusal import RoleRefusedError, role_refused_handler
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
@@ -66,6 +67,7 @@ from meho_backplane.no_store import mark_answer_holds_secret
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -155,6 +157,7 @@ def _build_app() -> FastAPI:
     )
     app.include_router(build_ui_auth_router())
     app.include_router(build_ui_router())
+    app.add_exception_handler(RoleRefusedError, role_refused_handler)
     return app
 
 
@@ -1106,7 +1109,14 @@ def test_operations_ui_call_and_preview_read_only_forbidden_403_no_dispatch(
             },
         )
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "operator_required"}
+    if path == "/ui/operations/preview":
+        assert response.json() == {"detail": "operator_required"}
+    else:
+        # A Reader who asks for a change reads the plain sentence.
+        assert response.json() == {
+            "detail": "insufficient_role",
+            "message": READER_CHANGE_SENTENCE,
+        }
     # Not a CSRF rejection: the middleware stamps no reason header.
     assert "x-csrf-rejection-reason" not in response.headers
     assert received == []

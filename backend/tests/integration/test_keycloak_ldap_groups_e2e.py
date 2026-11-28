@@ -40,6 +40,7 @@ federation is set up with the master admin the customer-IdP test adds.
 
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from collections.abc import Iterator
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from testcontainers.core.container import DockerContainer
     from testcontainers.core.network import Network
 
-_LDAP_IMAGE = "osixia/openldap:1.5.0"
+_LDAP_IMAGE = os.environ.get("MEHO_TEST_LDAP_IMAGE", "osixia/openldap:1.5.0")
 _LDAP_HOST = "openldap"  # the directory's name on the shared Docker network
 _BASE_DN = "dc=example,dc=org"
 _ADMIN_DN = f"cn=admin,{_BASE_DN}"
@@ -178,7 +179,10 @@ def ldap(network: Network) -> Iterator[_Ldap]:  # noqa: F811 -- fixture
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"OpenLDAP container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"OpenLDAP container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(container, "slapd starting", timeout=120)
         directory = _Ldap(container, admin_password)

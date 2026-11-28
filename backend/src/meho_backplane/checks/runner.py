@@ -347,6 +347,7 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
         # is configured, so a bounded role can scope background dispatch.
         # principal_kind stays USER (see above) so the policy gate is unchanged.
         check_runner_dispatch=True,
+        in_code_kind="system",
     )
 
 

@@ -398,6 +398,54 @@ instead of the standard one.
 | **Keycloak** | A [Keycloak](https://www.keycloak.org/) where you have realm admin rights, to make MEHO's realm, clients and groups. See [Your own Keycloak](#your-own-keycloak). |
 | **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. See [Your own Vault or Google Secret Manager](#your-own-vault-or-google-secret-manager). |
 
+### The approval hand-off key
+
+MEHO needs a key for a credential write that waits for approval, for
+example `meho vault kv put`. The key is
+`APPROVAL_HANDOFF_ENCRYPTION_KEY`. MEHO uses it to keep the value safe
+while the write waits for a person to approve it. With no key, MEHO
+refuses such a write at once.
+
+- **A built-in part is on (the default install):** the install makes the
+  key in the Secret `<release>-core-approval-handoff`. You have nothing
+  to do.
+- **No built-in part is on:** make the key yourself.
+
+    1. Make a Fernet key:
+
+        ```bash
+        python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+        ```
+
+    2. Store it in a Kubernetes Secret in the namespace of the release.
+       The key name in the Secret is `approval_handoff_encryption_key`.
+    3. Set `approvalHandoff.enabled: true` and
+       `approvalHandoff.secretName: <your Secret>` in your values file.
+       Then install or upgrade.
+
+To check the state, read `features.approval_custody` on `GET /ready`.
+With the metrics token on (`metricsAuth.enabled: true`, the default),
+`/ready` shows the `features` block only to a caller that sends the
+token as a bearer token. The chart keeps the token in the Secret
+`<release>-metrics-auth`, under the key `token`. This command reads the
+token and gives the header to curl on standard input (`-H @-`, curl
+7.55.0 or newer), so the token is on no command line and in no shell
+history:
+
+```bash
+kubectl -n <namespace> get secret <release>-metrics-auth -o jsonpath='{.data.token}' \
+  | base64 -d | sed 's/^/Authorization: Bearer /' \
+  | curl -s -H @- https://<your-backplane>/ready | jq .features.approval_custody
+```
+
+With `metricsAuth.enabled: false`, `/ready` shows the block to every
+caller: `curl -s https://<your-backplane>/ready | jq .features.approval_custody`.
+With your own Secret in `metricsAuth.existingSecret`, put that Secret's
+name in the command, and the key in `metricsAuth.secretKey` in place of
+`token`. When that key holds a dot (for example `metrics.token`), write each
+dot as `\.` in the `jsonpath`: `{.data.metrics\.token}`. Without the `\`,
+kubectl reads nothing.
+
 ### Your own PostgreSQL
 
 Set `corePostgres.enabled: false`. Do both steps below. The built-in
@@ -469,9 +517,30 @@ DSN at the key `url`, using the **async** driver prefix:
 
 ```bash
 kubectl create namespace meho
-kubectl create secret generic meho-postgres -n meho \
-  --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'
 ```
+
+Then make the Secret. The password you type is not shown:
+
+```bash
+{
+  printf 'Database password: '; IFS= read -rs DB_PASSWORD; echo
+  if [ -n "$DB_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' "$DB_PASSWORD" \
+      | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_PASSWORD
+}
+```
+
+`read` and `printf` are built into bash and zsh. They start no program,
+so the password is in no process list and in no shell history. The same
+idea holds for every secret in this guide: it comes from a file or from
+standard input, never from an argument of a command.
+
+Each such block is one command in braces (`{` to `}`). Paste the whole
+block, then type the value. An empty value makes nothing.
 
 Three things bite here if missed:
 
@@ -501,13 +570,28 @@ Create the role as a superuser, give it `CONNECT`, and put its DSN in a
 second Secret:
 
 ```sql
-CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '<password>';
+CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
 GRANT CONNECT ON DATABASE meho TO meho_app;
 ```
 
+Then set the password in `psql`. The command asks for it, so the
+password is not in the SQL text and not in the server log:
+
+```text
+\password meho_app
+```
+
 ```bash
-kubectl create secret generic meho-postgres-app -n meho \
-  --from-literal=url='postgresql+asyncpg://meho_app:<password>@<host>:5432/meho'
+{
+  printf 'Password of meho_app: '; IFS= read -rs APP_PASSWORD; echo
+  if [ -n "$APP_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://meho_app:%s@<host>:5432/meho' "$APP_PASSWORD" \
+      | kubectl create secret generic meho-postgres-app -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset APP_PASSWORD
+}
 ```
 
 Then name both in the
@@ -632,9 +716,17 @@ password of the Keycloak role to the one in the Secret
 `<release>-core-postgres-keycloak`, which the install makes by itself.
 
 ```bash
-kubectl create secret generic keycloak-db-admin \
-  --from-literal=username=<admin-user> \
-  --from-literal=password=<admin-password>
+{
+  printf 'Admin password: '; IFS= read -rs DB_ADMIN_PASSWORD; echo
+  if [ -n "$DB_ADMIN_PASSWORD" ]; then
+    printf '%s' "$DB_ADMIN_PASSWORD" \
+      | kubectl create secret generic keycloak-db-admin \
+          --from-literal=username=<admin-user> --from-file=password=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_ADMIN_PASSWORD
+}
 ```
 
 ```yaml

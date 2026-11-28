@@ -23,7 +23,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -177,11 +177,13 @@ async def run_remote(
     tenant_row: dict[str, Any] | None,
     *,
     child: bool = False,
+    approver_role: TenantRole = TenantRole.OPERATOR,
 ) -> Any:
     """Store the rows, start the run as a service login, approve with a token, go on.
 
     With *child* the step under test runs as a child call
     (:data:`REMOTE_CHILD_RUN`), else through the step gate (:data:`REMOTE_RUN`).
+    *approver_role* is the role of the person who approves the run.
     """
     await h.register_child(stub)
     register_connector_v2(
@@ -203,7 +205,8 @@ async def run_remote(
         operator=service, connector_id=REMOTE_CONNECTOR, op_id=run_op_id, target=None, params={}
     )
     assert first.status == "awaiting_approval", first.error
-    request = await h.approve(UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB)
-    return await resume_dispatch_after_approval(
-        operator=c.token_approver(), request=request, params=None
+    request = await h.approve(
+        UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB, role=approver_role
     )
+    approver = c.token_approver().model_copy(update={"tenant_role": approver_role})
+    return await resume_dispatch_after_approval(operator=approver, request=request, params=None)

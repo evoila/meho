@@ -1234,6 +1234,7 @@ async def _gate_subop(
     )
     from meho_backplane.operations.op_policy import apply_step_policy
     from meho_backplane.operations.run_step_rules import (
+        highest_level,
         step_rule_rows,
         step_wait_reason_after_approval,
     )
@@ -1434,6 +1435,9 @@ async def _gate_subop(
                 target=target,
                 params=params,
             )
+            # The request carries the level the step rule checked: with
+            # CUSTOM_POLICY on, a stored level above the declared one.
+            proposed_effect["safety_level"] = highest_level((descriptor, *rule_rows))
 
             # #294: a ``destructive``-tier sub-op must fail closed rather than park
             # with only the identifier-only envelope -- the same binding the

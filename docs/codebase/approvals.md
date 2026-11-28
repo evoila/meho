@@ -970,12 +970,11 @@ With the switch on, a step keeps its own approval when one of these holds:
   the web console after a fresh sign-in.
 - No run approval covers it (`never_covered_reason`, plus the root shell
   mark).
-- An override row or a classification entry raised its level above the
-  code's own level, and the person who approved the run may not approve
-  that level (`run_approver_may_approve` in
-  `operations/approved_run_rights.py`, read off the decision of the run's
-  approval). For example: an Operator approved the run, and an override
-  raised a `safe` step to `dangerous`.
+- The person who approved the run may not approve the step's level
+  (`run_approver_may_approve` in `operations/approved_run_rights.py`, read
+  off the decision of the run's approval). This holds for every step's
+  level: the code's own level, or a level an override row or a
+  classification entry set.
 
 The step gate asks these rules with the stored facts of the step's
 operation, when a row is stored (`step_rule_rows`): its parameter schema,
@@ -988,9 +987,11 @@ a delete sign, so a step whose stored row has `hard_to_undo` keeps its own
 approval, as a child call of the same operation does.
 When both a built-in row and a row of the caller's tenant are stored, the
 rules are asked once for each row, so a fact counts when either row holds
-it. The facts go only into copies of the step's row. The gate, the card and
-the approval request use the step's declared values. With the switch off,
-no stored row is read.
+it. The facts go only into copies of the step's row. The gate uses the
+step's declared values. The step's own approval request carries the level
+the rules checked: the highest level of the step and its copies
+(`highest_level`). So only a person who may approve that level can approve
+it. With the switch off, no stored row is read.
 
 When a person approved a step's own request and the run goes on, the step
 is checked again before it runs. With the switch on, its level then is the
@@ -1017,7 +1018,7 @@ step's `approval.request` audit row) names the rule:
 `run_step_keeps_own_approval: a step of a run after an approval keeps its
 own approval (floor:rights_change_waits)`. A fixed rule is named as
 `floor:<rule id>`; otherwise the reason ends in `(requires_approval)`,
-`(no_run_approval_covers_it)` or `(approver_may_not_approve_raised_level)`.
+`(no_run_approval_covers_it)` or `(approver_may_not_approve_step_level)`.
 
 One exception: a credential read that the run sent at once before the
 wait, and that a resume sends again, is sent again with no new wait, so

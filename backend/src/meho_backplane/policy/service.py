@@ -58,6 +58,7 @@ from meho_backplane.policy.classification import (
 )
 from meho_backplane.policy.document import (
     POLICY_VERSION,
+    ParsedPolicy,
     canonical_sha256,
     document_of,
     file_sha256,
@@ -450,9 +451,7 @@ async def build_plan(
     except ValueError as exc:
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
     if custom_policy:
-        plan.mistakes.extend(
-            await risk_levels_mistakes(session, content=content, scope=scope, tenant_id=tenant_id)
-        )
+        plan.mistakes += await _part_mistakes(session, content, parsed, scope, tenant_id)
     if plan.mistakes:
         return plan
     if scope == "tenant":
@@ -622,6 +621,24 @@ def _dump(value: Any) -> str:
         value, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
     return text
+
+
+async def _part_mistakes(
+    session: AsyncSession,
+    content: bytes,
+    parsed: ParsedPolicy,
+    scope: Scope,
+    tenant_id: uuid.UUID | None,
+) -> list[str]:
+    """The mistakes of the ``risk_levels`` part, each edit read back as :func:`_dump` writes it."""
+    return await risk_levels_mistakes(
+        session,
+        content=content,
+        in_file=parsed.risk_levels_in_file,
+        write=_dump,
+        scope=scope,
+        tenant_id=tenant_id,
+    )
 
 
 async def _no_effect_notes(

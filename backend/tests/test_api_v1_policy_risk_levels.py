@@ -13,7 +13,10 @@ then reads the stored rows.
   edit, no edit of another tenant and no row that sets only a category.
   The install's export holds the install-wide edits, also a platform
   admin's "approval off".
-* Export, then import of the same file, is "No change.".
+* Export, then import of the same file, is "No change.", also for odd
+  reason texts.
+* A ``risk_levels`` part that comes in through a merge key (``<<``) is
+  refused at the line of the merge key.
 * An import whose ``risk_levels`` part is not the stored edits is refused
   with the line named; nothing waits and nothing is stored.
 * The export writes nothing.
@@ -298,6 +301,39 @@ async def test_a_file_without_the_part_leaves_the_edits_as_they_are(
     assert await _stored_rows() == before
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Stops\u0085the host.",
+        "Two\nlines.",
+        "Line\u2028separator.",
+        "Say \"no\" and it's 'done'.",
+        "A long reason " * 60,
+    ],
+    ids=["next-line", "newline", "line-separator", "quotes", "long-line"],
+)
+async def test_an_export_imports_again_for_odd_reasons(
+    client: TestClient, embedding: AsyncMock, reason: str
+) -> None:
+    await h.setup_ops(embedding)
+    await _store_tenant_policy()
+    await _add(TENANT, "inslim.vm.restart", safety_level="dangerous", reason=reason)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        bearer = _tenant_admin()
+        text = _export(client, bearer).text
+        assert "risk_levels:" in text
+        before = await _stored_rows()
+        checked, preview, asked = _ask_all(client, bearer, text, "tenant")
+    assert checked.json()["mistakes"] == [], checked.text
+    assert preview.json()["message"] == "No change.", preview.text
+    assert asked.status_code == 200, asked.text
+    assert asked.json()["message"] == "No change."
+    assert await _stored_rows() == before
+
+
 # ---------------------------------------------------------------------------
 # A changed part is refused
 # ---------------------------------------------------------------------------
@@ -380,6 +416,46 @@ async def test_a_part_that_misses_an_edit_names_it_and_nothing_is_stored(
     assert await _stored_rows() == before
 
 
+def _merge_key_part(text: str, *, same: bool) -> str:
+    """*text* with its ``risk_levels`` part given through a merge key (``<<``)."""
+    head, part = text.split("risk_levels:\n")
+    if not same:
+        return head + "<<: {risk_levels: []}\n"
+    indented = "".join(f"  {row}\n" for row in part.splitlines())
+    return head + "<<:\n  risk_levels:\n" + indented
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("switch_on")
+@pytest.mark.parametrize("same", [False, True], ids=["changed", "unchanged"])
+async def test_a_part_through_a_merge_key_is_refused_with_its_line(
+    client: TestClient, embedding: AsyncMock, same: bool
+) -> None:
+    await h.setup_ops(embedding)
+    await _store_tenant_policy()
+    await _edits()
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        bearer = _tenant_admin()
+        text = _export(client, bearer).text
+        assert text.splitlines()[-1].startswith("  set_at:"), "risk_levels is the last part"
+        changed = _merge_key_part(text, same=same)
+        assert yaml.safe_load(changed)["risk_levels"] == (
+            yaml.safe_load(text)["risk_levels"] if same else []
+        )
+        before = await _stored_rows()
+        checked, preview, asked = _ask_all(client, bearer, changed, "tenant")
+    sentence = (
+        f"Line {_line_of(changed, '<<:')}: `risk_levels` comes in through a merge key (`<<`). "
+        f"{RISK_LEVELS_NOT_IN_THIS_VERSION}"
+    )
+    assert checked.json()["mistakes"] == [sentence], checked.text
+    assert preview.json()["mistakes"] == [sentence], preview.text
+    assert asked.status_code == 422, asked.text
+    assert asked.json()["mistakes"] == [sentence]
+    assert await _stored_rows() == before
+
+
 # ---------------------------------------------------------------------------
 # The switch off
 # ---------------------------------------------------------------------------
@@ -399,3 +475,20 @@ async def test_with_the_switch_off_the_export_has_no_part_and_the_key_is_refused
         assert str(ids["level"]) not in text
         checked = h.post(client, "validate", bearer, text + "risk_levels: []\n")
     assert checked.json()["mistakes"] == [not_read_mistake("risk_levels")]
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_a_part_through_a_merge_key_is_refused(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await h.setup_ops(embedding)
+    await _edits()
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        bearer = _tenant_admin()
+        text = _export(client, bearer).text
+        content = text + "<<: {risk_levels: []}\n"
+        checked = h.post(client, "validate", bearer, content)
+        preview = h.post(client, "import", bearer, content, preview="true")
+    for answer in (checked, preview):
+        assert answer.json()["mistakes"] == [not_read_mistake("risk_levels")], answer.text

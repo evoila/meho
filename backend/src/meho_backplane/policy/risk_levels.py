@@ -27,6 +27,7 @@ and writes nothing.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Any, Final, Literal
 
 import yaml
@@ -125,6 +126,15 @@ def _line(node: yaml.Node) -> int:
     return int(node.start_mark.line) + 1
 
 
+def _merge_key_line(text: str) -> int:
+    """The line of the first top-level merge key (``<<``); line 1 without one."""
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    for key_node, _value in root.value if isinstance(root, yaml.MappingNode) else []:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            return _line(key_node)
+    return 1
+
+
 def _items(value_node: yaml.SequenceNode) -> list[tuple[int, Any]]:
     """Each item of the part with its line, built as the safe loader builds it."""
     loader = yaml.SafeLoader("")
@@ -138,6 +148,8 @@ async def risk_levels_mistakes(
     session: AsyncSession,
     *,
     content: bytes,
+    in_file: bool,
+    write: Callable[[Any], str],
     scope: Literal["tenant", "install"],
     tenant_id: uuid.UUID | None,
 ) -> list[str]:
@@ -149,13 +161,25 @@ async def risk_levels_mistakes(
     stored edits the part misses are one sentence that names the line of
     ``risk_levels``, and so is a part that is not a list. The sentences
     never repeat a value of the file.
+
+    *in_file* says the parser saw the key in the file. When it came in
+    through a merge key (``<<``), the part is refused at the line of the
+    merge key, whatever it holds. Each stored edit is compared after
+    *write*, the writer of the export, and a read back, so an unchanged
+    export imports again for every reason text.
     """
-    found = _part_node(content.decode("utf-8"))
+    text = content.decode("utf-8")
+    found = _part_node(text)
     if found is None:
-        return []
+        if not in_file:
+            return []
+        return [
+            f"Line {_merge_key_line(text)}: `risk_levels` comes in through a merge key (`<<`). "
+            f"{RISK_LEVELS_NOT_IN_THIS_VERSION}"
+        ]
     key_node, value_node = found
     stored = {
-        item["rule"]: item
+        item["rule"]: yaml.safe_load(write(item))
         for item in await stored_risk_levels(session, scope=scope, tenant_id=tenant_id)
     }
     if not isinstance(value_node, yaml.SequenceNode):

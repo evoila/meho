@@ -339,6 +339,8 @@ class ParsedPolicy:
 
     model: PolicyFile | None
     mistakes: list[str] = field(default_factory=list)
+    #: The file holds ``risk_levels``, also when it comes in through a merge key (``<<``).
+    risk_levels_in_file: bool = False
 
 
 def _repeated_match_mistakes(model: PolicyFile) -> list[str]:
@@ -433,7 +435,9 @@ def parse_policy_file(
         mistakes.extend(format_validation_errors(exc))
     if model is not None:
         mistakes.extend(_repeated_match_mistakes(model))
-    return ParsedPolicy(None if mistakes else model, mistakes)
+    return ParsedPolicy(
+        None if mistakes else model, mistakes, risk_levels_in_file="risk_levels" in raw
+    )
 
 
 # ---------------------------------------------------------------------------

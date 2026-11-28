@@ -554,7 +554,7 @@ from meho_backplane.operations.run_step_rules import (
 )
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import (
-    CREDENTIAL_CARD_LINE,
+    descriptor_credential_card_line,
     descriptor_credential_waits,
 )
 from meho_backplane.operations.shutdown_drain import (
@@ -3649,7 +3649,7 @@ async def _build_proposed_effect(
             base["waits_because"] = TOKEN_CALL_WAIT
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
-            base["credential_wait"] = CREDENTIAL_CARD_LINE
+            base["credential_wait"] = descriptor_credential_card_line(descriptor)
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so

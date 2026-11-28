@@ -83,6 +83,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.delete_names import destructive_action_name_in_op_id
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 
 __all__ = [
     "NO_TRACE_BODY_TAG",
@@ -99,9 +100,7 @@ __all__ = [
 #: The op-sensitivity classes (from
 #: :func:`meho_backplane.broadcast.events.classify_op`) whose bodies are
 #: secret material. An op in any of these classes never records a body.
-SECRET_OP_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_mint", "credential_write"}
-)
+SECRET_OP_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES
 
 
 #: Case-sensitive globs matching credential / session-mint / token /

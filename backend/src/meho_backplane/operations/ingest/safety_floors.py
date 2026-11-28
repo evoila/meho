@@ -34,6 +34,7 @@ from collections.abc import Callable
 from typing import Final
 
 from meho_backplane.broadcast.events import resolve_op_class
+from meho_backplane.op_classes import CREDENTIAL_CHANGE_OP_CLASSES
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -117,9 +118,7 @@ def _apply_credential_read_floor(proto: EndpointDescriptorProto) -> EndpointDesc
     )
 
 
-_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_write", "credential_mint"}
-)
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = CREDENTIAL_CHANGE_OP_CLASSES
 
 
 def _apply_credential_change_floor(proto: EndpointDescriptorProto) -> EndpointDescriptorProto:

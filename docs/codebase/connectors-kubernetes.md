@@ -914,6 +914,46 @@ marker can be longer than the value it replaces: the echo keeps at most
 fit whole keeps only its identity; when not even that fits, one closing
 entry counts the documents left out.
 
+**The `k8s.apply` agent texts and the switch `K8S_APPLY_ONE_APPROVAL_HINT`.**
+A call of `k8s.apply` with `dry_run="server"` waits for approval, like the
+real call. With the switch on (`Settings.k8s_apply_one_approval_hint`, off
+by default), `register_operations()` stores the op with the texts of
+`with_apply_hint()` in `_apply_hint.py`:
+
+- The summary line "Server-side apply one or more manifests in order; needs
+  one approval per call." It shows in every `search_operations` answer.
+- A `when_to_use` text, a `dry_run` hint and an `output_shape` text. The
+  agent reads them in the `guidance` block of an exact-op
+  `search_operations` call. That block is there only while
+  `OPERATION_CONTRACT_GUIDANCE` is on too (off by default).
+
+It tells the agent:
+
+- `preview_operation` needs no approval and does not contact the cluster.
+  It shows the manifest text that was sent, after the check of the
+  parameter shape (`plan_shown` is false). It does not show what the apply
+  will change on the cluster.
+- Send all manifests of one deploy in one `k8s.apply` call, as one manifest
+  text with the documents split by `---`, in the order they must exist. The
+  call applies them in that order and needs one approval.
+- A call with `dry_run='server'` waits for approval too. The approval
+  request shows the result of a server dry run.
+
+This operation is at risk level `dangerous`. It waits for a person on every
+call, also when a platform admin has turned approval off for it.
+
+An object in a namespace that the same call creates fails its dry run on the
+approval request, because the namespace does not exist yet. The real apply
+still works, because the namespace is applied first. The hint says this.
+The risk level, the approval rule and the parameters are the same with the
+switch on and off. With the switch off, the op keeps the texts written in
+`ops_write_meta.py`, which say to run `dry_run='server'` and then
+`dry_run='none'`.
+`tests/test_k8s_write_hint_no_dry_run_first.py` reads the texts that
+`register_operations()` stores with the switch on. It fails when the text of
+any Kubernetes write operation tells the agent to call it with a dry run, or
+to read a dry-run answer, before the real call.
+
 **`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
 each field of an object. `k8s.apply` applies under the owner `meho`. When
 an object was applied before by another tool (`kubectl apply`, Helm), a

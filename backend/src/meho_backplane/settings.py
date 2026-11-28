@@ -2840,6 +2840,19 @@ class Settings(BaseModel):
     #: The node list then also reads the pods of all namespaces. Off: the op
     #: is as before. Set via ``K8S_NODE_LIST_RESOURCES``.
     k8s_node_list_resources: bool = Field(default=False, json_schema_extra=AGENT_FACING)
+    #: The agent texts of ``k8s.apply`` (#6921), behind a switch that is off by
+    #: default. When on, the summary line "Server-side apply one or more
+    #: manifests in order; needs one approval per call." shows in every
+    #: ``search_operations`` answer. The ``when_to_use`` text and the
+    #: ``dry_run`` hint reach the agent only in the ``guidance`` block of an
+    #: exact-op ``search_operations`` call, while ``OPERATION_CONTRACT_GUIDANCE``
+    #: is on too (off by default). They say that ``preview_operation`` needs no
+    #: approval and shows the manifest text that was sent, and to send all
+    #: manifests of one deploy in one call
+    #: (:mod:`meho_backplane.connectors.kubernetes._apply_hint`). Off:
+    #: ``k8s.apply`` keeps the texts written in ``ops_write_meta.py``. Set via
+    #: ``K8S_APPLY_ONE_APPROVAL_HINT``.
+    k8s_apply_one_approval_hint: bool = Field(default=False, json_schema_extra=AGENT_FACING)
     #: The realm in every Keycloak answer, behind a switch that is off by
     #: default. When on, each dict answer of a Keycloak operation starts with
     #: ``managed_realm``: the realm the call acted on
@@ -4039,6 +4052,9 @@ def get_settings() -> Settings:
         ),
         k8s_node_list_resources=parse_bool_env(
             os.environ.get("K8S_NODE_LIST_RESOURCES"),
+        ),
+        k8s_apply_one_approval_hint=parse_bool_env(
+            os.environ.get("K8S_APPLY_ONE_APPROVAL_HINT"),
         ),
         keycloak_answer_realm=parse_bool_env(
             os.environ.get("KEYCLOAK_ANSWER_REALM"),

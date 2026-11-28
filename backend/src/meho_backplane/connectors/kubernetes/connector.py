@@ -78,6 +78,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.kubernetes._apply_hint import with_switched_apply_hint
 from meho_backplane.connectors.kubernetes._dial_check import check_api_client_dials
 from meho_backplane.connectors.kubernetes._node_resources import (
     NODE_LIST_OP_ID,
@@ -1983,6 +1984,7 @@ class KubernetesConnector(Connector):
         for op, handler in bindings:
             if resources_on and op.op_id == NODE_LIST_OP_ID:
                 op = with_node_resources(op)
+            op = with_switched_apply_hint(op)
             when_to_use: str | None
             if op.group_key is None:
                 when_to_use = None

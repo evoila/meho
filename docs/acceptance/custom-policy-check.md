@@ -251,11 +251,13 @@ Exit codes:
 When a check failed and something was not taken back, the run ends with
 exit code 1, and the `[left]` lines are printed.
 
-Exit code 0 needs the three open parts of check 11 (the event intake, the
-findings investigator and the runner executor, which wait for #7073 and the
-logins it names), the two parts of check 8 that need the write rule's own
-reason (#6966), and the caller kind on the audit row (#6962). Until
-those are done, a run where every check passes ends with exit code 3. So does a run
+Exit code 0 needs the three open parts of check 11: the event intake (the
+script cannot send an event to the install), the findings investigator (it
+needs a sensor change and an AI model on the install) and the runner
+executor (it needs a satellite runner). It also needs the two parts of
+check 8 that need the write rule's own reason (#6966), and the caller kind
+on the audit row (#6962). Until then, a run where every check passes ends
+with exit code 3. So does a run
 where the person did checks 4 and 5, while MEHO has no route that reads
 the agent rule and the custom role. The `[skip]` line of check 7 for the
 owner's own approval prints in every run, so today every run where all
@@ -409,7 +411,7 @@ was checked by a run is in the pull request of the script.
   Operator from another session that still waits after the run, and a stop
   during the clean-up.
 
-Run both with `jq` on the `PATH`:
+Run both with Python 3.10 or newer and `jq` on the `PATH`:
 
 ```bash
 python3 -m unittest discover -s scripts/tests -p 'test_custom_policy_check*.py'

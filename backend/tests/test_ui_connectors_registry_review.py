@@ -701,7 +701,7 @@ def test_op_edit_platform_admin_turns_approval_off_with_reason() -> None:
 
 
 def test_op_edit_refuses_a_reason_that_looks_like_a_secret(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """A reason that looks like a secret is refused and nothing is stored."""
     key = made_up_key()
@@ -733,7 +733,7 @@ def test_op_edit_refuses_a_reason_that_looks_like_a_secret(
             rows = (await session.execute(select(AuditLog))).scalars().all()
             return [r.payload for r in rows]
 
-    assert_no_trace(key, refused.text, asyncio.run(_stored()), caplog.text)
+    assert_no_trace(key, refused.text, asyncio.run(_stored()), caplog.text, capfd.readouterr().out)
 
 
 @pytest.mark.parametrize(

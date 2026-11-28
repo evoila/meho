@@ -1106,7 +1106,7 @@ def test_a_file_in_the_reason_field_is_no_reason() -> None:
 
 
 def test_a_reason_that_looks_like_a_secret_is_refused_and_writes_nothing(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     key = made_up_key()
     _seed_tenants()
@@ -1121,7 +1121,9 @@ def test_a_reason_that_looks_like_a_secret_is_refused_and_writes_nothing(
     assert REASON_HOLDS_SECRET in applied.text
     assert _state() == _UNCHANGED
     rows = asyncio.run(_all(AuditLog))
-    assert_no_trace(key, applied.text, [row.payload for row in rows], caplog.text)
+    assert_no_trace(
+        key, applied.text, [row.payload for row in rows], caplog.text, capfd.readouterr().out
+    )
     assert all("reason" not in row.payload for row in rows)
 
 
@@ -1138,7 +1140,9 @@ def test_a_plain_reason_is_still_stored_in_the_audit_row() -> None:
     assert row.payload["reason"] == "ticket CHG-1234"
 
 
-def test_apply_import_refuses_a_reason_that_looks_like_a_secret() -> None:
+def test_apply_import_refuses_a_reason_that_looks_like_a_secret(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
     key = made_up_key()
     _seed_tenants()
 
@@ -1161,4 +1165,4 @@ def test_apply_import_refuses_a_reason_that_looks_like_a_secret() -> None:
     message = asyncio.run(_do())
     assert message == REASON_HOLDS_SECRET
     assert _state() == _UNCHANGED
-    assert_no_trace(key, message)
+    assert_no_trace(key, message, capfd.readouterr().out)

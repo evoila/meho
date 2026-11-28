@@ -1217,7 +1217,7 @@ async def _everything_stored() -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_the_service_refuses_an_edit_whose_reason_looks_like_a_secret(
-    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     key = made_up_key()
     tenant_id = uuid.uuid4()
@@ -1228,7 +1228,9 @@ async def test_the_service_refuses_an_edit_whose_reason_looks_like_a_secret(
     assert caught.value.code == "reason_looks_like_secret"
     assert str(caught.value) == REASON_HOLDS_SECRET
     assert await _effective(tenant_id) == ("caution", True)
-    assert_no_trace(key, str(caught.value), await _everything_stored(), caplog.text)
+    assert_no_trace(
+        key, str(caught.value), await _everything_stored(), caplog.text, capfd.readouterr().out
+    )
 
     # A plain reason is stored in the audit row.
     await _turn_off(admin, reason="ticket CHG-1234", person_present=True)
@@ -1238,7 +1240,7 @@ async def test_the_service_refuses_an_edit_whose_reason_looks_like_a_secret(
 
 @pytest.mark.asyncio
 async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(
-    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     key = made_up_key()
     await _register_typed(embedding, requires_approval=True)
@@ -1248,7 +1250,9 @@ async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(
     assert response.status_code == 400, response.text
     assert REASON_HOLDS_SECRET in response.json()["detail"]
     assert report.json() == {"overrides": []}
-    assert_no_trace(key, response.text, await _everything_stored(), caplog.text)
+    assert_no_trace(
+        key, response.text, await _everything_stored(), caplog.text, capfd.readouterr().out
+    )
 
     plain, report = _patch(fresh, {"requires_approval": False, "reason": "ticket CHG-1234"})
     assert plain.status_code == 200, plain.text
@@ -1258,7 +1262,7 @@ async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(
 
 @pytest.mark.asyncio
 async def test_rest_enable_only_edit_refuses_a_reason_that_looks_like_a_secret(
-    embedding: AsyncMock,
+    embedding: AsyncMock, capfd: pytest.CaptureFixture[str]
 ) -> None:
     key = made_up_key()
     await _register_typed(embedding)
@@ -1266,12 +1270,12 @@ async def test_rest_enable_only_edit_refuses_a_reason_that_looks_like_a_secret(
     assert response.status_code == 400, response.text
     assert REASON_HOLDS_SECRET in response.json()["detail"]
     assert (await _stored_row()).is_enabled is True
-    assert_no_trace(key, response.text, await _everything_stored())
+    assert_no_trace(key, response.text, await _everything_stored(), capfd.readouterr().out)
 
 
 @pytest.mark.asyncio
 async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
-    embedding: AsyncMock, caplog: pytest.LogCaptureFixture
+    embedding: AsyncMock, caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
 ) -> None:
     key = made_up_key()
     tenant_id = uuid.uuid4()
@@ -1285,7 +1289,9 @@ async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
     assert refused.status_code == 400, refused.text
     assert REASON_HOLDS_SECRET in refused.json()["detail"]
     assert await _effective(tenant_id) == ("caution", True)
-    assert_no_trace(key, refused.text, await _everything_stored(), caplog.text)
+    assert_no_trace(
+        key, refused.text, await _everything_stored(), caplog.text, capfd.readouterr().out
+    )
 
     removed = _delete_override(fresh, override_tenant_id=tenant_id, reason="ticket CHG-1234")
     assert removed.status_code == 204, removed.text
@@ -1294,7 +1300,7 @@ async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
 
 @pytest.mark.asyncio
 async def test_mcp_edit_tool_refuses_a_reason_that_looks_like_a_secret(
-    embedding: AsyncMock,
+    embedding: AsyncMock, capfd: pytest.CaptureFixture[str]
 ) -> None:
     import meho_backplane.mcp.tools.connector_admin as ca_mod
 
@@ -1312,7 +1318,7 @@ async def test_mcp_edit_tool_refuses_a_reason_that_looks_like_a_secret(
         await ca_mod._edit_op_handler(admin, args)
     assert REASON_HOLDS_SECRET in str(caught.value)
     assert await _effective(uuid.uuid4()) == ("caution", True)
-    assert_no_trace(key, str(caught.value), await _everything_stored())
+    assert_no_trace(key, str(caught.value), await _everything_stored(), capfd.readouterr().out)
 
     # A permitted edit with a plain reason is stored in the audit row.
     plain = {**args, "requires_approval": None, "safety_level": "dangerous"}

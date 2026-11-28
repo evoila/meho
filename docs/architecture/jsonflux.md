@@ -730,7 +730,8 @@ the default copy, outside that budget, but inside the 4,096-byte limit
 of the whole inline summary (#5139, next sections): a hinted value that
 would push the summary over moves out like any other, is counted under
 `omitted_scalar_count`, and is stored with the rows. Credential-class ops
-(`credential_read` / `credential_mint` / `credential_write`) get no
+(`credential_read` / `credential_mint` / `credential_write` /
+`credential_use`) get no
 default copy: for them the hint is still the only path, so a secret-shaped
 scalar is never copied by accident. The registry sweep in
 `tests/test_operations_jsonflux_conformance.py` fails the build when a

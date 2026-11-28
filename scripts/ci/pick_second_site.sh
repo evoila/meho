@@ -59,8 +59,8 @@ fi
 if [[ "${COVERAGE_LABEL:-}" != "false" ]]; then
   decide "" "today's pool: a pull request with the label ci-coverage-validate keeps all unit shards on today's pool"
 fi
-# The token of a Dependabot run cannot cancel a run, so the watchdog could
-# not stop shards that wait on a dead site.
+# The token of a Dependabot run cannot cancel a run, so the second-site
+# watchdog could not stop shards that wait on a dead site.
 if [[ "${ACTOR:-}" == "dependabot[bot]" ]]; then
   decide "" "today's pool: a Dependabot run stays on today's pool"
 fi

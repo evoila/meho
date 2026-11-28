@@ -35,7 +35,10 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final
 
 __all__ = [
+    "CREDENTIAL_CHANGE_OP_CLASSES",
+    "CREDENTIAL_OP_CLASSES",
     "DECLARABLE_OP_CLASSES",
+    "SECRET_REQUEST_OP_CLASSES",
     "call_always_waits",
     "declare_credential_capable",
     "declare_credential_capable_match",
@@ -65,13 +68,36 @@ __all__ = [
 ]
 
 #: The classes a connector may declare. ``credential_read``: the answer
-#: holds a secret. ``credential_mint``: the answer holds a new secret.
-#: ``credential_write``: the request holds a secret, or the operation sends
-#: one to the target. ``write``: the operation changes the target, but its
-#: op id does not end in a write word the pattern rules know.
+#: holds a secret. ``credential_mint``: the operation makes a new credential,
+#: and the answer holds it. ``credential_write``: the operation writes a
+#: credential: it sets, changes or stores a password, key, token or
+#: certificate, in MEHO or in the target. ``credential_use``: the request
+#: carries a secret, or MEHO sends a stored secret to the target, but the
+#: operation writes and makes no credential, for example a read inside a VM
+#: guest that logs in with the stored guest password. ``write``: the
+#: operation changes the target, but its op id does not end in a write word
+#: the pattern rules know.
 DECLARABLE_OP_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_mint", "credential_write", "write"}
+    {"credential_read", "credential_mint", "credential_write", "credential_use", "write"}
 )
+
+#: The classes of an operation that reads, writes, makes or uses a
+#: credential. MEHO keeps the body of such a call out of the broadcast, the
+#: flight recorder and the approval preview, and no standing grant, agent
+#: grant or run approval covers the call.
+CREDENTIAL_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_mint", "credential_write", "credential_use"}
+)
+
+#: The classes of an operation that writes or makes a credential.
+CREDENTIAL_CHANGE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_mint", "credential_write"}
+)
+
+#: The classes of an operation whose request carries a secret. A waiting
+#: call of such an operation keeps its params, and the params of a
+#: multi-step operation it is a step of, only in the one-time store.
+SECRET_REQUEST_OP_CLASSES: Final[frozenset[str]] = frozenset({"credential_write", "credential_use"})
 
 _DECLARED: dict[str, str] = {}
 _SAFE_WRITES: set[str] = set()
@@ -93,6 +119,7 @@ def declare_op_classes(
     credential_read: Iterable[str] = (),
     credential_mint: Iterable[str] = (),
     credential_write: Iterable[str] = (),
+    credential_use: Iterable[str] = (),
     write: Iterable[str] = (),
 ) -> None:
     """Declare the class of the given op ids.
@@ -106,6 +133,7 @@ def declare_op_classes(
         ("credential_read", credential_read),
         ("credential_mint", credential_mint),
         ("credential_write", credential_write),
+        ("credential_use", credential_use),
         ("write", write),
     ):
         for op_id in op_ids:

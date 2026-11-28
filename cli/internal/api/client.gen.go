@@ -121,6 +121,7 @@ const (
 	BroadcastAnnounceRequestPlannedOpClassAuditQuery      BroadcastAnnounceRequestPlannedOpClass = "audit_query"
 	BroadcastAnnounceRequestPlannedOpClassCredentialMint  BroadcastAnnounceRequestPlannedOpClass = "credential_mint"
 	BroadcastAnnounceRequestPlannedOpClassCredentialRead  BroadcastAnnounceRequestPlannedOpClass = "credential_read"
+	BroadcastAnnounceRequestPlannedOpClassCredentialUse   BroadcastAnnounceRequestPlannedOpClass = "credential_use"
 	BroadcastAnnounceRequestPlannedOpClassCredentialWrite BroadcastAnnounceRequestPlannedOpClass = "credential_write"
 	BroadcastAnnounceRequestPlannedOpClassOther           BroadcastAnnounceRequestPlannedOpClass = "other"
 	BroadcastAnnounceRequestPlannedOpClassRead            BroadcastAnnounceRequestPlannedOpClass = "read"

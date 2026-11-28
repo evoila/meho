@@ -495,13 +495,13 @@ def test_smoke_pulls_one_of_the_unit_test_images() -> None:
     assert f"PROXY/{image.removeprefix('docker.io/')}" in script
 
 
-def test_only_the_watchdogs_may_cancel_a_run() -> None:
+def test_only_the_second_site_watchdog_may_cancel_a_run() -> None:
     writers = sorted(
         name
         for name, job in _ci_jobs().items()
         if (job.get("permissions") or {}).get("actions") == "write"
     )
-    assert writers == ["merge-queue-watchdog", "second-site-watchdog"]
+    assert writers == ["second-site-watchdog"]
 
 
 # --- The same test steps in both shard jobs --------------------------------------

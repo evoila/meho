@@ -8,7 +8,9 @@
   approved import keeps the stored part.
 * ``apply_policy`` plans with the switch value it is given: the run after
   the approval refuses a file with ``limits`` while the switch is off.
-* The five refused keys, in any form, are refused with one sentence.
+* The five refused keys, in any form, are refused with one sentence; with
+  ``CUSTOM_POLICY`` on, ``risk_levels`` gets the sentence of
+  :mod:`meho_backplane.policy.risk_levels` instead.
 * A file that holds the key ``limits`` is refused whatever its value, where
   ``limits`` is not allowed; nothing waits.
 * The refusal is the same sentence whether the environment sets
@@ -48,6 +50,7 @@ from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.agent_rules import AGENTS_IN_INSTALL_FILE, AGENTS_NEED_CUSTOM_POLICY
 from meho_backplane.policy.document import file_sha256
 from meho_backplane.policy.limits import LIMITS_NEED_CUSTOM_POLICY, personal_agent_limit
+from meho_backplane.policy.risk_levels import RISK_LEVELS_NOT_IN_THIS_VERSION
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.validate import check_document
 from meho_backplane.settings import get_settings
@@ -75,6 +78,12 @@ _FILE_P2 = _FILE_P + "  - {match: {op: limapi.*}, always_wait: true}\n"
 _TENANT_SENTENCE = (
     "`limits` belongs to the install's policy file. Only a platform admin sets the "
     "outer limit; a tenant's file stays inside it."
+)
+
+
+#: The answer to ``risk_levels: {example-name: example-value-7}`` with the switch on.
+_RISK_LEVELS_NOT_A_LIST = (
+    f"Line 2: `risk_levels` is not the list of risk-level edits. {RISK_LEVELS_NOT_IN_THIS_VERSION}"
 )
 
 
@@ -405,6 +414,8 @@ def test_the_five_keys_are_refused_whatever_the_environment_and_limits_follows_i
                 elif name == "agents":
                     sentence = AGENTS_IN_INSTALL_FILE if environment else AGENTS_NEED_CUSTOM_POLICY
                     assert resp.json()["mistakes"] == [sentence]
+                elif name == "risk_levels" and environment == "true":
+                    assert resp.json()["mistakes"] == [_RISK_LEVELS_NOT_A_LIST]
                 else:
                     assert resp.json()["mistakes"] == [_not_read(name)]
         tenant = _post(client, "validate", _token(key), f"policy: v1\n{_SEVEN_FILES['limits']}\n")
@@ -423,7 +434,9 @@ async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
                 content=f"policy: v1\n{_SEVEN_FILES[name]}\n".encode(),
                 custom_policy=True,
             )
-            assert plan.mistakes == [_not_read(name)]
+            # With the switch on, the import reads `risk_levels` (policy/risk_levels.py).
+            expected = _RISK_LEVELS_NOT_A_LIST if name == "risk_levels" else _not_read(name)
+            assert plan.mistakes == [expected]
         content = f"policy: v1\n{_SEVEN_FILES['limits']}\n".encode()
         plan = await build_plan(
             session, scope="install", tenant_id=None, content=content, custom_policy=True

@@ -2029,13 +2029,11 @@ these workflows:
   `chart.yml` a push to `main` has its own group per commit, so nothing
   cancels it (see "Every main commit gets its image and chart").
 - **The runs of a dropped group are cancelled.** GitHub does not stop the
-  runs of a group that leaves the queue. Two helpers do it, so the runs
-  stop using our runners:
-  - The `merge-queue-watchdog` job in `ci.yml` (#4732) stops its own CI
-    run about a minute after the drop.
-  - `merge-queue-cleanup.yml` (#5292) runs
+  runs of a group that leaves the queue. `merge-queue-cleanup.yml` (#5292)
+  does it, so the runs stop using our runners. It runs
     `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
-    runner and covers every workflow. It cancels an open merge-queue run
+    runner and covers every workflow. A dropped group's run goes on until
+    the next sweep cancels it. It cancels an open merge-queue run
     only when the run's commit is not in the queue (GraphQL `mergeQueue`),
     its queue branch is gone, and its commit is not on `main` (the merge
     base of the commit and `main` is not the commit itself). Right before
@@ -2044,6 +2042,12 @@ these workflows:
     sweep. The reads and the cancel are separate calls, so a wrong cancel
     is very unlikely, not impossible. Only the sweep job may cancel; the
     dry run on a pull request has a read-only token.
+  - No job of a merge-queue run waits on a runner only to watch the run.
+    Before, a `merge-queue-watchdog` job in `ci.yml` did that. It held a runner of the main pool for the whole queue run (about
+    1,040 runner-minutes a day), and once it cancelled a run whose other
+    jobs had passed, so the pull request fell out of the queue.
+    `test_no_merge_group_job_only_watches_the_run` in
+    `backend/tests/test_ci_merge_queue_cleanup.py` keeps it so.
 - **Third-party actions that derive their own scan range must be told
   the `merge_group` range explicitly.** A `merge_group` trigger makes the
   workflow *run*, but an action that computes its diff from the event
@@ -2606,19 +2610,26 @@ run, not a broken `main`.
   makes it. `backend/.coveragerc.ci` sets `dynamic_context = test_function`,
   so the coverage data records which test function ran each line. That
   needs the C tracer (`COVERAGE_CORE=ctrace`), which is slower, so the
-  coverage pytest step may take 45 minutes. Each coverage shard also writes
+  coverage pytest step may take 45 minutes. The sweep runs in 10 shards
+  with three test workers each (`-n 3`). `.coveragerc.ci` leaves out files
+  in pytest temp folders: some tests import a package from their temp
+  folder, and that folder is gone when the combine job writes
+  `coverage.xml`. Each coverage shard also writes
   a pytest junit file with every test id. The combine job runs
   `tests/_unit_test_map.py build` and uploads the artifact `unit-test-map`
   (kept 8 days). It does this only on the `schedule` run, and only when all
-  eight shards delivered their data. A crashed worker leaves a junit file
+  ten shards delivered their data. A crashed worker leaves a junit file
   but no coverage data (the worker writes its data only at the end of its
-  session), and the download of that shard still works. So the tool checks
-  each junit file: one that reports a crashed worker, or whose tests are
-  not in the coverage data, means no map that night. A pull request with
+  session), and the download of that shard still works. In the coverage
+  job, each test in the junit file names its xdist worker (property
+  `xdist_worker`, set in `tests/conftest.py`). So the tool checks each
+  junit file: one that reports a crashed worker, a test without its
+  worker, or a worker none of whose tests are in the coverage data, means
+  no map that night. A pull request with
   the `ci-coverage-validate` label never makes a map.
-- **Who decides.** The `changes` job, step `map`. It runs only on a pull
-  request that is not docs-only, has a backend change and is not a
-  one-connector run. It downloads the newest `unit-test-map` artifact of a
+- **Who decides.** The `changes` job, step `map`. It uses the map only on
+  a pull request of a branch of this repo that is not docs-only, has a
+  backend change and is not a one-connector run. It downloads the newest `unit-test-map` artifact of a
   run of this repo on `main` (the job has `actions: read` for that). It
   pipes the changed files into `python3 backend/tests/_unit_test_map.py pick`
   (standard library only). The step `upload-selection` stores the picked
@@ -2667,9 +2678,35 @@ run, not a broken `main`.
 - **Old test ids.** The map can be a few days old. A test id whose file is
   gone is dropped. A test id that its file no longer defines picks the
   whole file, so pytest never gets an id it cannot find.
-- **The log.** The step prints one line, also as a notice, for example
+- **Old map.** A map older than 2 days (`STALE_DAYS`) means all the
+  shards too: the nightly run made no new map since then (#7103). The tool
+  still picks with such a map and keeps its 7-day limit; the step `map`
+  then drops the picked list.
+- **The log.** The step `report` of the `changes` job writes one
+  line on every pull request, as an annotation and in the step summary. It
+  runs after the upload of the picked tests, so it says what the unit
+  test jobs really do, for example
   `test map from 2026-11-01 (commit abc1234): 940 of 24,112 tests` or
   `full suite: a migration changed (backend/alembic/versions/0118_x.py)`.
+  A failed upload gives `full suite: could not store the picked tests`.
+  The line is a notice only when the unit tests run the tests the map
+  picked. Every pull request that skips the map gets a warning, so a
+  missing or old map is seen (#7103), with the reason: the full suite, one
+  connector's tests, a docs-only change, a pull request from a fork (the
+  unit test jobs need this repo's runners), one with no backend change
+  (only `python-outside-backend` runs), or an earlier failed step of the
+  `changes` job (then every unit test job skips). An old map gives one
+  more warning, `Old unit test map`.
+- **The alarm.** `.github/workflows/unit-test-map-check.yml` runs after
+  each nightly CI run. It is red when that run uploaded no `unit-test-map`
+  artifact, and its summary lists the coverage jobs that did not pass.
+  When it cannot read the artifacts of that run, it is red too, with the
+  title `Could not check the unit test map`. It
+  says only what it found in that run: pull requests may still use an
+  older map for 2 days. It
+  is a separate workflow, not a job in `ci.yml`: a red job would turn the
+  nightly run red, and `quality-gate.yml` runs SonarCloud only after a
+  green nightly run.
 - **The required check.** The fan-in `python-unit-lane` is unchanged; the
   required check `Python (ruff + mypy + pytest)` keeps its name and its
   strict rule. A selected run does not upload its per-test times.
@@ -2683,7 +2720,8 @@ run, not a broken `main`.
 - **Tests.** `tests/test_unit_test_map.py` checks the rules on a small fake
   tree, runs the real step script from `ci.yml` with a fake `gh`, and
   checks the wiring. `tests/test_ci_coverage_shards.py` checks that the map
-  step waits for every coverage shard.
+  step waits for every coverage shard, and runs the real step of the alarm
+  with a fake `gh`.
 
 ### Second runner site
 
@@ -2782,8 +2820,8 @@ start a job, it is busy, not down: the watchdog keeps waiting, at most 35
 minutes more (the time limit of a shard). Each cancel comes right after a
 fresh read that shows at least one shard with a waiting status (queued,
 waiting, requested or pending). A failed read of the run itself, or a shard
-with no status, never leads to a cancel. Only this job and
-`merge-queue-watchdog` have `actions: write`.
+with no status, never leads to a cancel. Only this job
+has `actions: write` in `ci.yml`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check
 that it passes. Then set the repository variable `MEHO_CI_SECOND_SITE` to
@@ -2827,6 +2865,19 @@ smaller `-n`. Target: request 4000m / limit 7000m (a change of the runner
 pool, outside this repo; tracked here as #1983). Until that lands,
 do not raise `-n` above the current value to chase wall-clock gains — the
 heartbeat failures will return.
+
+### Runner allow list
+
+`backend/tests/test_ci_runner_allow_list.py` fails when a workflow job names a runner
+that is not on its short allow list (the standard GitHub-hosted runners we use and our
+own runner sets), because larger GitHub runners are billed also for a public repository.
+
+The test reads each workflow file as text. The list holds exact texts: every line with
+`runs-on` (outside a comment) must match one of them word for word, and the test names
+the file and line number of each line that does not. The test does not work out what an
+expression gives. `runs-on: ${{ matrix.runner }}` passes only with the one allowed
+`include:` line as the job's whole matrix. A new form, or a changed one, is added to the
+list on purpose, in the pull request that brings it.
 
 ### Vendor spec shelf in CI (#2949)
 
@@ -3176,8 +3227,7 @@ the test map, and sysmon cannot record that (see
 
 Every job that runs on a pull request, except the six hosted jobs named
 below, carries the same `if:` guard the publish workflows use (the integration fan-in wraps
-it in `always() && ...`; `merge-queue-watchdog` runs only on
-`merge_group`):
+it in `always() && ...`):
 
 ```yaml
 if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -3228,7 +3278,7 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
-# The CI coverage run is nightly, in 8 shards, with COVERAGE_CORE=ctrace;
+# The CI coverage run is nightly, in 10 shards, with COVERAGE_CORE=ctrace;
 # see "Coverage handoff to SonarCloud" above and sonarcloud.md.
 
 # Go
@@ -3337,6 +3387,7 @@ their isolation posture:
 | `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** on the Semgrep job (skip on fork PR — the job pulls its scan image from the internal image proxy, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`); the `python-deps` job runs on GitHub-hosted `ubuntu-latest` for pull requests, is skipped in the merge queue (#6350), and only reads `backend/uv.lock` |
 | `private-names-check.yml` | yes (runs `scripts/ci/check_private_names.py` from the checkout of the pull request over its added lines) | **hosted runner** for every event, also the merge queue; a fork pull request gets no secrets, so the job prints a note and skips the checkout |
 | `security-weekly.yml` | no (`schedule` and `workflow_dispatch` only; trivy reads the lock files of `main`) | GitHub-hosted `ubuntu-latest`; built-in token is `contents: read`; the findings go to a private repo with a separate token (repository secrets `SECURITY_FINDINGS_REPO` and `SECURITY_FINDINGS_TOKEN`, so the log masks the repo name), so a finding is never public before its fix. all severities are reported. `scripts/ci/security_weekly_issue.py` opens one issue or comments only the new findings |
+| `unit-test-map-check.yml` | no (`workflow_run` after a nightly CI run; checks out nothing and only reads the API) | GitHub-hosted `ubuntu-latest`; job token `actions: read` only (the job's own `permissions` list replaces the workflow's `contents: read`) |
 | `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted); `docs-site.yml` `build` stays in the merge queue on a hosted runner (#6350) |
 
 ### Two in-repo isolation patterns
@@ -3429,8 +3480,7 @@ hosted runner. Once a maintainer adds that pull request to the merge
 queue, its merge-queue run does use the own pool (the jobs that stay in
 the queue, such as the unit shards and Semgrep, run the code of the merged
 commit). So a fork pull request enters the queue only after review.
-Own pools have no `gh` program: a job that needs it installs it in a step (the merge-queue
-watchdog does, and prints a `::warning::` line when that fails).
+Own pools have no `gh` program: a job that needs it installs it in a step.
 
 Every workflow that runs on `pull_request` also has `concurrency` with
 `cancel-in-progress`, so a new push cancels the run of the old commit.

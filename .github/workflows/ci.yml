@@ -47,6 +47,13 @@
 # in the last 45 minutes. That job names no secret. Every doubt means today's
 # pool. See `docs/codebase/devops.md`, "Second runner site".
 #
+# GitHub-hosted unit shards: unit test shards 1-3 of a pull request can run
+# on GitHub-hosted `ubuntu-latest` runners, in the job
+# `python-unit-shard-hosted`, when a person sets the repository variable
+# MEHO_CI_PR_HOSTED to `on`. That job names no secret, like the second-site
+# job. The merge queue, the nightly run, a fork and a re-run keep today's
+# pool. See `docs/codebase/devops.md`, "GitHub-hosted unit shards".
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
 # `.md`). On such a PR the heavy Python lanes — `python-lint` and the six
@@ -286,6 +293,13 @@ jobs:
     #                check passed in the last 45 minutes. Every doubt gives
     #                empty (today's pool). The step `second-site` decides.
     #
+    #   pr_hosted — `on` when unit test shards 1-3 run on GitHub-hosted
+    #                runners, else empty. Only on a pull request from this
+    #                repository that runs all six shards, on the first
+    #                attempt, when the repository variable MEHO_CI_PR_HOSTED
+    #                is `on`. Every doubt gives empty (today's pool). The
+    #                step `pr-hosted` decides.
+    #
     # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
     # a read-only token and no secret, so a fork pull request may run it. The
     # jobs on our own pool re-check head.repo in their own `if:`.
@@ -307,6 +321,7 @@ jobs:
       # `true` only when the picked tests were also stored.
       test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
       second_site: ${{ steps.second-site.outputs.second_site }}
+      pr_hosted: ${{ steps.pr-hosted.outputs.pr_hosted }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -622,6 +637,24 @@ jobs:
           # The same value as the job output `test_map` above.
           TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
         run: bash scripts/ci/pick_second_site.sh
+      - name: Pick the runners for unit shards 1-3
+        # The script checks every rule and writes one notice that says why. A
+        # failure or a timeout here leaves the output empty, which means
+        # today's pool, so this step can never fail or hold up the job.
+        id: pr-hosted
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          MEHO_CI_PR_HOSTED: ${{ vars.MEHO_CI_PR_HOSTED }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          # The same value as the job output `test_map` above.
+          TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+        run: bash scripts/ci/pick_pr_hosted.sh
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -764,6 +797,9 @@ jobs:
     # these legs and the fan-in fails the required context CLOSED. The legs
     # also skip when `backend_python` is `false` (#5296); the job
     # `python-outside-backend` then runs the tests that read outside backend/.
+    # This job always keeps at least one shard on a full pull request run
+    # from this repository, because only this job checks out the spec shelf
+    # and runs the step "Verify spec-shelf provisioned the pinned specs".
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
@@ -796,9 +832,13 @@ jobs:
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
       # Second runner site: when `changes` says `second_site=on`, this job
       # runs shards 1-3 and python-unit-shard-second-site runs shards 4-6.
+      # GitHub-hosted runners: when `changes` says `pr_hosted=on`, this job
+      # runs shards 4-6 and python-unit-shard-hosted runs shards 1-3. When
+      # both are on, this job runs shard 1, python-unit-shard-hosted runs
+      # shards 2-3 and the second site runs shards 4-6.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || needs.changes.outputs.second_site == 'on' && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6]') }}
+        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || (needs.changes.outputs.second_site == 'on' && needs.changes.outputs.pr_hosted == 'on') && '[1]' || needs.changes.outputs.second_site == 'on' && '[1, 2, 3]' || needs.changes.outputs.pr_hosted == 'on' && '[4, 5, 6]' || '[1, 2, 3, 4, 5, 6]') }}
     # 35-min cap: hang backstop only. Expected job wall is ~17-21 min (setup
     # ~2-3 min + pytest ~15-19 min). Setup plus the 1500 s budget stays under
     # the cap. So a shard whose pytest ends after 1500 s but before the cap
@@ -1876,45 +1916,60 @@ jobs:
       - *unit-upload-times
       - *unit-peak-memory
 
-  python-unit-shard-hosted-trial:
-    name: Hosted trial, unit shard 6/6 (not required)
-    # A one-day trial (#7187): unit shard 6 of a full pull request run also
-    # runs on a GitHub-hosted runner, beside the normal shard 6, so the wait
-    # and the run time can be compared. The job is removed after the trial.
+  python-unit-shard-hosted:
+    name: Python unit shard ${{ matrix.shard }}/6
+    # GitHub-hosted unit shards. Unit shards 1-3 of a pull request, when the
+    # `changes` job says `pr_hosted=on`: a person set the repository variable
+    # MEHO_CI_PR_HOSTED to `on`, and the run runs all six shards. Which
+    # shards then wait for our heavy runners (python-unit-shard):
+    # - second site off: shards 4-6; this job runs shards 1-3;
+    # - second site on: only shard 1; this job runs shards 2-3, and the
+    #   second site runs shards 4-6.
+    # python-unit-shard always keeps a shard, because only it checks the
+    # pinned vendor API files of the spec shelf. In every other case this
+    # job is skipped and the shards run as before: all six on our heavy
+    # runners, or shards 1-3 there and shards 4-6 on the second site when
+    # that site is on.
     #
-    # It is a copy of python-unit-shard-second-site, with these differences:
-    # - It runs on `ubuntu-latest` and only shard 6.
-    # - It has no step that checks the second site.
-    # - It has no step "Hide the proxy name in the test reports" and no
-    #   upload of the per-test times: the artifact name of the upload is the
-    #   same as the one of the normal shard 6, and the trial times must not
-    #   go into the shard split.
-    # - continue-on-error: a failed trial never fails the run.
+    # The same shape as python-unit-shard-second-site:
+    # - The text of this job names no secret, it has no `environment`, no
+    #   `id-token`, and a read-only token.
+    # - The test images are the public docker.io names, there is no Docker
+    #   Hub login, and the spec-shelf tests skip, as on a fork.
+    # - The steps are the steps of python-unit-shard-second-site, as YAML
+    #   aliases, without the second-site check, the step "Hide the proxy
+    #   name in the test reports" and the upload of the per-test times. The
+    #   per-test times feed the shard split, and times from other machines
+    #   must not go into it.
     #
-    # Rules: no job needs it, so no required check changes. The text of this
-    # job names no secret, so it gets none and does not use the image proxy.
-    # It runs only on a full pull request run from this repository, never in
-    # the merge queue or the nightly run. backend/tests/
-    # test_ci_hosted_unit_shard_trial.py checks this.
+    # Only the free `ubuntu-latest` label, never a larger runner. Never on a
+    # fork pull request, the merge queue, the nightly run or any other event:
+    # the `if:` below, and the pick rules in scripts/ci/pick_pr_hosted.sh.
+    # backend/tests/test_ci_pr_hosted_unit_shards.py checks this.
     needs: changes
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.backend_python != 'false' &&
-      needs.changes.outputs.single_connector == '' &&
-      needs.changes.outputs.test_map != 'true'
-    runs-on: ubuntu-latest
-    continue-on-error: true
+      needs.changes.outputs.pr_hosted == 'on'
+    # A re-run (run_attempt above 1) always uses today's pool, so one click
+    # gets a run off a GitHub outage, also with "re-run failed jobs", which
+    # keeps the old `changes` output. The job still names no secret there.
+    runs-on: ${{ github.run_attempt == '1' && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}
     permissions:
       contents: read
+    # The job sets `cache-mode: read`, so GitHub lets its token restore
+    # caches and never save one.
     cache-mode: read
     strategy:
       fail-fast: false
       matrix:
-        shard: [6]
+        # Shard 1 stays in python-unit-shard when the second site is on too.
+        shard: ${{ fromJSON(needs.changes.outputs.second_site == 'on' && '[2, 3]' || '[1, 2, 3]') }}
+    # Same cap as python-unit-shard.
     timeout-minutes: 35
     env:
+      # The spec-shelf checkout does not run here, so this folder does not
+      # exist and the spec-backed tests skip, as on a fork.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -2438,7 +2493,16 @@ jobs:
     #     python-unit-shard-second-site, and both must succeed. When it is
     #     empty, the second-site job must be skipped, and python-unit-shard
     #     alone stands for the shards.
-    needs: [changes, python-lint, python-unit-shard, python-unit-shard-second-site, python-outside-backend]
+    #  6. GitHub-hosted unit shards. When `pr_hosted` is `on`, shards 1-3 run
+    #     in python-unit-shard-hosted and must succeed; python-unit-shard runs
+    #     shards 4-6, or only shard 1 when the second site runs shards 4-6
+    #     (then the hosted job runs shards 2-3). When `pr_hosted` is empty,
+    #     the hosted job must be skipped. So this check keeps its name, and
+    #     it still needs all six shards to pass, wherever they ran.
+    #  7. On a full run, python-unit-shard itself must succeed in every
+    #     switch state: only that job checks the pinned vendor API files of
+    #     the spec shelf.
+    needs: [changes, python-lint, python-unit-shard, python-unit-shard-second-site, python-unit-shard-hosted, python-outside-backend]
     if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the
     # allowlist in test_ci_fork_runner_isolation.py, with its reason.
@@ -2464,6 +2528,8 @@ jobs:
           SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
           CHANGES_SECOND_SITE: ${{ needs.changes.outputs.second_site }}
           SECOND_SITE_RESULT: ${{ needs.python-unit-shard-second-site.result }}
+          CHANGES_PR_HOSTED: ${{ needs.changes.outputs.pr_hosted }}
+          HOSTED_RESULT: ${{ needs.python-unit-shard-hosted.result }}
           OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
           detect="${CHANGES_RESULT}"
@@ -2480,6 +2546,9 @@ jobs:
           second_site="${CHANGES_SECOND_SITE}"
           site2="${SECOND_SITE_RESULT}"
           echo "second_site='${second_site}' (on = shards 4-6 ran on the second runner site); python-unit-shard-second-site: ${site2}"
+          pr_hosted="${CHANGES_PR_HOSTED}"
+          hosted="${HOSTED_RESULT}"
+          echo "pr_hosted='${pr_hosted}' (on = shards 1-3 ran on GitHub-hosted runners); python-unit-shard-hosted: ${hosted}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -2488,6 +2557,21 @@ jobs:
           # fork PR too (#4835).
           if [ "${detect}" != "success" ]; then
             echo "::error title=Python unit lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required unit lane closed."
+            exit 1
+          fi
+
+          # GitHub-hosted unit shards. When they are on, shards 1-3 (or 2-3,
+          # when the second site is on too) ran in python-unit-shard-hosted,
+          # and python-unit-shard ran the rest of shards 1-6 that the second
+          # site did not run. When they are off, the hosted job must be
+          # skipped, and any other result fails the lane closed.
+          pool="${shards}"
+          if [ "${pr_hosted}" = "on" ]; then
+            if [ "${shards}" != "success" ] || [ "${hosted}" != "success" ]; then
+              shards="failure (python-unit-shard: ${shards}, shards 1-3 on GitHub-hosted runners: ${hosted})"
+            fi
+          elif [ "${hosted}" != "skipped" ]; then
+            echo "::error title=Python unit lane red::the GitHub-hosted runners are off for this run, but python-unit-shard-hosted reports '${hosted}' instead of 'skipped'. Failing the required unit lane closed."
             exit 1
           fi
 
@@ -2591,6 +2675,13 @@ jobs:
               success|skipped) ;;
               *) fail=1 ;;
             esac
+            # Only python-unit-shard, on our own runners, runs the step
+            # "Verify spec-shelf provisioned the pinned specs". On a full
+            # run it must have run, in every runner switch state.
+            if [ "${pool}" != "success" ]; then
+              echo "::error title=Python unit lane red::python-unit-shard reports '${pool}', so no job checked the pinned vendor API files of the spec shelf. Failing the required unit lane closed."
+              fail=1
+            fi
           fi
 
           if [ "${fail}" -ne 0 ]; then

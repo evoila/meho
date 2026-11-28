@@ -35,8 +35,8 @@
     },
     {
       "workflow": "ci.yml",
-      "job": "python-unit-shard-hosted-trial",
-      "reason": "A one-day trial on a GitHub-hosted runner, which cannot reach the image proxy. The job names no secret. It takes its step \"Use the public test images\" by alias from python-unit-shard-second-site, so it sets the same public docker.io/ names."
+      "job": "python-unit-shard-hosted",
+      "reason": "Unit shards 1-3 of a pull request on GitHub-hosted runners, which cannot reach the image proxy. The job names no secret. It takes its step \"Use the public test images\" by alias from python-unit-shard-second-site, so it sets the same public docker.io/ names."
     },
     {
       "workflow": "chart.yml",

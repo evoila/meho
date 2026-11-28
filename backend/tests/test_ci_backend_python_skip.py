@@ -422,6 +422,9 @@ def _fan_in(
         # The second runner site is off (#7085), so its shard job skips.
         "CHANGES_SECOND_SITE": "",
         "SECOND_SITE_RESULT": "skipped",
+        # The GitHub-hosted unit shards are off, so their shard job skips.
+        "CHANGES_PR_HOSTED": "",
+        "HOSTED_RESULT": "skipped",
     }
     return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values, **(env or {})})
 

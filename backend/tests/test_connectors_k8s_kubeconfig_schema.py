@@ -184,6 +184,25 @@ def test_rejects_token_file_reference() -> None:
         enforce_passive_kubeconfig(config)
 
 
+@pytest.mark.parametrize("section", ["clusters", "users", "contexts"])
+def test_error_names_the_entry_by_index_not_by_name(section: str) -> None:
+    config = _passive_config()
+    entry = config[section][0]
+    entry["name"] = "sample-login-name"
+    entry.pop(section[:-1])
+    with pytest.raises(UnsupportedKubeconfigError, match=f"{section} entry #0") as excinfo:
+        enforce_passive_kubeconfig(config)
+    assert "sample-login-name" not in str(excinfo.value)
+
+
+def test_rejected_user_field_error_leaves_out_the_entry_name() -> None:
+    config = _passive_config()
+    config["users"][0] = {"name": "sample-login-name", "user": {"tokenFile": "/tmp/t"}}
+    with pytest.raises(UnsupportedKubeconfigError, match="tokenFile") as excinfo:
+        enforce_passive_kubeconfig(config)
+    assert "sample-login-name" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("file_key", ["client-certificate", "client-key"])
 def test_rejects_user_local_file_reference(file_key: str) -> None:
     config = _passive_config()

@@ -50,6 +50,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixture 
     _assert_absent,
     _ticket,
 )
+from tests.conftest import MehoLogs
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-00000000d303")
 _TARGET_NAME = "proxmox-redirect-demo"
@@ -257,7 +258,7 @@ async def _start_routed_server(
 
 
 async def _places(
-    result: Any, events: list[dict[str, Any]], caplog: pytest.LogCaptureFixture, *, trace: bool
+    result: Any, events: list[dict[str, Any]], meho_logs: MehoLogs, *, trace: bool
 ) -> dict[str, str]:
     """Each place the answer can reach, as text."""
     assert result.audit_id is not None
@@ -277,7 +278,7 @@ async def _places(
         "audit row": _row_text(audit),
         "stored trace": trace_text,
         "log events": repr(events),
-        "log records": caplog.text,
+        "log records": meho_logs.text(),
         "agent copy of the trace": _AGENT_STORE.text(),
     }
 
@@ -298,6 +299,7 @@ async def _places(
 async def test_about_after_a_followed_redirect_names_only_the_host(
     connector: ProxmoxConnector,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     redirected: str,
     status_line: str,
     text: str,
@@ -332,6 +334,6 @@ async def test_about_after_a_followed_redirect_names_only_the_host(
     assert result.extras["exception_message"] == (
         f"HTTPStatusError: {text} from 127.0.0.1, after a redirect on the same host."
     )
-    places = await _places(result, events, caplog, trace=trace)
+    places = await _places(result, events, meho_logs, trace=trace)
     assert result.extras["exception_message"] in places["audit row"]
     _assert_absent([path, user, password, fragment, *ticket_parts], places)

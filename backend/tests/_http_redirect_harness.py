@@ -43,6 +43,7 @@ from meho_backplane.flight_recorder.config import reset_flight_recorder_config_c
 from meho_backplane.operations import dispatch, register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import reset_handler_cache
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-00000000d302")
 _PRODUCT = "redirdemo"
@@ -314,7 +315,7 @@ async def _vendor_call_bodies(audit_id: UUID) -> list[Any]:
 
 
 async def _run(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     routes: dict[str, dict[str, str]],
     *,
     trace: bool = True,
@@ -324,7 +325,7 @@ async def _run(
     async with get_sessionmaker()() as session:
         await _register(session, trace=trace)
     server = await _start_server(routes, **server_options)
-    caplog.set_level(logging.DEBUG)
+    meho_logs.caplog.set_level(logging.DEBUG)
     try:
         with capture_logs() as events:
             result = await dispatch(
@@ -344,7 +345,7 @@ async def _run(
         "audit row": audit_text,
         "stored trace": trace_text,
         "log events": repr(events),
-        "log records": caplog.text,
+        "log records": meho_logs.text(),
         "agent copy of the trace": _AGENT_STORE.text(),
     }
     return result, places, events

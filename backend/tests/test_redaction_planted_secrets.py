@@ -81,6 +81,7 @@ from meho_backplane.operations import (
 )
 from meho_backplane.redaction.flight_recorder import redact_span
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 #: The start of every planted value. The capture check looks for it.
 PLANTED_MARKER = "planted-secret-"
@@ -358,6 +359,7 @@ async def test_planted_secrets_stay_out_of_results_audit_rows_and_logs(
     impl_id: str,
     embedding: AsyncMock,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """No planted value reaches the caller, the audit row or a log line."""
     register_connector_v2(product=product, version=version, impl_id=impl_id, cls=_StandInConnector)
@@ -428,7 +430,7 @@ async def test_planted_secrets_stay_out_of_results_audit_rows_and_logs(
         for place, text in (
             ("result", result.model_dump_json()),
             ("audit row", row_text),
-            ("log", json.dumps(structured_logs, default=str) + caplog.text),
+            ("log", json.dumps(structured_logs, default=str) + meho_logs.text()),
         ):
             if found := _leaks(text):
                 leaks[f"{answer} -> {place}"] = found

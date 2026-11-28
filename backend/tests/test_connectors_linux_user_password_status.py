@@ -23,6 +23,7 @@ from meho_backplane.connectors.linux.ops_user import (
     validate_user_name,
 )
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 _SUDO_CANARY = "linux-user-sudo-canary-xyz-6239"  # gitleaks:allow -- synthetic
 _HASH_CANARY = "$6$saltsalt$hashhashhashcanary"  # gitleaks:allow -- synthetic
@@ -241,6 +242,7 @@ async def test_unknown_user_is_a_clear_error() -> None:
 @pytest.mark.asyncio
 async def test_failed_reads_raise_and_never_repeat_host_output(
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     connector = _connector({"username": "ops", "sudo_password": _SUDO_CANARY})
     stderr = f"sudo: a password is required {_HASH_CANARY}\n"
@@ -253,8 +255,8 @@ async def test_failed_reads_raise_and_never_repeat_host_output(
         await connector.user_password_status(_TARGET, {"user": "svc-deploy"})
     assert _HASH_CANARY not in str(excinfo.value)
     assert _SUDO_CANARY not in str(excinfo.value)
-    assert _HASH_CANARY not in caplog.text
-    assert _SUDO_CANARY not in caplog.text
+    assert _HASH_CANARY not in meho_logs.text()
+    assert _SUDO_CANARY not in meho_logs.text()
 
 
 @pytest.mark.asyncio

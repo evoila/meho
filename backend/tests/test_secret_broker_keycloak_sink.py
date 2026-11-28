@@ -64,6 +64,7 @@ from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 from ._vault_fakes import install_fake_client
 
@@ -251,6 +252,7 @@ def test_keycloak_ref_rejects_malformed(ref: str) -> None:
 async def test_vault_to_keycloak_move_writes_credential_server_side(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     keycloak_sink_env: KeycloakConnector,
 ) -> None:
     """A vault: → keycloak: move sets the user password; value stays server-side.
@@ -299,7 +301,7 @@ async def test_vault_to_keycloak_move_writes_credential_server_side(
     }
     assert _SENTINEL not in result.model_dump_json()
     assert _SENTINEL not in json.dumps(params)
-    assert _SENTINEL not in caplog.text
+    assert _SENTINEL not in meho_logs.text()
 
     # (d) ...and not in the persisted audit row (payload + raw_payload).
     move_rows = await _fetch_move_audit_rows()

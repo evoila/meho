@@ -67,6 +67,7 @@ from meho_backplane.operations._validate import compute_value_fingerprint
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
+from tests.conftest import MehoLogs
 
 from ._vault_fakes import install_fake_client
 
@@ -299,6 +300,7 @@ async def test_client_secret_source_client_not_found(
 async def test_keycloak_source_to_vault_move_reads_secret_server_side(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     keycloak_source_env: KeycloakConnector,
 ) -> None:
     """A keycloak: → vault: move reads the client secret; value stays server-side.
@@ -354,7 +356,7 @@ async def test_keycloak_source_to_vault_move_reads_secret_server_side(
     }
     assert _SENTINEL not in result.model_dump_json()
     assert _SENTINEL not in json.dumps(params)
-    assert _SENTINEL not in caplog.text
+    assert _SENTINEL not in meho_logs.text()
 
     # (d) ...and not in the persisted audit row (payload + raw_payload).
     move_rows = await _fetch_move_audit_rows()

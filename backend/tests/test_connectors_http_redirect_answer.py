@@ -40,6 +40,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixtures
     _settings_env,
     _stub_embedding,
 )
+from tests.conftest import MehoLogs
 
 
 def _refusal_event(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -48,7 +49,7 @@ def _refusal_event(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_refused_redirect_after_a_followed_hop_names_only_host_names(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     hop_path, hop_query = _made_up(), _made_up()
     user, password, path, query, fragment = (_made_up() for _ in range(5))
@@ -56,7 +57,7 @@ async def test_refused_redirect_after_a_followed_hop_names_only_host_names(
     location = f"http://{user}:{password}@{_OTHER_HOST}/{path}?q={query}#{fragment}"
     routes = {_START: {"Location": hop}, hop: {"Location": location}}
 
-    result, places, events = await _run(caplog, routes)
+    result, places, events = await _run(meho_logs, routes)
 
     assert result.status == "error"
     assert result.extras["error_code"] == "connector_error"
@@ -77,7 +78,7 @@ async def test_refused_redirect_after_a_followed_hop_names_only_host_names(
     ],
 )
 async def test_refused_redirect_names_only_the_host_name(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
     authority: str,
     host: str,
     reason: str,
@@ -85,7 +86,7 @@ async def test_refused_redirect_names_only_the_host_name(
     path, query, fragment = _made_up(), _made_up(), _made_up()
     routes = {_START: {"Location": f"http://{authority}/{path}?q={query}#{fragment}"}}
 
-    result, places, events = await _run(caplog, routes)
+    result, places, events = await _run(meho_logs, routes)
 
     assert result.extras["http_status"] == 302
     assert result.extras["exception_message"] == (
@@ -97,12 +98,12 @@ async def test_refused_redirect_names_only_the_host_name(
 
 @pytest.mark.asyncio
 async def test_redirect_to_https_on_the_same_host_names_the_reason(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     path = _made_up()
     routes = {_START: {"Location": f"https://127.0.0.1/{path}"}}
 
-    result, places, events = await _run(caplog, routes)
+    result, places, events = await _run(meho_logs, routes)
 
     assert result.extras["exception_message"] == (
         "Redirect response 302 from 127.0.0.1 to 127.0.0.1, not followed."
@@ -113,7 +114,7 @@ async def test_redirect_to_https_on_the_same_host_names_the_reason(
 
 @pytest.mark.asyncio
 async def test_unreadable_port_after_a_followed_hop_gives_one_fixed_text(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     hop_path, port, path, query = _made_up(), _made_up(), _made_up(), _made_up()
     hop = f"/{hop_path}"
@@ -122,7 +123,7 @@ async def test_unreadable_port_after_a_followed_hop_gives_one_fixed_text(
         hop: {"Location": f"http://{_OTHER_HOST}:{port}/{path}?q={query}"},
     }
 
-    result, places, events = await _run(caplog, routes)
+    result, places, events = await _run(meho_logs, routes)
 
     assert result.status == "error"
     assert result.extras["exception_message"] == UNREADABLE_LOCATION_MESSAGE
@@ -171,14 +172,14 @@ async def test_followed_hop_answer_names_the_first_address_for_the_trace() -> No
 
 @pytest.mark.asyncio
 async def test_followed_hop_whose_body_ends_early_names_only_the_first_address(
-    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     hop_path, hop_query = _made_up(), _made_up()
     hop = f"/{hop_path}?q={hop_query}"
     routes = {_START: {"Location": hop}}
 
     result, places, _events = await _run(
-        caplog, routes, status="307 Temporary Redirect", short_body=frozenset({hop})
+        meho_logs, routes, status="307 Temporary Redirect", short_body=frozenset({hop})
     )
 
     assert result.status == "error"

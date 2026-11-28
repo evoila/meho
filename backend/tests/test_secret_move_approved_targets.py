@@ -45,6 +45,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from tests.conftest import MehoLogs
 
 from ._vault_fakes import install_fake_client
 from .test_secret_broker_vault_target import (  # noqa: F401  (fixtures)
@@ -483,7 +484,10 @@ async def _all_stored_rows() -> str:
 @pytest.mark.parametrize("write_refused", [False, True], ids=["moved", "write-refused"])
 @pytest.mark.usefixtures("_alias")
 async def test_a_planted_value_is_in_no_answer_log_or_stored_row(
-    write_refused: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    write_refused: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """On the success path, and when Vault refuses the write after the source was read."""
     async with get_sessionmaker()() as session:
@@ -520,7 +524,7 @@ async def test_a_planted_value_is_in_no_answer_log_or_stored_row(
         assert (await session.execute(select(DispatchTrace))).scalars().first() is not None
     for place, text in (
         ("answer", result.model_dump_json()),
-        ("log", json.dumps(logs, default=str) + caplog.text),
+        ("log", json.dumps(logs, default=str) + meho_logs.text()),
         ("stored rows", await _all_stored_rows()),
         ("broadcast stream", await stream.read_everything()),
     ):

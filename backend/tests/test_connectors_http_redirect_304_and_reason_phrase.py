@@ -33,6 +33,7 @@ from tests._http_redirect_harness import (  # noqa: F401 -- the autouse fixtures
     _stub_embedding,
     _vendor_call_bodies,
 )
+from tests.conftest import MehoLogs
 
 
 def _phrase() -> str:
@@ -43,12 +44,12 @@ def _phrase() -> str:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [b"", b"short"], ids=["no-body", "short-body"])
 async def test_not_modified_answer_keeps_what_the_vendor_sent(
-    caplog: pytest.LogCaptureFixture, body: bytes
+    meho_logs: MehoLogs, body: bytes
 ) -> None:
     routes = {_START: {}}
 
     result, _places, _events = await _run(
-        caplog, routes, route_status={_START: "304 Not Modified"}, route_body={_START: body}
+        meho_logs, routes, route_status={_START: "304 Not Modified"}, route_body={_START: body}
     )
 
     assert result.status == "error"
@@ -76,7 +77,7 @@ async def test_not_modified_answer_keeps_what_the_vendor_sent(
     ],
 )
 async def test_refused_redirect_has_the_fixed_sentence_in_answer_and_span(
-    caplog: pytest.LogCaptureFixture, status_line: str
+    meho_logs: MehoLogs, status_line: str
 ) -> None:
     path = _made_up()
     routes = {
@@ -85,7 +86,7 @@ async def test_refused_redirect_has_the_fixed_sentence_in_answer_and_span(
     body = f'{{"_typeName": "NotFound", "faultstring": "See /{path}"}}'.encode()
 
     result, places, _events = await _run(
-        caplog, routes, route_status={_START: status_line}, route_body={_START: body}
+        meho_logs, routes, route_status={_START: status_line}, route_body={_START: body}
     )
 
     code = int(status_line.split()[0])
@@ -112,13 +113,13 @@ async def test_refused_redirect_has_the_fixed_sentence_in_answer_and_span(
 )
 @pytest.mark.parametrize("trace", [True, False], ids=["trace-on", "trace-off"])
 async def test_error_after_a_followed_redirect_has_the_fixed_reason_phrase(
-    caplog: pytest.LogCaptureFixture, code: int, text: str, trace: bool
+    meho_logs: MehoLogs, code: int, text: str, trace: bool
 ) -> None:
     phrase, hop = _phrase(), f"/{_made_up()}"
     routes = {_START: {"Location": f"http://127.0.0.1:{{port}}{hop}"}, hop: {}}
 
     result, places, _events = await _run(
-        caplog,
+        meho_logs,
         routes,
         trace=trace,
         route_status={_START: "307 Temporary Redirect", hop: f"{code} {phrase}"},
@@ -134,14 +135,12 @@ async def test_error_after_a_followed_redirect_has_the_fixed_reason_phrase(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("trace", [True, False], ids=["trace-on", "trace-off"])
-async def test_refused_redirect_holds_no_reason_phrase(
-    caplog: pytest.LogCaptureFixture, trace: bool
-) -> None:
+async def test_refused_redirect_holds_no_reason_phrase(meho_logs: MehoLogs, trace: bool) -> None:
     phrase = _phrase()
     routes = {_START: {"Location": f"http://{_OTHER_HOST}/next"}}
 
     result, places, _events = await _run(
-        caplog, routes, trace=trace, route_status={_START: f"302 {phrase}"}
+        meho_logs, routes, trace=trace, route_status={_START: f"302 {phrase}"}
     )
 
     assert result.extras["exception_message"] == (

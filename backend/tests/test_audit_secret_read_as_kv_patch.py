@@ -40,6 +40,7 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from tests._vault_fakes import install_fake_vault
+from tests.conftest import MehoLogs
 
 _TENANT = UUID("00000000-0000-0000-0000-0000000000d7")
 _MOUNT = "markermount0zzz"
@@ -174,6 +175,7 @@ async def test_secret_values_stay_out_of_the_row_the_logs_and_the_answer(
     monkeypatch: pytest.MonkeyPatch,
     embedding: AsyncMock,
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     _install_reading_patch(monkeypatch)
     caplog.set_level(logging.DEBUG)
@@ -189,7 +191,7 @@ async def test_secret_values_stay_out_of_the_row_the_logs_and_the_answer(
     texts = {
         "answer": repr(result.model_dump()),
         "structlog": repr(logs),
-        "stdlib log": caplog.text,
+        "stdlib log": meho_logs.text(),
         "audit row": whole_row,
     }
     for where, text in texts.items():

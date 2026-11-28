@@ -108,6 +108,7 @@ from meho_backplane.connectors.rke2.ops_write import (
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
+from tests.conftest import MehoLogs
 
 # ---------------------------------------------------------------------------
 # Environment fixture (settings cache requires the env vars to resolve)
@@ -604,6 +605,7 @@ async def test_posture_show_propagates_ssh_failure() -> None:
 @pytest.mark.asyncio
 async def test_posture_show_never_leaks_secret_material(
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """The posture envelope + logs carry no credential or token-value material."""
     connector = Rke2SshConnector()
@@ -614,7 +616,7 @@ async def test_posture_show_never_leaks_secret_material(
     rendered = repr(result)
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered
-        assert canary not in caplog.text
+        assert canary not in meho_logs.text()
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1018,7 @@ async def test_config_get_read_failure_returns_structured_error() -> None:
 @pytest.mark.asyncio
 async def test_config_get_never_leaks_secret_material(
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """The config-get envelope + logs carry no credential material."""
     connector = Rke2SshConnector()
@@ -1031,7 +1034,7 @@ async def test_config_get_never_leaks_secret_material(
         _CONFIG_DSN_PASS_CANARY,
     ):
         assert canary not in rendered
-        assert canary not in caplog.text
+        assert canary not in meho_logs.text()
 
 
 # ---------------------------------------------------------------------------
@@ -1358,6 +1361,7 @@ async def test_etcd_snapshot_save_nonzero_exit_raises() -> None:
 @pytest.mark.asyncio
 async def test_etcd_snapshot_save_never_leaks_credentials(
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """No SSH/sudo credential material appears in the result or logs."""
     connector = Rke2SshConnector()
@@ -1372,7 +1376,7 @@ async def test_etcd_snapshot_save_never_leaks_credentials(
     rendered = repr(result)
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered
-        assert canary not in caplog.text
+        assert canary not in meho_logs.text()
 
 
 # ---------------------------------------------------------------------------
@@ -1521,6 +1525,7 @@ async def test_etcd_snapshot_list_nonzero_exit_raises() -> None:
 @pytest.mark.asyncio
 async def test_etcd_snapshot_list_never_leaks_credentials(
     caplog: pytest.LogCaptureFixture,
+    meho_logs: MehoLogs,
 ) -> None:
     """No SSH/sudo credential material appears in the result or logs."""
     connector = Rke2SshConnector()
@@ -1535,7 +1540,7 @@ async def test_etcd_snapshot_list_never_leaks_credentials(
     rendered = repr(result)
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered
-        assert canary not in caplog.text
+        assert canary not in meho_logs.text()
 
 
 _SUDO_RUN = "meho_backplane.connectors.rke2.ops_snapshot.run_remote_bash_with_sudo"

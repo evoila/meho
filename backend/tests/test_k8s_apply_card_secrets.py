@@ -40,6 +40,7 @@ from meho_backplane.operations.approval_queue import (
     approve_request,
     resume_dispatch_after_approval,
 )
+from tests.conftest import MehoLogs
 from tests.test_k8s_apply_card_through_dispatch import (
     _CONNECTOR_ID,
     _agent,
@@ -164,12 +165,12 @@ def _secret_with(value: str) -> str:
 
 
 def _assert_unreadable_manifest_hidden(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, manifest: str, value: str
+    monkeypatch: pytest.MonkeyPatch, meho_logs: MehoLogs, manifest: str, value: str
 ) -> str:
     """Call and preview *manifest*: it is refused and *value* is nowhere. Return the reason."""
     server = _StandInServer()
     _setup(monkeypatch, server)
-    caplog.set_level(logging.DEBUG)
+    meho_logs.caplog.set_level(logging.DEBUG)
 
     with structlog.testing.capture_logs() as logs:
         result = _refuse(_login("person-token"), manifest)
@@ -185,7 +186,7 @@ def _assert_unreadable_manifest_hidden(
         "agent preview": json.dumps({**preview, "redacted_body": None}, default=str),
         "audit rows": _audit_text(),
         "structlog": json.dumps(logs, default=str),
-        "stdlib log": caplog.text,
+        "stdlib log": meho_logs.text(),
     }
     for place, text in shown.items():
         assert value not in text, place
@@ -194,13 +195,13 @@ def _assert_unreadable_manifest_hidden(
 
 @pytest.mark.parametrize("form", sorted(_UNREADABLE_FORMS))
 def test_a_parser_error_quotes_no_value_anywhere(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, form: str
+    monkeypatch: pytest.MonkeyPatch, meho_logs: MehoLogs, form: str
 ) -> None:
     value = _made_up()
     shape, why = _UNREADABLE_FORMS[form]
     manifest = _secret_with(shape.format(v=value))
 
-    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, meho_logs, manifest, value)
 
     assert reason.startswith(
         f"The manifest cannot be applied: document 1 is not valid YAML or JSON ({why}). "
@@ -208,12 +209,12 @@ def test_a_parser_error_quotes_no_value_anywhere(
 
 
 def test_a_duplicate_tag_handle_quotes_no_value_anywhere(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, meho_logs: MehoLogs
 ) -> None:
     value = _made_up()
     manifest = f"%TAG !{value}! tag:a,2000:\n%TAG !{value}! tag:b,2000:\n---\n" + _secret_with("x")
 
-    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, meho_logs, manifest, value)
 
     assert reason.startswith(
         "The manifest cannot be applied: document 1 is not valid YAML or JSON "
@@ -222,12 +223,12 @@ def test_a_duplicate_tag_handle_quotes_no_value_anywhere(
 
 
 def test_a_control_character_is_refused_with_the_fixed_reason(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, meho_logs: MehoLogs
 ) -> None:
     value = _made_up()
     manifest = _secret_with(f"{value}\x07")
 
-    reason = _assert_unreadable_manifest_hidden(monkeypatch, caplog, manifest, value)
+    reason = _assert_unreadable_manifest_hidden(monkeypatch, meho_logs, manifest, value)
 
     assert reason.startswith(
         "The manifest cannot be applied: the text has a character that YAML does not allow, "

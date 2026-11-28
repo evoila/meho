@@ -2626,7 +2626,7 @@ run, not a broken `main`.
   shards too: the nightly run made no new map since then (#7103). The tool
   still picks with such a map and keeps its 7-day limit; the step `map`
   then drops the picked list.
-- **The log.** The last step of the `changes` job, `report`, writes one
+- **The log.** The step `report` of the `changes` job writes one
   line on every pull request, as an annotation and in the step summary. It
   runs after the upload of the picked tests, so it says what the unit
   test jobs really do, for example

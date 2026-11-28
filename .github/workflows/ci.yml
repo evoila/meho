@@ -551,27 +551,6 @@ jobs:
           path: ${{ runner.temp }}/unit-test-map/selection.txt
           retention-days: 1
           if-no-files-found: error
-      - name: Pick the runner site for unit shards 4-6
-        # #7085. The script checks every rule and writes one notice that
-        # says why. A failure or a timeout here leaves the output empty,
-        # which means today's pool, so this step can never fail or hold up
-        # the job. `actions: read` above lets it read the smoke runs.
-        id: second-site
-        continue-on-error: true
-        timeout-minutes: 2
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          ACTOR: ${{ github.actor }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
-          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
-          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
-          # The same value as the job output `test_map` above.
-          TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
-        run: bash scripts/ci/pick_second_site.sh
       - name: Say how the unit tests run
         # #7103. One line on every pull request, in the step summary and as
         # an annotation, after the upload above: the same choice as the job
@@ -621,6 +600,27 @@ jobs:
             echo "::warning title=Old unit test map::${OLD_MAP}"
             echo "Old unit test map: ${OLD_MAP}" >> "${GITHUB_STEP_SUMMARY}"
           fi
+      - name: Pick the runner site for unit shards 4-6
+        # #7085. The script checks every rule and writes one notice that
+        # says why. A failure or a timeout here leaves the output empty,
+        # which means today's pool, so this step can never fail or hold up
+        # the job. `actions: read` above lets it read the smoke runs.
+        id: second-site
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          # The same value as the job output `test_map` above.
+          TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+        run: bash scripts/ci/pick_second_site.sh
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic

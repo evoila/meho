@@ -570,9 +570,9 @@ class IngestRequest(BaseModel):
         without re-parsing the prose.
         """
         if value is not None and _version_looks_like_epoch(value):
-            raise ValueError(
-                "connector_version_epoch_rejected: version "
-                f"{value!r} is a Unix-epoch-like integer, not a stable "
+            raise FixedMessageError(
+                "connector_version_epoch_rejected: the version "
+                "is a Unix-epoch-like integer, not a stable "
                 "connector version (e.g. '9.0', '2.x', '2026-04'). An "
                 "epoch version renders a fresh connector_id on every "
                 "ingest, minting the unbounded '<impl>-probe-<epoch>' "
@@ -612,9 +612,9 @@ class IngestRequest(BaseModel):
         without re-parsing the prose.
         """
         if value is not None and _impl_id_looks_like_probe_epoch(value):
-            raise ValueError(
-                "connector_impl_id_probe_epoch_rejected: impl_id "
-                f"{value!r} ends in a '-probe-<epoch>' Unix-epoch tail, not a "
+            raise FixedMessageError(
+                "connector_impl_id_probe_epoch_rejected: the impl_id "
+                "ends in a '-probe-<epoch>' Unix-epoch tail, not a "
                 "stable impl_id (e.g. 'harbor-rest', 'net-probe'). A "
                 "per-run epoch renders a fresh connector_id on every ingest, "
                 "minting the unbounded '<impl>-probe-<epoch>' catalog rows "

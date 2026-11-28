@@ -4684,6 +4684,40 @@ def test_ingest_request_check_keeps_its_error_name_in_the_422(
     assert any(error_name in message for message in messages), messages
 
 
+@pytest.mark.parametrize(
+    ("field", "sent", "error_name"),
+    [
+        ("version", "1699999999", "connector_version_epoch_rejected"),
+        ("impl_id", "fleet-rest-probe-1784123249", "connector_impl_id_probe_epoch_rejected"),
+    ],
+)
+def test_ingest_field_check_keeps_its_error_name_in_the_422(
+    field: str,
+    sent: str,
+    error_name: str,
+) -> None:
+    """The version and impl_id checks keep their error name in the 422, without the sent value."""
+    body: dict[str, Any] = {
+        "product": "fleet",
+        "version": "9.0",
+        "impl_id": "fleet-rest",
+        "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+        field: sent,
+    }
+    app = _build_app()
+    app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = TestClient(app).post(
+            "/api/v1/connectors/ingest", json=body, headers=_authed(token)
+        )
+    assert response.status_code == 422, response.text
+    messages = [error["msg"] for error in response.json()["detail"]]
+    assert any(error_name in message for message in messages), messages
+    assert not any(sent in message for message in messages), messages
+
+
 def test_ingest_catalog_entry_malformed_ref_returns_422(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -1254,6 +1254,19 @@ async def test_rest_edit_refuses_a_reason_that_looks_like_a_secret(embedding: As
 
 
 @pytest.mark.asyncio
+async def test_rest_enable_only_edit_refuses_a_reason_that_looks_like_a_secret(
+    embedding: AsyncMock,
+) -> None:
+    key = made_up_key()
+    await _register_typed(embedding)
+    response, _ = _patch({"platform_admin": True}, {"is_enabled": False, "reason": key})
+    assert response.status_code == 400, response.text
+    assert REASON_HOLDS_SECRET in response.json()["detail"]
+    assert (await _stored_row()).is_enabled is True
+    assert_no_trace(key, response.text, await _everything_stored())
+
+
+@pytest.mark.asyncio
 async def test_rest_remove_override_refuses_a_reason_that_looks_like_a_secret(
     embedding: AsyncMock,
 ) -> None:

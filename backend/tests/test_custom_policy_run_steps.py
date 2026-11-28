@@ -46,6 +46,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
 from meho_backplane.operations import run_step_rules
@@ -406,9 +407,17 @@ async def test_the_facts_of_the_built_in_row_and_the_tenant_row_both_count(
     waits_on: bool,
     on: bool,
 ) -> None:
+    """An Admin approves the run: an Admin may approve the step's ``dangerous`` level."""
     c.switch(monkeypatch, on=on)
     reads = _Reads(monkeypatch)
-    result = await r.run_remote(session, stub_embedding_service, step, built_in, tenant_row)
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        step,
+        built_in,
+        tenant_row,
+        approver_role=TenantRole.TENANT_ADMIN,
+    )
     if on:
         assert reads.reads == [step.op_id]
         [(_, copies)] = reads.rows

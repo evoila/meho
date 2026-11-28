@@ -2774,6 +2774,13 @@ heartbeat failures will return.
 that is not on its short allow list (the standard GitHub-hosted runners we use and our
 own runner sets), because larger GitHub runners are billed also for a public repository.
 
+The test reads each workflow file as text. The list holds exact texts: every line with
+`runs-on` (outside a comment) must match one of them word for word, and the test names
+the file and line number of each line that does not. The test does not work out what an
+expression gives. `runs-on: ${{ matrix.runner }}` passes only with the one allowed
+`include:` line as the job's whole matrix. A new form, or a changed one, is added to the
+list on purpose, in the pull request that brings it.
+
 ### Vendor spec shelf in CI (#2949)
 
 The real-spec lanes check ingest and op_id reconciliation against **real**

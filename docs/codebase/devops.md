@@ -3005,6 +3005,12 @@ The rule:
 - A Dockerfile that a test builds takes its base image from a build argument
   (`ARG DEBIAN_IMAGE=...` and `FROM ${DEBIAN_IMAGE}`). The test passes the
   variable as the build argument.
+- A test builds its image with `build_test_image` in
+  `backend/tests/_test_image_build.py`. The step "Pull the test images"
+  pulls the base image before pytest, and the build asks for no pull, so
+  Docker uses the copy on the runner. A failed build names only the image
+  tag, not Docker's output. `backend/tests/test_ci_test_image_build.py`
+  checks that each job pulls the base images of the builds it runs.
 - CI sets each variable with `PROXY/<image>` (or `PROXY_ONLY/<image>` for a
   large image) in the image block of the step "Read the CI repository
   secrets", in every job that runs the test. Official Docker Hub images

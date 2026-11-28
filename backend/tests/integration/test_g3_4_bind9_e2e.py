@@ -55,7 +55,6 @@ import contextlib
 import os
 import re
 import shlex
-import tempfile
 import textwrap
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -320,48 +319,43 @@ def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
 
     try:
         from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
-        from testcontainers.core.image import DockerImage  # type: ignore[import-untyped]
 
         from tests._strategies import wait_for_log_message
+        from tests._test_image_build import build_test_image
     except ImportError as exc:  # pragma: no cover -- testcontainers ships these in 4.x
         pytest.skip(f"testcontainers missing module: {exc}")
 
-    with tempfile.TemporaryDirectory() as build_dir:
-        dockerfile = Path(build_dir) / "Dockerfile"
-        dockerfile.write_text(_DOCKERFILE)
-        tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
-
-        image = DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
-                )
-            },
-        )
-        image.build()
-
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
-        try:
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
-            host = container.get_container_host_ip()
-            port = int(container.get_exposed_port(22))
-            # named starts in the background just before sshd; give
-            # it a moment for `pgrep -x named` to see the process.
-            time.sleep(2.0)
-            target = _Bind9Target(
-                name=_TARGET_NAME,
-                host=host,
-                port=port,
-                secret_ref=_BIND9_VAULT_PATH,
+    tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
+    build_test_image(
+        _DOCKERFILE,
+        tag,
+        {
+            "DEBIAN_IMAGE": os.environ.get(
+                "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
             )
-            # NOSONAR -- container-local credentials, never leave the testcontainer.
-            creds = _ContainerCreds(username="root", password="testpw")
-            yield target, creds
-        finally:
-            container.stop()
+        },
+    )
+
+    container = DockerContainer(tag).with_exposed_ports(22)
+    container.start()
+    try:
+        wait_for_log_message(container, "Server listening on", timeout=30.0)
+        host = container.get_container_host_ip()
+        port = int(container.get_exposed_port(22))
+        # named starts in the background just before sshd; give
+        # it a moment for `pgrep -x named` to see the process.
+        time.sleep(2.0)
+        target = _Bind9Target(
+            name=_TARGET_NAME,
+            host=host,
+            port=port,
+            secret_ref=_BIND9_VAULT_PATH,
+        )
+        # NOSONAR -- container-local credentials, never leave the testcontainer.
+        creds = _ContainerCreds(username="root", password="testpw")
+        yield target, creds
+    finally:
+        container.stop()
 
 
 class _SeededBind9Connector(Bind9Connector):  # type: ignore[misc]

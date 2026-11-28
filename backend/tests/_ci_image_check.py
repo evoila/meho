@@ -36,8 +36,14 @@ REPO = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO / ".github" / "workflows"
 EXCEPTIONS_FILE = TESTS / "ci_test_image_exceptions.json"
 
-#: This helper and its test name image variables as data, not to start a container.
-_CHECK_FILES = frozenset({Path(__file__).resolve(), TESTS / "test_ci_test_images.py"})
+#: This helper and its tests name image variables as data, not to start a container.
+_CHECK_FILES = frozenset(
+    {
+        Path(__file__).resolve(),
+        TESTS / "test_ci_test_images.py",
+        TESTS / "test_ci_test_image_build.py",
+    }
+)
 
 SECRETS_STEP = "Read the CI repository secrets"
 VARIABLE = re.compile(r"MEHO_TEST_[A-Z0-9_]+_IMAGE")

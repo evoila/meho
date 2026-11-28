@@ -65,6 +65,7 @@ from meho_backplane.db.models import Tenant
 
 __all__ = [
     "TENANT_HEADER",
+    "bind_role_from_platform_admin",
     "bind_tenant_role_source",
     "reject_duplicate_tenants",
     "select_current_tenant",
@@ -131,7 +132,18 @@ def bind_tenant_role_source(operator: Operator) -> None:
     the key is cleared, so a tenant switch does not keep the note of the
     tenant left. Called by the REST, MCP and console bind steps.
     """
-    if operator.role_from_platform_admin:
+    bind_role_from_platform_admin(operator.role_from_platform_admin)
+
+
+def bind_role_from_platform_admin(from_platform_admin: bool) -> None:
+    """Bind the role note when *from_platform_admin* is true, else clear it.
+
+    :func:`bind_tenant_role_source` with only the answer of a token check.
+    The console session dependency calls it with the answer it keeps for
+    the session, so a console route that checks no role carries the note
+    too, without a new token check.
+    """
+    if from_platform_admin:
         structlog.contextvars.bind_contextvars(
             **{_TENANT_ROLE_SOURCE_CONTEXTVAR: _PLATFORM_ADMIN_SOURCE}
         )

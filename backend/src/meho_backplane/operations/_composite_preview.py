@@ -38,8 +38,8 @@ example the OVF properties of an appliance deploy) is masked while its keys
 stay. The hash still changes with every value, through ``params_digest``.
 A parameter with a registered card echo
 (:func:`~meho_backplane.operations._preview.register_card_param_echo`)
-shows as the approval card shows it instead: the manifest of ``k8s.apply``
-is one dict per document, with Secret values and ``env`` values hidden.
+shows its echo instead: the manifest of ``k8s.apply`` is one entry per
+document with only its kind, namespace and name.
 
 Every synthetic preview says whether it shows the plan (#4028):
 ``plan_shown=True`` when ``proposed_effect`` is present, otherwise
@@ -220,8 +220,8 @@ def _redacted_body(
     """The ``redacted_body`` of the preview: the safe view, with each card echo in place.
 
     A parameter with a registered card echo (for example the manifest of
-    ``k8s.apply``) shows as the approval card shows it, so it hides the
-    same values as the card.
+    ``k8s.apply``) shows its echo, which hides at least what the approval
+    card hides.
     """
     body = safe_params_view(
         params,

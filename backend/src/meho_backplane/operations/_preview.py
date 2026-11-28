@@ -528,17 +528,17 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
 
 
 def register_card_param_echo(op_id: str, param: str, echo: Callable[[PreviewContext], Any]) -> None:
-    """Show the parameter *param* of *op_id* on a preview as the approval card shows it.
+    """Show the parameter *param* of *op_id* on a preview through *echo*.
 
     The preview of the call (``preview_operation``) puts ``echo(ctx)`` in
-    place of the value it would copy from the params, so the copy hides the
-    same values as the card.
+    place of the value it would copy from the params. *echo* hides at
+    least what the approval card hides.
     """
     _CARD_PARAM_ECHOES.setdefault(op_id, {})[param] = echo
 
 
 def card_param_echoes(ctx: PreviewContext) -> dict[str, Any]:
-    """Each registered parameter of *ctx* (:func:`register_card_param_echo`), hidden as on the card.
+    """Each registered parameter of *ctx* (:func:`register_card_param_echo`), shown by its echo.
 
     Only a parameter present in the params is given. A value whose echo
     cannot be built is the redaction marker, so nothing shows in clear text.
@@ -1299,6 +1299,30 @@ def _k8s_apply_manifest_only(ctx: PreviewContext) -> list[dict[str, Any]]:
     return apply_manifest_echo(ctx.params["manifest"], redact=_k8s_apply_redactor(ctx))
 
 
+def _k8s_apply_manifest_identities(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of a k8s.apply preview: the identity of each document, nothing else.
+
+    Each entry is ``kind`` and ``metadata`` with ``namespace`` and ``name``,
+    read from the top of the parsed document, so the rest of the document
+    is not walked. A field that is not a text is left out. The texts pass
+    the shared hiding of the card (:func:`_k8s_apply_redactor`).
+    """
+    from meho_backplane.connectors.kubernetes._apply_manifest import _parse_manifest
+
+    entries: list[dict[str, Any]] = []
+    for doc in _parse_manifest(ctx.params["manifest"]):
+        raw_metadata = doc.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        entry: dict[str, Any] = {"kind": doc["kind"]} if isinstance(doc.get("kind"), str) else {}
+        entry["metadata"] = {
+            key: metadata[key]
+            for key in ("namespace", "name")
+            if isinstance(metadata.get(key), str)
+        }
+        entries.append(entry)
+    return _k8s_apply_redactor(ctx)(entries)
+
+
 def _k8s_apply_redactor(
     ctx: PreviewContext,
 ) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]]]:
@@ -1513,7 +1537,7 @@ def _register_builtin_builders() -> None:
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
     register_preview_failure_keys("k8s.apply", _k8s_apply_failure_keys)
-    register_card_param_echo("k8s.apply", "manifest", _k8s_apply_manifest_only)
+    register_card_param_echo("k8s.apply", "manifest", _k8s_apply_manifest_identities)
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",

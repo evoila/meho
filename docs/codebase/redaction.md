@@ -134,6 +134,7 @@ production traffic cannot reach that branch.
 | `bearer_token` | Bare `Bearer <opaque>` outside an Authorization header |
 | `jwt` | `ey<base64url>.<base64url>.<base64url>` three-segment tokens |
 | `api_key` | Labelled credential pairs: `api_key`, `access_token`, `refresh_token`, `auth_token`, `session_token`, `token` (bare), `secret` / `secret_key` / `secret_id`, `private_key`, `password`, `passwd`, `pwd`, `client_secret` — each followed by `=` or `:` and an 8+ char value. The label may follow `_` or `-` (`DB_PASSWORD=...`, `GITHUB_TOKEN=...`); a label glued to letters (`mypassword=`) does not match |
+| `vendor_token` | A vendor access token with a clear prefix (in the default policy and in the flight recorder policy), alone or inside a sentence, with no label needed: GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, and `github_pat_` + 22 letters or digits + `_` + 59 letters or digits), cloud access key ids (`AKIA` / `ASIA` and 16 capitals or digits), chat tokens (`xox` + one letter + `-`, then a number, up to three more numbers and a last part of 20 to 255 letters or digits, all joined by `-`; the same after `xoxe.`; and the cookie `xoxd-` + 40 to 1000 letters, digits or `%` codes; every repeat has an upper bound) and payment secret keys (`sk_live_`, `rk_live_`). A text with no clear prefix (a long hex text, plain base64, three random parts with two dots) is hidden only after a secret-like label or under a secret-named key: a long hex text is also a commit id or a checksum, and results show those whole. Runs after `api_key` in the default policy, so a `token=ghp_...` pair keeps the `api_key` label |
 | `pem_private_key` | A PEM private key block, from the `BEGIN ... PRIVATE KEY` line to the matching `END` line (or to the end of the text when the `END` line is missing). Public keys and certificates do not match. Runs before `api_key` in the default policy, so a `private_key=-----BEGIN ...` pair loses the whole block |
 | `kubeconfig` | YAML kubeconfig blobs (`apiVersion: v1` + `kind: Config`) |
 | `password_hash` | A crypt(3) password hash as in `/etc/shadow`: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$7$`, `$y$`, `$gy$`, `$sha1$`, `$argon2id$`/`$argon2i$`/`$argon2d$`. The match stops at `:`, so the other `/etc/shadow` columns stay readable |
@@ -202,6 +203,39 @@ cannot survive truncation as an unmatchable cleartext fragment.
 Since #5031 the same sanitizer first replaces the value of each quoted
 secret-named pair in the text (see "Errors, diagnostics and saved test
 captures" below).
+
+## One list of secret shapes
+
+The named patterns above, in the order of the default policy, are MEHO's
+one list of secret shapes. Three places use it:
+
+* the stored result of a call and the parameters on an approval card, through
+  the default policy;
+* the free-text check `contains_secret`, through `secret_shape` in
+  `redaction/secret_shapes.py`. The settings file import, the settings file
+  export and the reason of a policy edit use it.
+
+Each shape has two answers: is it hidden, and is it refused. The approval
+card and the stored result hide every shape of the list. The free-text check
+refuses only a shape that is surely a secret:
+
+* a vendor access token (`vendor_token`);
+* a link that holds a password (`url_secret`, only the `user:password@`
+  part of a link);
+* a full key block: a `BEGIN ... PRIVATE KEY` line and a later `END` line;
+* a JWT whose first part decodes to JSON with an `alg` field;
+* base64 that decodes to a key: a raw key of a usual size, a DER private
+  key, or a text that holds a full key block or such a JWT.
+
+Every other shape of the list is hidden only: it needs a label or a key
+name to be a secret, and normal text can look like it. `REFUSED_PATTERNS`
+in `secret_shapes.py` names the patterns of the list that are refused.
+
+A new shape is a named pattern here, a rule in `policies/default.yaml`, and
+one row of `tests/test_secret_shapes_table.py`. That test checks every shape
+in every place (hidden, and refused or not): alone, inside a sentence, and
+after a secret-like label. It also checks that every rule of the default
+policy has a row.
 
 ## Errors, diagnostics and saved test captures (#5031)
 
@@ -471,7 +505,8 @@ falls through to the packaged **default-safe** policy
 The default-safe policy is the load-bearing guarantee: a connector
 landing without a registered override **still gets credentials
 stripped** (`authorization_header`, `bearer_token`, `jwt`, `api_key`,
-`pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`, `bind_key_secret`, `url_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
+`vendor_token`, `pem_private_key`, `kubeconfig`, `password_hash`, `ceph_key`,
+`bind_key_secret`, `url_secret`). Identifier patterns (`uuid` / `ipv4` / `ipv6` / `fqdn`)
 are deliberately not in the default — most connector responses are
 mostly identifiers, and a global default that redacts them would
 blank operator-facing summaries. Operators wanting them at the global

@@ -29,13 +29,9 @@ Key semantics, shared by the parser and the service:
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from itertools import pairwise
 from typing import Annotated, Any, Final, Literal
 from uuid import UUID
 
@@ -53,6 +49,7 @@ from pydantic import (
 from meho_backplane.broadcast.events import is_secret_param_name
 from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
 from meho_backplane.conventions.schemas import ConventionKind
+from meho_backplane.redaction.secret_shapes import secret_shape
 from meho_backplane.targets.schemas import AuthModel
 
 __all__ = [
@@ -382,138 +379,22 @@ _DuplicateKeyLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_ti
 # Secret-shaped values
 # ---------------------------------------------------------------------------
 
-# Each check reads the text a fixed number of times, so its time grows in
-# step with the length of the text. MEHO runs these checks in one process
-# for every tenant, and a regex search holds the interpreter lock.
-_PEM_BEGIN_RE: Final = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
-_PEM_END_RE: Final = re.compile(r"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
-_B64URL_RUN_RE: Final = re.compile(r"[A-Za-z0-9_-]+")
-#: The shortest JWT header or payload part: ``eyJ`` and eight more characters.
-_JWT_PART_MIN: Final = 11
-_BASE64_RE: Final = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
-#: Raw symmetric-key sizes (AES-128/192/256, HMAC-384/512, Fernet = 32).
-_BINARY_KEY_LENGTHS: Final[frozenset[int]] = frozenset({16, 24, 32, 48, 64})
 #: A mask is never "keep the stored value"; it is refused like any other secret.
 _MASK_RE: Final = re.compile(
     r"^(\*+|<\s*(keep|redacted|masked|secret|unchanged|hidden)\s*>)$", re.I
 )
 
 
-def _compact(text: str) -> str:
-    # Line breaks only: base64 is often wrapped, but a value with spaces is
-    # prose, and joining prose would turn a sentence into "valid base64".
-    return re.sub(r"[\r\n]+", "", text.strip())
-
-
-def _b64_decode(text: str) -> bytes | None:
-    compact = _compact(text)
-    if len(compact) < 22 or not _BASE64_RE.match(compact):
-        return None
-    padded = compact + "=" * (-len(compact) % 4)
-    try:
-        if "-" in compact or "_" in compact:
-            return base64.urlsafe_b64decode(padded)
-        return base64.b64decode(padded, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-
-
-def _is_binary(data: bytes) -> bool:
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
-    return any(ord(c) < 0x20 and c not in "\t\r\n" for c in text)
-
-
-def _looks_like_der_private_key(data: bytes) -> bool:
-    # PKCS#1 / PKCS#8 / SEC1 private keys open with SEQUENCE then INTEGER 0
-    # (``02 01 00``) within the first few bytes; X.509 certificates do not.
-    return len(data) >= 64 and data[0] == 0x30 and b"\x02\x01\x00" in data[2:8]
-
-
-def _has_pem_private_key(text: str) -> bool:
-    # The first BEGIN line ends first, so one END line after it is enough.
-    begin = _PEM_BEGIN_RE.search(text)
-    return begin is not None and _PEM_END_RE.search(text, begin.end() + 1) is not None
-
-
-def _jwt_header_start(text: str, start: int, end: int) -> int | None:
-    """Where a JWT header can start in the run ``text[start:end]``, or ``None``.
-
-    The header starts at the first ``eyJ`` that follows no letter, digit or
-    ``_`` and leaves at least :data:`_JWT_PART_MIN` characters to the end of
-    the run. A later ``eyJ`` in the same run is always shorter.
-    """
-    pos = text.find("eyJ", start, end)
-    while pos != -1 and end - pos >= _JWT_PART_MIN:
-        before = text[pos - 1] if pos > 0 else ""
-        if not (before.isalnum() or before == "_"):
-            return pos
-        pos = text.find("eyJ", pos + 1, end)
-    return None
-
-
-def _jwt_headers(text: str) -> list[str]:
-    """Each header of a ``<header>.<payload>.<signature>`` shape in *text*.
-
-    The text is split once into runs of base64url characters. A header run
-    is followed by a dot, then a payload run that starts with ``eyJ``, then
-    a dot.
-    """
-    runs = [m.span() for m in _B64URL_RUN_RE.finditer(text)]
-    headers: list[str] = []
-    for (start, end), (p_start, p_end) in pairwise(runs):
-        if p_start != end + 1 or text[end] != "." or text[p_end : p_end + 1] != ".":
-            continue
-        if p_end - p_start < _JWT_PART_MIN or not text.startswith("eyJ", p_start):
-            continue
-        header_start = _jwt_header_start(text, start, end)
-        if header_start is not None:
-            headers.append(text[header_start:end])
-    return headers
-
-
-def _jwt_shaped(text: str) -> bool:
-    for header in _jwt_headers(text):
-        try:
-            decoded = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
-        except (binascii.Error, ValueError):
-            continue
-        if isinstance(decoded, dict) and "alg" in decoded:
-            return True
-    return False
-
-
 def _secret_kind(text: str) -> str | None:
-    """Name what *text* looks like ("a private key", "a JWT", ...) or ``None``."""
+    """Name what *text* looks like ("a private key", "a JWT", ...) or ``None``.
+
+    The secret shapes are the one list of the redaction package
+    (:func:`~meho_backplane.redaction.secret_shapes.secret_shape`); the
+    approval card and the stored result hide the same shapes.
+    """
     if _MASK_RE.match(text.strip()):
         return "a mask"
-    if _has_pem_private_key(text):
-        return "a private key"
-    if _jwt_shaped(text):
-        return "a JWT"
-    decoded = _b64_decode(text)
-    if decoded is None:
-        return None
-    if not _is_binary(decoded):
-        inner = decoded.decode("utf-8")
-        if _has_pem_private_key(inner):
-            return "a base64-encoded private key"
-        if _jwt_shaped(inner):
-            return "a base64-encoded JWT"
-        return None
-    if _looks_like_der_private_key(decoded):
-        return "a base64-encoded private key"
-    compact = _compact(text)
-    mixed = (
-        any(c.isupper() for c in compact)
-        and any(c.islower() for c in compact)
-        and any(c.isdigit() for c in compact)
-    )
-    if len(decoded) in _BINARY_KEY_LENGTHS and mixed:
-        return "a base64-encoded key"
-    return None
+    return secret_shape(text)
 
 
 def contains_secret(text: str) -> bool:
@@ -526,10 +407,11 @@ def contains_secret(text: str) -> bool:
 def find_secret_shaped_values(data: Any, loc: tuple[int | str, ...] = ()) -> list[str]:
     """Walk *data* and return one sentence per string that looks like a secret.
 
-    Checks every string value and every mapping key: a full ``PRIVATE KEY``
-    PEM block, a JWT, the same after one base64 decode, base64 that decodes
-    to a raw or DER key, and masks such as ``*`` or ``<keep>``. A
-    ``CERTIFICATE`` block passes, so ``tls_ca_pin`` works. Under ``extras``, a
+    Checks every string value and every mapping key against the secret
+    shapes of :func:`~meho_backplane.redaction.secret_shapes.secret_shape`
+    (a private key, a JWT, a vendor access token, a password in a link, ...,
+    also after one base64 decode) and refuses masks such as ``*`` or
+    ``<keep>``. A ``CERTIFICATE`` block passes, so ``tls_ca_pin`` works. Under ``extras``, a
     key named like a credential (``password``, ``api_key``, ...) is refused
     whatever its value, since an ordinary password has no shape to find; the
     name rule is :func:`~meho_backplane.broadcast.events.is_secret_param_name`,

@@ -597,9 +597,9 @@ def test_contributing_fork_steps_start_a_ci_run() -> None:
     assert "git push origin <full-sha>:refs/heads/ci/pr-<number>" in section
     triggers = _triggers(_load_workflow(_WORKFLOWS_DIR / "ci.yml"))
     # A pushed ci/pr-<number> branch starts no run, because ci.yml has no
-    # push trigger; the draft pull request starts the run.
+    # push trigger; the draft pull request starts the run. ci.yml can be
+    # started by hand (#7236), but only a maintainer does that, never a push.
     assert "push" not in triggers
-    assert "workflow_dispatch" not in triggers
 
 
 # --- values from pull request code reach a script only through env: ----------

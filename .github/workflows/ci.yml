@@ -188,6 +188,11 @@ on:
   # GitHub delays scheduled runs at the start of every hour.
   schedule:
     - cron: '17 2 * * *'
+  # A maintainer can start the nightly run by hand (#7236), for example after
+  # a night that made no unit test map: Actions -> CI -> Run workflow on
+  # `main`, or `gh workflow run ci.yml --ref main`. It runs the same jobs as
+  # the nightly run. Pull requests take a map only from a run on `main`.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -204,7 +209,9 @@ concurrency:
   # runs only. Queued (not-yet-started) merge_group runs can
   # still be displaced by newer queue entries; that is expected behaviour.
   # The nightly `schedule` run has its own group (`ci-<ref>-schedule`), so
-  # a merge during the run does not cancel it.
+  # a merge during the run does not cancel it. A run started by hand has its
+  # own group too (`ci-<ref>-workflow_dispatch`): it cancels only an older
+  # run started by hand on the same branch.
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
@@ -2685,13 +2692,14 @@ jobs:
     # tests/conftest.py session-finish hook saves the worker's data before
     # that report, so a slow worker clean-up no longer loses a whole
     # shard's test coverage with every check green.
-    # Runs on the nightly `schedule` run of `main`, OR on a PR explicitly
+    # Runs on the nightly `schedule` run of `main` (or the same run started
+    # by hand, `workflow_dispatch`), OR on a PR explicitly
     # opted in via the `ci-coverage-validate` label (the on-runner validation
     # escape hatch described above). Never on `push` or `merge_group`. The
     # fork-PR guard still applies on the PR path so fork code never executes
     # on the self-hosted pool.
     if: >-
-      github.event_name == 'schedule' ||
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
@@ -3095,8 +3103,9 @@ jobs:
     # single `python-coverage` artifact (backend/coverage.xml) — the
     # quality-gate.yml contract is byte-identical to the old monolithic
     # producer; only the producer topology changed. Same trigger + absorption
-    # posture as the shard job: the nightly `schedule` run (or the
-    # `ci-coverage-validate` PR label), never `push` or `merge_group`,
+    # posture as the shard job: the nightly `schedule` run (also when started
+    # by hand) or the
+    # `ci-coverage-validate` PR label, never `push` or `merge_group`,
     # non-required, whole-job continue-on-error. `always()` keeps
     # the fan-in merging partial data when a shard failed its tests or died —
     # per-download continue-on-error tolerates a shard that never produced an
@@ -3106,7 +3115,7 @@ jobs:
     needs: python-coverage
     if: >-
       always() &&
-      (github.event_name == 'schedule' ||
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
@@ -3296,9 +3305,10 @@ jobs:
       - name: Make the unit test map
         # #5642. The map says which tests run each source file. Pull
         # requests use it to run only the tests their change can break (the
-        # `changes` job, step `map`). Only the nightly run on `main` makes
-        # it, and only when all 10 shards delivered their data: a map from
-        # partial data would pick too few tests. The download steps and the
+        # `changes` job, step `map`). Only the nightly run makes it (also
+        # when started by hand), and pull requests take only a map of a run
+        # on `main`. It is made only when all 10 shards delivered their
+        # data: a map from partial data would pick too few tests. The download steps and the
         # junit count below are not proof of that: a crashed worker leaves
         # a junit file but no coverage data, and the download still works.
         # So the tool refuses a junit file that reports a crashed worker,
@@ -3307,7 +3317,8 @@ jobs:
         # and makes no map.
         id: test-map
         if: >-
-          always() && github.event_name == 'schedule' &&
+          always() &&
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
           hashFiles('backend/.coverage') != '' &&
           steps.shard-1.outcome == 'success' && steps.shard-2.outcome == 'success' &&
           steps.shard-3.outcome == 'success' && steps.shard-4.outcome == 'success' &&

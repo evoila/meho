@@ -989,9 +989,18 @@ no stored row is read.
 When a person approved a step's own request and the run goes on, the step
 is checked again before it runs. With the switch on, its level then is the
 higher of its declared level and the levels of the stored rows of its
-operation. When that level is higher than the one on the step's approval
-card, the step does not run: it gets the refusal a child call of the same
-operation gets. With the switch off, nothing more is read.
+operation. The same risk check as for a child call of the same operation
+decides (`_risk_refusal` in `operations/approved_run_rights.py`):
+
+- A level of `destructive` above the level on the step's approval card
+  stops the step.
+- A level of `dangerous` above the card's level stops the step when the
+  person who approved may not approve that level.
+- A stopped step gets the refusal such a child call gets.
+- A higher level that the approval covers lets the step run, as it lets a
+  child call run.
+
+With the switch off, nothing more is read.
 
 In a run that goes on after a person's approval, these rules hold also
 when a step's policy answer lets it run at once

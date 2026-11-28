@@ -21,6 +21,10 @@ its own approval, and the Admin ``admin-probe-5`` approves it:
   the same answer as a child call of the same operation: a refusal because
   the risk level is now higher than the approved one.
 * Without the level change, the step runs.
+* The step ``POST:/probe/things/{id}/fetch3`` declares level ``caution``.
+  When its stored row gets the level ``dangerous`` before the run goes on,
+  the step runs, because the Admin may approve that level. A child call of
+  the same operation runs too.
 
 With the switch off, every answer is the one of main (values recorded from
 a run on main): the step goes ahead under the run's approval and no stored
@@ -68,6 +72,7 @@ _CONNECTOR = "probe-1.x"
 _RUN = "probe.composite.remote_steps"
 _CHILD_RUN = "probe.composite.remote_child"
 _FETCH2 = Step("POST:/probe/things/{id}/fetch2", "dangerous", False)
+_FETCH3 = Step("POST:/probe/things/{id}/fetch3", "caution", False)
 _ADDRESS_ROW: dict[str, Any] = {
     "schema": {
         "type": "object",
@@ -128,16 +133,17 @@ async def _first_step(operator: Operator, target: Any, run_op_id: str) -> Any:
 
 
 async def remote_steps(operator: Any, target: Any, params: dict[str, Any]) -> Any:
-    """A step that waits, then ``fetch2`` through the step gate."""
+    """A step that waits, then the step under test through the step gate."""
     gated = await _first_step(operator, target, _RUN)
     if gated is not None:
         return gated
+    [step] = c.current
     gated = await enforce_subop_policy(
         operator=operator,
         connector_id=_CONNECTOR,
-        op_id=_FETCH2.op_id,
-        safety_level=_FETCH2.safety_level,
-        requires_approval=_FETCH2.requires_approval,
+        op_id=step.op_id,
+        safety_level=step.safety_level,
+        requires_approval=step.requires_approval,
         target=target,
         params={},
         resume_state={"at": "fetch2"},
@@ -145,18 +151,18 @@ async def remote_steps(operator: Any, target: Any, params: dict[str, Any]) -> An
     )
     if gated is not None:
         return gated
-    c.ran.append(_FETCH2.op_id)
+    c.ran.append(step.op_id)
     return {"done": True}
 
 
 async def remote_child(
     operator: Any, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
 ) -> Any:
-    """A step that waits, then ``fetch2`` as a child call."""
+    """A step that waits, then the step under test as a child call."""
     gated = await _first_step(operator, target, _CHILD_RUN)
     if gated is not None:
         return gated
-    return await dispatch_child(connector_id=_CONNECTOR, op_id=_FETCH2.op_id, params={})
+    return await dispatch_child(connector_id=_CONNECTOR, op_id=c.current[0].op_id, params={})
 
 
 def _run_row(op_id: str, handler: str) -> EndpointDescriptor:
@@ -192,16 +198,18 @@ def _admin() -> Operator:
     )
 
 
-async def _start_and_approve_first(session: AsyncSession, stub: AsyncMock, *, child: bool) -> Any:
+async def _start_and_approve_first(
+    session: AsyncSession, stub: AsyncMock, *, child: bool, step: Step = _FETCH2
+) -> Any:
     """Store the rows, start as a service login, approve the first step with a token, go on."""
     await h.register_child(stub)
     register_connector_v2(product="probe", version="1.x", impl_id="probe", cls=_ProbeConnector)
     async with get_sessionmaker()() as s, s.begin():
-        s.add(r.probe_row(_FETCH2, None, _ADDRESS_ROW))
+        s.add(r.probe_row(step, None, _ADDRESS_ROW))
     run_op_id = _CHILD_RUN if child else _RUN
     session.add(_run_row(run_op_id, "remote_child" if child else "remote_steps"))
     await session.commit()
-    c.current.append(_FETCH2)
+    c.current.append(step)
     service = h.operator(sub=c.SERVICE_SUB, principal_kind=PrincipalKind.SERVICE)
     await give_service_a_known_person(h.TENANT_ID, c.SERVICE_SUB)
     first = await dispatch(
@@ -214,10 +222,11 @@ async def _start_and_approve_first(session: AsyncSession, stub: AsyncMock, *, ch
     )
 
 
-async def _approve_own_and_go_on(*, raise_level: bool) -> Any:
+async def _approve_own_and_go_on(*, raise_level: bool, level: str = "destructive") -> Any:
     """The Admin approves the step's own request; the stored level may rise; the run goes on."""
     _, own = await c.requests()
-    assert own.op_id == _FETCH2.op_id
+    [step] = c.current
+    assert own.op_id == step.op_id
     async with get_sessionmaker()() as s:
         await approve_request(s, own.id, operator=_admin(), params=None)
         await s.commit()
@@ -225,8 +234,8 @@ async def _approve_own_and_go_on(*, raise_level: bool) -> Any:
         async with get_sessionmaker()() as s, s.begin():
             await s.execute(
                 update(EndpointDescriptor)
-                .where(EndpointDescriptor.op_id == _FETCH2.op_id)
-                .values(safety_level="destructive")
+                .where(EndpointDescriptor.op_id == step.op_id)
+                .values(safety_level=level)
             )
     return await resume_dispatch_after_approval(
         operator=_admin(), request=await h.request(own.id), params=None
@@ -311,3 +320,32 @@ async def test_off_a_child_call_waits_and_is_checked_as_on_main(
     else:
         assert result.status == "ok", result.error
         assert c.ran == [h.STEP_A, _FETCH2.op_id]
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
+@_BOTH_PATHS
+async def test_dangerous_above_the_card_runs_when_the_admin_may_approve_it(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+    child: bool,
+) -> None:
+    """A ``caution`` step whose stored level rose to ``dangerous`` runs, as a child call does.
+
+    With the switch off the step goes ahead under the run's approval, as on
+    main, and only the child call waits for its own approval.
+    """
+    c.switch(monkeypatch, on=on)
+    waiting = await _start_and_approve_first(
+        session, stub_embedding_service, child=child, step=_FETCH3
+    )
+    if on or child:
+        assert waiting.status == "awaiting_approval", waiting.error
+        result = await _approve_own_and_go_on(raise_level=True, level="dangerous")
+        assert len(await c.requests()) == 2
+    else:
+        result = waiting
+        assert len(await c.requests()) == 1
+    assert result.status == "ok", result.error
+    assert c.ran == [h.STEP_A, _FETCH3.op_id]

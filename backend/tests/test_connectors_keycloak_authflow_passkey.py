@@ -645,7 +645,12 @@ async def test_other_realm_answered_before_the_bind_sends_no_write(
         fake.mount(mock)
         result = await _run()
     assert result["status"] != "ok"
-    assert "did not answer with the realm" in json.dumps(result)
+    text = json.dumps(result)
+    assert "did not answer with the realm" in text
+    assert "changes nothing" not in text
+    assert "realm_changed" in text
+    assert "has written flow" in text
+    assert "did not bind" in text
     assert not any(path == _ADMIN for _, path, _ in fake.writes)
 
 
@@ -664,7 +669,12 @@ async def test_other_realm_answered_after_the_bind_is_an_error(kc: KeycloakConne
         mock.route(path=_ADMIN).mock(side_effect=realm_then_other)
         result = await _run()
     assert result["status"] != "ok"
-    assert "did not answer with the realm" in json.dumps(result)
+    text = json.dumps(result)
+    assert "did not answer with the realm" in text
+    assert "changes nothing" not in text
+    assert "check_failed" in text
+    assert "has written flow" in text
+    assert "has sent the bind" in text
 
 
 async def test_realm_with_the_step_is_not_changed(kc: KeycloakConnector) -> None:

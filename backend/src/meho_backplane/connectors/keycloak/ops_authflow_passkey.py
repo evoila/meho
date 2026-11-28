@@ -512,7 +512,11 @@ async def _read_realm(
 
 
 def _flow_state(flow_written: bool) -> str:
-    """What this call did to the passkey flow, for an error text."""
+    """What this call did to the passkey flow, for an error text.
+
+    The error texts start with it: the dispatcher cuts an error text at 256
+    characters, and what this call wrote must stay in the cut text.
+    """
     if flow_written:
         return f"MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step"
     return f"Flow {PASSKEY_FLOW_ALIAS!r} with the step was in place; MEHO did not change it"
@@ -544,8 +548,8 @@ async def _bind(
     except ValueError:
         raise KeycloakPasskeyFlowError(
             "realm_changed",
+            f"{_flow_state(flow_written)}, and did not bind the realm's browser flow to it: "
             f"Keycloak did not answer with the realm {managed!r} right before the bind. "
-            f"{_flow_state(flow_written)}, and did not bind the realm's browser flow to it. "
             "Check the managed realm of the target.",
         ) from None
     if before.get("browserFlow") != expected_flow:
@@ -570,11 +574,10 @@ async def _bind(
     except ValueError:
         raise KeycloakPasskeyFlowError(
             "check_failed",
-            f"Keycloak did not answer with the realm {managed!r} when MEHO read it back "
-            f"after the bind. {_flow_state(flow_written)}, and has sent the bind of the "
-            f"realm's browser flow to {PASSKEY_FLOW_ALIAS!r}. MEHO "
-            "could not check which realm the bind reached. Check the managed realm of the "
-            "target and its browser flow.",
+            f"{_flow_state(flow_written)}, and has sent the bind of the realm's browser flow "
+            f"to it. Keycloak did not answer with the realm {managed!r} when MEHO read it "
+            "back after the bind, so MEHO could not check which realm the bind reached. "
+            "Check the managed realm of the target and its browser flow.",
         ) from None
     if after.get("browserFlow") != PASSKEY_FLOW_ALIAS:
         raise KeycloakPasskeyFlowError(

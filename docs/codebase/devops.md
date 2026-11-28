@@ -2289,6 +2289,38 @@ shape (deterministic file-level matrix + fan-in):
   installs Helm v3.16.4 (the same pinned `azure/setup-helm` step as
   `chart.yml`) and sets `MEHO_REQUIRE_HELM=1`, so the `tests/test_chart_*.py`
   render tests really run there and fail, not skip, if helm is missing.
+  In the same way, every shard installs node 22 (step "Install Node", the
+  same pinned `actions/setup-node` as `plugin-test.yml`) and sets
+  `MEHO_REQUIRE_NODE=1`, so the console script tests (they run the
+  JavaScript in node) fail, not skip, if node is missing.
+- **Skip limit check.** A skipped test shows as green. So after pytest,
+  each unit shard and each integration shard runs the step "Check the
+  skipped tests of this shard". The unit step runs
+  `uv run python tests/_skip_limit_check.py --lane unit --selection "${RUNNER_TEMP}/unit-files.txt" [--without-secrets] pytest-unit-shard.xml`,
+  and the integration step runs
+  `uv run python tests/_skip_limit_check.py --lane integration [--without-secrets] pytest-integration-shard.xml`.
+  `--without-secrets` is added only in a run without the repository
+  secrets (see below). The step counts the skipped tests (xfail too) per test file in the
+  shard's JUnit file. `backend/tests/_skip_limits.json` holds one allowed
+  number per test file and lane. A file that is not in it may skip 0
+  tests. The step fails when a file skips more than its number. A pull
+  request that adds a skip raises the number in the same pull request.
+  A file that ran whole and skips fewer tests gives only a notice to
+  lower the number, because some k3s skips depend on how fast pods start.
+  A file that a test map run picked by test id gives no such notice: the
+  unit step passes the list of what pytest ran (`--selection`).
+  A row is one number, or two numbers (`with_secrets` and
+  `without_secrets`). A run without the repository secrets takes the
+  second number: in the unit lane when `SPEC_SHELF_READY` is not `true`
+  (no vendor API files, so the spec tests skip), in the integration lane
+  when `MEHO_TEST_KEYCLOAK_IMAGE` is empty (no image proxy, so the live
+  Keycloak tests skip). The step runs in both kinds of run. A row names a
+  test file in the plain form `tests/<path>.py`. The step also fails
+  when the JUnit file or the count file is missing or broken, when a row
+  name is absolute or holds a `.` or `..` part, and when the count file
+  names a test file that is not in the repo. The count is per test file,
+  not per shard, so it holds for any shard split and for the short runs
+  (one connector, test map).
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
   `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`
@@ -2474,7 +2506,8 @@ runs one short job instead.
   `python-outside-backend` runs exactly these test files. The list lives in
   `backend/tests/_outside_backend_tests.py`; the job reads it with
   `uv run python tests/_outside_backend_tests.py`. It runs on a GitHub-hosted
-  runner with Helm installed and `MEHO_REQUIRE_HELM=1`.
+  runner with Helm and node installed, `MEHO_REQUIRE_HELM=1` and
+  `MEHO_REQUIRE_NODE=1`.
 - **The list stays complete.** `backend/tests/test_outside_backend_tests.py`
   scans the unit test files (everything under `backend/tests/` except
   `integration/` and `migrations/`). A file reads outside `backend/` when it
@@ -2658,6 +2691,9 @@ shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
 - the repository variable `MEHO_CI_SECOND_SITE` is exactly `on` (lower
   case; `ON` counts as off);
 - the event is `pull_request`, from this repository (not a fork);
+- the pull request does not have the label `ci-coverage-validate`. The
+  coverage job joins the coverage files of all shards and works in the
+  checked-out code, so all the files it joins come from the usual runners;
 - the actor is not Dependabot;
 - it is the first attempt of the run;
 - all six shards really run (not docs-only, a backend change, not a
@@ -2682,7 +2718,8 @@ runs shards 4-6, under the same check names `Python unit shard N/6`:
   enough;
 - the test images are the public `docker.io/` names, from the same image
   lines as the other job. There is no Docker Hub login, and the spec-shelf
-  tests skip, as on a fork;
+  tests skip, as on a fork. So the skip limit check of the job takes the
+  `without_secrets` numbers;
 - its first step fails on the first attempt unless the runner has
   `MEHO_CI_SITE=site2`;
 - its test steps are YAML aliases (`*unit-...`) of the steps of
@@ -2798,7 +2835,9 @@ on a secret:
   skips, the directory doesn't exist, and the resolvers
   (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness)
   return `None` → the lanes
-  `pytest.skip()`. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
+  `pytest.skip()`. The skip limit check then takes the `without_secrets`
+  numbers of `backend/tests/_skip_limits.json`, so such a run passes, and a
+  test file that skips more tests than its number fails. When the secret exists, the lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
   the unit sweep. Full-ingest tests of a real vendor spec (minutes per

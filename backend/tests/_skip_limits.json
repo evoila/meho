@@ -1,0 +1,100 @@
+{
+ "how": "Allowed skipped tests per test file and lane, checked by tests/_skip_limit_check.py. A test file that is not listed may skip 0 tests. A row is one number, or two numbers: with_secrets for a run with the repository secrets, without_secrets for a run without them (no vendor API files in the unit lane, no Keycloak test image in the integration lane). Raise a number only in the pull request that adds the skip.",
+ "lanes": {
+  "unit": {
+   "tests/acceptance/test_g41_kb_canary.py": 7,
+   "tests/test_ci_fork_runner_isolation.py": 9,
+   "tests/test_connectors_argocd_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/test_connectors_azure_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/test_connectors_entra_spec_reconcile.py": 1,
+   "tests/test_connectors_freeipa_spec_reconcile.py": 1,
+   "tests/test_connectors_gcloud_e2e.py": 2,
+   "tests/test_connectors_harbor_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/test_connectors_hetzner_robot_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 3
+   },
+   "tests/test_connectors_keycloak_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 2
+   },
+   "tests/test_connectors_loki_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 2
+   },
+   "tests/test_connectors_proxmox_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 2
+   },
+   "tests/test_connectors_rabbitmq_spec_reconcile.py": {
+    "with_secrets": 0,
+    "without_secrets": 4
+   },
+   "tests/test_ingest_health_benchmark.py": 2,
+   "tests/test_keycloak_rights_change_writes.py": 2,
+   "tests/test_operations_ingest_delete_approval.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/test_operations_ingest_llm_groups.py": 1,
+   "tests/test_retrieval_embedding.py": 1,
+   "tests/test_shared_lists_only_shrink.py": 1,
+   "tests/test_spec_shelf_example_lane.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/test_targets_resolver.py": 1,
+   "tests/test_ui_chassis_smoke.py": 1,
+   "tests/test_ui_static_assets.py": 3
+  },
+  "integration": {
+   "tests/integration/test_agent_run_anthropic.py": 1,
+   "tests/integration/test_auth_keycloak_client_credentials.py": {
+    "with_secrets": 0,
+    "without_secrets": 2
+   },
+   "tests/integration/test_connectors_k8s_e2e.py": 1,
+   "tests/integration/test_connectors_k8s_k3d.py": 61,
+   "tests/integration/test_connectors_k8s_live_vault.py": 1,
+   "tests/integration/test_github_composite_dispatch.py": 1,
+   "tests/integration/test_keycloak_bootstrap_mcp_login.py": {
+    "with_secrets": 0,
+    "without_secrets": 11
+   },
+   "tests/integration/test_keycloak_lock_reads_e2e.py": {
+    "with_secrets": 0,
+    "without_secrets": 3
+   },
+   "tests/integration/test_keycloak_one_tenant_unchanged.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/integration/test_keycloak_profile_client.py": {
+    "with_secrets": 0,
+    "without_secrets": 4
+   },
+   "tests/integration/test_keycloak_tool_sign_out.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/integration/test_operations_ingest_github.py": 2,
+   "tests/integration/test_runner_key_login_keycloak.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   },
+   "tests/integration/test_service_principal_recipe.py": {
+    "with_secrets": 0,
+    "without_secrets": 1
+   }
+  }
+ }
+}

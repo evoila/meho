@@ -47435,6 +47435,12 @@
             "nullable": true,
             "title": "Extras"
           },
+          "extras_changes": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras Changes"
+          },
           "notes": {
             "type": "string",
             "nullable": true,

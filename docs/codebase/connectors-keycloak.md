@@ -2404,11 +2404,11 @@ admin realm (`master` by default), or the realm MEHO itself signs in with
   card of every write on such a target; the console shows them as a
   "Check the target" box.
 
-To set the realm on an existing target (`--extra` replaces the whole
-`extras` map, so repeat the keys you keep):
+To set or correct the realm of an existing target, change that one key.
+Every other extra keeps its value:
 
 ```console
-$ meho targets update <name> --extra admin_realm=master --extra managed_realm=<realm>
+$ meho targets update <name> --set-extra managed_realm=<realm>
 ```
 
 ## Dependencies

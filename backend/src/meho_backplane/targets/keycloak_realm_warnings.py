@@ -108,11 +108,15 @@ def backplane_login_realms() -> set[str]:
     return realms
 
 
-def keycloak_realm_warnings(product: str | None, extras: Any) -> list[str]:
+def keycloak_realm_warnings(
+    product: str | None, extras: Any, *, name_realm: bool = True
+) -> list[str]:
     """The warnings for a Keycloak target's managed realm; empty when there are none.
 
     Other products, and a target whose realms do not pass the realm check,
-    get no warning: that check refuses them on its own.
+    get no warning: that check refuses them on its own. With
+    ``name_realm=False`` a line names the key ``managed_realm``, never its
+    value, for an answer that holds no value of the extras.
     """
     if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
         return []
@@ -123,15 +127,16 @@ def keycloak_realm_warnings(product: str | None, extras: Any) -> list[str]:
         return []
     admin = extras.get("admin_realm") or _DEFAULT_ADMIN_REALM
     wanted = str(managed).casefold()
+    subject = f"The managed realm {managed!r}" if name_realm else "The realm in `managed_realm`"
     warnings: list[str] = []
     if isinstance(admin, str) and wanted == admin.casefold():
         warnings.append(
-            f"The managed realm {managed!r} is the admin realm of this Keycloak. "
+            f"{subject} is the admin realm of this Keycloak. "
             "MEHO writes on this target change the realm the target logs in to."
         )
     if wanted in {name.casefold() for name in backplane_login_realms()}:
         warnings.append(
-            f"The managed realm {managed!r} is the realm MEHO itself signs in with. "
+            f"{subject} is the realm MEHO itself signs in with. "
             "MEHO writes on this target change MEHO's own sign-in."
         )
     return warnings

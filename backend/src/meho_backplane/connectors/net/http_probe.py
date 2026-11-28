@@ -205,7 +205,8 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "response was received. The body is never included. When "
                 "host_header is set these reflect the vhost-routed virtual "
                 "host (the origin the Host: header selected), not a default "
-                "vhost."
+                "vhost. The location and content-location values hold only "
+                "the host name of their address."
             ),
         },
         "redirect_chain": {
@@ -432,15 +433,40 @@ def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
 
-def _headers_dict(headers: httpx.Headers) -> dict[str, str]:
-    """Flatten response headers to a lowercased name→value dict.
+#: Response headers whose value is an address the vendor chooses.
+_ADDRESS_HEADERS = frozenset({"location", "content-location"})
+
+
+def _address_host(value: str, base: httpx.URL) -> str:
+    """Return only the host name of the address *value*, read against *base*.
+
+    A relative address names the host of *base*. An address httpx cannot
+    read gives the fixed mark :data:`UNPARSEABLE_ADDRESS`.
+    """
+    try:
+        url = base.join(value)
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        return UNPARSEABLE_ADDRESS
+    return host_for_log(url)
+
+
+def _headers_dict(response: httpx.Response) -> dict[str, str]:
+    """Flatten the response headers to a lowercased name→value dict.
 
     ``httpx.Headers`` lowercases names already; multi-valued headers are
     comma-joined by :meth:`httpx.Headers.items` semantics. No body, no
     cookies-as-secrets concern beyond what the origin already sent in the
-    clear on a HEAD/GET.
+    clear on a HEAD/GET. The ``location`` and ``content-location`` values
+    hold only the host name of their address.
     """
-    return {name.lower(): value for name, value in headers.items()}
+    return {
+        name.lower(): (
+            _address_host(value, response.request.url)
+            if name.lower() in _ADDRESS_HEADERS
+            else value
+        )
+        for name, value in response.headers.items()
+    }
 
 
 def _rdn(rdn_seq: Any) -> str | None:
@@ -744,7 +770,7 @@ def _advance_or_halt(
             reachable=True,
             reason=None,
             status=status,
-            headers=_headers_dict(response.headers),
+            headers=_headers_dict(response),
             redirect_chain=redirect_chain,
             tls=_tls_summary(response),
             timing_ms=_elapsed_ms(started),
@@ -837,7 +863,7 @@ async def _walk_redirects(
                 reachable=True,
                 reason=None,
                 status=response.status_code,
-                headers=_headers_dict(response.headers),
+                headers=_headers_dict(response),
                 redirect_chain=redirect_chain,
                 tls=tls,
                 timing_ms=_elapsed_ms(started),

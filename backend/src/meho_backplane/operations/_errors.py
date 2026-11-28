@@ -53,7 +53,12 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
-from meho_backplane.connectors._shared.log_host import redirect_status_text
+from meho_backplane.connectors._shared.log_host import (
+    REDIRECT_TEXT_WITHHELD,
+    followed_redirect_status_text,
+    redirect_status_text,
+    redirect_text_withheld,
+)
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -1726,9 +1731,18 @@ def result_connector_error(
     :func:`_add_attached_upstream_fault`).
 
     A 3xx answer gets the text of :func:`redirect_status_text`, with
-    host names only.
+    host names only. For a 3xx other than a 304, ``upstream_message`` is
+    :data:`REDIRECT_TEXT_WITHHELD` in place of the vendor's text, and the
+    answer has no ``upstream_fault``. An error answer after a followed
+    redirect gets the text of :func:`followed_redirect_status_text`, with the
+    host name only.
     """
-    msg = _sanitize_free_text(redirect_status_text(exc) or str(exc))
+    msg = _sanitize_free_text(
+        redirect_status_text(exc) or followed_redirect_status_text(exc) or str(exc)
+    )
+    withheld = isinstance(exc, httpx.HTTPStatusError) and redirect_text_withheld(
+        exc.response.status_code
+    )
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,
@@ -1741,8 +1755,11 @@ def result_connector_error(
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
-        extras["upstream_message"] = _http_upstream_message(exc.response)
-        _add_upstream_fault(extras, exc.response)
+        if withheld:
+            extras["upstream_message"] = REDIRECT_TEXT_WITHHELD
+        else:
+            extras["upstream_message"] = _http_upstream_message(exc.response)
+            _add_upstream_fault(extras, exc.response)
     elif isinstance(exc, ConnectorUpstreamError):
         extras["http_status"] = exc.http_status
         extras["upstream_message"] = (
@@ -1750,7 +1767,8 @@ def result_connector_error(
             if exc.upstream_message
             else None
         )
-    _add_attached_upstream_fault(extras, exc)
+    if not withheld:
+        _add_attached_upstream_fault(extras, exc)
     remediation = getattr(exc, "remediation", None)
     if isinstance(remediation, str) and remediation:
         # MEHO's own next step, set by the raising connector. It stays when the

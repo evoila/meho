@@ -292,4 +292,9 @@ def test_two_pull_requests_in_the_merge_queue_with_a_migration_on_the_same_paren
     assert "Migration chain check FAILED" in err
     assert first[0] in err
     assert second[0] in err
-    assert "take the next free number and set down_revision to the newest migration on main" in err
+    assert (
+        "Rule: each pull request with a migration must take the next free number "
+        "and set down_revision to the newest migration on main. If the merge queue "
+        "refuses your pull request, wait until the other migration is on main or its "
+        "pull request has left the queue, then merge main and take the next free number again."
+    ) in err

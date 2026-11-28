@@ -198,8 +198,9 @@ def find_problems(migrations: list[Migration]) -> list[str]:
 #: belong to another pull request; this rule is true in every case.
 RULE = (
     "Rule: each pull request with a migration must take the next free number "
-    "and set down_revision to the newest migration on main. In the merge queue, "
-    "the migrations of the pull requests ahead of yours count as on main."
+    "and set down_revision to the newest migration on main. If the merge queue "
+    "refuses your pull request, wait until the other migration is on main or its "
+    "pull request has left the queue, then merge main and take the next free number again."
 )
 
 

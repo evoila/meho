@@ -380,7 +380,7 @@ The "What to do" line of the check output says what to change. Example:
 Migration chain check FAILED:
   - revision 0108 is used by 2 files: 0108_add_claims.py, 0108_add_scope.py
 What to do: main is at 0108. Rename your migration to 0109 and set down_revision to '0108'.
-Rule: each pull request with a migration must take the next free number and set down_revision to the newest migration on main. In the merge queue, the migrations of the pull requests ahead of yours count as on main.
+Rule: each pull request with a migration must take the next free number and set down_revision to the newest migration on main. If the merge queue refuses your pull request, wait until the other migration is on main or its pull request has left the queue, then merge main and take the next free number again.
 ```
 
 1. Rename your migration file to the number the message gives
@@ -393,35 +393,6 @@ If the message says only "Set down_revision ... to ...", your numbers are
 already right and only the named parent links are stale. If a migration on `main`
 merges after you fixed it, the check runs again on your branch by itself
 and tells you if you need to move once more.
-
-### Two pull requests with a migration
-
-Two pull requests can each add a migration with the same number, or with
-the same `down_revision`. Each one alone passes its own check. Together
-they give `main` two heads.
-
-The merge queue stops this. A merge-queue run tests the tree that holds
-`main` plus every pull request ahead of it in the queue. The check
-**Migration chain (single head)** runs there too (`merge_group` in
-`.github/workflows/migration-heads.yml`), and it is a required check. So
-the second pull request fails its merge-queue run and leaves the queue.
-`main` never gets the second head.
-
-What each author does:
-
-1. In the last push before you add the pull request to the merge queue,
-   take the next free number, and set `down_revision` to the newest
-   migration on `main`.
-2. If the merge queue refuses the pull request with "Migration chain
-   check FAILED", another migration got in first. Merge `main` into
-   your branch, take the next free number again, set `down_revision` to
-   the newest migration on `main`, push, and add the pull request to
-   the queue again. The file names in the message show which migration
-   got in first.
-
-In the merge queue, the "What to do" line can name a migration of a pull
-request ahead of yours as if it were yours. The "Rule" line under it is
-true in every case.
 
 Run it locally before you push (from the repo root):
 
@@ -450,6 +421,38 @@ get a check run on their head commit, a migration after the first 100
 changed files is still found, and a pull request whose head moved, whose
 files cannot be read, or that cannot be fetched or unpacked is reported
 and skipped while the next one still gets its result.
+
+### Two pull requests with a migration
+
+Two pull requests can each add a migration with the same number, or with
+the same `down_revision`. Each one alone passes its own check. Together
+they give `main` two heads.
+
+The merge queue stops this. A merge-queue run tests the tree that holds
+`main` plus every pull request ahead of it in the queue. The check
+**Migration chain (single head)** runs there too (`merge_group` in
+`.github/workflows/migration-heads.yml`), and it is a required check. So
+the second pull request fails its merge-queue run and leaves the queue.
+`main` never gets the second head.
+
+What each author does:
+
+1. In the last push before you add the pull request to the merge queue,
+   take the next free number, and set `down_revision` to the newest
+   migration on `main`.
+2. If the merge queue refuses the pull request with "Migration chain
+   check FAILED", another migration got in first. The file names in the
+   message show the other migration. If that migration is not on `main`
+   yet, wait until it is on `main` or its pull request has left the
+   queue. Then merge `main` into your branch, take the next free number,
+   set `down_revision` to the newest migration on `main`, push, and add
+   the pull request to the queue again.
+
+Never build on a migration that is only in the merge queue. Only main counts.
+
+In the merge queue, the "What to do" line can name a migration of a pull
+request ahead of yours as if it were yours. The "Rule" line under it is
+true in every case.
 
 ## Additive-only constraint
 

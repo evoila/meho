@@ -513,3 +513,119 @@ async def test_child_record_of_a_person_or_service_starter_stays_internal(
         assert "permission_preflight" not in shown
         assert _preview.REQUESTER_RECORD_KEY not in shown
         assert _preview.AGENT_REQUESTER_RECORD_KEY not in shown
+
+
+# -- a further child call of a run whose first request has no starter's record -----
+
+_MID_RUN = "vault.composite.child_with_a_further_child"
+_FURTHER = Step("probe.things.grant_write", "caution", True)
+
+
+async def mid_run(
+    operator: Operator, target: Any, params: dict[str, Any], dispatch_child: DispatchChild
+) -> Any:
+    """The child: a multi-step operation whose first act is a further child call."""
+    return await dispatch_child(connector_id=h.CONNECTOR_ID, op_id=_FURTHER.op_id, params={})
+
+
+async def further_child(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    admin = _person("admin-third-7", TenantRole.TENANT_ADMIN)
+    _REFUSALS.append(await secondary_target_refusal(admin, _second_write(), _SECOND_TARGET))
+    c.ran.append(_FURTHER.op_id)
+    return {"done": True}
+
+
+async def _approve_and_run(row: ApprovalRequest, sub: str) -> OperationResult:
+    admin = _person(sub, TenantRole.TENANT_ADMIN)
+    approved = await _approve(row.id, admin)
+    return await resume_dispatch_after_approval(operator=admin, request=approved, params=None)
+
+
+async def test_further_child_of_an_old_first_request_is_never_checked_with_another_role(
+    monkeypatch: pytest.MonkeyPatch, stub_embedding_service: AsyncMock, session: AsyncSession
+) -> None:
+    """A first request without the starter's record: the further child never uses the Admin's role.
+
+    An Admin approves and re-runs the first step of an Operator's run. The
+    child's card then holds the Admin's record, which is not the row's own.
+    So the further child's checks are of the starter's own record, or they
+    refuse with "ask again". They never check the starter with the Admin's role.
+    """
+    from meho_backplane.operations import secondary_target_policy as stp
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    c.switch(monkeypatch, on=False)
+    _REFUSALS.clear()
+    roles: list[tuple[str, str]] = []
+    rebuild = stp._requester_operator
+
+    def spy(requester: Any, subject: Any) -> Operator:
+        rebuilt = rebuild(requester, subject)
+        roles.append((rebuilt.sub, rebuilt.tenant_role.value))
+        return rebuilt
+
+    monkeypatch.setattr(stp, "_requester_operator", spy)
+    for op_id in (_MID_RUN, _FURTHER.op_id):
+        monkeypatch.setitem(_preview._PERMISSION_PREFLIGHTS, op_id, _second_target_preflight)
+    await h.register_child(stub_embedding_service)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id=_FURTHER.op_id,
+        handler=further_child,
+        summary="The further child call.",
+        description="The further child call.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+        safety_level=_FURTHER.safety_level,
+        requires_approval=_FURTHER.requires_approval,
+        tags=None,
+    )
+    await h.register_composite(session, _MID_RUN, "mid_run", module=__name__)
+    await h.register_composite(session, c.CHILD_RUN, "child_run", module=c._MODULE)
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(EndpointDescriptor)
+            .where(EndpointDescriptor.op_id == _MID_RUN)
+            .values(requires_approval=True)
+        )
+        await s.commit()
+    c.current.append(Step(_MID_RUN, "caution", True))
+    first = await h.run(c.CHILD_RUN, _person(_PERSON_SUB))
+    assert first.status == "awaiting_approval", first.error
+    first_id = UUID(first.extras["approval_request_id"])
+    admin = _person(_ADMIN_SUB, TenantRole.TENANT_ADMIN)
+    approved = await _approve(first_id, admin)
+    old_effect = dict(approved.proposed_effect or {})
+    old_effect.pop(_preview.REQUESTER_RECORD_KEY, None)
+    async with get_sessionmaker()() as s:
+        await s.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == first_id)
+            .values(proposed_effect=old_effect)
+        )
+        await s.commit()
+    resumed = await resume_dispatch_after_approval(
+        operator=admin, request=await h.request(first_id), params=None
+    )
+    assert resumed.status == "awaiting_approval", resumed.error
+    [mid] = [row for row in await c.requests() if row.op_id == _MID_RUN]
+    assert mid.principal_sub == _PERSON_SUB
+
+    ran_mid = await _approve_and_run(mid, "admin-other-6")
+    further = [row for row in await c.requests() if row.op_id == _FURTHER.op_id]
+    if further:
+        record = (further[0].proposed_effect.get("permission_preflight") or {}).get("requester")
+        if record is not None and record["sub"] == _PERSON_SUB:
+            assert record["tenant_role"] == TenantRole.OPERATOR.value
+        ran = await _approve_and_run(further[0], "admin-third-7")
+        outcome = f"{ran.status} {ran.error} {_REFUSALS}"
+    else:
+        outcome = f"{ran_mid.status} {ran_mid.error}"
+
+    assert (_PERSON_SUB, TenantRole.TENANT_ADMIN.value) not in roles
+    assert "ask again" in outcome or (
+        _REFUSALS == [None] and (_PERSON_SUB, TenantRole.OPERATOR.value) in roles
+    ), outcome

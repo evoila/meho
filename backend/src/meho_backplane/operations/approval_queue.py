@@ -3861,6 +3861,9 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
     The record is the card's requester record, else the record a person's
     or a service login's request keeps under
     :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`.
+    It is kept only when its ``sub`` is the row's, as
+    :func:`~meho_backplane.operations.secondary_target_policy.bind_approved_requester`
+    does; else the requester has no record.
     """
     from meho_backplane.operations._preview import REQUESTER_RECORD_KEY, stored_requester_record
 
@@ -3869,6 +3872,8 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
     subject = stored_requester_record(effect)
     if not isinstance(subject, dict):
         subject = effect.get(REQUESTER_RECORD_KEY)
+    if not isinstance(subject, dict) or subject.get("sub") != request.principal_sub:
+        subject = None
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,

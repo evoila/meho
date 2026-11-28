@@ -24,8 +24,8 @@
 #
 # This sweep is the only thing that cancels a dropped group's run (#7105).
 # The `merge-queue-watchdog` job of ci.yml did it for the CI run, but it
-# held a runner for the whole queue run. A dropped group's run can now go on
-# for up to about 5 minutes (one sweep interval) before it is cancelled.
+# held a runner for the whole queue run. A dropped group's run now goes on
+# until the next sweep cancels it.
 #
 # What a sweep does is in scripts/ci/merge_queue_cleanup.sh. In short: it
 # cancels an open merge-queue run only when the run's commit is not in the

@@ -22,9 +22,7 @@ lists every breaking change.
 ## Control flow
 
 1. A pull request to `main` opens, gets a new commit, gets or loses a label,
-   or gets new text. Each of these starts the workflow again. A label or
-   title change that the check does not read copies the last result
-   instead (see "Copy the result for a label or title change" below).
+   or gets new text. Each of these runs the job again.
 2. The job checks out the merge commit. `HEAD^1` is the base branch.
 3. It installs `oasdiff` (pinned version, checked against its sha256).
 4. `scripts/ci/check_contract_compat.py --base HEAD^1` runs all checks:
@@ -87,32 +85,6 @@ rules and `additionalProperties` are not compared.
 
 A new tool, a new optional argument, a new output field and a new enum
 value in an input are not breaking.
-
-### Copy the result for a label or title change
-
-Most label and text events change nothing the check reads (#7105). Then the
-workflow does not run the check again. It copies the result it already has
-for the same commit:
-
-- The job `reuse` ("Find the result of this commit") runs first, on a
-  GitHub-hosted runner. It runs `scripts/ci/compat_gates_reuse.sh`.
-- It copies only for a label other than `breaking-change` (added or
-  removed), and for an edit where only the title changed. A new commit,
-  the `breaking-change` label, a new text and a new base branch always run
-  the full check.
-- It looks at the compatibility job of the newest earlier run of the
-  workflow for the same commit and pull request. When that job still runs,
-  it waits for it, for about 5 minutes at most.
-- It copies only `success` or `failure`. A cancelled or skipped job, no
-  earlier run, a run that does not finish in time, and every failed read
-  give the full check.
-- The job `compat` then passes or fails with the copied result, on a
-  GitHub-hosted runner. It is never skipped: a skipped job counts as passed
-  and would hide an earlier red result.
-- A run that may copy has a concurrency group of its own. So a label added
-  right after a push does not cancel the check of the new commit.
-
-Tests: `backend/tests/test_ci_compat_gates_reuse.py`.
 
 ### When the check cannot run
 
@@ -182,8 +154,6 @@ script needs `helm`; the test is `backend/tests/test_ci_helm_golden.py`.
 
 - `scripts/ci/check_contract_compat.py` and its tests
   `backend/tests/test_ci_check_contract_compat.py`.
-- `scripts/ci/compat_gates_reuse.sh` and its tests
-  `backend/tests/test_ci_compat_gates_reuse.py`.
 - `backend/scripts/snapshot_mcp_tools.py` and its test
   `backend/tests/test_mcp_tools_snapshot_drift.py`.
 - oasdiff: <https://github.com/oasdiff/oasdiff> (`docs/BREAKING-CHANGES.md`,

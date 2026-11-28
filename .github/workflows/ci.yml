@@ -210,10 +210,7 @@ jobs:
     # (job-level `if:` on this job's outputs, NEVER `on.paths`):
     #
     #   migrations — `true` when a PR touches migration-related files, so the
-    #                required `python-migration-tests` job runs only then. A
-    #                merge-queue run uses the same file pattern, on the diff
-    #                from the group's base commit to its head (#7105). The
-    #                nightly run and any diff problem keep it `true`.
+    #                required `python-migration-tests` job runs only then.
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
     #                heavy Python lanes (`python-lint`, the `python-unit-shard`
@@ -313,10 +310,6 @@ jobs:
           fetch-depth: 2
       - name: Detect migration-related + docs-only changes
         id: detect
-        env:
-          # Set only in a merge-queue run (#7105).
-          QUEUE_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          QUEUE_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
           # Full run unless proven. The four outputs start at the full run:
@@ -341,13 +334,6 @@ jobs:
           c_backend_python=
           c_redaction_compare=
           c_single_connector=
-
-          # Files that make the migration suite meaningful to run: the
-          # alembic tree, the relocated migration test suite, the db
-          # migrate/migrations modules under test, the compat script, and
-          # the workflows that define this gate. A pull request and a
-          # merge-queue run use this one pattern (#2140, #7105).
-          migration_files='^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)'
 
           # Run `grep` on a file and return 0 (match), 1 (no match) or 2
           # (error). `set -e` does not stop a command whose status is
@@ -399,9 +385,13 @@ jobs:
               1) ;;
               *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
             esac
-            # --- migration classification (#2140) ---
+            # --- migration classification (#2140, unchanged) ---
+            # Files that make the migration suite meaningful to run: the
+            # alembic tree, the relocated migration test suite, the db
+            # migrate/migrations modules under test, the compat script, and
+            # the workflows that define this gate.
             rc=0
-            grep -qE "${migration_files}" "${list}" || rc=$?
+            grep -qE '^(backend/alembic/|backend/tests/migrations/|backend/src/meho_backplane/db/(migrations|migrate)\.py$|scripts/ci/(check_migration_(compat|heads)|recheck_migration_prs)\.py$|\.github/workflows/(ci|migration-compat|migration-heads)\.yml$)' "${list}" || rc=$?
             case "${rc}" in
               0) c_migrations=true; echo "migration-related change detected -> migrations=true" ;;
               1) c_migrations=false; echo "no migration-related change -> migrations=false" ;;
@@ -469,68 +459,8 @@ jobs:
             return 0
           }
 
-          # merge_group (#7105): only the migration gate is worked out. The
-          # group can hold more than one pull request, so HEAD^1 is not its
-          # base: the diff runs from the group's base commit to its head.
-          # Every other output keeps the full run. Returns 0 only when the
-          # answer is sure; the caller then takes c_migrations.
-          classify_queue_migrations() {
-            local list rc sha
-            for sha in "${QUEUE_BASE_SHA:-}" "${QUEUE_HEAD_SHA:-}"; do
-              case "${sha}" in
-                *[!0-9a-f]*|'') reason="no base or head commit of the queue group"; return 1 ;;
-              esac
-              if [ "${#sha}" -ne 40 ] && [ "${#sha}" -ne 64 ]; then
-                reason="no base or head commit of the queue group"
-                return 1
-              fi
-            done
-            # The checkout holds the head and its parent only.
-            if ! git fetch --no-tags --quiet --depth=1 origin "${QUEUE_BASE_SHA}"; then
-              reason="could not fetch the base commit of the queue group"
-              return 1
-            fi
-            if ! list="$(mktemp "${RUNNER_TEMP:-/tmp}/queue-files.XXXXXX")"; then
-              reason="could not make the list file"
-              return 1
-            fi
-            if ! git -c core.quotePath=false diff --name-only --no-renames "${QUEUE_BASE_SHA}" "${QUEUE_HEAD_SHA}" >"${list}"; then
-              reason="git diff failed"
-              return 1
-            fi
-            if [ ! -s "${list}" ]; then
-              reason="empty diff"
-              return 1
-            fi
-            printf 'changed files (queue base..head):\n'
-            cat "${list}"
-            rc=0
-            grep -q '^"' "${list}" || rc=$?
-            case "${rc}" in
-              0) reason="quoted path in the diff"; return 1 ;;
-              1) ;;
-              *) reason="quote check failed (grep exit ${rc})"; return 1 ;;
-            esac
-            rc=0
-            grep -qE "${migration_files}" "${list}" || rc=$?
-            case "${rc}" in
-              0) c_migrations=true ;;
-              1) c_migrations=false ;;
-              *) reason="migration check failed (grep exit ${rc})"; return 1 ;;
-            esac
-            return 0
-          }
-
-          if [ "${{ github.event_name }}" = "merge_group" ]; then
-            # Never a fast path for the other lanes: the full matrix runs.
-            if classify_queue_migrations; then
-              migrations="${c_migrations}"
-              echo "merge_group -> migrations=${migrations} (from the queue diff), docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
-            else
-              echo "merge_group: ${reason} -> migrations=${migrations} (fail-safe), docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
-            fi
-          elif [ "${{ github.event_name }}" != "pull_request" ]; then
-            # nightly: never fast-path; always the full matrix.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # merge_group / nightly: never fast-path; always the full matrix.
             echo "non-PR event (${{ github.event_name }}) -> migrations=${migrations}, docs_only=${docs_only}, backend_python=${backend_python}, single_connector=<empty> (full run)"
           elif classify; then
             migrations="${c_migrations}"
@@ -3615,7 +3545,7 @@ jobs:
     # required unit lane (the python-unit-shard matrix) excludes
     # tests/migrations from its find, so this job carries the deep
     # per-migration coverage — but only on
-    # migration-touching PRs and queue groups, gated by the `changes` job.
+    # migration-touching PRs, gated by the `changes` job.
     #
     # Safety net: the unit lane's session-scoped `_schema_template_db`
     # fixture still runs `alembic upgrade head` on every PR, so a broken
@@ -3626,16 +3556,13 @@ jobs:
     # migrations)" in branches/main branch protection (manual ops step,
     # not code — #2140 acceptance item B.3).
     needs: changes
-    # Runs on the nightly run, on a merge-queue run whose group changes
-    # migration files (#7105), and on a same-repo PR that touched migration
-    # files. `changes` fails closed to `migrations=true`. A run without
-    # migration changes (and every fork PR) skips this job via `if:`, which
-    # reports Success and satisfies the required check.
+    # Run on any non-PR event (merge_group / nightly — never leave a required
+    # check Pending), OR a same-repo PR that touched migration files. A
+    # no-migration same-repo PR (and every fork PR) skips this job via
+    # `if:`, which reports Success and satisfies the required check.
     if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'merge_group' && needs.changes.outputs.migrations == 'true') ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
        needs.changes.outputs.migrations == 'true')
     runs-on: meho-runners-ci
     timeout-minutes: 45

@@ -1972,7 +1972,7 @@ hangs the queue forever:
 | --- | --- | --- |
 | `Python (ruff + mypy + pytest)` | `ci.yml` | yes (#769) |
 | `Python (integration testcontainers)` | `ci.yml` | yes (#769) — since #5384 the `python-integration` fan-in over four integration shards carries it |
-| `Python (database migrations)` | `ci.yml` | yes (#769) — in a merge-queue run only when the group changes migration files (#7105): the `changes` job reads the diff from the group's base commit to its head, with the pull request pattern, and keeps `true` when it cannot read it. It is skipped otherwise, which reports success. The nightly run always runs it. |
+| `Python (database migrations)` | `ci.yml` | yes (#769) — `changes` job emits `true` on non-PR events |
 | `Go (golangci-lint + go test)` | `ci.yml` | yes (#769) |
 | `Helm (lint + template + kubeconform)` | `ci.yml` | yes (#769) |
 | `Semgrep SAST` | `security-scan.yml` | yes (#769) |
@@ -2012,8 +2012,8 @@ these workflows:
   runs of a group that leaves the queue. `merge-queue-cleanup.yml` (#5292)
   does it, so the runs stop using our runners. It runs
     `scripts/ci/merge_queue_cleanup.sh` every 5 minutes on a GitHub-hosted
-    runner and covers every workflow. A dropped group's run can go on for
-    up to about 5 minutes before the sweep cancels it. It cancels an open merge-queue run
+    runner and covers every workflow. A dropped group's run goes on until
+    the next sweep cancels it. It cancels an open merge-queue run
     only when the run's commit is not in the queue (GraphQL `mergeQueue`),
     its queue branch is gone, and its commit is not on `main` (the merge
     base of the commit and `main` is not the commit itself). Right before
@@ -2427,13 +2427,7 @@ completes CI in minutes.
   `grep` error, a failing selection tool) keeps the full run, with one log
   line that says why. Tests: `backend/tests/test_ci_backend_python_skip.py`.
   `merge_group` and `push` NEVER fast-path (a queue batch may mix docs +
-  code; a `main` push must always run the full matrix). One exception: in a
-  `merge_group` run the `migrations` output follows the same file pattern
-  as on a PR (#7105). The diff is `git diff <merge_group.base_sha>
-  <merge_group.head_sha>`, not `HEAD^1`, because a group can hold more than
-  one PR. The step fetches the base commit first. A missing or odd commit,
-  a failed fetch or diff, an empty diff and a quoted path keep
-  `migrations=true`. Tests: `backend/tests/test_ci_merge_queue_migrations.py`.
+  code; a `main` push must always run the full matrix).
 - **What skips.** `python-lint`, the six `python-unit-shard` legs, and
   the four `python-integration-shard` legs gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the

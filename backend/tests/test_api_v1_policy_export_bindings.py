@@ -24,7 +24,8 @@ the stored rows.
 * With every switch off, the preview compares an old kind as written, as
   before: ``SA-Operators`` against ``Operators`` is one changed binding.
 * A file near the import's size limit: the comment gets shorter, so the
-  export still imports again with "No change.".
+  export still imports again with "No change.". This holds also for a group
+  name with a ``#``, a quote, a colon and a line break.
 
 Drives the production ``meho_backplane.main:app``. DB is the autouse
 per-test SQLite + ``alembic upgrade head``.
@@ -336,6 +337,21 @@ async def _export_size(document: dict[str, Any]) -> int:
         return len((await export_policy(session, scope="tenant", tenant_id=TENANT)).encode())
 
 
+async def _fill_to(monkeypatch: pytest.MonkeyPatch, room: int) -> None:
+    """Store a document whose export leaves *room* bytes free, then turn ``CUSTOM_POLICY`` on."""
+    # Size the file with routing off, so the export holds no note.
+    monkeypatch.delenv("CUSTOM_POLICY")
+    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
+    get_settings.cache_clear()
+    one = await _export_size(_big_document(1))
+    per_entry = await _export_size(_big_document(2)) - one
+    count = 1 + (MAX_POLICY_BYTES - room - 1000 - one) // per_entry
+    description = "x" * (1 + MAX_POLICY_BYTES - room - await _export_size(_big_document(count)))
+    assert await _export_size(_big_document(count, description)) == MAX_POLICY_BYTES - room
+    monkeypatch.setenv("CUSTOM_POLICY", "true")
+    get_settings.cache_clear()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("switches", [_CUSTOM], ids=["custom"], indirect=True)
 @pytest.mark.parametrize(
@@ -348,17 +364,7 @@ async def test_a_file_near_the_size_limit_imports_its_export_with_no_change(
     room: int,
     short: bool,
 ) -> None:
-    # Size the file with routing off, so the export holds no note.
-    monkeypatch.delenv("CUSTOM_POLICY")
-    monkeypatch.setenv("POLICY_CLASSIFICATION", "true")
-    get_settings.cache_clear()
-    one = await _export_size(_big_document(1))
-    per_entry = await _export_size(_big_document(2)) - one
-    count = 1 + (MAX_POLICY_BYTES - room - 1000 - one) // per_entry
-    description = "x" * (1 + MAX_POLICY_BYTES - room - await _export_size(_big_document(count)))
-    assert await _export_size(_big_document(count, description)) == MAX_POLICY_BYTES - room
-    monkeypatch.setenv("CUSTOM_POLICY", "true")
-    get_settings.cache_clear()
+    await _fill_to(monkeypatch, room)
     before = await _rows()
 
     text, answer = _round_trip(client)
@@ -367,4 +373,30 @@ async def test_a_file_near_the_size_limit_imports_its_export_with_no_change(
     assert await _rows() == before
     assert len(text.encode()) <= MAX_POLICY_BYTES
     assert _NOTE not in text
-    assert ("Shipped bindings in force: /MEHO-Readers (Readers)" in text) is short
+    assert ("Shipped bindings in force:\n# - /MEHO-Readers (Readers)\n" in text) is short
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switches", [_CUSTOM], ids=["custom"], indirect=True)
+async def test_the_short_note_writes_an_odd_group_name_so_the_export_imports_again(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    switches: bool,
+) -> None:
+    # A group name with a `#`, a quote, a colon and a line break.
+    monkeypatch.setenv("JWT_ROLE_GROUPS", "MEHO-Readers,Net#1: 'a'\nb-Operators")
+    await _fill_to(monkeypatch, 400)
+    before = await _rows()
+
+    text, answer = _round_trip(client)
+
+    _assert_no_change(answer)
+    assert await _rows() == before
+    assert _NOTE not in text
+    note = text[text.index("# No bindings are stored") :]
+    assert note.startswith(
+        "# No bindings are stored for this tenant. Shipped bindings in force:\n"
+        "# - /MEHO-Readers (Readers)\n"
+    )
+    assert "Net#1: ''a''" in note
+    assert all(line.startswith("# ") or line == "#" for line in note.splitlines())

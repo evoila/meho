@@ -181,8 +181,9 @@ What `meho policy export` writes for a tenant (`export_policy` in
   no comment, so the file imports again with "No change." and stores no
   binding (`test_api_v1_policy_export_bindings.py`). When the block
   would make the file larger than the import accepts
-  (`MAX_POLICY_BYTES`), the comment is one line with the shipped groups
-  and their kinds. When even that line does not fit, the file has no
+  (`MAX_POLICY_BYTES`), the comment is a short list of the shipped groups
+  and their kinds, one per line, written by the same YAML writer as the
+  full block. When even that list does not fit, the file has no
   comment: it must import again.
 - The tenant has no stored bindings and the switch is off: no `bindings`
   part and no comment, as before.

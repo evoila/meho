@@ -755,9 +755,10 @@ def _shipped_bindings_note(shipped: list[dict[str, Any]], *, room: int) -> str:
 
     The import reads no comment, so the file stores no binding and the
     tenant keeps the shipped bindings. When the block needs more than
-    *room* bytes, the file would be too large to import again; then one
-    short line names the shipped groups and their kinds. When even that
-    line does not fit, the file has no note: it must import again.
+    *room* bytes, the file would be too large to import again; then a
+    short list names the shipped groups and their kinds, one per line,
+    written like the full block. When even that list does not fit, the file
+    has no note: it must import again.
     """
     if not shipped:
         return ""
@@ -769,8 +770,11 @@ def _shipped_bindings_note(shipped: list[dict[str, Any]], *, room: int) -> str:
     full = "".join(f"# {line}\n" for line in lines)
     if len(full.encode()) <= room:
         return full
-    groups = ", ".join(f"{b['match']['group']} ({b['kind']})" for b in shipped)
-    short = f"# No bindings are stored for this tenant. Shipped bindings in force: {groups}\n"
+    groups = _dump([f"{b['match']['group']} ({b['kind']})" for b in shipped]).splitlines()
+    short = "".join(
+        f"# {line}\n"
+        for line in ["No bindings are stored for this tenant. Shipped bindings in force:", *groups]
+    )
     return short if len(short.encode()) <= room else ""
 
 

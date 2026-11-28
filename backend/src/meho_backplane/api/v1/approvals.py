@@ -777,11 +777,15 @@ def _proposed_effect_for(operator: Operator, row: ApprovalRequest) -> dict[str, 
     of ``k8s.apply`` stay out. Every other card
     is the stored one, without the person-only keys for a caller that is not
     a person (:func:`without_person_only_effect_keys`). No caller reads the
-    internal keys (:func:`without_internal_effect_keys`). The parts of a card
-    that only a platform admin reads stay out for every other caller
+    internal keys (:func:`without_internal_effect_keys`). The view of the op
+    and the parts that only a platform admin reads shape the card for its
+    reader in one step
     (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
     """
-    return card_for_reader(row.op_id, _effect_for_kind(operator, row), reader=operator)
+    effect = _effect_for_kind(operator, row)
+    whole = _reads_whole_card(operator)
+    shown: dict[str, Any] = card_for_reader(row.op_id, effect, reader=operator, whole=whole)
+    return shown
 
 
 def _effect_for_kind(operator: Operator, row: ApprovalRequest) -> dict[str, Any]:

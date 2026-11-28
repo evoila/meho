@@ -2382,7 +2382,7 @@
           "policy"
         ],
         "summary": "History",
-        "description": "The imported policy files of *scope*, newest first (MEHO keeps the last 20).",
+        "description": "The imported policy files of *scope*, newest first (MEHO keeps the last 20).\n\nEach entry's ``diff`` reads as an approval card's plan\n(:func:`~meho_backplane.connectors.policy.apply_card.diff_as_read`): a\nperson gets each role's whole list, every other caller the short form.",
         "operationId": "history_api_v1_policy_history_get",
         "parameters": [
           {

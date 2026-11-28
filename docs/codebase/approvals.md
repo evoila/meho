@@ -3550,7 +3550,10 @@ The per-op preview is opt-in via a builder registry in
   (`operations/platform_admin_card.py`, core only) names the parts of a
   card that only a platform admin who is a person reads, in a call of
   their own. Every view of a stored card passes it through
-  `card_for_reader`: the REST approvals API, the MCP tools
+  `card_for_reader`, which first runs the op's card view when it has one
+  (`register_card_view(op_id, view)`, in the same module: the view gets
+  the effect and whether the reader gets the whole card). The views are
+  the REST approvals API, the MCP tools
   `meho_approvals_get` and `meho_approvals_list`, and the console pages.
   Every other reader gets the card as the filter gives it back. So does
   a call that runs with an acting agent (`actor_delegation`, for example

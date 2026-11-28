@@ -70,6 +70,8 @@ from meho_backplane.operations.deny_reasons import POLICY_DENIED
 from meho_backplane.operations.secondary_target_policy import approved_agent_requester
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 
 __all__ = [
@@ -320,7 +322,12 @@ def _step_refusal_text(reason: str) -> str:
 
 
 async def approved_step_refusal_now(
-    *, operator: Operator, descriptor: EndpointDescriptor, connector_id: str, target: Any
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    connector_id: str,
+    target: Any,
+    level_rows: Sequence[EndpointDescriptor] = (),
 ) -> str | None:
     """Why the approved step of a multi-step operation may not run now, or ``None``.
 
@@ -330,7 +337,10 @@ async def approved_step_refusal_now(
 
     * **The risk level**, for every requester: the level stamped on the
       step's approval card is compared with the step's level now
-      (:func:`_risk_refusal`).
+      (:func:`_risk_refusal`). The level of each of *level_rows* counts
+      too: with ``CUSTOM_POLICY`` on, the step gate passes the rows of
+      :func:`~meho_backplane.operations.run_step_rules.step_rule_rows`,
+      which carry the stored level of the step's operation.
     * **The grants of the agent that asked**, and of the acting agent of a
       hosted run: a ``deny`` grant, or no grant while
       ``AGENT_GRANT_REQUIRED`` is ``on``, refuses the step.
@@ -339,10 +349,12 @@ async def approved_step_refusal_now(
     from meho_backplane.operations._preview_steps import agent_acts
     from meho_backplane.operations._validate import policy_gate
 
-    risk = await _risk_refusal(_approved_run_var.get(), descriptor)
-    if risk is not None:
-        _log.info("approved_step_needs_new_approval", op_id=descriptor.op_id, reason=risk)
-        return _step_refusal_text(f"{POLICY_DENIED}: {risk}")
+    run = _approved_run_var.get()
+    for row in (descriptor, *level_rows):
+        risk = await _risk_refusal(run, row)
+        if risk is not None:
+            _log.info("approved_step_needs_new_approval", op_id=descriptor.op_id, reason=risk)
+            return _step_refusal_text(f"{POLICY_DENIED}: {risk}")
     who: tuple[Operator, Any] | str | None
     if agent_acts(operator):
         who = operator, nullcontext()

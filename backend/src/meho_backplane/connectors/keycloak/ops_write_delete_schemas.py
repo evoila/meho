@@ -251,7 +251,10 @@ DELETE_WRITE_OPS: tuple[KeycloakOp, ...] = (
     KeycloakOp(
         op_id="keycloak.realm.delete",
         handler_attr="realm_delete",
-        summary="Delete a whole Keycloak realm (destructive, a second person must approve).",
+        summary=(
+            "Delete a whole Keycloak realm (destructive). "
+            "Approval cannot be turned off for this operation."
+        ),
         description=(
             "DELETEs ``/admin/realms/{realm}``. Every user, client, group and "
             "session in the realm goes with it. ``realm`` is required; the op "

@@ -3297,6 +3297,10 @@
           "extras": {
             "type": "object"
           },
+          "extras_changes": {
+            "minProperties": 1,
+            "type": "object"
+          },
           "flight_recorder_capture": {
             "type": [
               "boolean",
@@ -3401,6 +3405,18 @@
         "oneOf": [
           {
             "properties": {
+              "extras_keys_removed": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "extras_keys_set": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "host": {
                 "type": "string"
               },

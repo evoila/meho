@@ -482,7 +482,9 @@ on any deployment that uses credential-write operations:
    that Secret, then run `helm upgrade`.
 
 Check it with `GET /ready`: `features.approval_custody.custody` reads
-`configured`, `missing` or `malformed`. `helm install` and `helm upgrade`
+`configured`, `missing` or `malformed`. With `metricsAuth.enabled` on (the
+default), `/ready` shows this only to a caller that sends the metrics token;
+the command is in the part "The approval hand-off key" of the install guide. `helm install` and `helm upgrade`
 also print a warning while the block is off. Full steps, the pipe-in Secret
 command and key rotation:
 [Credential-write execution custody](codebase/approvals.md#required-set-the-custody-key-3712).

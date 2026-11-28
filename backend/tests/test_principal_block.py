@@ -1027,12 +1027,14 @@ async def test_a_failed_block_or_unblock_logs_no_login_or_reason(
             "log_level": "warning",
             "operation": "block",
             "error_type": "OperationalError",
+            "error_code": "none",
         },
         {
             "event": "principal_unblock_write_failed",
             "log_level": "warning",
             "operation": "unblock",
             "error_type": "OperationalError",
+            "error_code": "none",
         },
     ]
     assert private not in repr(logs)

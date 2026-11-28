@@ -65,6 +65,7 @@ from meho_backplane.connectors.vault.ops_identity_oidc_schemas import (
     VAULT_IDENTITY_OIDC_ROLE_READ_PARAMETER_SCHEMA,
     VAULT_IDENTITY_OIDC_ROLE_READ_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 
@@ -191,7 +192,7 @@ async def vault_identity_oidc_role_read(
     ``client.secrets.identity.read_role(name=...)`` and returns the
     unwrapped ``data`` dict (``key``, ``client_id``, ``ttl``, ``template``).
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_role, name=name)
     return _extract_data(payload)
@@ -206,7 +207,7 @@ async def vault_identity_oidc_role_delete(
     ``client.secrets.identity.delete_role(name=...)``. Deleting a missing
     role succeeds in Vault.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.secrets.identity.delete_role, name=name)
     return {"name": name, "deleted": True}
@@ -238,7 +239,7 @@ async def vault_identity_oidc_key_read(
     ``client.secrets.identity.read_named_key(name=...)`` and returns the
     unwrapped ``data`` dict. Vault never returns the private key.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.secrets.identity.read_named_key, name=name)
     return _extract_data(payload)
@@ -254,7 +255,7 @@ async def vault_identity_oidc_key_delete(
     refuses because the key is still in use, raises
     :class:`VaultOidcKeyInUseError` naming what uses it.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(client.secrets.identity.delete_named_key, name=name)

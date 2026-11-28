@@ -25,7 +25,7 @@ __all__ = [
 _USERNAME_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "pattern": "^(?!\\.{1,2}$)[^/\\s]+$",
+    "pattern": r"^(?!\.{1,2}$)[^/\s?#%\\\x00-\x1f\x7f]+$",
     "description": (
         "userpass username (no mount prefix, no '/'). The login must exist on the mount."
     ),

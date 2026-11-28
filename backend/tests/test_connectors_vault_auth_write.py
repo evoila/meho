@@ -153,7 +153,7 @@ async def test_write_ops_register_with_approval_and_expected_safety(
     """Each op registers requires_approval=True with the stated safety level."""
     expected_safety = {
         "vault.auth.userpass.write": "dangerous",
-        "vault.auth.userpass.update_password": "caution",
+        "vault.auth.userpass.update_password": "dangerous",
         "vault.auth.userpass.delete": "dangerous",
         "vault.auth.approle.write": "dangerous",
         "vault.auth.approle.delete": "dangerous",

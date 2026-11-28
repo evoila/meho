@@ -73,6 +73,7 @@ import hvac.exceptions
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vault.path_params import NAME, NAME_PATTERN, path_param
 
 __all__ = [
     "VAULT_SYS_AUTH_ENABLE_LLM_INSTRUCTIONS",
@@ -105,7 +106,7 @@ __all__ = [
 #: about *where* a dangerous mount lands.
 _MOUNT_PATH_PROPERTY: dict[str, Any] = {
     "type": "string",
-    "pattern": r"^(?=.*\S)[^/]+$",
+    "pattern": NAME_PATTERN,
     "description": (
         "The mount path (a flat handle, no slashes, e.g. 'userpass' or "
         "'kv-prod'). This is where the method/engine is mounted; it need "
@@ -429,7 +430,7 @@ async def vault_sys_auth_enable(
         Any other error hvac raises from the enable.
     """
     method_type: str = str(params["method_type"]).strip()
-    path: str = str(params["path"]).strip()
+    path: str = path_param(params, "path", NAME)
     description: str | None = params.get("description")
     async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
@@ -470,7 +471,7 @@ async def vault_sys_mounts_enable(
         Any other error hvac raises from the enable.
     """
     backend_type: str = str(params["backend_type"]).strip()
-    path: str = str(params["path"]).strip()
+    path: str = path_param(params, "path", NAME)
     description: str | None = params.get("description")
     async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
@@ -507,7 +508,7 @@ async def vault_sys_auth_tune(
         Any error hvac raises from the tune (e.g. a 400 for a path that
         is not an enabled auth method).
     """
-    path: str = str(params["path"]).strip()
+    path: str = path_param(params, "path", NAME)
     kwargs = _tune_kwargs(params)
     async with _auth_vault.vault_client_for_operator(operator) as client:
         await asyncio.to_thread(client.sys.tune_auth_method, path=path, **kwargs)
@@ -530,7 +531,7 @@ async def vault_sys_mounts_tune(
     Exception
         Any error hvac raises from the tune.
     """
-    path: str = str(params["path"]).strip()
+    path: str = path_param(params, "path", NAME)
     kwargs = _tune_kwargs(params)
     async with _auth_vault.vault_client_for_operator(operator) as client:
         await asyncio.to_thread(client.sys.tune_mount_configuration, path=path, **kwargs)

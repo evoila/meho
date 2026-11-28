@@ -46,6 +46,7 @@ from meho_backplane.connectors.vault.ops_userpass_lifecycle_schemas import (
     VAULT_AUTH_USERPASS_ENABLE_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_STATE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import MOUNT, NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -63,14 +64,9 @@ class VaultUserpassUserNotFoundError(Exception):
 
 
 def _clean_inputs(params: dict[str, Any]) -> tuple[str, str]:
-    """Return ``(username, mount)`` and refuse a value that could change a URL path."""
-    username = str(params["username"]).strip()
-    mount = str(params.get("mount", "userpass")).strip().strip("/")
-    if not username or "/" in username or username in (".", ".."):
-        raise ValueError("username must not be empty or contain '/'")
-    if not mount or any(part in ("", ".", "..") for part in mount.split("/")):
-        raise ValueError("mount must be a plain mount path such as 'userpass'")
-    return username, mount
+    """Return ``(username, mount)``; refuse a value that is not one plain path value."""
+    username = path_param(params, "username", NAME)
+    return username, path_param(params, "mount", MOUNT, default="userpass")
 
 
 def _mount_accessor(client: Any, mount: str) -> str:

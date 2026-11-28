@@ -367,7 +367,7 @@ target registration) is documented in
   | op_id | hvac call | safety_level | op_class (broadcast) |
   |---|---|---|---|
   | `vault.auth.userpass.write` | `create_or_update_user` | dangerous | `credential_write` |
-  | `vault.auth.userpass.update_password` | `update_password_on_user` | caution | `credential_write` |
+  | `vault.auth.userpass.update_password` | `update_password_on_user` | dangerous | `credential_write` |
   | `vault.auth.userpass.delete` | `delete_user` | dangerous | `write` |
   | `vault.auth.approle.write` | `create_or_update_approle` | dangerous | `write` |
   | `vault.auth.approle.delete` | `delete_role` | dangerous | `write` |
@@ -1007,6 +1007,10 @@ would over-match the `credential_read`-allowlisted `vault.kv.read`), and
 the policy-read param is only the policy name, so the `other` full-param
 broadcast is the consistent, safe direction (same rationale as the
 `vault.auth.*.read` auth-config ops).
+
+## Names and mounts in a Vault path
+
+A name that a Vault operation puts into a Vault path (for example `username`, `role_name`, `name`, `entity_id`, or the `path` of `vault.sys.auth.enable`) is one plain part: no `/`, not `.` or `..`, and no `?`, `#`, `%`, backslash or control character; a `mount` is one or more such parts split by `/` (for example `team-a/userpass`), with no empty part. The one list of these values is `VAULT_PATH_PARAMS` in `connectors/vault/path_params.py`: each listed operation refuses a bad value as `invalid_params` before an approval request is stored and before any request to Vault, its schema carries the same rule as a `pattern`, and `tests/test_connectors_vault_path_params.py` fails for a Vault operation with a name-like parameter that is in neither this list nor `VAULT_NAME_PARAMS_NOT_IN_PATH`.
 
 ## Approval gating
 

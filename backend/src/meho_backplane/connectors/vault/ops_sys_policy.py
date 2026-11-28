@@ -55,6 +55,7 @@ from typing import Any
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops import vault_capability_preflight
+from meho_backplane.connectors.vault.path_params import NAME, NAME_PATTERN, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 
@@ -89,7 +90,7 @@ __all__ = [
 #: rejects a slash-bearing name (Vault policy names are flat handles).
 _POLICY_NAME_PROPERTY: dict[str, Any] = {
     "type": "string",
-    "pattern": r"^(?=.*\S)[^/]+$",
+    "pattern": NAME_PATTERN,
     "description": (
         "The ACL policy name (a flat handle, e.g. 'meho-mcp'). Vault "
         "lower-cases policy names server-side."
@@ -343,7 +344,7 @@ async def vault_sys_policy_read(
     Exception
         Any error hvac raises from the policy read.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         response = await asyncio.to_thread(client.sys.read_policy, name=name)
         return {"name": name, "rules": _extract_rules(response)}
@@ -391,7 +392,7 @@ async def vault_sys_policy_write(
         Any error hvac raises from the policy write (e.g. a malformed
         HCL body Vault rejects with a 400).
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     policy: str = params["policy"]
     async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(
@@ -419,7 +420,7 @@ async def vault_sys_policy_delete(
     Exception
         Any error hvac raises from the policy delete.
     """
-    name: str = str(params["name"]).strip()
+    name: str = path_param(params, "name", NAME)
     async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(client.sys.delete_policy, name=name)
         return {"name": name, "deleted": True}

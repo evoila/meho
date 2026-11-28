@@ -557,7 +557,7 @@
   {"class": "other", "connector_id": "vault-1.x", "needs_approval": true, "never_covered": null, "op_id": "vault.auth.userpass.enable", "risk_level": "dangerous"},
   {"class": "read", "connector_id": "vault-1.x", "needs_approval": false, "never_covered": null, "op_id": "vault.auth.userpass.list", "risk_level": "safe"},
   {"class": "other", "connector_id": "vault-1.x", "needs_approval": false, "never_covered": null, "op_id": "vault.auth.userpass.read", "risk_level": "safe"},
-  {"class": "credential_write", "connector_id": "vault-1.x", "needs_approval": true, "never_covered": "credential", "op_id": "vault.auth.userpass.update_password", "risk_level": "caution"},
+  {"class": "credential_write", "connector_id": "vault-1.x", "needs_approval": true, "never_covered": "credential", "op_id": "vault.auth.userpass.update_password", "risk_level": "dangerous"},
   {"class": "credential_write", "connector_id": "vault-1.x", "needs_approval": true, "never_covered": "credential", "op_id": "vault.auth.userpass.write", "risk_level": "dangerous"},
   {"class": "other", "connector_id": "vault-1.x", "needs_approval": false, "never_covered": null, "op_id": "vault.identity.entity.read", "risk_level": "safe"},
   {"class": "write", "connector_id": "vault-1.x", "needs_approval": true, "never_covered": null, "op_id": "vault.identity.entity.write", "risk_level": "dangerous"},

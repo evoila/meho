@@ -79,6 +79,7 @@ from meho_backplane.connectors.vault.ops_auth_jwt_schemas import (
     VAULT_AUTH_JWT_ROLE_WRITE_RESPONSE_SCHEMA,
     VAULT_AUTH_JWT_WRITE_NOTE,
 )
+from meho_backplane.connectors.vault.path_params import MOUNT, NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -117,7 +118,7 @@ _DEFAULT_MOUNT = "jwt"
 
 
 def _mount(params: dict[str, Any]) -> str:
-    return str(params.get("mount") or _DEFAULT_MOUNT).strip()
+    return path_param(params, "mount", MOUNT, default=_DEFAULT_MOUNT)
 
 
 def _role_auth_path(mount: str, role_name: str) -> str:
@@ -146,7 +147,7 @@ async def vault_auth_jwt_role_read(
     An unknown role or mount surfaces as :class:`hvac.exceptions.InvalidPath`,
     which the dispatcher turns into a ``connector_error``.
     """
-    path = _role_auth_path(_mount(params), str(params["role_name"]).strip())
+    path = _role_auth_path(_mount(params), path_param(params, "role_name", NAME))
     async with vault_client_for_target(operator, target) as client:
         payload = await asyncio.to_thread(client.adapter.get, f"/v1/{path}")
     return _extract_data(payload)
@@ -164,7 +165,7 @@ async def vault_auth_jwt_role_write(
     that only new logins get the change.
     """
     mount = _mount(params)
-    role_name = str(params["role_name"]).strip()
+    role_name = path_param(params, "role_name", NAME)
     api_path = f"/v1/{_role_auth_path(mount, role_name)}"
     settings: dict[str, Any] = {
         field: params[field]

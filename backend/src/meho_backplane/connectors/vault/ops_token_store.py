@@ -88,6 +88,7 @@ from meho_backplane.connectors.vault.ops_token_store_schemas import (
     VAULT_TOKEN_CREATE_AND_STORE_PARAMETER_SCHEMA,
     VAULT_TOKEN_CREATE_AND_STORE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.path_params import NAME, path_param
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.connectors.vault.tenant_scope import (
     VaultTenantScopeError,
@@ -367,7 +368,7 @@ async def _mint(operator: Operator, target: Any, params: Mapping[str, Any]) -> _
     (shielded from cancellation), because the caller's clean-up only starts
     after this function returns.
     """
-    role_name = params.get("role_name")
+    role_name = path_param(params, "role_name", NAME) if params.get("role_name") else None
     kwargs = _create_kwargs(params)
     minted: _Minted | None = None
     try:

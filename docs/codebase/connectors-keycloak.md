@@ -346,9 +346,12 @@ for these fields. This covers every admin read
 that goes through the recorded `_get_admin_json` path: the curated read
 ops, and the client reads inside `keycloak.client.update`, the client
 delete lookup and the realm delete. An empty answer is recorded as it is; an
-answer that is not JSON is replaced by a fixed marker. The answer of the
-realm name check (the read of the realm before the name is compared) is
-replaced by the same marker. The shared trace
+answer that is not JSON is replaced by a fixed marker. A realm answer whose
+name MEHO has not checked yet is replaced by the same marker: the realm name
+check (the read of the realm before the name is compared), and the three
+realm reads of `keycloak.authflow.ensure_passkey_code_skip`. A read is marked
+this way with `managed_realm_check.unchecked_realm_answer()`; the hook asks
+`realm_answer_unchecked()`. The shared trace
 engine (`docs/codebase/redaction.md`) still runs on what the hook returns
 and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
@@ -2060,6 +2063,16 @@ managed realm:
    top, write the full realm back (`ops_write_merge.merge_representation`),
    and read it again. A `browserFlow` that does not read back is
    `check_failed`.
+
+Each of the three realm reads (step 1, before the bind, after the bind) must
+answer with exactly the managed realm (`check_answered_realm`). The trace
+stores none of their answers (see the trace mask above). When another realm
+answers before the bind, the error is `realm_changed`; after the bind, it is
+`check_failed`. Both texts say what this call did to the flow:
+"MEHO has written flow 'browser with passkeys' with the step" when the call
+copied the flow or wrote one of its steps, and "Flow 'browser with passkeys'
+with the step was in place; MEHO did not change it" when it wrote nothing to
+the flow. The rest of the text says whether the bind was sent.
 
 The result is `{realm, previous_browser_flow, browser_flow, changed,
 flow_copied, step_added, binding_changed, unrequested_changes, flow_steps}`.

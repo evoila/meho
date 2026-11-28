@@ -257,7 +257,7 @@ def test_an_mcp_call_writes_the_tool_name_the_client_sent(
             "params": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": f"{_TOOL} ", "version": "1.0"},
+                "clientInfo": {"name": _TOOL + "\u2028", "version": "1.0"},
             },
         },
     )
@@ -431,28 +431,46 @@ async def test_a_row_under_a_system_name_writes_system(
     assert (await _system_row(sub)).caller_kind is None
 
 
+_RAW_INSERT = re.compile(r"INSERT\s+INTO\s+audit_log", re.IGNORECASE)
+
+
+def _core_inserts(source: str) -> list[int]:
+    """The lines of *source* that write ``audit_log`` without an ``AuditLog`` object."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if _RAW_INSERT.search(node.value):
+                lines.append(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr == "__table__":
+            if ast.unparse(node.value) == "AuditLog":
+                lines.append(node.lineno)
+        elif (
+            isinstance(node, ast.Call)
+            and ast.unparse(node.func).split(".")[-1] == "insert"
+            and [ast.unparse(arg) for arg in node.args[:1]] == ["AuditLog"]
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
+def test_the_scan_finds_each_core_insert() -> None:
+    for line in (
+        "stmt = sa.insert(AuditLog).values(operator_sub='system:x')",
+        "stmt = AuditLog.__table__.insert()",
+        "text('INSERT INTO audit_log (id) VALUES (:id)')",
+    ):
+        assert _core_inserts(line) == [1], line
+
+
 def test_every_audit_row_is_built_as_an_audit_log_object() -> None:
     """The kind of a ``system`` row is set when its ``AuditLog`` is built.
 
-    A Core insert into ``audit_log`` would build no object, so such a row
-    would get no kind. No source file may write one.
+    A Core insert into ``audit_log`` builds no object, so such a row would
+    get no kind. No source file may write one.
     """
-    core_insert = re.compile(
-        r"insert\(\s*AuditLog\b|AuditLog\.__table__|INSERT\s+INTO\s+audit_log", re.IGNORECASE
-    )
-    found = []
-    for path in sorted(_SRC.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if core_insert.search(node.value):
-                    found.append(f"{path.relative_to(_SRC)}:{node.lineno}")
-            elif isinstance(node, ast.Call) and core_insert.search(ast.unparse(node.func) + "("):
-                found.append(f"{path.relative_to(_SRC)}:{node.lineno}")
-            elif (
-                isinstance(node, ast.Call)
-                and ast.unparse(node.func).endswith("insert")
-                and node.args
-                and ast.unparse(node.args[0]) == "AuditLog"
-            ):
-                found.append(f"{path.relative_to(_SRC)}:{node.lineno}")
+    found = [
+        f"{path.relative_to(_SRC)}:{line}"
+        for path in sorted(_SRC.rglob("*.py"))
+        for line in _core_inserts(path.read_text(encoding="utf-8"))
+    ]
     assert found == []

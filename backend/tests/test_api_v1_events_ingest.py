@@ -655,6 +655,25 @@ async def test_accepted_event_publishes_outbox_and_audit(client: TestClient) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("switch", "kind"), [("true", "system"), ("false", None)])
+async def test_the_intake_row_has_the_kind_of_its_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, switch: str, kind: str | None
+) -> None:
+    """With ``CUSTOM_POLICY`` on, the intake row is MEHO's own: ``system``."""
+    monkeypatch.setenv("CUSTOM_POLICY", switch)
+    get_settings.cache_clear()
+    await _seed_source()
+    body = json.dumps({"type": "alert"}).encode()
+    resp = client.post("/api/v1/events/ingest/prod-am", content=body, headers=_signed(body))
+    assert resp.status_code == 202, resp.text
+
+    async with get_sessionmaker()() as session:
+        query = select(AuditLog).where(AuditLog.method == "INGEST")
+        (audit,) = (await session.execute(query)).scalars().all()
+    assert (audit.operator_sub, audit.caller_kind) == ("__ingest__", kind)
+
+
+@pytest.mark.asyncio
 async def test_duplicate_delivery_is_idempotent_200(client: TestClient) -> None:
     await _seed_source()
     body = json.dumps({"type": "alert"}).encode()

@@ -152,3 +152,9 @@ Every operation call writes an audit row
   starts and the caller has chosen a tenant. The row holds the name and
   version that the tool sends about itself. They are empty when the tool
   sends none.
+- With the setting `CUSTOM_POLICY` on, the audit row names the kind of
+  caller in `caller_kind`: `person`, `personal_agent`, `service_agent`,
+  `runner` or `system` (MEHO's own work). The row of a personal agent
+  also has the block `caller`: the login client (`azp`) and, in an MCP
+  session, the tool name. The tool name is what the tool reports about
+  itself. A waiting request and its approval card name the kind too.

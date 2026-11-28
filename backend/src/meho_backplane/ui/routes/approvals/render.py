@@ -286,20 +286,17 @@ def caller_line(row: ApprovalRequest, reader: Operator | None) -> str | None:
     if not caller_record_on():
         return None
     kind = (row.proposed_effect or {}).get(CALLER_KIND_KEY)
+    if kind == "personal_agent" and reader is not None and reader.sub == row.principal_sub:
+        return "Your personal agent asked."
     who = row.principal_name or row.principal_sub
-    if kind == "personal_agent":
-        if reader is not None and reader.sub == row.principal_sub:
-            return "Your personal agent asked."
-        return f"The personal agent of {who} asked."
-    if kind == "service_agent":
-        return f"The service agent {row.principal_act or row.principal_sub} asked."
-    if kind == "person":
-        return f"{who} asked in the web console."
-    if kind == "runner":
-        return f"The runner {row.principal_sub} asked."
-    if kind == "system":
-        return "MEHO itself asked."
-    return None
+    lines = {
+        "personal_agent": f"The personal agent of {who} asked.",
+        "service_agent": f"The service agent {row.principal_act or row.principal_sub} asked.",
+        "person": f"{who} asked in the web console.",
+        "runner": f"The runner {row.principal_sub} asked.",
+        "system": "MEHO itself asked.",
+    }
+    return lines.get(kind) if isinstance(kind, str) else None
 
 
 def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:

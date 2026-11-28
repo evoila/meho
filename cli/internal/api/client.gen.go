@@ -2445,6 +2445,8 @@ type AuditClassCountsRequest struct {
 //     “None“ when nobody acted for another login.
 //   - “actor_name“ — the agent's name, read from “actor_sub“
 //     (“agent:<name>“). “None“ when “actor_sub“ is not of that form.
+//   - “caller_kind“ ← “audit_log.caller_kind“ (the kind of caller,
+//     “CUSTOM_POLICY“). Left out of the answer when the row has none.
 //   - “broadcast_event_id“ — v0.2 placeholder, always None (FK direction
 //     is reversed: “BroadcastEvent.audit_id“ points at the audit row).
 type AuditEntry struct {
@@ -2452,6 +2454,7 @@ type AuditEntry struct {
 	ActorSub         *string                `json:"actor_sub"`
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	CallerKind       *string                `json:"caller_kind"`
 	DurationMs       *string                `json:"duration_ms"`
 	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
@@ -2488,6 +2491,7 @@ type AuditEntryDetail struct {
 	ActorSub         *string                `json:"actor_sub"`
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	CallerKind       *string                `json:"caller_kind"`
 	DurationMs       *string                `json:"duration_ms"`
 	EventClass       string                 `json:"event_class"`
 	Id               openapi_types.UUID     `json:"id"`
@@ -9856,6 +9860,7 @@ type ReplayNode struct {
 	ActorSub         *string                `json:"actor_sub"`
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	CallerKind       *string                `json:"caller_kind"`
 	Children         *[]ReplayNode          `json:"children,omitempty"`
 	Depth            int                    `json:"depth"`
 	DurationMs       *string                `json:"duration_ms"`

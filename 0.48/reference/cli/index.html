@@ -21373,7 +21373,7 @@
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit raw JSON instead of the human summary</li>
-<li><code>--reason</code> — why the person is blocked (required)</li>
+<li><code>--reason</code> — why the person is blocked: 1 to 500 characters, at least one that is not a blank (required)</li>
 </ul>
 <h3 id="meho-principal-blocked"><code>meho principal blocked</code><a class="headerlink" href="#meho-principal-blocked" title="Permanent link">&para;</a></h3>
 <p>List the blocked people (tenant_admin)</p>
@@ -21390,7 +21390,7 @@
 <ul>
 <li><code>--backplane</code> — backplane URL (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
 <li><code>--json</code> — emit raw JSON instead of the human summary</li>
-<li><code>--reason</code> — why the block is removed (required on your own login; kept in the audit log)</li>
+<li><code>--reason</code> — why the block is removed: 1 to 500 characters, at least one that is not a blank (required on your own login; kept in the audit log)</li>
 </ul>
 <h2 id="meho-promote"><code>meho promote</code><a class="headerlink" href="#meho-promote" title="Permanent link">&para;</a></h2>
 <p>Promote one memory to a strictly broader scope (POST /api/v1/memory/{scope}/{slug}/promote)</p>

@@ -5738,7 +5738,8 @@ admin removes a block in every tenant.</p>
 <li>A platform admin whom a tenant admin blocked can remove that block on
   their own login: <code>meho principal unblock &lt;sub&gt; --reason "&lt;why&gt;"</code>. MEHO
   first asks for a fresh sign-in in the browser. The audit log keeps the
-  reason and the sign-in.</li>
+  reason and the sign-in.
+  A proxy in front of MEHO must pass the body of a DELETE call: <code>meho principal unblock</code> sends the reason in it.</li>
 <li>The way back uses the approval sign-in client of the login server
   (<code>meho-cli-approve</code> in MEHO's own setup). An install without that
   client has no way back; another platform admin or a tenant admin of

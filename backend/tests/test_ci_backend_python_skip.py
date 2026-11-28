@@ -6,7 +6,9 @@
 A pull request that changes no file under ``backend/`` (apart from ``.md``
 files) and does not change ``ci.yml`` skips the heavy Python lanes. It runs
 only the backend tests that read files outside ``backend/``, in the job
-``python-outside-backend``. push and merge_group always run everything.
+``python-outside-backend``. The merge queue reads the diff of the whole
+group the same way (``test_ci_integration_in_merge_queue.py``); the nightly
+run always runs everything.
 
 These tests run the real step scripts, taken from the workflow file: the
 ``changes`` detector inside a small git repository, and the
@@ -29,7 +31,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
-_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard", "python-integration-shard")
+_SKIPPED_ON_NO_BACKEND = ("python-lint", "python-unit-shard")
 
 
 def _jobs() -> dict[str, Any]:
@@ -79,6 +81,8 @@ def _detect(
     *,
     tool_dir: Path | None = None,
     runner_temp: Path | None = None,
+    later: list[str] | None = None,
+    queue_base: str | None = None,
 ) -> dict[str, str]:
     """Run the detect step and return its outputs.
 
@@ -88,6 +92,10 @@ def _detect(
     ``runner_temp`` is where the step writes its list of changed files; the
     default is a folder under ``tmp_path``. The repository holds the real
     connector selection tool, which the step runs after the classifiers.
+    ``later`` adds one more commit after ``changed``, as a second pull
+    request in a merge queue group does. ``queue_base`` is the base commit
+    of a merge queue group: ``"base"`` stands for the first commit, any
+    other text is passed as is.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -98,11 +106,16 @@ def _detect(
     tool.write_text((_REPO_ROOT / _CONNECTOR_SELECT).read_text())
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
-    if changed is not None:
-        for name in changed:
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    for commit in (changed, later):
+        if commit is None:
+            continue
+        for name in commit:
             path = repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("changed\n")
+            path.write_text(f"changed {len(commit)}\n")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "change")
 
@@ -116,6 +129,8 @@ def _detect(
         runner_temp = tmp_path / "runner-temp"
         runner_temp.mkdir()
     env = {"PATH": search_path, "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(runner_temp)}
+    if queue_base is not None:
+        env["QUEUE_BASE_SHA"] = base_sha if queue_base == "base" else queue_base
     result = _bash(script, repo, env)
     assert result.returncode == 0, result.stdout + result.stderr
     return dict(line.split("=", 1) for line in output.read_text().splitlines())
@@ -170,11 +185,17 @@ def test_docs_only_pull_request_is_also_no_backend(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("event", ["push", "merge_group"])
-def test_push_and_merge_group_always_run_everything(tmp_path: Path, event: str) -> None:
+@pytest.mark.parametrize("event", ["schedule", "merge_group"])
+def test_nightly_and_merge_group_without_a_base_run_everything(tmp_path: Path, event: str) -> None:
+    # merge_group here has no base commit of the group: the full run.
     outputs = _detect(tmp_path, event, ["cli/main.go"])
     assert outputs["backend_python"] == "true"
     assert outputs["docs_only"] == "false"
+
+
+def test_nightly_run_ignores_a_base_commit(tmp_path: Path) -> None:
+    outputs = _detect(tmp_path, "schedule", ["docs/x.md"], queue_base="base")
+    assert outputs == _FULL_RUN
 
 
 def test_unknown_diff_runs_everything(tmp_path: Path) -> None:
@@ -563,44 +584,3 @@ def test_fork_fan_in_fails_when_the_detector_did_not_pass(tmp_path: Path) -> Non
     )
     assert result.returncode != 0
     assert summary == ""
-
-
-# --- The `python-integration` fan-in -----------------------------------------
-
-
-def _integration_fan_in(
-    tmp_path: Path, *, docs_only: str, backend_python: str, shards: str
-) -> subprocess.CompletedProcess[str]:
-    script = _step_script("python-integration", name="Assert every integration shard passed")
-    assert "${{" not in script
-    values = {
-        "CHANGES_RESULT": "success",
-        "CHANGES_DOCS_ONLY": docs_only,
-        "CHANGES_BACKEND_PYTHON": backend_python,
-        "SHARDS_RESULT": shards,
-    }
-    return _bash(script, tmp_path, {"PATH": "/usr/bin:/bin", **values})
-
-
-@pytest.mark.parametrize(
-    ("docs_only", "backend_python", "shards", "passes"),
-    [
-        # No-backend path: the shards skip; the merge queue runs them.
-        ("false", "false", "skipped", True),
-        ("false", "false", "failure", False),
-        ("false", "false", "cancelled", False),
-        # Full run: the shards must pass.
-        ("false", "true", "success", True),
-        ("false", "true", "skipped", False),
-        ("false", "", "skipped", False),
-        # Docs-only: the shards skip.
-        ("true", "false", "skipped", True),
-    ],
-)
-def test_integration_fan_in_result(
-    tmp_path: Path, docs_only: str, backend_python: str, shards: str, passes: bool
-) -> None:
-    result = _integration_fan_in(
-        tmp_path, docs_only=docs_only, backend_python=backend_python, shards=shards
-    )
-    assert (result.returncode == 0) is passes, result.stdout + result.stderr

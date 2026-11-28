@@ -1,18 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The manifest of a ``k8s.apply`` preview, with the hiding of the approval card.
+"""The manifest of a ``k8s.apply`` preview holds only the identity of each document.
 
 Each preview goes through ``preview_dispatch``, the REST route
 ``POST /api/v1/operations/preview`` or the MCP tool ``preview_operation``,
 over the stand-in Kubernetes API server of
 ``test_k8s_apply_card_through_dispatch``. Each value is made up at run time.
 
-* A Secret ``stringData`` value, a Secret ``data`` value and a Deployment
-  ``env`` value are in no field of the answer.
-* ``redacted_body.manifest`` equals the ``manifest`` of the approval card for
-  the same manifest: the same fields and the same hidden marks.
-* Both hold with the ``PREVIEW_TYPED_WRITES`` switch off and on.
+* ``redacted_body.manifest`` is one entry per document with its kind,
+  namespace and name only. No value and no key of the documents is in any
+  field of the answer.
+* A name that looks like a secret is the marker in its entry.
+* A small manifest whose YAML aliases name one list many times gives its
+  preview fast and with little memory.
+* All three hold with the ``PREVIEW_TYPED_WRITES`` switch off and on.
+* The stored approval card of a call that waits hides a value that the
+  value-shape engine knows by its key and value together, and shows the
+  key names of a Secret with one large value.
 """
 
 from __future__ import annotations
@@ -31,12 +36,9 @@ import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from multidict import CIMultiDict
 
 from meho_backplane.api.v1 import operations as operations_api
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.kubernetes import ops_write_dangerous
-from meho_backplane.connectors.kubernetes.ops_write_preview import MANIFEST_ECHO_MAX_BYTES
 from meho_backplane.mcp.handlers import handle_tools_call
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import meta_tools
@@ -167,33 +169,115 @@ def _preview(path: str, manifest: str) -> tuple[dict[str, Any], str]:
     return _through_dispatch(manifest)
 
 
+def _identity_shape(entries: list[dict[str, Any]]) -> None:
+    """Each entry holds ``kind`` and ``metadata`` with ``namespace`` and ``name``, nothing else."""
+    for entry in entries:
+        assert set(entry) <= {"kind", "metadata"}, entry
+        assert set(entry["metadata"]) <= {"namespace", "name"}, entry
+
+
+def _jwt_shape() -> str:
+    return "eyJ" + secrets.token_hex(8) + ".eyJ" + secrets.token_hex(8) + "." + secrets.token_hex(8)
+
+
+def _forms(value: str) -> tuple[str, ...]:
+    """*value* as text, in base64 and JSON-escaped."""
+    return (value, base64.b64encode(value.encode()).decode(), json.dumps(value)[1:-1])
+
+
+def _four_documents(made_up: dict[str, str]) -> str:
+    """A Secret, a Deployment and a ConfigMap, each holding values of *made_up*."""
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "db", "namespace": "prod"},
+        "stringData": {made_up["string_key"]: made_up["string_value"]},
+        "data": {made_up["data_key"]: base64.b64encode(made_up["data_value"].encode()).decode()},
+    }
+    deployment = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "web", "namespace": "prod"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "web",
+                            "image": "nginx:1.27",
+                            "env": [{"name": made_up["env_key"], "value": made_up["env_value"]}],
+                        }
+                    ]
+                }
+            },
+        },
+    }
+    config_map = (
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: prod\n"
+        f"data:\n  Authorization: Basic {made_up['basic']}\n  {made_up['jwt_key']}: x\n"
+    )
+    namespace = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: team-b\n"
+    return "---\n".join([yaml.safe_dump_all([secret, deployment]), config_map, namespace])
+
+
 @pytest.mark.parametrize("path", _PATHS)
 @pytest.mark.usefixtures("_typed_writes")
-def test_the_preview_hides_manifest_values_as_the_approval_card(
+def test_the_preview_shows_only_the_identity_of_each_document(
     monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
     _setup(monkeypatch, _StandInServer())
     _resolve_to_stand_in(monkeypatch)
-    note, data_value, env_value = _made_up(), _made_up(), _made_up()
-    manifest = _secret_and_deployment(note, data_value, env_value)
-    data_b64 = base64.b64encode(data_value.encode()).decode()
+    made_up = {
+        "string_key": _made_up(),
+        "string_value": _made_up(),
+        "data_key": _made_up(),
+        "data_value": _made_up(),
+        "env_key": "E" + secrets.token_hex(6).upper(),
+        "env_value": _made_up(),
+        "basic": _basic_value(),
+        "jwt_key": _jwt_shape(),
+    }
+    manifest = _four_documents(made_up)
 
     answer, text = _preview(path, manifest)
 
     assert answer["status"] == "ok", answer
-    for value in (note, data_value, data_b64, env_value):
-        assert value not in text
+    for value in made_up.values():
+        for form in _forms(value):
+            assert form not in text
     shown = answer["redacted_body"]["manifest"]
-    secret, deployment = shown
-    assert secret["metadata"] == {"name": "db", "namespace": "prod"}
-    assert deployment["spec"]["replicas"] == 2
+    _identity_shape(shown)
+    assert shown == [
+        {"kind": "Secret", "metadata": {"namespace": "prod", "name": "db"}},
+        {"kind": "Deployment", "metadata": {"namespace": "prod", "name": "web"}},
+        {"kind": "ConfigMap", "metadata": {"namespace": "prod", "name": "cfg"}},
+        {"kind": "Namespace", "metadata": {"name": "team-b"}},
+    ]
 
-    card = _park(_login("person-token"), manifest).proposed_effect
-    assert shown == card["preview"]["manifest"]
+
+@pytest.mark.parametrize("path", _PATHS)
+@pytest.mark.usefixtures("_typed_writes")
+def test_a_name_that_looks_like_a_secret_is_hidden_in_its_entry(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    _resolve_to_stand_in(monkeypatch)
+    name = _jwt_shape()
+    manifest = f"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {name}\n  namespace: prod\n"
+
+    answer, text = _preview(path, manifest)
+
+    for form in _forms(name):
+        assert form not in text
+    shown = answer["redacted_body"]["manifest"]
+    _identity_shape(shown)
+    assert shown[0]["kind"] == "ConfigMap"
+    assert shown[0]["metadata"]["namespace"] == "prod"
+    assert shown[0]["metadata"]["name"] != name
+    assert "REDACTED" in shown[0]["metadata"]["name"]
 
 
 def test_a_manifest_that_cannot_be_read_shows_only_the_marker() -> None:
-    from types import SimpleNamespace
 
     from meho_backplane.operations._preview import _PARAM_REDACTED, PreviewContext
 
@@ -241,54 +325,6 @@ _PAIR_CASES: dict[str, Any] = {
 }
 
 
-@pytest.mark.parametrize("path", ["preview_dispatch", "mcp"])
-@pytest.mark.parametrize("case", sorted(_PAIR_CASES))
-def test_a_value_known_by_its_key_is_hidden_in_the_preview_and_the_card(
-    monkeypatch: pytest.MonkeyPatch, path: str, case: str
-) -> None:
-    _setup(monkeypatch, _StandInServer())
-    _resolve_to_stand_in(monkeypatch)
-    value = _key_ring_value() if "key-ring" in case else _basic_value()
-    manifest = _PAIR_CASES[case](value)
-    forms = (value, base64.b64encode(value.encode()).decode(), json.dumps(value)[1:-1])
-
-    answer, text = _preview(path, manifest)
-    card = _park(_login("person-token"), manifest).proposed_effect
-
-    assert answer["status"] == "ok", answer
-    card_text = json.dumps(card, default=str)
-    for form in forms:
-        assert form not in text
-        assert form not in card_text
-    shown = answer["redacted_body"]["manifest"]
-    assert shown == card["preview"]["manifest"]
-    assert shown[0]["kind"] in {"ConfigMap", "Probe", "Store"}
-
-
-@pytest.mark.parametrize("path", ["preview_dispatch", "mcp"])
-def test_an_ordinary_config_map_value_shows_in_the_preview_and_the_card(
-    monkeypatch: pytest.MonkeyPatch, path: str
-) -> None:
-    _setup(monkeypatch, _StandInServer())
-    _resolve_to_stand_in(monkeypatch)
-    plain = _made_up()
-    manifest = _config_map(f"data:\n  mode: {plain}\n")
-
-    answer, _text = _preview(path, manifest)
-    card = _park(_login("person-token"), manifest).proposed_effect
-
-    shown = answer["redacted_body"]["manifest"]
-    assert shown == card["preview"]["manifest"]
-    assert shown == [
-        {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "cfg", "namespace": "prod"},
-            "data": {"mode": plain},
-        }
-    ]
-
-
 def _alias_manifest(levels: int) -> str:
     """A ConfigMap of under 600 bytes whose aliases name one list 10**levels times."""
     lines = [
@@ -316,46 +352,81 @@ def _timed(run: Any) -> tuple[Any, float, int]:
         tracemalloc.stop()
 
 
-def _send_identity_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Answer each dry run with the object's identity, without sending the document.
-
-    So the test measures how MEHO builds the preview and the card, not how
-    the Kubernetes client writes a large document to the stand-in server.
-    """
-
-    async def _send(_dyn: Any, _resource: Any, doc: dict[str, Any], **_: Any) -> tuple[Any, str]:
-        metadata = doc.get("metadata") or {}
-        identity = {key: metadata.get(key) for key in ("name", "namespace")}
-        body = {"apiVersion": doc.get("apiVersion"), "kind": doc.get("kind"), "metadata": identity}
-        return SimpleNamespace(status=200, headers=CIMultiDict()), json.dumps(body)
-
-    monkeypatch.setattr(ops_write_dangerous, "_send_apply", _send)
-
-
 @pytest.mark.parametrize("levels", [6, 7])
-def test_an_alias_manifest_gives_a_small_preview_and_card_fast(
+@pytest.mark.usefixtures("_typed_writes")
+def test_an_alias_manifest_gives_its_preview_fast(
     monkeypatch: pytest.MonkeyPatch, levels: int
 ) -> None:
     _setup(monkeypatch, _StandInServer())
-    _send_identity_only(monkeypatch)
+    _resolve_to_stand_in(monkeypatch)
     manifest = _alias_manifest(levels)
     assert len(manifest) < 600
-    # The first call that waits sets up the database; it is not measured.
-    _park(_login("person-token"), _config_map("data:\n  a: b\n"))
-    (answer, _text), preview_seconds, preview_peak = _timed(lambda: _through_dispatch(manifest))
-    row, card_seconds, card_peak = _timed(lambda: _park(_login("person-token"), manifest))
 
-    assert preview_seconds < 5
-    assert preview_peak < 50 * 1024 * 1024
-    assert card_seconds < 5
-    assert card_peak < 50 * 1024 * 1024
-    for shown in (answer["redacted_body"]["manifest"], row.proposed_effect["preview"]["manifest"]):
-        assert len(json.dumps(shown).encode()) <= MANIFEST_ECHO_MAX_BYTES
-        assert shown == [
-            {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {"name": "a", "namespace": "prod"},
-                "echo_omitted": shown[0]["echo_omitted"],
-            }
-        ]
+    (answer, _text), seconds, peak = _timed(lambda: _through_dispatch(manifest))
+
+    assert seconds < 5
+    assert peak < 50 * 1024 * 1024
+    assert answer["redacted_body"]["manifest"] == [
+        {"kind": "ConfigMap", "metadata": {"namespace": "prod", "name": "a"}}
+    ]
+
+
+@pytest.mark.parametrize("case", sorted(_PAIR_CASES))
+def test_the_card_hides_a_value_known_by_its_key(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    value = _key_ring_value() if "key-ring" in case else _basic_value()
+
+    card = _park(_login("person-token"), _PAIR_CASES[case](value)).proposed_effect
+
+    card_text = json.dumps(card, default=str)
+    for form in _forms(value):
+        assert form not in card_text
+    assert card["preview"]["manifest"][0]["kind"] in {"ConfigMap", "Probe", "Store"}
+
+
+def test_an_ordinary_config_map_value_shows_on_the_card(monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup(monkeypatch, _StandInServer())
+    plain = _made_up()
+
+    card = _park(_login("person-token"), _config_map(f"data:\n  mode: {plain}\n")).proposed_effect
+
+    assert card["preview"]["manifest"] == [
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {"name": "cfg", "namespace": "prod"},
+            "data": {"mode": plain},
+        }
+    ]
+
+
+def test_the_card_of_a_secret_with_one_large_value_shows_its_key_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _setup(monkeypatch, _StandInServer())
+    big, user, host = "qv" + secrets.token_hex(10_000) + "x", _made_up(), _made_up()
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "db", "namespace": "prod"},
+        "stringData": {"big": big, "user": user, "host": host},
+    }
+
+    card = _park(_login("person-token"), yaml.safe_dump(secret)).proposed_effect
+
+    card_text = json.dumps(card, default=str)
+    for value in (big[:40], user, host):
+        assert value not in card_text
+    shown = card["preview"]["manifest"][0]
+    assert "echo_omitted" not in shown
+    assert sorted(shown["stringData"]) == ["big", "host", "user"]
+    assert all(
+        isinstance(item, str) and item != value
+        for item, value in zip(
+            (shown["stringData"][key] for key in ("big", "user", "host")),
+            (big, user, host),
+            strict=True,
+        )
+    )

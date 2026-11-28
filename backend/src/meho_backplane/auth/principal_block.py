@@ -95,6 +95,7 @@ __all__ = [
     "is_principal_blocked",
     "list_blocked",
     "raise_if_send_refused",
+    "reason_is_valid",
     "refusal_of_step",
     "reset_block_cache",
     "unblock_principal",
@@ -115,6 +116,15 @@ _REST_ROUTE: Final[str] = "/api/v1/principals/blocked"
 
 #: Longest reason an admin can type.
 REASON_MAX_LENGTH: Final[int] = 500
+
+
+def reason_is_valid(reason: str) -> bool:
+    """A reason has 1 to ``REASON_MAX_LENGTH`` characters, one of them not a blank.
+
+    A blank is a space, a tab or a line break. The block and the unblock
+    use this one rule.
+    """
+    return 1 <= len(reason) <= REASON_MAX_LENGTH and bool(reason.strip())
 
 
 class PrincipalBlockUnavailableError(Exception):

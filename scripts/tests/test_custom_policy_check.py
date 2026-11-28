@@ -334,7 +334,7 @@ class SwitchOffBaselineTest(DryRunTestCase):
 OPERATOR_DELETE_PROBE = PROBE_KEYS.index("6 PERSON_TOKEN DELETE token") + 1
 OWN_APPROVAL_SKIP = (
     "[skip] check 7 (the owner's own approval of the request of check 10, web console and "
-    "command line): not run: waits for #7132"
+    "command line): not run: MEHO's explain answer says it only while the switch is on"
 )
 
 
@@ -1954,10 +1954,11 @@ class DocsPageTest(unittest.TestCase):
             "Exit code 0 needs the three open parts of check 11",
             "#7073",
             "the two parts of check 8 that need the write rule's own reason (#6966)",
-            "the owner's own approval in check 7 (#7132)",
-            "Check 7 does not compare whether the owner may approve their own request until "
-            "#7132 is merged",
+            "not run: MEHO's explain answer says it only while the switch is on`. "
+            "Check 7 runs with the switch off. With the switch off, MEHO's explain answer "
+            "does not say whether the owner may approve their own request.",
             "Check 10 tests it while the switch is on.",
+            "The `[skip]` line of check 7 for the owner's own approval prints in every run",
             "MEHO never gives the first request of check 10 back for its second call.",
             "Check 10 makes its second call only when it read the state of its first "
             "request (HTTP 200) and that state is not `pending`.",

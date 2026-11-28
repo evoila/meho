@@ -148,6 +148,10 @@ async def dispatch_targets_write(
 
     exception_class = result.extras.get("exception_class")
     message = str(result.extras.get("exception_message") or result.error or f"{op_id} failed")
+    # Each entry names the field and the rule, never the sent value.
+    problems = result.extras.get("validation_errors") or []
+    if problems:
+        message += ": " + "; ".join(f"{e.get('path')}: {e.get('expected')}" for e in problems)
     if (
         exception_class in _TARGETS_WRITE_INVALID_PARAM_EXCEPTIONS
         or result.extras.get("error_code") == "invalid_params"

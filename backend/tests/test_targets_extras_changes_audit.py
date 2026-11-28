@@ -13,8 +13,8 @@
 * A realm warning in the answer of an ``extras_changes`` call names the key
   ``managed_realm``, never the realm.
 * The instruction text names every field of the answer.
-* A run that the request model refuses names the field and the rule, never
-  a sent value.
+* A call that the request model refuses is refused before it waits, and
+  names the field and the rule, never a sent value.
 
 Every test value is made up at run time.
 """
@@ -443,7 +443,7 @@ async def test_a_full_extras_answer_keeps_the_realm_in_its_warning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A run that the request model refuses names the field and the rule only
+# A call that the request model refuses names the field and the rule only
 # ---------------------------------------------------------------------------
 
 
@@ -457,7 +457,7 @@ def _too_deep(value: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("case", ["too-deep-map", "other-model-rule"])
-async def test_a_run_the_model_refuses_holds_no_sent_value(client: TestClient, case: str) -> None:
+async def test_a_call_the_model_refuses_holds_no_sent_value(case: str) -> None:
     row = await _insert_target(name=_NAME, extras={"a": 1})
     # Short, so that a shortened copy of the input would still hold it whole.
     made = f"v{secrets.token_hex(4)}"
@@ -472,27 +472,21 @@ async def test_a_run_the_model_refuses_holds_no_sent_value(client: TestClient, c
         }
         reason = "tls_ca_pin and verify_tls=false are mutually exclusive"
 
-    waiting = await dispatch(
+    result = await dispatch(
         operator=_operator("admin-1"),
         connector_id=TARGETS_REGISTRY_CONNECTOR_ID,
         op_id=TARGETS_UPDATE_OP_ID,
         target=None,
         params={"target_id": str(row.id), **fields},
     )
-    assert waiting.status == "awaiting_approval", waiting
-    [request] = await _requests()
-    request_id = str(request.id)
-    result = await _approve_and_run(request.id)
-    assert result.status != "ok", result
-    assert await _extras(row.id) == {"a": 1}
 
-    answer = _call(client, "GET", f"/api/v1/approvals/{request_id}/result")
-    assert answer.status_code == 200, answer.text
-    [request] = await _requests()
-    rows = await _audit_rows()
-    assert rows
-    audit_text = " ".join(_columns(r) for r in rows)
-    for place in (repr(result), answer.text, repr(request.resume_result), audit_text):
+    # Refused at once: no approval request is stored and nothing changes.
+    assert result.status == "error", result
+    assert result.extras["error_code"] == "invalid_params", result
+    assert await _requests() == []
+    assert await _extras(row.id) == {"a": 1}
+    audit_text = " ".join(_columns(r) for r in await _audit_rows())
+    for place in (repr(result), audit_text):
         assert made not in place
     assert reason in repr(result)
     if case == "too-deep-map":

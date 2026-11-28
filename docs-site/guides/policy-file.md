@@ -423,8 +423,11 @@ refused, and the message names the entry and the operation.
   every operation whose level the entry lowers, also those of connectors
   with a version, each with its connector, up to five; it says how many
   more there are. It gives a fix for every one of them, also those past
-  the five, and each fix only once. So when you follow the whole message,
-  the file passes the check.
+  the five, and each fix only once. A file has at most 2,000 entries.
+  When the new entries would not fit, the message suggests one entry for
+  each connector instead. Such an entry raises every operation of its
+  connector that the refused entry matches. So when you follow the whole
+  message, the file passes the check.
 - Which install values make **every** call wait: `always_wait: true` and
   `risk: destructive`. With `risk: dangerous`, a call waits too, but
   two things can still let it run without a new approval: a standing

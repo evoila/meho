@@ -55,6 +55,7 @@ __all__ = [
     "DEFAULT_TAXONOMY",
     "LABEL_KEY_MAX",
     "LABEL_VALUE_MAX",
+    "MAX_CLASSIFICATIONS",
     "RISK_LEVELS",
     "Classification",
     "ClassificationConflictError",
@@ -89,6 +90,9 @@ _LABEL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 #: The longest label key and label value, in characters.
 LABEL_KEY_MAX: Final[int] = 63
 LABEL_VALUE_MAX: Final[int] = 255
+
+#: The most entries one policy file may have.
+MAX_CLASSIFICATIONS: Final[int] = 2000
 
 #: The rule reference of an operation that no entry matches.
 DEFAULT_RULE_REF: Final[str] = "taxonomy.default"
@@ -550,9 +554,9 @@ def _product_risk_text(
     It names each operation whose install level *entry* lowers, of every
     connector, each with its connector: up to :data:`_MAX_NAMED_OPS` of
     them, and how many more there are. It gives a fix for every one of
-    them, one per match (:func:`_lowered_by_match`). For each it says to
-    set ``risk`` on the tenant entry that already matches exactly that
-    operation (:func:`_exact_entry`), or it suggests a new entry. It
+    them (:func:`_fix_text`): ``risk`` on the tenant entry that already
+    matches exactly that operation (:func:`_exact_entry`), or a new
+    entry, each fix once. It
     suggests a change of *entry* only when *entry* matches that one
     operation alone, because *entry* can also match the operation of
     another product that shares the form with the dash. ``None`` when
@@ -584,8 +588,12 @@ def _product_risk_text(
         entry.matches(o) and _match_key(o, with_group=with_group) != key for o in coords
     )
     if len(lowered) == 1 and alone:
-        return f"{head} Set `risk: {level}` or higher in this entry; its other fields can stay."
-    return f"{head} This entry can stay. {_fix_text(entry, lowered, entries)}"
+        return f"{head} {_SET_RISK_HERE.format(level=level)}"
+    return f"{head} {_fix_text(entry, found, entries)}"
+
+
+#: The fix that raises the level of the refused entry itself.
+_SET_RISK_HERE = "Set `risk: {level}` or higher in this entry; its other fields can stay."
 
 
 def _match_key(one: OpCoordinates, *, with_group: bool) -> tuple[str, str, str | None]:
@@ -599,7 +607,7 @@ def _lowered_by_match(
     """*found* with one row per match, each at the highest level that match needs.
 
     Two rows of one operation (a built-in row and the tenant's own) have
-    the same match, and a suggested entry for each would repeat it.
+    the same match, and the sentence names the operation once.
     """
     by_key: dict[tuple[str, str, str | None], tuple[OpCoordinates, str, str]] = {}
     for one, ref, level in found:
@@ -610,31 +618,109 @@ def _lowered_by_match(
     return list(by_key.values())
 
 
+def _higher(levels: dict[Any, str], key: Any, level: str) -> None:
+    """Keep the higher of *level* and the level already at *key*."""
+    if RISK_LEVELS.index(level) > _risk_index(levels.get(key)):
+        levels[key] = level
+
+
 def _fix_text(
     entry: ClassificationEntry,
-    lowered: Sequence[tuple[OpCoordinates, str, str]],
+    found: Sequence[tuple[OpCoordinates, str, str]],
     entries: Sequence[ClassificationEntry],
 ) -> str:
-    """The fix for each lowered operation: ``risk`` on the exact entry, else a new entry."""
+    """The fix for each lowered row: ``risk`` on its exact entry, else a new entry.
+
+    Rows with the same fix get one fix, at the highest level they need:
+    the same exact entry, or the same match of a new entry. Two rows of
+    one operation in different groups can each have their own exact
+    entry. When the new entries do not fit into the file
+    (:data:`MAX_CLASSIFICATIONS`), the fix is one entry per connector
+    (:func:`_per_connector`), else a higher level in *entry* itself.
+    """
     with_group = entry.group is not None
     on_entry: dict[str, str] = {}
-    new: list[str] = []
-    for one, _, level in lowered:
+    new_level: dict[tuple[str, str, str | None], str] = {}
+    new_one: dict[tuple[str, str, str | None], OpCoordinates] = {}
+    for one, _, level in found:
         exact = _exact_entry(entry, one, entries, with_group=with_group)
-        if exact is None:
-            new.append(f"`{_entry_text(one, level, with_group=with_group)}`")
+        if exact is not None:
+            _higher(on_entry, exact.ref.removeprefix("tenant:"), level)
             continue
-        ref = exact.ref.removeprefix("tenant:")
-        if RISK_LEVELS.index(level) > _risk_index(on_entry.get(ref)):
-            on_entry[ref] = level
-    texts = [
+        key = _match_key(one, with_group=with_group)
+        new_one.setdefault(key, one)
+        _higher(new_level, key, level)
+    new = [
+        _entry_text(new_one[key], level, with_group=with_group) for key, level in new_level.items()
+    ]
+    what = "a tenant entry" if len(new) == 1 else "a tenant entry for each operation"
+    per_connector_text = ""
+    room = MAX_CLASSIFICATIONS - _file_size(entries)
+    if len(new) > room:
+        per_connector = _per_connector(entry, new_one, new_level, entries)
+        if per_connector is None or len(per_connector[1]) > room:
+            top = max((level for _, _, level in found), key=RISK_LEVELS.index)
+            raised = "This also raises the other operations it matches."
+            return f"{_SET_RISK_HERE.format(level=top)} {raised}"
+        more, new = per_connector
+        for ref, level in more.items():
+            _higher(on_entry, ref, level)
+        what, it = (
+            ("a tenant entry", "It") if len(new) == 1 else ("these tenant entries", "Each one")
+        )
+        per_connector_text = (
+            f" {it} raises every operation of its connector that this entry matches."
+        )
+    fixes = [
         f"Set `risk: {level}` or higher on `{ref}`; its other fields can stay."
         for ref, level in on_entry.items()
     ]
     if new:
-        what = "a tenant entry" if len(new) == 1 else "a tenant entry for each operation"
-        texts.append(f"Add {what}, with this risk level or higher: {', '.join(new)}.")
-    return " ".join(texts)
+        listed = ", ".join(f"`{t}`" for t in new)
+        fixes.append(f"Add {what}, with this risk level or higher: {listed}.{per_connector_text}")
+    return " ".join(["This entry can stay.", *fixes])
+
+
+def _file_size(entries: Sequence[ClassificationEntry]) -> int:
+    """How many entries the tenant's file has."""
+    return len({e.ref for e in entries if e.ref.startswith("tenant:classifications[")})
+
+
+def _per_connector(
+    entry: ClassificationEntry,
+    new_one: Mapping[tuple[str, str, str | None], OpCoordinates],
+    new_level: Mapping[tuple[str, str, str | None], str],
+    entries: Sequence[ClassificationEntry],
+) -> tuple[dict[str, str], list[str]] | None:
+    """The new entries of :func:`_fix_text` as one entry per connector.
+
+    Each has the match of *entry* with the connector's own id, so it is
+    more specific than *entry*. Returns ``(set risk on these file
+    entries, new entries)``: a file entry with exactly that match gets
+    the level instead of a new entry. ``None`` when *entry* already names
+    one of these connectors exactly: the entry would repeat its match.
+    """
+    by_connector: dict[str, str] = {}
+    for key, level in new_level.items():
+        _higher(by_connector, new_one[key].connector_id, level)
+    if entry.connector in by_connector:
+        return None
+    on_entry: dict[str, str] = {}
+    new: list[str] = []
+    for connector, level in by_connector.items():
+        match = {"connector": connector, "group": entry.group, "op": entry.op}
+        same = [
+            e
+            for e in entries
+            if e is not entry
+            and e.ref.startswith("tenant:classifications[")
+            and (e.connector, e.group, e.op) == (connector, entry.group, entry.op)
+        ]
+        if same:
+            on_entry[same[0].ref.removeprefix("tenant:")] = level
+            continue
+        new.append(_match_text(match, level))
+    return on_entry, new
 
 
 def _exact_entry(
@@ -666,14 +752,21 @@ def _exact_entry(
 
 
 def _entry_text(coords: OpCoordinates, level: str, *, with_group: bool) -> str:
-    """A tenant entry for the one operation at *coords*, in the form of the policy file.
+    """A tenant entry for the one operation at *coords*, in the form of the policy file."""
+    group = coords.group_key if with_group else None
+    return _match_text(
+        {"connector": coords.connector_id, "group": group, "op": coords.op_id}, level
+    )
+
+
+def _match_text(match: Mapping[str, str | None], level: str) -> str:
+    """A tenant entry with *match* (its ``None`` values left out) and *level*.
 
     Each value is quoted (as JSON text, which YAML reads), so an op id
     with ``{``, ``}``, ``:`` or ``/`` parses as written.
     """
-    group = f"group: {_quoted(coords.group_key)}, " if with_group and coords.group_key else ""
-    connector, op = _quoted(coords.connector_id), _quoted(coords.op_id)
-    return f"{{match: {{connector: {connector}, {group}op: {op}}}, risk: {_quoted(level)}}}"
+    fields = ", ".join(f"{k}: {_quoted(v)}" for k, v in match.items() if v)
+    return f"{{match: {{{fields}}}, risk: {_quoted(level)}}}"
 
 
 def _quoted(value: str) -> str:

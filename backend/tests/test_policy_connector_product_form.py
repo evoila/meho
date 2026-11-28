@@ -45,6 +45,7 @@ from meho_backplane.db.models import (
 from meho_backplane.main import app
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.classification import MAX_CLASSIFICATIONS
 from meho_backplane.policy.store import classify_rows
 from meho_backplane.settings import get_settings
 
@@ -1018,8 +1019,14 @@ async def test_the_suggested_fix_passes_the_check_as_written(
         )
 
 
-async def _copy_for_the_tenant(product: str, op_id: str) -> None:
-    """A tenant's own row of the built-in operation *op_id* of *product*."""
+async def _copy_for_the_tenant(
+    product: str, op_id: str, *, changes: dict[str, Any] | None = None, copies: int = 1
+) -> None:
+    """Rows like the built-in operation *op_id* of *product*: the tenant's own, by default.
+
+    *changes* are column values for each copy, and the copy number
+    replaces ``{n}`` in a text value.
+    """
     async with get_sessionmaker()() as session:
         built_in = (
             await session.execute(
@@ -1035,7 +1042,12 @@ async def _copy_for_the_tenant(product: str, op_id: str) -> None:
             for a in sa_inspect(EndpointDescriptor).column_attrs
             if a.key != "id"
         }
-        session.add(EndpointDescriptor(**{**fields, "tenant_id": TENANT}))
+        for n in range(copies):
+            own = {
+                k: v.format(n=n) if isinstance(v, str) else v
+                for k, v in (changes or {"tenant_id": TENANT}).items()
+            }
+            session.add(EndpointDescriptor(**{**fields, **own}))
         await session.commit()
 
 
@@ -1061,6 +1073,97 @@ async def test_one_fix_per_match_when_an_operation_has_two_rows(
     await _store_tenant_file(followed)
     for connector, level in (("cowx", "dangerous"), ("cowy", "caution"), (BULL, "dangerous")):
         assert _explain(client, key, connector, RUN)["risk_level"] == level, connector
+
+
+STORE_OP = "wild.disk.list"
+
+
+async def _register_bull_storage_op(embedding: AsyncMock) -> None:
+    """An operation of bullapi in the group ``storage``, so that group exists."""
+    await register_typed_operation(
+        product="bullapi",
+        version="1.x",
+        impl_id="bullapi",
+        op_id=STORE_OP,
+        handler=_handler,
+        summary="Fixture operation.",
+        description="Fixture operation.",
+        parameter_schema={"type": "object", "properties": {}},
+        group_key="storage",
+        when_to_use="Fixture group.",
+        safety_level="safe",
+        embedding_service=embedding,
+    )
+
+
+async def _group_id(op_id: str) -> uuid.UUID | None:
+    async with get_sessionmaker()() as session:
+        return (
+            await session.execute(
+                select(EndpointDescriptor.group_id).where(EndpointDescriptor.op_id == op_id)
+            )
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_each_group_entry_gets_its_own_fix_when_two_rows_differ_in_group(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    for product in PRODUCTS:
+        await _register_op(embedding, product, "", RUN)
+    await _register_op(embedding, "bullapi", "1.x", RUN)
+    await _register_bull_storage_op(embedding)
+    await _copy_for_the_tenant(
+        "bullapi", RUN, changes={"tenant_id": TENANT, "group_id": await _group_id(STORE_OP)}
+    )
+    await policy(None, [_BY_PRODUCT, _BULL_RUN])
+    key = make_rsa_keypair("kid-cpf-follow-two-groups")
+    tenant = [
+        _ALL_CAUTION,
+        {"match": {"connector": BULL, "group": "compute", "op": RUN}, "category": "network"},
+        {"match": {"connector": BULL, "group": "storage", "op": RUN}, "category": "storage"},
+    ]
+
+    sentence, followed = _refused_then_followed(client, key, "two-groups", tenant)
+
+    assert sentence == (
+        f"{_HEAD}{_sets('cowx')} and `install:classifications[1]` sets `{RUN}` of `{BULL}` to "
+        "`dangerous` for the whole install, so `risk: caution` does not count for them. This "
+        "entry can stay. Set `risk: dangerous` or higher on `classifications[1]`; its other "
+        "fields can stay. Set `risk: dangerous` or higher on `classifications[2]`; its other "
+        "fields can stay. Add a tenant entry, with this risk level or higher: "
+        f"{_suggested('cowx')}."
+    )
+    await _store_tenant_file(followed)
+    for connector, level in (("cowx", "dangerous"), ("cowy", "caution"), (BULL, "dangerous")):
+        assert _explain(client, key, connector, RUN)["risk_level"] == level, connector
+
+
+@pytest.mark.asyncio
+async def test_the_suggested_fix_fits_into_the_file_when_many_operations_are_lowered(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    for product in PRODUCTS:
+        await _register_op(embedding, product, "", RUN)
+    await _copy_for_the_tenant(
+        "cowx", RUN, changes={"op_id": RUN + "{n}", "path": "/run/{n}"}, copies=MAX_CLASSIFICATIONS
+    )
+    await policy(None, [{"match": {"connector": "cowx"}, "risk": "dangerous"}])
+    key = make_rsa_keypair("kid-cpf-follow-many")
+
+    sentence, followed = _refused_then_followed(client, key, "many", [_ALL_CAUTION])
+
+    assert f" and {MAX_CLASSIFICATIONS + 1 - 5} more operations for the whole install," in sentence
+    assert sentence.endswith(
+        "This entry can stay. Add a tenant entry, with this risk level or higher: "
+        '`{match: {connector: "cowx"}, risk: "dangerous"}`. It raises every operation of its '
+        "connector that this entry matches."
+    ), sentence
+    assert len(yaml.safe_load(followed)["classifications"]) == 2
+    await _store_tenant_file(followed)
+    for op_id in (RUN, RUN + "0", RUN + str(MAX_CLASSIFICATIONS - 1)):
+        assert _explain(client, key, "cowx", op_id)["risk_level"] == "dangerous", op_id
+    assert _explain(client, key, "cowy", RUN)["risk_level"] == "caution"
 
 
 SIX = tuple(f"wild.thing.run{n}" for n in range(1, 7))

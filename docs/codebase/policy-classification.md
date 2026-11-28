@@ -167,13 +167,20 @@ The rules are in `policy/classification.py` (`classify`, no database):
    entry lowers, also those of connectors with a version, each with its
    connector (a connector with no version by its product), up to five and
    a count of the rest. It gives a fix for every lowered operation, also
-   those past the five, and one fix per match (`_lowered_by_match`): two
-   rows of one operation, such as a built-in row and the tenant's own,
-   get one fix at the higher level. For each one it says to set `risk` on
-   the tenant's entry that already has exactly the match needed
+   those past the five (`_fix_text`). For each row it says to set `risk`
+   on the tenant's entry that already has exactly the match needed
    (`_exact_entry`), or it suggests a new entry for that connector, never
-   for the form with the dash. A suggested entry quotes each value (`_entry_text`), so it
-   parses as written. It suggests a change of the refused entry only when
+   for the form with the dash. Rows with the same fix get one fix, at the
+   higher level: the same exact entry, or the same match of a new entry.
+   So two rows of one operation (a built-in row and the tenant's own) get
+   one new entry, but when they are in two groups and each group has its
+   own entry, each of those entries gets its own fix. When the new entries
+   do not fit into the file (`MAX_CLASSIFICATIONS`, 2,000 entries), it
+   suggests one entry per connector instead (`_per_connector`): the
+   refused entry's match with the connector's own id. When even that does
+   not fit, or the refused entry already names that connector, it says to
+   raise the level of the refused entry itself. A suggested entry quotes
+   each value (`_entry_text`), so it parses as written. It suggests a change of the refused entry only when
    the entry matches that one operation alone, because two products
    share the form with the dash. The single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).

@@ -7,7 +7,9 @@ The rules: registration leaves out an operation that sets ``hard_to_undo`` on
 a ``safe`` level, and writes and deletes nothing for it; it refuses any word
 other than ``deletes``, ``stops`` and ``overwrites``; the stored row carries
 both values, for a typed and a multi-step operation; and each start writes
-them from the code again.
+them from the code again. An operation that sets ``changes_rights`` on a
+``safe`` level is left out the same way
+(``test_changes_rights_left_out_at_start.py``).
 """
 
 from __future__ import annotations

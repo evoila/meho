@@ -199,7 +199,7 @@ def async_pg_url() -> Iterator[str]:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:
             pytest.skip(
-                f"Docker Hub pull rate-limited for {image!r}; "
+                "Docker Hub pull rate-limited for the pgvector image; "
                 "set MEHO_TEST_PGVECTOR_IMAGE to a GHCR/Harbor mirror to fix"
             )
         raise

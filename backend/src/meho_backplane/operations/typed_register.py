@@ -1079,11 +1079,24 @@ def _hard_to_undo_on_safe(marks: _Marks) -> str | None:
     )
 
 
+def _changes_rights_on_safe(marks: _Marks) -> str | None:
+    if not marks.changes_rights or marks.safety_level != "safe":
+        return None
+    return (
+        "changes_rights=True on a 'safe' operation; a safe operation changes nothing, "
+        "so it cannot change rights. Give it a higher safety_level or leave "
+        "changes_rights out"
+    )
+
+
 #: The checks of an operation's marks against its risk level. Each returns
 #: why the marks do not fit, or ``None``. An operation that fails one is
 #: left out at registration (:func:`_left_out_for_misfit`), and the start
 #: goes on. A new check is one more entry here.
-_MARK_FIT_CHECKS: tuple[Callable[[_Marks], str | None], ...] = (_hard_to_undo_on_safe,)
+_MARK_FIT_CHECKS: tuple[Callable[[_Marks], str | None], ...] = (
+    _hard_to_undo_on_safe,
+    _changes_rights_on_safe,
+)
 
 
 def _left_out_for_misfit(
@@ -1506,7 +1519,8 @@ async def register_typed_operation(
         ``docs/codebase/policy-classification.md``.
     changes_rights
         ``True`` when a call gives or takes rights, a login or an access
-        policy in the target system. Default ``False``. Stored on the row.
+        policy in the target system. Default ``False``. Refused on a
+        ``safe`` op. Stored on the row.
     llm_instructions
         Optional structured agent guidance ("when to call",
         "parameter hints", "output format"). The agent prompt

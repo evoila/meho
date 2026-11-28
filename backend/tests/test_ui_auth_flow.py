@@ -550,14 +550,20 @@ def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatc
 
 
 def _console_login(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, key: Any = None
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    key: Any = None,
+    *,
+    name: str | None = "Alice",
 ) -> httpx.Response:
     """Run login then callback with a valid token; return the callback response.
 
     Pass the same ``key`` to log in twice: the key is cached by its key id.
+    ``name`` is the token's ``name`` claim; ``None`` leaves the claim out.
     """
     key = key or make_rsa_keypair("test-kid")
-    access_token, jwks = mint_token(key, sub="op-42", audience=DEFAULT_AUDIENCE), public_jwks(key)
+    access_token = mint_token(key, sub="op-42", audience=DEFAULT_AUDIENCE, name=name)
+    jwks = public_jwks(key)
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
         _patch_oauth_token_transport(
@@ -625,6 +631,37 @@ def test_console_login_twice_keeps_one_tenant_row_and_its_name(
     assert SESSION_COOKIE_NAME in second.cookies
 
     assert asyncio.run(_tenant_rows()) == [(f"tenant-{DEFAULT_TENANT_ID}", "Chosen Name")]
+
+
+async def _stored_display_name(cookie_value: str) -> tuple[bytes | None, str | None]:
+    """Return the row's ``display_name`` ciphertext and what it loads back as."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        raw = (
+            await session.execute(
+                select(WebSession.display_name).where(WebSession.id == uuid.UUID(cookie_value))
+            )
+        ).scalar_one()
+        loaded = await load_session(session, uuid.UUID(cookie_value))
+    assert loaded is not None
+    return raw, loaded.display_name
+
+
+def test_callback_stores_the_name_claim_encrypted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The login keeps the token's ``name`` for the user menu, encrypted."""
+    callback = _console_login(_https_client(), monkeypatch, name="Alice Example")
+    assert callback.status_code == 302
+    raw, loaded = asyncio.run(_stored_display_name(callback.cookies[SESSION_COOKIE_NAME]))
+    assert raw is not None
+    assert b"Alice" not in raw
+    assert loaded == "Alice Example"
+
+
+def test_callback_without_a_name_claim_stores_no_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``name`` claim, no name -- never the ``sub`` in its place."""
+    callback = _console_login(_https_client(), monkeypatch, name=None)
+    assert callback.status_code == 302
+    assert asyncio.run(_stored_display_name(callback.cookies[SESSION_COOKIE_NAME])) == (None, None)
 
 
 # Non-HTML ``Accept`` -- a scripted probe / htmx fragment fetch. The

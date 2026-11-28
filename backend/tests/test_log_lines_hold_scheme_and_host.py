@@ -229,6 +229,44 @@ def test_ingest_version_lines_hold_the_spec_source_only(
         _expect(events, event, "spec_source", [source], root_level=log_level, event_level=level)
 
 
+class _StopAfterLogError(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_ingest_op_allowlist_dropped_line_holds_scheme_and_host_only(
+    monkeypatch: pytest.MonkeyPatch, log_level: int, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from meho_backplane.operations.ingest import register_ingested
+    from meho_backplane.operations.ingest.op_allowlist import DroppedOp, OpAllowlistResult
+
+    def _drop_one(**_: object) -> OpAllowlistResult:
+        return OpAllowlistResult(kept=(), dropped=(DroppedOp(method="GET", path="/dropped"),))
+
+    def _stop(*_: object, **__: object) -> None:
+        raise _StopAfterLogError
+
+    monkeypatch.setattr(register_ingested, "apply_op_allowlist", _drop_one)
+    monkeypatch.setattr(register_ingested, "_prepare_ingested_operations", _stop)
+    parts = _parts()
+    capfd.readouterr()
+    with pytest.raises(_StopAfterLogError):
+        await register_ingested.register_ingested_operations(
+            product="acme",
+            version="1.0",
+            impl_id="acme-rest-1.0",
+            spec_source=_address("spec.example.test", parts),
+            operations=[],
+        )
+    _expect(
+        _read_lines(capfd, list(parts.values())),
+        "ingest_op_allowlist_dropped",
+        "spec_source",
+        ["https://spec.example.test"],
+        root_level=log_level,
+    )
+
+
 @pytest.mark.asyncio
 async def test_runner_started_line_holds_scheme_and_host_only(
     monkeypatch: pytest.MonkeyPatch, log_level: int, capfd: pytest.CaptureFixture[str]
@@ -362,10 +400,6 @@ _ALLOWED = {
     ("connectors/adapters/http.py", "connector_redirect_not_followed_cross_origin", "location"),
     # MEHO's own resource address template.
     ("mcp/registry.py", "mcp_resource_registered", "uri_template"),
-    # The short name of a spec that tags its rows, not an address.
-    ("operations/ingest/register_ingested.py", "ingest_op_allowlist_dropped", "spec_source"),
-    ("operations/ingest/register_ingested.py", "ingested_operation_upserted", "spec_source"),
-    ("operations/ingest/register_ingested.py", "ingested_operations_registered", "spec_source"),
 }
 
 

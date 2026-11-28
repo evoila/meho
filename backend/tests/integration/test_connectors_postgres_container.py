@@ -154,7 +154,10 @@ def pg_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     except _DockerAPIError as exc:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            pytest.skip(f"image pull rate-limited for {run.label}; set MEHO_TEST_POSTGRES_IMAGE")
+            reason = f"image pull rate-limited for {run.label}; set MEHO_TEST_POSTGRES_IMAGE"
+            if os.environ.get("GITHUB_ACTIONS"):
+                pytest.fail(reason)
+            pytest.skip(reason)
         raise
     try:
         coords = _Container(

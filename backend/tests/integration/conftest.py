@@ -193,15 +193,18 @@ def async_pg_url() -> Iterator[str]:
     except _DockerAPIError as exc:
         # Docker Hub rate-limit (429 / "too many requests") surfaces here
         # when CI runners exhaust the unauthenticated pull quota. Convert
-        # to a skip rather than a hard failure so the suite's pass/fail
-        # signal stays meaningful. Fix: set MEHO_TEST_PGVECTOR_IMAGE to a
+        # to a skip on a laptop. Under CI the test fails instead, so a
+        # missing image cannot hide. Fix: set MEHO_TEST_PGVECTOR_IMAGE to a
         # GHCR or Harbor mirror, or add Docker Hub credentials to CI.
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            pytest.skip(
+            reason = (
                 "Docker Hub pull rate-limited for the pgvector image; "
                 "set MEHO_TEST_PGVECTOR_IMAGE to a GHCR/Harbor mirror to fix"
             )
+            if os.environ.get("GITHUB_ACTIONS"):
+                pytest.fail(reason)
+            pytest.skip(reason)
         raise
     try:
         sync_url = pg.get_connection_url()
@@ -927,10 +930,14 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
         # socket missing) under a heterogeneous set of exceptions; the
         # only useful response is "skip with the class name and
         # message" so the suite stays diagnosable without enumerating
-        # every transitive docker.errors subtype. Mirrors the same
+        # every transitive docker.errors subtype. Under CI the test fails
+        # instead of skipping, so a missing image cannot hide. Mirrors the same
         # pattern in :func:`vault_dev_addr` of
         # :mod:`tests.integration.test_connectors_vault_dev_e2e`.
-        pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         # Quarkus logs ``started in <N>.<N>s. Listening on: http://...:8080``

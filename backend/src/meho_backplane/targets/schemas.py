@@ -63,6 +63,7 @@ from pydantic import (
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.targets.extras_limits import check_extras_size
 from meho_backplane.targets.field_rules import check_target_host, check_target_name
+from meho_backplane.targets.keycloak_realm_warnings import shown_fingerprint
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
 if TYPE_CHECKING:
@@ -216,6 +217,11 @@ class TargetSummary(BaseModel):
     updated_at: datetime
     deleted_at: datetime | None = None
 
+    @field_validator("fingerprint")
+    @classmethod
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
+
 
 class TargetListResponse(BaseModel):
     """Unified list envelope for ``GET /api/v1/targets``.
@@ -355,6 +361,11 @@ class Target(BaseModel):
     # observed the target through an audit-history surface, not a
     # live registry probe.
     deleted_at: datetime | None = None
+
+    @field_validator("fingerprint")
+    @classmethod
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
 
 
 class TargetWriteResult(Target):

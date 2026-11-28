@@ -17,6 +17,8 @@ reads the stored request and the audit rows.
   Admin can.
 * "Approve each call", "wait when set", a credential call, a change of
   rights, a caller address and a delete keep their wait and their level.
+  A change of the policy waits at ``caution``, and a ``destructive``
+  operation gets the same answer in both switch states.
 * When a platform admin turned approval off, the operation stays
   ``caution`` and runs at once in the web console.
 * An admin's override that turns approval on keeps the wait and the level.
@@ -55,6 +57,7 @@ from meho_backplane.operations._contract import build_operation_contract
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
+from meho_backplane.policy import fixed_rules
 from meho_backplane.targets.resolver import resolve_target
 from tests._hard_to_undo_helpers import (
     RUNS,
@@ -437,6 +440,45 @@ async def test_a_mark_with_a_reason_keeps_its_wait_and_its_level(
     params = {"address": "widget.example.invalid"} if "schema" in extra else {}
 
     await _waits_at_level(await _console(op_id, params), "caution")
+
+
+async def _denied(status: str, op_id: str) -> None:
+    """The call is refused, nothing ran, no request waits, and the audit row says so."""
+    assert status == "denied"
+    assert RUNS == []
+    assert await _requests() == []
+    async with get_sessionmaker()() as session:
+        rows = list(
+            (await session.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars()
+        )
+    assert [r.payload["result_status"] for r in rows] == ["denied"]
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_policy_change_with_the_plain_mark_waits_at_caution(
+    monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    custom_policy(monkeypatch, on=on)
+    op_id = "plainmark.widget.set_policy"
+    monkeypatch.setattr(grant_approval, "_RIGHTS_CHANGE_OPS", {op_id})
+    monkeypatch.setattr(fixed_rules, "POLICY_CHANGE_OPS", frozenset({op_id}))
+    await _register(op_id)
+    await seed_target(_TARGET, _PRODUCT, _VERSION)
+
+    await _waits_at_level(await _console(op_id), "caution")
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_destructive_operation_with_the_plain_mark_gets_the_same_answer(
+    monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    """The console Operator is refused in both switch states, and nothing runs."""
+    custom_policy(monkeypatch, on=on)
+    op_id = "plainmark.widget.erase"
+    await _register(op_id, level="destructive")
+    await seed_target(_TARGET, _PRODUCT, _VERSION)
+
+    await _denied(await _console(op_id), op_id)
 
 
 async def _override(*, tenant_id: uuid.UUID | None, requires_approval: bool) -> None:

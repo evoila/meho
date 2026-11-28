@@ -60,14 +60,14 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     yield TestClient(app)
 
 
-async def _seed() -> None:
+async def _seed(*, announce_gate_enabled: bool = False) -> None:
     async with get_sessionmaker()() as session:
         session.add(
             Tenant(
                 id=_TENANT,
                 slug="tenant-a",
                 name="Tenant A",
-                announce_gate_enabled=False,
+                announce_gate_enabled=announce_gate_enabled,
                 run_approval_target_kinds_enabled=False,
                 flight_recorder_enabled=True,
                 flight_recorder_retention_days=14,
@@ -81,18 +81,24 @@ async def _rows(model: Any) -> list[Any]:
         return list((await session.execute(select(model))).scalars().all())
 
 
+def _gate_file(enabled: bool) -> str:
+    return yaml.safe_dump(
+        {
+            "apiVersion": "meho.evoila.com/v1",
+            "kind": "Settings",
+            "spec": {
+                "tenants": [{"id": str(_TENANT), "policies": {"announce_gate_enabled": enabled}}]
+            },
+        },
+        sort_keys=False,
+    )
+
+
 #: The gate turned on narrows what runs, so a token applies it.
-_FILE = yaml.safe_dump(
-    {
-        "apiVersion": "meho.evoila.com/v1",
-        "kind": "Settings",
-        "spec": {"tenants": [{"id": str(_TENANT), "policies": {"announce_gate_enabled": True}}]},
-    },
-    sort_keys=False,
-)
+_FILE = _gate_file(True)
 
 
-def _post_file(client: TestClient) -> Any:
+def _post_file(client: TestClient, content: str = _FILE) -> Any:
     key = make_rsa_keypair("kid-settings-attempt")
     token = mint_token(
         key, sub="admin-person", tenant_role=TenantRole.TENANT_ADMIN.value, tenant_id=str(_TENANT)
@@ -101,7 +107,7 @@ def _post_file(client: TestClient) -> Any:
         mock_discovery_and_jwks(mock, public_jwks(key))
         return client.post(
             _URL,
-            content=_FILE.encode(),
+            content=content.encode(),
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/yaml"},
         )
 
@@ -173,3 +179,21 @@ async def test_a_rest_import_whose_commit_fails_leaves_one_row_with_the_attempt_
 
     assert resp.status_code == 503, resp.text
     await _assert_one_attempt_row(503)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_rest_import_row_names_the_tenant_of_the_plan(client: TestClient) -> None:
+    await _seed(announce_gate_enabled=True)
+    # Turning the gate off needs a person in the web console, so a token gets 403.
+    content = _gate_file(False)
+
+    resp = _post_file(client, content)
+
+    assert resp.status_code == 403, resp.text
+    (tenant,) = [t for t in await _rows(Tenant) if t.id == _TENANT]
+    assert tenant.announce_gate_enabled is True
+    rows = [r for r in await _rows(AuditLog) if r.payload.get("op_id") == "settings.import"]
+    (row,) = rows
+    assert row.status_code == 403
+    assert row.payload["settings_tenant_ids"] == [str(_TENANT)]
+    assert row.payload["settings_file_sha256"] == hashlib.sha256(content.encode()).hexdigest()

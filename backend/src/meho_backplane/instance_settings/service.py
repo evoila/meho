@@ -971,6 +971,13 @@ async def _apply_targets(
             failed.append(f"`{path}` ({name}) could not be written.")
 
 
+def _bind_plan_tenants(plan: ImportPlan) -> None:
+    """Bind the file hash and the tenants of *plan*, so the audit row names them."""
+    structlog.contextvars.bind_contextvars(
+        **attempt_values(plan.file_sha256, [str(tp.tenant_id) for tp in plan.tenants])
+    )
+
+
 async def apply_import(
     session: AsyncSession,
     operator: Operator,
@@ -992,19 +999,19 @@ async def apply_import(
     plan = await build_plan(session, operator, content, lock=True)
     refusal = None if plan.mistakes else loosening_refusal(operator, plan.console_only, reason)
     if refusal is not None:
+        _bind_plan_tenants(plan)
         raise SettingsForbiddenError(refusal)
     result = ImportResult(plan=plan)
     if plan.mistakes or plan.diff is None or is_empty(plan.diff):
         result.diff = plan.diff
         return result
     if not runs_at_once(operator) and any(tp.targets for tp in plan.tenants):
+        _bind_plan_tenants(plan)
         raise SettingsForbiddenError(TARGET_WRITES_NEED_CONSOLE)
 
     tenant_ids = [tp.tenant_id for tp in plan.tenants]
     # Bound before the first write, so the row of an apply that stops names it.
-    structlog.contextvars.bind_contextvars(
-        **attempt_values(plan.file_sha256, [str(t) for t in tenant_ids])
-    )
+    _bind_plan_tenants(plan)
     broken = await _apply_tenant_rows(session, plan, result.failed)
     live = [tp for tp in plan.tenants if tp.tenant_id not in broken]
     replanned = await _replan_new_tenants(session, plan, live)

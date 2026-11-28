@@ -149,6 +149,19 @@ def test_a_missing_reason_writes_nothing() -> None:
     assert [row.status_code for row in _audit_rows("settings.import")] == [403]
 
 
+def test_a_missing_reason_row_names_the_tenant_of_the_plan() -> None:
+    _seed_tenants()
+    client, mock, csrf = _client()
+    try:
+        refused = _apply(client, csrf, _LOOSEN, None)
+    finally:
+        mock.stop()
+    assert refused.status_code == 403, refused.text
+    (row,) = _audit_rows("settings.import")
+    assert row.payload["settings_tenant_ids"] == [str(_TENANT_A)]
+    assert row.payload["settings_file_sha256"] == hashlib.sha256(_LOOSEN).hexdigest()
+
+
 @pytest.mark.parametrize("role", [TenantRole.OPERATOR.value, TenantRole.READ_ONLY.value])
 def test_a_person_without_an_admin_role_gets_a_console_error_page(role: str) -> None:
     _seed_tenants()

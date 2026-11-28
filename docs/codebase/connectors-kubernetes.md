@@ -937,8 +937,9 @@ gives the preview builder the target's connector. The builder then calls
   sent and is `not_checked`.
 - In `warnings`, `error` and `reason`, secret-shaped text is hidden, and so
   is every value that the echo of the manifest hides: Secret values (also
-  the decoded text of `data`; line breaks in the base64 text are skipped,
-  as the API server skips them), `env` and `httpHeaders` values, command
+  the base64 text of `data` on one line, also for binary data, and its
+  decoded text; line breaks in the base64 text are skipped, as the API
+  server skips them), `env` and `httpHeaders` values, command
   lines and the last-applied annotation (`ops_write_apply_dry_run_text.py`).
   The shared params redaction runs over the whole list of documents, as
   for the echo, so a rule for one place in the list (such as
@@ -959,7 +960,8 @@ gives the preview builder the target's connector. The builder then calls
 - When the result store keeps fewer entries than the preview checked (it
   is not reachable, or its row limit is reached), `preview.not_stored`
   counts the missing entries. Then `plan_shown` is false, and `plan_note`
-  says that `result_query` cannot give the whole plan.
+  says that `result_query` cannot give the whole plan. The note says that
+  `result_query` gives every part only when the store kept every entry.
 - `preview.manifest` and `preview.subject` are the same as on the approval
   request, with Secret values hidden. The object summary and what each
   container runs stay for a person only.

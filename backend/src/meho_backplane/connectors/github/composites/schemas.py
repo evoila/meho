@@ -43,6 +43,12 @@ __all__ = [
 ]
 
 
+# One GitHub owner or repository name. The lookahead after ``$`` matters:
+# the validator is Python ``re``, where ``$`` also matches before a final
+# newline, so without it ``"name\n"`` would pass.
+_GITHUB_NAME_PATTERN = "^[A-Za-z0-9._-]+$(?!\\n)"
+
+
 PR_STATUS_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -52,12 +58,20 @@ PR_STATUS_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
         "owner": {
             "type": "string",
             "minLength": 1,
-            "description": "GitHub repository owner (user or organisation login).",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "GitHub repository owner (user or organisation login). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
         "repo": {
             "type": "string",
             "minLength": 1,
-            "description": "GitHub repository name (without the owner prefix).",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "GitHub repository name (without the owner prefix). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
         "pull_number": {
             "type": "integer",
@@ -515,12 +529,20 @@ REPO_VIEW_PARAMETER_SCHEMA: dict[str, Any] = {
         "owner": {
             "type": "string",
             "minLength": 1,
-            "description": "GitHub repository owner (user or organisation login).",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "GitHub repository owner (user or organisation login). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
         "repo": {
             "type": "string",
             "minLength": 1,
-            "description": "GitHub repository name (without the owner prefix).",
+            "pattern": _GITHUB_NAME_PATTERN,
+            "description": (
+                "GitHub repository name (without the owner prefix). "
+                "Letters, digits, '.', '-' and '_' only."
+            ),
         },
     },
     "examples": [{"owner": "<owner>", "repo": "<repo>"}],
@@ -600,11 +622,6 @@ REPO_VIEW_RESPONSE_SCHEMA: dict[str, Any] = {
     ),
 }
 
-
-# One GitHub owner or repository name. The lookahead after ``$`` matters:
-# the validator is Python ``re``, where ``$`` also matches before a final
-# newline, so without it ``"name\n"`` would pass.
-_GITHUB_NAME_PATTERN = "^[A-Za-z0-9._-]+$(?!\\n)"
 
 REPO_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

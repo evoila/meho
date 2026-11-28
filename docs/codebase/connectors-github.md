@@ -30,6 +30,15 @@ multiple L2 sub-ops into one governed call. T4 ships the first one,
   14 rows, all on the same pattern: `pr_status_summary`, the board and
   sub-issue composites, the issue, repository and git composites (see the
   sections below).
+- **`composites/_names.py`** — the one check for owner and repository
+  names (`check_github_name`: letters, digits, `.`, `-` and `_`, not `.`
+  or `..`). `_register.py` registers its params check
+  (`owner_repo_params_problem`) for every composite with an `owner` or
+  `repo` parameter, so the dispatcher refuses a bad name as
+  `invalid_params` before anything is sent. The handlers check the names
+  again, and `pr_status_summary` and `repo_view` also carry the name
+  `pattern` in their schemas. `test_connectors_github_composites_names.py`
+  guards that every such composite has the check.
 - **`composites/_read.py`** — module-level `async def` handlers. The
   handler `pr_status_summary_composite` declares a `connector` parameter
   and issues its three reads through the resolved `GitHubRestConnector`'s

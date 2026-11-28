@@ -82,6 +82,7 @@ from meho_backplane.connectors.github.composites._issues import (
     issue_search_composite,
     issue_view_composite,
 )
+from meho_backplane.connectors.github.composites._names import owner_repo_params_problem
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
     repo_view_composite,
@@ -133,6 +134,7 @@ from meho_backplane.connectors.github.composites.schemas_issues import (
     ISSUE_VIEW_PARAMETER_SCHEMA,
     ISSUE_VIEW_RESPONSE_SCHEMA,
 )
+from meho_backplane.operations._validate import register_params_check
 from meho_backplane.operations.governed_subops import declare_no_governed_subops
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -565,6 +567,18 @@ _WRITES_WITHOUT_CHECKED_STEPS: tuple[str, ...] = (
 )
 
 declare_no_governed_subops(_WRITES_WITHOUT_CHECKED_STEPS)
+
+#: The composites whose ``owner`` or ``repo`` parameter goes into a request.
+#: The dispatcher runs the one shared name check on each of them and refuses
+#: a bad name as ``invalid_params``, before anything is sent.
+NAME_CHECKED_OP_IDS: tuple[str, ...] = tuple(
+    spec.op_id
+    for spec in _COMPOSITES
+    if {"owner", "repo"} & set(spec.parameter_schema.get("properties", {}))
+)
+
+for _op_id in NAME_CHECKED_OP_IDS:
+    register_params_check(_op_id, owner_repo_params_problem)
 
 
 async def register_github_composite_operations(

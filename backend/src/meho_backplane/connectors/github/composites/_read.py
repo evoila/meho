@@ -74,6 +74,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.github.composites._names import check_github_name
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.github.connector import GitHubRestConnector
@@ -300,6 +301,22 @@ def _assemble_envelope(
     }
 
 
+def _checked_owner_repo(params: dict[str, Any], *, op: str) -> tuple[str, str]:
+    """Return ``(owner, repo)`` from *params*, or raise ``ValueError`` before any request.
+
+    The dispatcher refuses a bad name first (the params check registered in
+    :mod:`._register`); this keeps the handler safe when it is called directly.
+    """
+    names: list[str] = []
+    for key in ("owner", "repo"):
+        value = params.get(key)
+        problem = check_github_name(value)
+        if problem is not None:
+            raise ValueError(f"{op}: {key}: {problem}")
+        names.append(str(value))
+    return names[0], names[1]
+
+
 async def pr_status_summary_composite(
     *,
     operator: Operator,
@@ -343,6 +360,8 @@ async def pr_status_summary_composite(
 
     Raises
     ------
+    ValueError
+        ``owner`` or ``repo`` is not a plain GitHub name. Nothing is sent.
     httpx.HTTPStatusError
         The primary PR sub-call returned a non-2xx status (e.g. 404 /
         401). Mapped by the dispatcher's outer exception branch to the
@@ -354,8 +373,7 @@ async def pr_status_summary_composite(
         into a ``connector_error`` :class:`OperationResult` by the
         dispatcher's outer exception branch.
     """
-    owner = params["owner"]
-    repo = params["repo"]
+    owner, repo = _checked_owner_repo(params, op="pr_status_summary")
     pull_number = params["pull_number"]
 
     pr_path = await connector.mount_op_path(
@@ -447,6 +465,8 @@ async def repo_view_composite(
 
     Raises
     ------
+    ValueError
+        ``owner`` or ``repo`` is not a plain GitHub name. Nothing is sent.
     httpx.HTTPStatusError
         GitHub answered with a non-2xx status (404 for a repository the
         identity cannot see). The dispatcher maps it to a structured
@@ -454,8 +474,7 @@ async def repo_view_composite(
     RuntimeError
         The payload was not a JSON object.
     """
-    owner = params["owner"]
-    repo = params["repo"]
+    owner, repo = _checked_owner_repo(params, op="repo_view")
     path = await connector.mount_op_path(
         target, _REPO_PATH.format(owner=owner, repo=repo), operator
     )

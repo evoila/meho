@@ -413,7 +413,13 @@ target registration) is documented in
     capability than `create`, `update` and `read` on that path and the
     rights on the KV path. MEHO reads the login right before that password
     request. When an admin removed the login during the KV write, MEHO sets
-    nothing and does not make the login again.
+    nothing and does not make the login again. The answer is then an error
+    (`PasswordStoredNotSetError`): its `error` text and
+    `extras.exception_message` say that the new password was stored and not
+    set, and name the KV mount, path and field. `extras` also holds
+    `password_stored: true`, `password_set: false`, `stored_mount`,
+    `stored_path` and `stored_field`. The audit row holds the same fields.
+    Neither holds the password.
 
   The result never holds the password. It says `credential_source`
   (`request`, `kv_path` or `generated`), `credential_generated` and

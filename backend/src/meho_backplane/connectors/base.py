@@ -48,6 +48,11 @@ class ConnectorOwnMessage:
     system. For an operation that sends a secret, the dispatcher then shows
     this message instead of hiding it. Never put vendor text, a value from
     the call, or a secret into such a message.
+
+    Such an error may also set ``answer_facts`` (a dict of plain text or
+    true/false facts that MEHO wrote, copied into ``extras``) and
+    ``message_in_summary = True`` (the message is added to the ``error``
+    text).
     """
 
 

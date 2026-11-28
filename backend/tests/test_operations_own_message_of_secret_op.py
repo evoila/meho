@@ -238,6 +238,8 @@ _MARKED_TYPES = {
     "SecretMergeRefusedError",
     "Rke2SnapshotNoSudoError",
     "Rke2WriteOwnMessageError",
+    # vault.auth.userpass.write: the login name and the KV place; no value, no Vault text.
+    "PasswordStoredNotSetError",
 }
 
 

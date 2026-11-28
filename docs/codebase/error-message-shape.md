@@ -340,6 +340,13 @@ text from the error result, in one shared place.
   the target's secret) is the first use. The RKE2 connector marks the
   same case with `Rke2WriteOwnMessageError` (write operations) and
   `Rke2SnapshotNoSudoError` (snapshot operations).
+  A marked error type can also set two attributes. `answer_facts` is a
+  dict of plain facts that MEHO wrote (text or true/false, never a
+  secret); `result_connector_error` copies each one into `extras`, and a
+  key the builder set already wins. `message_in_summary = True` adds the
+  message to the `error` text after `connector_error: <type>`.
+  `PasswordStoredNotSetError` (`vault.auth.userpass.write`, the login was
+  removed before MEHO set the stored password) uses both.
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

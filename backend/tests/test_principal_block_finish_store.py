@@ -14,7 +14,9 @@
   ``written``. A change of the policies keeps the check: it is not sent, the
   login keeps its policies, and the answer is the block refusal. A login
   that does not exist is not made. A caller blocked before the store gets
-  the block refusal: no store and no set.
+  the block refusal: no store and no set. A login removed during the store
+  is not made again, and the answer and the audit row say that the new
+  password is stored and not set, and where it is stored.
 
 The node is a scripted SSH connection under the real ``_run_command`` and
 ``run_capped``. Vault is the stand-in HTTP server with the real ``hvac``
@@ -436,4 +438,57 @@ async def test_a_login_removed_during_the_store_of_a_blocked_rotation_is_not_mad
     assert stored not in json.dumps(result.model_dump(mode="json"))
     (row,) = await _dispatch_rows(_USERPASS)
     assert row.payload["result_status"] != "ok"
+    assert stored not in json.dumps(row.payload) + json.dumps(row.raw_payload)
+
+
+_REMOVE_CASES = [
+    pytest.param(True, id="caller-blocked"),
+    pytest.param(False, id="caller-not-blocked"),
+]
+
+
+@pytest.mark.parametrize("block", _REMOVE_CASES)
+async def test_a_login_removed_during_the_store_says_the_password_is_stored_and_not_set(
+    vault_ops: VaultStandIn, block: bool
+) -> None:
+    params = _prepare(vault_ops, rotate=True)
+
+    async def _remove_the_login() -> None:
+        vault_ops.users.pop("svc-a")
+        if block:
+            await _block()
+
+    vault_ops.on_request("POST", _PASSWORD_DATA, _remove_the_login)
+
+    result = await _write_login(params)
+
+    assert result.status == "error", (result.status, result.error)
+    assert "svc-a" not in vault_ops.users
+    assert vault_ops.user_writes == []
+    stored = vault_ops.items[f"secret/{_PASSWORD_ITEM}"][1]["password"]
+    assert stored != "made-up-old"
+    place = ("'secret'", f"'{_PASSWORD_ITEM}'", "'password'")
+
+    error = result.error or ""
+    assert "stored and not set" in error
+    assert all(part in error for part in place), error
+    extras = result.extras
+    assert "stored and not set" in extras["exception_message"]
+    assert all(part in extras["exception_message"] for part in place)
+    assert extras["password_stored"] is True
+    assert extras["password_set"] is False
+    assert extras["stored_mount"] == "secret"
+    assert extras["stored_path"] == _PASSWORD_ITEM
+    assert extras["stored_field"] == "password"
+    assert stored not in json.dumps(result.model_dump(mode="json"))
+
+    (row,) = await _dispatch_rows(_USERPASS)
+    assert row.payload["result_status"] == "error"
+    audit_error = row.payload["error"]
+    assert audit_error["exception_message"] == extras["exception_message"]
+    assert audit_error["password_stored"] is True
+    assert audit_error["password_set"] is False
+    assert audit_error["stored_mount"] == "secret"
+    assert audit_error["stored_path"] == _PASSWORD_ITEM
+    assert audit_error["stored_field"] == "password"
     assert stored not in json.dumps(row.payload) + json.dumps(row.raw_payload)

@@ -23,7 +23,9 @@ the new password is stored for a login that exists, setting only that password
 on the login (on ``auth/<mount>/users/<name>``, the path of every set) runs
 with no block check, so the login gets the stored password also when an
 admin blocked the caller during the store. MEHO reads the login right before
-that set, and sets nothing when the login was removed during the store. A change of the
+that set, and sets nothing when the login was removed during the store. Then
+the answer and the audit row say that the new password is stored and not set,
+and where it is stored. A change of the
 login's policies, and the create of a login that does not exist, keep the
 block check.
 """
@@ -40,6 +42,7 @@ import hvac.exceptions
 from meho_backplane.auth.principal_block_run import finish_without_block_check
 from meho_backplane.auth.secret_read_as import record_caller_secret_read
 from meho_backplane.auth.send_check import to_thread_checked
+from meho_backplane.connectors.base import ConnectorOwnMessage
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -50,6 +53,7 @@ __all__ = [
     "DEFAULT_SECRET_MOUNT",
     "PasswordPlan",
     "PasswordSecretError",
+    "PasswordStoredNotSetError",
     "apply_credential_source",
     "generate_password_value",
     "select_credential_source",
@@ -67,6 +71,31 @@ class PasswordSecretError(Exception):
 
     The message names the mount, path and field. It never holds a value.
     """
+
+
+class PasswordStoredNotSetError(PasswordSecretError, ConnectorOwnMessage):
+    """The new password is stored in KV, but the login was gone when MEHO went to set it.
+
+    A fixed MEHO sentence that names the login and the KV mount, path and
+    field, never the value. The answer and the audit row show it, and carry
+    the place as ``stored_mount``, ``stored_path`` and ``stored_field``.
+    """
+
+    message_in_summary = True
+
+    def __init__(self, *, username: str, mount: str, path: str, field: str) -> None:
+        super().__init__(
+            f"the new password was stored and not set: it is at KV {mount!r} path {path!r} "
+            f"field {field!r}, but the login {username!r} was removed before MEHO set it. "
+            "MEHO did not make the login again"
+        )
+        self.answer_facts: dict[str, Any] = {
+            "password_stored": True,
+            "password_set": False,
+            "stored_mount": mount,
+            "stored_path": path,
+            "stored_field": field,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,10 +318,8 @@ def _apply_sync(
     # right before the set and sets nothing when an admin removed it.
     with finish_without_block_check():
         if _user_policies(client, username, mount) is None:
-            raise PasswordSecretError(
-                f"the login {username!r} was removed while MEHO stored its new password at "
-                f"KV {plan.mount!r} path {plan.path!r} field {plan.field!r}; MEHO did not "
-                "make the login again"
+            raise PasswordStoredNotSetError(
+                username=username, mount=plan.mount, path=plan.path, field=plan.field
             )
         _set_user(client, username=username, mount=mount, password=password, token_policies=None)
     if token_policies is not None and sorted(token_policies) != sorted(current_policies):

@@ -1385,11 +1385,15 @@ jobs:
 
       - &unit-pull-images
         name: Pull the test images
-        # Pulls every test image of this job before pytest starts, with at
-        # most 3 tries per image, 10 s apart. Docker's own output is thrown
-        # away, because the log is public. When an image did not pull and
-        # is not on the runner, this step fails with a clear text, so no
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
         # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
         timeout-minutes: 3
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
@@ -2008,6 +2012,8 @@ jobs:
         # The one test image of this job: the chart's PostgreSQL image that
         # tests/test_db_engine.py starts. Same script and rules as the
         # step of the same name in python-unit-shard.
+        env:
+          PULL_TIME_LIMIT: 50
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2857,11 +2863,15 @@ jobs:
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
       - name: Pull the test images
-        # Pulls every test image of this job before pytest starts, with at
-        # most 3 tries per image, 10 s apart. Docker's own output is thrown
-        # away, because the log is public. When an image did not pull and
-        # is not on the runner, this step fails with a clear text, so no
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
         # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
         timeout-minutes: 3
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
@@ -3558,11 +3568,15 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Pull the test images
-        # Pulls every test image of this job before pytest starts, with at
-        # most 3 tries per image, 10 s apart. Docker's own output is thrown
-        # away, because the log is public. When an image did not pull and
-        # is not on the runner, this step fails with a clear text, so no
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
         # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 150
         timeout-minutes: 10
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
@@ -3741,11 +3755,15 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Pull the test images
-        # Pulls every test image of this job before pytest starts, with at
-        # most 3 tries per image, 10 s apart. Docker's own output is thrown
-        # away, because the log is public. When an image did not pull and
-        # is not on the runner, this step fails with a clear text, so no
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
         # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
         timeout-minutes: 3
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"
@@ -3916,11 +3934,15 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Pull the test images
-        # Pulls every test image of this job before pytest starts, with at
-        # most 3 tries per image, 10 s apart. Docker's own output is thrown
-        # away, because the log is public. When an image did not pull and
-        # is not on the runner, this step fails with a clear text, so no
+        # Gets every test image of this job before pytest starts. An image
+        # that is on the runner is used with no pull. A missing image gets
+        # at most 3 pulls, 10 s apart, each with a limit of PULL_TIME_LIMIT
+        # seconds: 3 pulls and 2 pauses fit into the step's limit. Docker's
+        # own output is thrown away, because the log is public. When an
+        # image is still missing, this step fails with a clear text, so no
         # test fails or skips later on a missing image.
+        env:
+          PULL_TIME_LIMIT: 50
         timeout-minutes: 3
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/scripts/ci/pull_test_images.sh"

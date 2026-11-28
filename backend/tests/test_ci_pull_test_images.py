@@ -9,14 +9,15 @@ skip limit check then failed the run. So:
 1. Every job of ``ci.yml`` that runs container tests has the step "Pull the
    test images" before its pytest step. The step runs
    ``scripts/ci/pull_test_images.sh``, which pulls every image the job sets.
-2. The script tries each image at most 3 times, 10 s apart, and never
-   prints Docker's own output (the logs of this repository are public).
-   After a failed pull it uses the image at once when it is on the runner;
-   a missing image fails after 3 tries.
+2. The script looks on the runner first and uses an image that is there,
+   with no pull. A missing image gets at most 3 pulls, 10 s apart, each
+   under the job's time limit ``PULL_TIME_LIMIT``; then it fails. The
+   script never prints Docker's own output (the logs of this repository
+   are public).
 3. Under CI (``GITHUB_ACTIONS`` set) a fixture whose container does not
    start fails the test instead of skipping it.
 
-The script tests use a stand-in ``docker`` and ``sleep`` on the PATH.
+The script tests use a stand-in ``docker``, ``sleep`` and ``timeout`` on the PATH.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import os
 import re
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,7 @@ _IMAGE_LINE = re.compile(
     re.MULTILINE,
 )
 _NOISE = "docker-output-that-must-not-show"
+_LIMIT = "50"
 
 
 def _container_jobs() -> list[str]:
@@ -99,8 +102,17 @@ def test_each_container_job_pulls_its_images_before_pytest(job_id: str) -> None:
             assert i < pull_at, f"{job_id}: {other.get('name')!r} must come before the pull"
 
 
-def _fake_bin(tmp_path: Path, pull_fails: int, on_runner: bool) -> tuple[Path, Path]:
-    """A ``docker`` and a ``sleep`` that log their calls to ``calls.log``."""
+@pytest.mark.parametrize("job_id", _container_jobs())
+def test_three_pulls_and_two_pauses_fit_into_the_step_limit(job_id: str) -> None:
+    step = next(s for s in jobs("ci.yml")[job_id]["steps"] if s.get("name") == _STEP)
+    limit = int(step["env"]["PULL_TIME_LIMIT"])
+    assert 3 * limit + 2 * 10 <= int(step["timeout-minutes"]) * 60
+
+
+def _fake_bin(
+    tmp_path: Path, pull_fails: int, on_runner: bool, pull: str, timeout: str
+) -> tuple[Path, Path]:
+    """A ``docker``, a ``sleep`` and a ``timeout`` that log their calls to ``calls.log``."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "calls.log"
@@ -112,6 +124,7 @@ def _fake_bin(tmp_path: Path, pull_fails: int, on_runner: bool) -> tuple[Path, P
         f'echo "{_NOISE} stdout"\n'
         f'echo "{_NOISE} stderr" >&2\n'
         'if [ "$1" = pull ]; then\n'
+        f"  {pull}\n"
         f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{count}"\n'
         f'  [ "$n" -gt {pull_fails} ] && exit 0 || exit 7\n'
         "fi\n"
@@ -120,7 +133,9 @@ def _fake_bin(tmp_path: Path, pull_fails: int, on_runner: bool) -> tuple[Path, P
     )
     sleep = bin_dir / "sleep"
     sleep.write_text(f'#!/usr/bin/env bash\necho "sleep $*" >> "{log}"\n')
-    for path in (docker, sleep):
+    timeout_bin = bin_dir / "timeout"
+    timeout_bin.write_text(f'#!/usr/bin/env bash\necho "timeout $*" >> "{log}"\n{timeout}\n')
+    for path in (docker, sleep, timeout_bin):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return bin_dir, log
 
@@ -131,14 +146,17 @@ def _run(
     *args: str,
     pull_fails: int = 0,
     on_runner: bool = False,
+    pull: str = ":",
+    timeout: str = 'shift; exec "$@"',
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    bin_dir, log = _fake_bin(tmp_path, pull_fails, on_runner)
+    bin_dir, log = _fake_bin(tmp_path, pull_fails, on_runner, pull, timeout)
     result = subprocess.run(
         ["bash", str(_SCRIPT), *args],
-        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", **env},
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "PULL_TIME_LIMIT": _LIMIT, **env},
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     calls = log.read_text().splitlines() if log.exists() else []
     return result, calls
@@ -206,22 +224,44 @@ def test_three_failed_pulls_fail_when_the_image_is_not_on_the_runner(tmp_path: P
     assert _NOISE not in result.stdout + result.stderr
 
 
-def test_three_failed_pulls_pass_when_the_image_is_on_the_runner(tmp_path: Path) -> None:
+def test_an_image_on_the_runner_passes_with_no_pull(tmp_path: Path) -> None:
     result, calls = _run(tmp_path, {}, "example/image:1", pull_fails=3, on_runner=True)
     assert result.returncode == 0
-    assert "image inspect example/image:1" in calls
-    assert "The copy on the runner is used." in result.stdout
+    assert calls == ["image inspect example/image:1"]
+    assert "The copy on the runner is used, with no pull." in result.stdout
     assert _NOISE not in result.stdout + result.stderr
 
 
-def test_images_on_the_runner_need_one_pull_each_and_no_pause(tmp_path: Path) -> None:
+def test_images_on_the_runner_need_no_pull_and_no_pause(tmp_path: Path) -> None:
     images = [f"example/image:{n}" for n in range(1, 6)]
     result, calls = _run(tmp_path, {}, *images, pull_fails=99, on_runner=True)
     assert result.returncode == 0, result.stdout
-    assert [c for c in calls if c.startswith("pull")] == [f"pull --quiet {i}" for i in images]
-    assert not [c for c in calls if c.startswith("sleep")]
-    assert result.stdout.count("The copy on the runner is used.") == 5
+    assert calls == [f"image inspect {i}" for i in images]
+    assert result.stdout.count("The copy on the runner is used, with no pull.") == 5
     assert _NOISE not in result.stdout + result.stderr
+
+
+def test_images_on_the_runner_pass_fast_when_a_pull_never_answers(tmp_path: Path) -> None:
+    images = [f"example/image:{n}" for n in range(1, 6)]
+    started = time.monotonic()
+    result, calls = _run(tmp_path, {}, *images, on_runner=True, pull="exec /bin/sleep 600")
+    assert time.monotonic() - started < 10
+    assert result.returncode == 0, result.stdout
+    assert not [c for c in calls if c.startswith(("pull", "timeout"))]
+
+
+def test_a_missing_image_whose_pull_hangs_fails_under_the_time_limit(tmp_path: Path) -> None:
+    result, calls = _run(tmp_path, {}, "example/image:1", timeout="exit 124")
+    assert result.returncode == 1
+    assert [c for c in calls if c.startswith("timeout")] == [
+        f"timeout {_LIMIT} docker pull --quiet example/image:1"
+    ] * 3
+    assert calls.count("sleep 10") == 2
+    assert result.stdout.count("exit code 124") == 3
+    assert (
+        "SETUP FAILURE, not a test failure: the test image example/image:1 did not pull "
+        "after 3 tries and is not on the runner." in result.stdout
+    )
 
 
 def test_a_failed_image_does_not_stop_the_pull_of_the_others(tmp_path: Path) -> None:

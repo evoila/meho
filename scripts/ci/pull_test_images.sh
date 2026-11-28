@@ -13,18 +13,24 @@
 # MEHO_TEST_K3S_IMAGE with each of its tags is pulled too, the same way
 # tests/integration/test_connectors_k8s_k3d.py picks its images.
 #
-# Each image gets at most 3 tries, 10 s apart. The pull runs quiet and
-# its output is thrown away: the logs of this repository are public, and
-# an error of Docker can name a host. The script prints only the image
-# name, the exit code and a line when it tries again. After a failed
-# pull, the script looks at once whether the image is on the runner: then
-# it uses that copy and goes on, with no more tries and no pause. An image
-# that is not on the runner gets its 3 tries; then the script fails with a
-# clear text.
+# The script looks on the runner first: an image that is there is used,
+# with no pull. Only a missing image is pulled: at most 3 tries, 10 s
+# apart. Each pull may take at most PULL_TIME_LIMIT seconds. The job sets
+# this value, so that the 3 tries and their 2 pauses fit into the time
+# limit of its step. The pull runs quiet and its output is thrown away:
+# the logs of this repository are public, and an error of Docker can name
+# a host. The script prints only the image name, the exit code and a line
+# when it tries again. When an image is still missing after 3 tries, the
+# script fails with a clear text.
 set -uo pipefail
 
 tries=3
 pause=10
+limit="${PULL_TIME_LIMIT:-}"
+if [[ ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
+  echo "::error title=Test images::SETUP FAILURE, not a test failure: PULL_TIME_LIMIT must be the time limit of one pull in seconds."
+  exit 1
+fi
 
 images=("$@")
 while IFS= read -r name; do
@@ -62,9 +68,13 @@ fi
 
 failed=0
 for image in "${unique[@]}"; do
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    echo "${image} is on the runner. The copy on the runner is used, with no pull."
+    continue
+  fi
   done_ok=0
   for ((try = 1; try <= tries; try++)); do
-    docker pull --quiet "$image" >/dev/null 2>&1
+    timeout "$limit" docker pull --quiet "$image" >/dev/null 2>&1
     status=$?
     if [[ $status -eq 0 ]]; then
       echo "Pulled ${image} (try ${try} of ${tries})."
@@ -72,11 +82,6 @@ for image in "${unique[@]}"; do
       break
     fi
     echo "Pull of ${image} failed with exit code ${status} (try ${try} of ${tries})."
-    if docker image inspect "$image" >/dev/null 2>&1; then
-      echo "::warning title=Test image::${image} did not pull. The copy on the runner is used."
-      done_ok=1
-      break
-    fi
     if ((try < tries)); then
       echo "::warning title=Test image::Trying the pull of ${image} again in ${pause} s."
       sleep "$pause"

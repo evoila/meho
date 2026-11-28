@@ -3362,11 +3362,14 @@ A job must not fail because a download failed once. The rules:
   "Pull the test images", before pytest, in every job that starts test
   containers. It pulls each `MEHO_TEST_*_IMAGE` and `RYUK_CONTAINER_IMAGE`
   value the job sets (and the k3s image with each tag of
-  `MEHO_TEST_K3S_TAGS`): at most 3 tries per image, 10 s apart. Docker's
-  own output is thrown away, because the logs are public; the step prints
-  only the image name, the exit code and a line for each new try. When an
-  image did not pull, the step passes only if the image is already on the
-  runner, and fails with a clear text otherwise. Under CI
+  `MEHO_TEST_K3S_TAGS`). It looks on the runner first: an image that is
+  there is used, with no pull. Only a missing image is pulled: at most 3
+  tries, 10 s apart, each with the time limit `PULL_TIME_LIMIT` that the
+  step sets (50 s, and 150 s in the integration shards), so 3 tries and
+  2 pauses fit into the step's limit. Docker's own output is thrown away,
+  because the logs are public; the step prints only the image name, the
+  exit code and a line for each new try. When an image is still missing
+  after 3 tries, the step fails with a clear text. Under CI
   (`GITHUB_ACTIONS` set) a container test whose container does not start
   fails instead of skipping. `tests/test_ci_pull_test_images.py` checks
   the step, the script and the fixtures.

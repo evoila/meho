@@ -3336,6 +3336,17 @@ of CI. Two actions are unique to `ci.yml`:
 
 ### Tools that CI downloads
 
+**Rule: no step of a merge queue run takes a file from an outside server
+without our proxy or cache.** A merge queue run must not fail for a
+reason outside its pull request. A file from an outside server (a tool,
+a package, a schema, an image) comes from the runner image, our image
+proxy, or a cache (`actions/cache`) that the runs on `main` fill. A
+download is only the last way, when the cache does not have the file
+yet. Then a retry is allowed around that one network step: three tries
+at most, and the log says each new try. Never retry a whole job, and
+never skip a test or mark it as expected to fail to hide a download
+problem.
+
 A job must not fail because a download failed once. The rules:
 
 - `scripts/ci/install_tool.sh` puts a pinned tool on the PATH. It uses the
@@ -3351,6 +3362,21 @@ A job must not fail because a download failed once. The rules:
   last.
 - `scripts/ci/retry.sh` runs any download command (the language model
   warm-up) with the same three tries.
+- `scripts/ci/pull_test_images.sh` pulls the test images in the step
+  "Pull the test images", before pytest, in every job that starts test
+  containers. It pulls each `MEHO_TEST_*_IMAGE` and `RYUK_CONTAINER_IMAGE`
+  value the job sets (and the k3s image with each tag of
+  `MEHO_TEST_K3S_TAGS`). It looks on the runner first: an image that is
+  there is used, with no pull. Only a missing image is pulled: at most 3
+  tries, 10 s apart, each with the time limit `PULL_TIME_LIMIT` that the
+  step sets (50 s, and 150 s in the integration shards), so 3 tries and
+  2 pauses fit into the step's limit. Docker's own output is thrown away,
+  because the logs are public; the step prints only the image name, the
+  exit code and a line for each new try. When an image is still missing
+  after 3 tries, the step fails with a clear text. Under CI
+  (`GITHUB_ACTIONS` set) a container test whose container does not start
+  fails instead of skipping. `tests/test_ci_pull_test_images.py` checks
+  the step, the script and the fixtures.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
   run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in

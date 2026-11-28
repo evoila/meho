@@ -271,7 +271,10 @@ def site() -> Iterator[_Site]:
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
         wait_for_log_message(container, "Listening on:", timeout=240)
         host = container.get_container_host_ip()

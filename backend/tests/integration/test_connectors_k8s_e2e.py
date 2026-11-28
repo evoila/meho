@@ -55,7 +55,8 @@ Skip conditions
 
 * Docker socket missing -- mirrors the rest of ``tests/integration/``.
 * k3s container start failure (privileged not allowed, cgroup v1 host
-  refusing the v2 mount) -- clean skip, not red.
+  refusing the v2 mount) -- clean skip, not red. Under CI
+  (``GITHUB_ACTIONS`` set) it fails instead.
 
 CI side: ``MEHO_TEST_K3S_IMAGE`` overrides the default image so the
 runner pulls through the in-cluster Harbor proxy; ``ci.yml`` sets it
@@ -198,7 +199,10 @@ def k3s_kubeconfig_and_target() -> Iterator[tuple[dict[str, Any], _K3sTarget]]:
         container = K3SContainer(image=image)
         container.start()
     except Exception as exc:
-        pytest.skip(f"k3s container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         kubeconfig_text = container.config_yaml()

@@ -68,7 +68,13 @@ from meho_backplane.policy.document import (
     parse_policy_file,
 )
 from meho_backplane.policy.limits import limits_diff
-from meho_backplane.policy.risk_levels import risk_levels_mistakes, stored_risk_levels
+from meho_backplane.policy.risk_levels import (
+    ExactText,
+    exact_texts,
+    represent_exact_text,
+    risk_levels_mistakes,
+    stored_risk_levels,
+)
 from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.routing_floor import (
     floor_warnings,
@@ -84,8 +90,10 @@ __all__ = [
     "KEEP_REVISIONS",
     "NO_CHANGE",
     "POLICY_CHANGED",
+    "POLICY_TOO_LARGE_TO_EXPORT",
     "SMALL_TEAM_PROFILE",
     "PolicyApplyError",
+    "PolicyExportError",
     "PolicyPlan",
     "apply_policy",
     "build_plan",
@@ -113,8 +121,20 @@ SMALL_TEAM_PROFILE: Final[str] = "small-team.yaml"
 _INSTALL_LOCK_ID: Final[uuid.UUID] = uuid.UUID(int=0)
 
 
+#: Why the export with the switch on wrote no file: the import could not read it.
+POLICY_TOO_LARGE_TO_EXPORT: Final[str] = (
+    f"The policy file would be larger than {MAX_POLICY_BYTES // 1024} KiB, the most the import "
+    "reads, so nothing is exported and no part is left out. Remove the risk-level edits you no "
+    "longer need, or shorten their reasons, then export again."
+)
+
+
 class PolicyApplyError(ValueError):
     """An approved import did not run; the message says why in one sentence."""
+
+
+class PolicyExportError(ValueError):
+    """The export wrote no file; the message says why."""
 
 
 @dataclass
@@ -420,8 +440,9 @@ async def build_plan(
     they are. With it on, the diff also shows the personal agent rules
     (:func:`~meho_backplane.policy.agent_rules_plan.agents_plan`), and a
     ``risk_levels`` part that is not exactly the stored risk-level edits is
-    a mistake (:func:`~meho_backplane.policy.risk_levels.risk_levels_mistakes`).
-    The planned document never holds that part: the import changes no edit.
+    a mistake (:func:`~meho_backplane.policy.risk_levels.risk_levels_mistakes`),
+    named next to the mistakes of the other parts. The planned document
+    never holds that part: the import changes no edit.
     """
     before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
@@ -431,8 +452,11 @@ async def build_plan(
         based_on=canonical_sha256(before),
     )
     parsed = parse_policy_file(content, custom_policy=custom_policy, read_risk_levels=custom_policy)
+    part_mistakes = (
+        await _part_mistakes(session, content, parsed, scope, tenant_id) if custom_policy else []
+    )
     if parsed.model is None:
-        plan.mistakes = parsed.mistakes
+        plan.mistakes = parsed.mistakes + part_mistakes
         return plan
     document = document_of(parsed.model)
     plan.warnings.extend(category_routing_warnings(document.get("routing") or []))
@@ -454,8 +478,7 @@ async def build_plan(
         )
     except ValueError as exc:
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
-    if custom_policy:
-        plan.mistakes += await _part_mistakes(session, content, parsed, scope, tenant_id)
+    plan.mistakes += part_mistakes
     if plan.mistakes:
         return plan
     if scope == "tenant":
@@ -620,6 +643,9 @@ class _NoAliasDumper(yaml.SafeDumper):  # type: ignore[misc]  # yaml has no stub
         return True
 
 
+_NoAliasDumper.add_representer(ExactText, represent_exact_text)
+
+
 def _dump(value: Any) -> str:
     text: str = yaml.dump(
         value, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, default_flow_style=False
@@ -634,12 +660,11 @@ async def _part_mistakes(
     scope: Scope,
     tenant_id: uuid.UUID | None,
 ) -> list[str]:
-    """The mistakes of the ``risk_levels`` part, each edit read back as :func:`_dump` writes it."""
+    """The mistakes of the ``risk_levels`` part, also when another part has a mistake."""
     return await risk_levels_mistakes(
         session,
         content=content,
         in_file=parsed.risk_levels_in_file,
-        write=_dump,
         scope=scope,
         tenant_id=tenant_id,
     )
@@ -692,7 +717,11 @@ async def export_policy(
     (:func:`~meho_backplane.policy.risk_levels.stored_risk_levels`), only
     when *custom_policy* says the ``CUSTOM_POLICY`` switch is on; with it
     off, the exported file imports again. The file has no ``risk_levels``
-    part when *scope* has no risk-level edit. The export only reads.
+    part when *scope* has no risk-level edit. Each text of the part reads
+    back exactly as stored (:func:`~meho_backplane.policy.risk_levels.exact_texts`).
+    With the switch on, a file larger than the import reads raises
+    :class:`PolicyExportError` instead (:data:`POLICY_TOO_LARGE_TO_EXPORT`).
+    The export only reads.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
@@ -726,7 +755,7 @@ async def export_policy(
         await stored_risk_levels(session, scope=scope, tenant_id=tenant_id) if custom_policy else []
     )
     if edits:
-        end["risk_levels"] = edits
+        end["risk_levels"] = exact_texts(edits)
     entries = list(document.get("classifications") or [])
     route_notes = (
         tenant_wider_notes(document, await _stored_document(session, "install", None))
@@ -742,6 +771,8 @@ async def export_policy(
         if routes:
             body += _noted("routing", routes, route_notes, "Has no effect where wider")
     rest = _dump(end) if end else ""
+    if custom_policy and _room(body, rest) < 0:
+        raise PolicyExportError(POLICY_TOO_LARGE_TO_EXPORT)
     return body + _shipped_bindings_note(shipped, room=_room(body, rest)) + rest
 
 

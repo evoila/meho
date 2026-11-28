@@ -524,6 +524,14 @@ The import does not change the edits in this version of MEHO:
   the part as `meho policy export` wrote it, or remove it." Nothing waits
   and nothing is stored.
 - A file without the part leaves the edits as they are.
+- The reason must be the stored text, every character. The export writes
+  a reason in double quotes when it holds a character that YAML would
+  read back changed.
+- `requires_approval` must be `true` or `false`. A number or a text is
+  refused.
+- When the policy would make a file larger than 1024 KiB, the most the
+  import reads, the export writes no file and says so. Remove the edits
+  you no longer need, or shorten their reasons, then export again.
 
 !!! note "Off by default"
 

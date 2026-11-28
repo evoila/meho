@@ -2328,7 +2328,7 @@
           "policy"
         ],
         "summary": "Export",
-        "description": "The stored policy of *scope* as a ``policy: v1`` file.",
+        "description": "The stored policy of *scope* as a ``policy: v1`` file.\n\n409 when the file would be too large for the import to read again.",
         "operationId": "export_api_v1_policy_export_get",
         "parameters": [
           {

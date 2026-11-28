@@ -35,10 +35,8 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.github.composites._repos import (
-    check_github_name,
-    repo_create_composite,
-)
+from meho_backplane.connectors.github.composites._names import check_github_name
+from meho_backplane.connectors.github.composites._repos import repo_create_composite
 from meho_backplane.connectors.github.composites.schemas import (
     REPO_CREATE_PARAMETER_SCHEMA,
 )

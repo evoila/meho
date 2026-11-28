@@ -36,7 +36,6 @@ from meho_backplane.connectors.github.composites._git import (
     STATUS_INVALID_REQUEST,
     STATUS_PRECONDITION_FAILED,
     branch_commit_files_composite,
-    check_github_name,
     check_name,
     describe_files,
     git_ref_view_composite,
@@ -47,6 +46,7 @@ from meho_backplane.connectors.github.composites._git_preview import (
     branch_commit_files_preview,
 )
 from meho_backplane.connectors.github.composites._graphql import GitHubGraphQlError
+from meho_backplane.connectors.github.composites._names import check_github_name
 from meho_backplane.connectors.github.composites.schemas_git import (
     MAX_FILE_BYTES,
     MAX_TOTAL_BYTES,

@@ -46,17 +46,18 @@ performs is fully governed.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote
 
 import httpx
 
+from meho_backplane.connectors.github.composites._names import check_github_name
+
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.github.connector import GitHubRestConnector
 
-__all__ = ["check_github_name", "repo_create_composite"]
+__all__ = ["repo_create_composite"]
 
 # REST wire paths, keyed with ``str.format`` placeholders. Mounted under
 # ``https://api.github.com`` by the connector's ``_base_url``;
@@ -64,25 +65,6 @@ __all__ = ["check_github_name", "repo_create_composite"]
 # is checked and percent-encoded before it is formatted in.
 _ORG_REPOS_PATH: Final = "/orgs/{org}/repos"
 _REPO_PATH: Final = "/repos/{org}/{name}"
-
-# What GitHub allows in a user, organisation or repository name.
-_GITHUB_NAME: Final = re.compile(r"[A-Za-z0-9._-]+")
-
-
-def check_github_name(value: object) -> str | None:
-    """Return why ``value`` is not a safe owner or repository name, or ``None``.
-
-    GitHub names hold letters, digits, ``.``, ``-`` and ``_`` only. The
-    names ``.`` and ``..`` are refused because the URL encoding keeps dots,
-    so they would point at another API path. ``.github`` is a valid name.
-    """
-    if not isinstance(value, str) or not value:
-        return "name is empty"
-    if value in (".", ".."):
-        return f"name {value!r} is not allowed"
-    if not _GITHUB_NAME.fullmatch(value):
-        return f"name {value!r} may hold only letters, digits, '.', '-' and '_'"
-    return None
 
 
 def _checked_path_part(field: str, value: object) -> str:

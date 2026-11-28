@@ -60,6 +60,7 @@ from meho_backplane.connectors.github.composites._graphql import (
     GitHubGraphQlError,
     github_graphql,
 )
+from meho_backplane.connectors.github.composites._names import check_github_name
 from meho_backplane.connectors.github.composites.schemas_git import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -76,7 +77,6 @@ __all__ = [
     "STATUS_PRECONDITION_FAILED",
     "GitRepo",
     "branch_commit_files_composite",
-    "check_github_name",
     "check_name",
     "describe_files",
     "git_ref_view_composite",
@@ -106,9 +106,6 @@ _SHA1: Final = re.compile(r"^[0-9a-f]{40}$")
 # characters and space.
 _FORBIDDEN_CHARS: Final = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 
-# What GitHub allows in a user, organisation or repository name.
-_GITHUB_NAME: Final = re.compile(r"[A-Za-z0-9._-]+")
-
 # GitHub's atomic branch update. ``beforeOid`` is the commit the branch must
 # still be at; GitHub checks it in the same step that moves the branch, so
 # there is no window between a read and the move. ``force: false`` keeps the
@@ -134,22 +131,6 @@ mutation MehoBranchCommitFiles(
 # ``UNPROCESSABLE``. Any other type (auth, not found, ...) is unexpected and
 # raised. The wording is GitHub's; MEHO quotes it.
 _REFUSED_UPDATE_TYPES: Final = frozenset({None, "UNPROCESSABLE"})
-
-
-def check_github_name(value: object) -> str | None:
-    """Return why ``value`` is not a safe owner or repository name, or ``None``.
-
-    GitHub names hold letters, digits, ``.``, ``-`` and ``_`` only. The
-    names ``.`` and ``..`` are refused because the URL encoding keeps dots,
-    so they would point at another API path. ``.github`` is a valid name.
-    """
-    if not isinstance(value, str) or not value:
-        return "name is empty"
-    if value in (".", ".."):
-        return f"name {value!r} is not allowed"
-    if not _GITHUB_NAME.fullmatch(value):
-        return f"name {value!r} may hold only letters, digits, '.', '-' and '_'"
-    return None
 
 
 def check_name(value: object, *, allow_slash: bool) -> str | None:

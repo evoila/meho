@@ -703,11 +703,13 @@ class AuditLog(Base):
     # The policy rule that matched the call, and the version of the policy
     # file (#6044). The writers read both from
     # :data:`meho_backplane.operations._audit.policy_rule_var`, which the
-    # dispatcher binds next to ``policy_decision_var``. Today only the
-    # policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) sets it,
-    # so the text ends with ``(shadow)``: the evaluator matched this rule,
-    # but today's checks decided. NULL with the switch off, on rows where no
-    # gate ran, and on every row from before migration ``0168``.
+    # dispatcher binds next to ``policy_decision_var``. With ``CUSTOM_POLICY``
+    # on it names the rule that decided (``gate:<verdict>`` when the policy
+    # evaluator gave another answer). With it off, only the evaluator in
+    # shadow mode (``POLICY_ENGINE_SHADOW``) sets it, and the text ends with
+    # ``(shadow)``: the evaluator matched this rule, but today's checks
+    # decided. NULL with both switches off, on rows where no gate ran, and on
+    # every row from before migration ``0168``.
     policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
     # The kind of caller of the row: one of

@@ -236,7 +236,9 @@ async def test_the_gate_keeps_the_rule_once_marked_as_not_deciding(
     verdict = await _gate("person", _operator("person"), _descriptor("safe"))
     assert verdict is PermissionVerdict.AUTO_EXECUTE
     stamp = take_rule()
-    assert stamp == RuleStamp(source="default", rule_id="forced", text="x", decided=False)
+    assert stamp == RuleStamp(
+        source="default", rule_id="forced", text="x", decided=False, verdict="deny"
+    )
     assert stamp.label() == "default:forced (shadow)"
     assert stamp.as_json() == {
         "source": "default",

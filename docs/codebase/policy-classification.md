@@ -367,6 +367,12 @@ when a write gets `hard_to_undo: overwrites`:
    the mark. The operation's own text says that it overwrites the backup at
    the same path. No mark depends on the parameters of a call.
 
+A delete of an object gets `hard_to_undo: deletes` when no later call of the
+same connector brings the object back as it was, also in one of MEHO's own
+stores, whose connector is the only way in (for example
+`topology.delete_node`: a node made again gets a new id, and the edges of
+the old node do not come back).
+
 `changes_rights` follows one sentence in every connector: a call changes
 rights when it changes who or what may reach or use something in the
 target system: a login, a group or role, an access list, or a firewall

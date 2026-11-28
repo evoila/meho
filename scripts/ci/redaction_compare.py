@@ -12,13 +12,14 @@
                              a backend/ folder with uv run; it imports that
                              folder's own tests.redaction_compare code)
   --judge BASE HEAD --approved FILE [--base-approved FILE] [--changed FILE]
-          [--summary-only]
+          [--full-list] [--summary-only]
                              compare two record files; exit 1 on a difference
                              that the approved file does not list. Only the
                              entries that are not in the base's approved file
-                             count. Without --summary-only it prints each
-                             difference that is not approved (input id, step,
-                             kind) and the counts.
+                             count. By default it prints only one closing
+                             line. With --full-list it prints each difference
+                             that is not approved (input id, step, kind) and
+                             the counts.
   --changed FILE             the paths under backend/tests/redaction_compare/,
                              and backend/tests/__init__.py, that the pull
                              request changes, each ended by a
@@ -27,21 +28,30 @@
                              its new path). Each path is a difference of
                              kind "changed" and needs an approved entry with
                              id "compare-package", that path, and part
-                             "changed". The input set and the way the answers
-                             are read are then reviewed, never changed
-                             silently. The file is read as bytes, and each
+                             "changed". So each change of the input set or of
+                             the way the answers are read needs its own
+                             reviewed entry. The file is read as bytes, and each
                              path is spelled so that two different paths
                              never get the same spelling (see path_name).
-  --summary-only             for the public CI log: print no input id, no
-                             step, no part and no number, only one closing
-                             line (a stale approved entry is still printed:
-                             it is in the committed approved file already).
-                             The exit code is the same.
+  --full-list                print each difference that is not approved and
+                             the counts. The judge refuses this option when
+                             the variable GITHUB_ACTIONS is "true" (GitHub
+                             sets it on every Actions runner), because the
+                             CI log is public.
+  --summary-only             accepted and changes nothing: the summary is the
+                             default. The CI job still passes it, because the
+                             job runs the judge of the base commit.
 
-The judge uses only the standard library. The CI job reads this script from
-the base branch, so a pull request cannot weaken the rule that judges it.
-It builds the records of the base and of the pull request in the job, each
-from its own code; the records are never committed.
+The summary has no input id, no step, no part and no number, only one closing
+line (a stale approved entry is still printed: it is in the committed
+approved file already). The exit code is the same with or without
+--full-list. The option parser takes only the full option names.
+
+The judge uses only the standard library. The CI job reads this script and
+the base's approved file from the base commit. It builds the records of the
+base and of the pull request in the job, each from its own code, except that
+the pull request's build takes backend/tests/ from the base commit. The
+pull request's code runs only in a container. The records are never committed.
 
 A part id starting with "s" is a secret value; "p" is a plain word. A
 difference is one of:
@@ -146,14 +156,14 @@ def judge(
     head_path: Path,
     approved_path: Path,
     base_approved_path: Path | None = None,
-    summary_only: bool = False,
+    full_list: bool = False,
     changed: list[str] | None = None,
 ) -> int:
     """Only the entries that the pull request adds can approve a difference or be stale.
 
     An entry that is also in the base's approved file was merged with an
     earlier pull request: it approves nothing and never fails the job.
-    With ``summary_only`` the output names no input and holds no number.
+    Without ``full_list`` the output names no input and holds no number.
     """
     old = []
     if base_approved_path is not None and base_approved_path.is_file():
@@ -177,7 +187,7 @@ def judge(
             None,
         )
         if match is None:
-            if not summary_only:
+            if full_list:
                 print(f"{input_id} {path}: {kind}")
             not_approved += 1
         else:
@@ -185,7 +195,7 @@ def judge(
     stale = [entry for index, entry in enumerate(approved) if index not in used]
     for entry in stale:
         print(f"approved entry matches no difference (stale): {entry}")
-    if not summary_only:
+    if full_list:
         print(f"{len(found)} difference(s), {not_approved + len(stale)} not approved")
     elif not_approved:
         print(
@@ -215,9 +225,15 @@ def write_records(target: Path) -> None:
     print(f"wrote the records to {target}")
 
 
-def main() -> int:
+#: The one message of the refusal of --full-list in CI.
+FULL_LIST_REFUSED = "--full-list is not allowed when GITHUB_ACTIONS is true: the CI log is public."
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--records", metavar="FILE")
@@ -225,8 +241,17 @@ def main() -> int:
     parser.add_argument("--approved")
     parser.add_argument("--base-approved")
     parser.add_argument("--changed")
+    parser.add_argument("--full-list", action="store_true")
     parser.add_argument("--summary-only", action="store_true")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
+    if args.full_list and os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        print(FULL_LIST_REFUSED, file=sys.stderr)
+        return 2
     if args.write:
         write()
         return 0
@@ -241,7 +266,7 @@ def main() -> int:
             Path(args.judge[1]),
             Path(args.approved),
             base_approved,
-            summary_only=args.summary_only,
+            full_list=args.full_list,
             changed=changed,
         )
     parser.error("use --write, --records FILE, or --judge BASE HEAD --approved FILE")

@@ -55,7 +55,9 @@ class _FakeTokenCheck:
         self.calls.append(decrypted.id)
         if decrypted.id == self.disabled:
             raise HTTPException(status_code=401, detail="session_expired")
-        return decrypted, SimpleNamespace(tenant_role=TenantRole.READ_ONLY)
+        return decrypted, SimpleNamespace(
+            tenant_role=TenantRole.READ_ONLY, role_from_platform_admin=False
+        )
 
 
 def _session(session_id: uuid.UUID | None = None) -> DecryptedSession:
@@ -292,7 +294,9 @@ class _RefreshMovesTenant:
     ) -> tuple[DecryptedSession, Any]:
         refreshed = replace(decrypted, tenant_id=self.moves_to)
         operator = SimpleNamespace(
-            tenant_role=self.roles[self.moves_to], principal_kind=PrincipalKind.USER
+            tenant_role=self.roles[self.moves_to],
+            principal_kind=PrincipalKind.USER,
+            role_from_platform_admin=False,
         )
         return refreshed, operator
 

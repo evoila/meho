@@ -178,7 +178,7 @@ _log = structlog.get_logger(__name__)
 #: routes' RBAC gate (``operator`` minimum). Built once at import time to
 #: satisfy ruff's B008 rule, matching the convention
 #: :mod:`~meho_backplane.api.v1.retrieve_usage` established.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 #: RBAC gate for the cross-session replay route (#1843). Replaying an
 #: *arbitrary* ``session_id`` exposes another principal's full session

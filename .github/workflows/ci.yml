@@ -36,15 +36,21 @@
 # `python-migration-tests` and the nightly coverage jobs. Every moved job
 # keeps its name, `if:` guard and triggers, so the required checks are
 # unchanged. Merge-queue runs are the exception (#6325, #6350): there
-# `python-lint`, `go-lint-test`, `cli-api-snapshot-freshness` and the
-# merge-queue watchdog use the internal `meho-runners-ci` pool. The
+# `python-lint`, `go-lint-test` and `cli-api-snapshot-freshness` use the
+# internal `meho-runners-ci` pool. The
 # four short jobs `changes`, `python-unit-lane`, `python-integration` and
 # `helm-lint-template` stay hosted, to keep the main pool free.
 #
+# Second runner site (#7085): unit test shards 4-6 of a pull request can run
+# on a second runner site, in the job `python-unit-shard-second-site`. This
+# happens only when a person has switched it on and its smoke check passed
+# in the last 45 minutes. That job names no secret. Every doubt means today's
+# pool. See `docs/codebase/devops.md`, "Second runner site".
+#
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the six
-# `python-unit-shard` legs, and the four `python-integration-shard` legs —
+# `.md`). On such a PR the heavy Python lanes — `python-lint` and the six
+# `python-unit-shard` legs —
 # skip via their own job-level `if:` (skipped-by-`if:` == Success per
 # #2140), so a changelog roll / guide edit / README fix finishes CI in
 # minutes instead of paying the ~17-19-min Python tax for zero signal. The
@@ -64,6 +70,11 @@
 # the backend tests that read files outside `backend/` (the Helm chart, the Go
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
 # path. merge_group and the nightly run always run everything.
+#
+# Integration shards: the four `python-integration-shard` legs run
+# only in the merge queue and in the nightly run, never on a pull request.
+# On a pull request the fan-in `Python (integration testcontainers)` still
+# reports and passes, with a summary line that says so.
 #
 # Test map run (#5642): a PR that would otherwise run all the unit shards
 # runs one unit job with only the tests its change can break. The nightly
@@ -142,16 +153,11 @@
 # is scoped to pull_request refs only so PR force-pushes still cancel
 # their predecessors cleanly. A push to `main` starts no run (#6387).
 #
-# Merge-queue watchdog (#4732): the queue drops a group as soon as one of
-# its required checks fails, or when it rebuilds the group behind a pull
-# request it took out, and then deletes the group's branch. GitHub does not
-# stop the group's CI run, so the run's jobs kept waiting for and using
-# runners for up to three hours after the drop. The `merge-queue-watchdog`
-# job (last in this file) runs only on `merge_group` events. It cancels its
-# own run when a job that carries or feeds a required check has not passed,
-# or when the queue branch is gone. It ends quietly once every job that
-# carries or feeds a required check has finished, so a run that passed and
-# merged is never cancelled.
+# Dropped queue groups: the queue drops a group as soon as one of
+# its required checks fails, and GitHub does not stop the group's run. The
+# sweep in merge-queue-cleanup.yml cancels such runs every 5 minutes, on a
+# GitHub-hosted runner. No job of this file waits on a runner only to watch
+# the run; test_ci_merge_queue_cleanup.py keeps it so.
 
 name: CI
 
@@ -212,8 +218,8 @@ jobs:
     #                required `python-migration-tests` job runs only then.
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
-    #                heavy Python lanes (`python-lint`, the `python-unit-shard`
-    #                matrix, and the `python-integration-shard` matrix) skip
+    #                heavy Python lanes (`python-lint` and the
+    #                `python-unit-shard` matrix) skip
     #                via their own `if:` and report success-by-skip (#3252).
     #   backend_python — `false` when a PR changes no file under `backend/`
     #                (except `.md`), does not change this file and does not
@@ -261,15 +267,24 @@ jobs:
     #                merge_group / nightly run give empty (the full run).
     #
     #   test_map — `true` when the test map picked the unit tests of a PR
-    #                (#5642). Only computed on a PR that is not docs-only, has
-    #                a backend change and is not a one-connector run. The
+    #                (#5642). Only computed on a PR of a branch of this repo
+    #                that is not docs-only, has a backend change and is not a
+    #                one-connector run. The step `report` writes one line on
+    #                every PR that says what runs, or why not (#7103). The
     #                step `map` downloads the newest map that the nightly run
     #                on `main` made, and backend/tests/_unit_test_map.py picks
     #                the tests. The step `upload-selection` stores them for
     #                the `python-unit-shard` job. Same fail-closed rule: no
-    #                map, an old map, a file the map cannot judge, too many
+    #                map, a map older than 2 days, a file the map cannot judge, too many
     #                tests, any error, and every merge_group / nightly run give
     #                `false` (the full run).
+    #
+    #   second_site — `on` when unit test shards 4-6 run on the second
+    #                runner site (#7085), else empty. Only on a pull request
+    #                from this repository that runs all six shards, on the
+    #                first attempt, when the site is switched on and its smoke
+    #                check passed in the last 45 minutes. Every doubt gives
+    #                empty (today's pool). The step `second-site` decides.
     #
     # No fork-PR guard (#4835): this job runs on a GitHub-hosted runner, with
     # a read-only token and no secret, so a fork pull request may run it. The
@@ -291,6 +306,7 @@ jobs:
       single_connector: ${{ steps.detect.outputs.single_connector }}
       # `true` only when the picked tests were also stored.
       test_map: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+      second_site: ${{ steps.second-site.outputs.second_site }}
     steps:
       - name: Checkout
         # On a PR, HEAD is the test merge: the PR on top of the newest
@@ -471,14 +487,18 @@ jobs:
             echo "single_connector=${single_connector}"
           } >> "$GITHUB_OUTPUT"
       - name: Pick unit tests with the test map
-        # #5642. Only on a pull request that would otherwise run all the unit
-        # shards. Every failure below gives test_map=false (the full run);
-        # the step itself never fails. The artifact must come from a run of
-        # this repo on `main`: only the nightly run makes it
-        # (python-coverage-combine).
+        # #5642. Only on a pull request of a branch of this repo that would
+        # otherwise run all the unit shards. Every failure below gives
+        # test_map=false (the full run); the step itself never fails. The
+        # artifact must come from a run of this repo on `main`: only the
+        # nightly run makes it (python-coverage-combine).
+        # #7103: a map older than STALE_DAYS (2) days in _unit_test_map.py
+        # also gives the full run, and the outputs `old_map` says so. The
+        # step `report` below writes the line of every pull request.
         id: map
         if: >-
           github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
           steps.detect.outputs.docs_only == 'false' &&
           steps.detect.outputs.backend_python == 'true' &&
           steps.detect.outputs.single_connector == ''
@@ -498,14 +518,26 @@ jobs:
             line="full suite: no test map from a nightly run of this repo on main"
           elif ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact}/zip" > "${dir}/map.zip"; then
             line="full suite: could not download the test map"
-          elif ! line="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD | python3 backend/tests/_unit_test_map.py pick --map "${dir}/map.zip" --out "${dir}/selection.txt")"; then
+          elif ! line="$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD | python3 backend/tests/_unit_test_map.py pick --map "${dir}/map.zip" --out "${dir}/selection.txt" --warning-out "${dir}/warning.txt")"; then
             line="full suite: the test map tool failed"
-          elif [ -s "${dir}/selection.txt" ]; then
+          elif [ ! -s "${dir}/selection.txt" ]; then
+            :  # The tool chose the full run; its line says why.
+          elif [ -s "${dir}/warning.txt" ]; then
+            line="full suite: the test map is too old to pick tests"
+            rm -f "${dir}/selection.txt"
+          else
             test_map=true
           fi
+          old_map=
+          if [ -s "${dir}/warning.txt" ]; then
+            old_map="$(head -n 1 "${dir}/warning.txt")"
+          fi
           echo "${line}"
-          echo "::notice title=Unit tests::${line}"
-          echo "test_map=${test_map}" >> "$GITHUB_OUTPUT"
+          {
+            echo "test_map=${test_map}"
+            echo "line=${line}"
+            echo "old_map=${old_map}"
+          } >> "$GITHUB_OUTPUT"
       - name: Store the picked unit tests
         # The python-unit-shard job downloads this list. A failed upload
         # gives test_map=false (see the job outputs), so the full run.
@@ -519,6 +551,77 @@ jobs:
           path: ${{ runner.temp }}/unit-test-map/selection.txt
           retention-days: 1
           if-no-files-found: error
+      - name: Say how the unit tests run
+        # #7103. One line on every pull request, in the step summary and as
+        # an annotation, after the upload above: the same choice as the job
+        # output `test_map`. The line is a notice only when the unit tests
+        # run the tests the map picked. Every other case is a warning: the
+        # full suite, one connector's tests, only docs changed, or no unit
+        # tests at all. A failed earlier step of this job fails the job, so
+        # every job that needs it skips, the unit tests too. A pull request
+        # with no backend change runs the job python-outside-backend instead
+        # of the unit shards. A pull request from a fork runs neither: those
+        # jobs need this repo's runners.
+        id: report
+        if: always() && github.event_name == 'pull_request'
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SAME_REPO: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          TEST_MAP: ${{ steps.map.outputs.test_map }}
+          MAP_LINE: ${{ steps.map.outputs.line }}
+          OLD_MAP: ${{ steps.map.outputs.old_map }}
+          UPLOAD: ${{ steps.upload-selection.outcome }}
+        run: |
+          level=warning
+          if [ "${JOB_STATUS}" != "success" ]; then
+            line="no unit tests: an earlier step of this job did not pass (job: ${JOB_STATUS:-unknown}), so the unit test jobs are skipped"
+          elif [ "${DOCS_ONLY}" = "true" ]; then
+            line="no unit tests: only docs changed"
+          elif [ "${SAME_REPO}" != "true" ]; then
+            line="no unit tests: the pull request comes from a fork, and the unit test jobs run only for branches of this repo"
+          elif [ "${BACKEND_PYTHON}" = "false" ]; then
+            line="no unit shards: no backend change, so only the job \"Python tests that read files outside backend\" runs"
+          elif [ -n "${SINGLE_CONNECTOR}" ]; then
+            line="no test map needed: the tests of connector ${SINGLE_CONNECTOR} run"
+          elif [ "${TEST_MAP}" != "true" ]; then
+            line="${MAP_LINE:-full suite: the test map step gave no result}"
+          elif [ "${UPLOAD}" != "success" ]; then
+            line="full suite: could not store the picked tests (upload: ${UPLOAD:-not run})"
+          else
+            level=notice
+            line="${MAP_LINE}"
+          fi
+          echo "::${level} title=Unit tests::${line}"
+          echo "Unit tests: ${line}" >> "${GITHUB_STEP_SUMMARY}"
+          if [ -n "${OLD_MAP}" ]; then
+            echo "::warning title=Old unit test map::${OLD_MAP}"
+            echo "Old unit test map: ${OLD_MAP}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+      - name: Pick the runner site for unit shards 4-6
+        # #7085. The script checks every rule and writes one notice that
+        # says why. A failure or a timeout here leaves the output empty,
+        # which means today's pool, so this step can never fail or hold up
+        # the job. `actions: read` above lets it read the smoke runs.
+        id: second-site
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEHO_CI_SECOND_SITE: ${{ vars.MEHO_CI_SECOND_SITE }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          ACTOR: ${{ github.actor }}
+          COVERAGE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate') && 'true' || 'false' }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
+          BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
+          SINGLE_CONNECTOR: ${{ steps.detect.outputs.single_connector }}
+          # The same value as the job output `test_map` above.
+          TEST_MAP: ${{ steps.map.outputs.test_map == 'true' && steps.upload-selection.outcome == 'success' && 'true' || 'false' }}
+        run: bash scripts/ci/pick_second_site.sh
 
   # ---------------------------------------------------------------------------
   # Required unit lane, sharded (#3251). The pre-#3251 monolithic
@@ -691,19 +794,23 @@ jobs:
       # count, edit BOTH the matrix and the `TOTAL` in the pytest step, in
       # lockstep. To rebalance the shards, refresh the measured file times
       # (tests/_unit_shard_durations.json, see tests/_unit_shard_split.py).
+      # Second runner site: when `changes` says `second_site=on`, this job
+      # runs shards 1-3 and python-unit-shard-second-site runs shards 4-6.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || '[1, 2, 3, 4, 5, 6]') }}
-    # 30-min cap: hang backstop only. Expected job wall is ~8-12 min (setup
-    # ~2 min + pytest ~6-10 min); on busy nights passed shards took up to ~20
-    # min, and a 20-min cap cut good shards. The perf-budget step below is the
-    # PR-level early-warning gate that fires well before this cap. The slow
-    # "Install PHP CLI" step has its own short limit, so one stalled download
-    # cannot use up the job's time. The pre-shard lane's 25-min cap
-    # covered a ~18-min serial pytest wall; a ~6-min shard needs far less. The
+        shard: ${{ fromJSON((needs.changes.outputs.single_connector != '' || needs.changes.outputs.test_map == 'true') && '[1]' || needs.changes.outputs.second_site == 'on' && '[1, 2, 3]' || '[1, 2, 3, 4, 5, 6]') }}
+    # 35-min cap: hang backstop only. Expected job wall is ~17-21 min (setup
+    # ~2-3 min + pytest ~15-19 min). Setup plus the 1500 s budget stays under
+    # the cap. So a shard whose pytest ends after 1500 s but before the cap
+    # fails on the budget check with its measured time. A shard whose pytest
+    # still runs at the cap is stopped by this limit, and the budget check
+    # does not run. A 20-min cap once cut good shards. The perf-budget step
+    # below is the PR-level early-warning gate that fires well before this
+    # cap. The slow "Install PHP CLI" step has its own short limit, so one
+    # stalled download cannot use up the job's time. The
     # old lane's OOM/heartbeat history (why the whole-suite lane dropped --cov
     # and pinned -n 3) is preserved verbatim in the pytest step comment below.
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT
@@ -728,9 +835,13 @@ jobs:
       # spec-shelf checkout. Set UNCONDITIONALLY: when the shelf checkout
       # was skipped (secret absent — fork PRs, Dependabot runs,
       # not-yet-provisioned repos) the directory does not exist, the
-      # resolver returns None, and the spec-backed lanes pytest.skip
-      # exactly as they did before #2949. When the checkout ran, the
-      # seconds-cheap reconcile lanes run for real in this job.
+      # resolver returns None, and the spec-backed tests skip. The step
+      # "Check the skipped tests of this shard" then takes the
+      # without_secrets numbers of tests/_skip_limits.json, so a run
+      # without the shelf passes, and a test file that skips more tests
+      # than its number fails.
+      # When the checkout ran, the seconds-cheap reconcile lanes run for
+      # real in this job and the check takes the with_secrets numbers.
       MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
@@ -738,7 +849,8 @@ jobs:
         # and uv.lock both live here.
         working-directory: backend
     steps:
-      - name: Checkout
+      - &unit-checkout
+        name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Read the CI repository secrets
@@ -766,11 +878,13 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
           MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
           MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
           MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           IMAGES
 
-      - name: Start memory sampling
+      - &unit-memory-start
+        name: Start memory sampling
         # Feeds the "Print peak memory" step at the end of this job. A small
         # background loop reads this container's cgroup v2 memory files once a
         # second and keeps the highest values until that step stops it. It
@@ -820,8 +934,8 @@ jobs:
         #
         # SPEC_SHELF_TOKEN is a fine-grained PAT: Contents read-only on
         # the single private shelf repo, nothing else. Secret absent →
-        # this step skips → the spec lanes pytest.skip exactly as
-        # before this step existed. Fork PRs never reach this step (the
+        # this step skips → the spec lanes skip, and the skip limit check
+        # takes the without_secrets numbers. Fork PRs never reach this step (the
         # job-level fork guard skips the whole job) and would not see
         # the secret anyway (GitHub withholds secrets from fork-PR
         # runs). Dependabot runs read the Dependabot secret store,
@@ -860,7 +974,8 @@ jobs:
         # job — otherwise the resolvers would return None and the spec
         # lanes would silently go back to skipping, undetected (the
         # exact regression #2949 closes). Without the secret this step
-        # skips and lane-skip stays the documented degraded mode.
+        # skips, the spec tests skip, and the skip limit check takes the
+        # without_secrets numbers of tests/_skip_limits.json.
         # Prints file *presence* only — never spec content.
         if: env.SPEC_SHELF_READY == 'true'
         working-directory: ${{ github.workspace }}
@@ -925,7 +1040,8 @@ jobs:
           enable-cache: true
           add-problem-matchers: false
 
-      - name: Sync Python environment (locked)
+      - &unit-sync
+        name: Sync Python environment (locked)
         # --locked refuses to update uv.lock; if pyproject.toml drifted
         # from the lock, CI fails here rather than silently bumping
         # deps. --all-groups pulls dev tools (ruff, mypy, pytest, etc.)
@@ -968,7 +1084,7 @@ jobs:
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
+        run: &unit-warm-run |
           "${GITHUB_WORKSPACE}/scripts/ci/retry.sh" uv run python -m meho_backplane.retrieval.warm
 
       - name: Restore the spaCy model from the cache
@@ -979,7 +1095,8 @@ jobs:
           path: ~/.cache/meho-ci-tools
           key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
 
-      - name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
+      - &unit-spacy
+        name: Provision spaCy NLP model for Presidio Tier-2 (#1072)
         # G11.4-T3 (#1072) ships the Tier-2 Presidio NER adapter
         # (capability-flagged per policy). The acceptance gate
         # (``Tier-2 redacts a free-text field containing a person
@@ -1011,7 +1128,8 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
-      - name: Install Helm
+      - &unit-helm
+        name: Install Helm
         # The chart render tests (tests/test_chart_*.py) call `helm
         # template`. Without helm they skip, so a broken chart test could
         # stay hidden on main. Same pinned action and Helm version as
@@ -1021,7 +1139,20 @@ jobs:
         with:
           version: v3.16.4
 
-      - name: Name the PHP package cache
+      - &unit-node
+        name: Install Node
+        # The console script tests (tests/test_ui_*_js.py, test_ui_pwa.py,
+        # test_web_push_service_worker.py and others) run the JavaScript in
+        # node. MEHO_REQUIRE_NODE=1 in the pytest step makes them FAIL, not
+        # skip, when node is missing. Same pinned action and node version as
+        # plugin-test.yml. No package cache: the repo root has no package.json.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - &unit-php-name
+        name: Name the PHP package cache
         # The key holds the OS release and the CPU type, because the cached
         # package files fit only that. Bump the -v1 at the end to drop a
         # bad cache entry.
@@ -1033,14 +1164,16 @@ jobs:
           . /etc/os-release
           echo "key=php-cli-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the PHP package files from the cache
+      - &unit-php-restore
+        name: Restore the PHP package files from the cache
         id: php-debs-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
-      - name: Install PHP CLI
+      - &unit-php-install
+        name: Install PHP CLI
         id: php-install
         # The pfSense user-write tests
         # (tests/test_connectors_pfsense_user_write_ops.py) run the
@@ -1136,7 +1269,8 @@ jobs:
           path: ~/.cache/meho-ci-php-debs
           key: ${{ steps.php-debs.outputs.key }}
 
-      - name: Name the GBK locale package cache
+      - &unit-locale-name
+        name: Name the GBK locale package cache
         # Same pattern as "Name the PHP package cache". Bump the -v1 at
         # the end to drop a bad cache entry.
         id: locale-debs
@@ -1147,14 +1281,16 @@ jobs:
           . /etc/os-release
           echo "key=locales-debs-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-v1" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the GBK locale package files from the cache
+      - &unit-locale-restore
+        name: Restore the GBK locale package files from the cache
         id: locale-debs-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/meho-ci-locale-debs
           key: ${{ steps.locale-debs.outputs.key }}
 
-      - name: Install the GBK locale data
+      - &unit-locale-install
+        name: Install the GBK locale data
         id: locale-install
         # The linux.script.run locale test
         # (tests/test_connectors_linux_script_env_locale.py) builds the
@@ -1237,7 +1373,8 @@ jobs:
           path: ~/.cache/meho-ci-locale-debs
           key: ${{ steps.locale-debs.outputs.key }}
 
-      - name: Download the picked unit tests
+      - &unit-download-picked
+        name: Download the picked unit tests
         # Test map run (#5642): the list the `changes` job stored.
         if: needs.changes.outputs.test_map == 'true'
         timeout-minutes: 2
@@ -1246,7 +1383,8 @@ jobs:
           name: unit-test-selection
           path: ${{ runner.temp }}/unit-test-selection
 
-      - name: Pytest (unit shard ${{ matrix.shard }}/6)
+      - &unit-pytest
+        name: Pytest (unit shard ${{ matrix.shard }}/6)
         # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
         # default self-hosted shell does not enable — #2865). Under -e a
         # failing `uv run pytest` exits the step immediately, so the
@@ -1268,6 +1406,8 @@ jobs:
           # Same for the linux.script.run locale test and the Install the
           # GBK locale data step above.
           MEHO_REQUIRE_GBK_LOCALE: "1"
+          # Same for the console script tests and the Install Node step above.
+          MEHO_REQUIRE_NODE: "1"
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
           # tier2 path in test_redaction_middleware.py exercise the
@@ -1367,7 +1507,7 @@ jobs:
           # kept 660 s when the shard count went 3 → 4: the 3 shards had
           # reached 580-660 s; the #4655 measurement put the slowest of 4
           # shards at ~470 s with the same budget. The budget still fires below the
-          # 30-min job `timeout-minutes` hang backstop. This step measures the
+          # 35-min job `timeout-minutes` hang backstop. This step measures the
           # pytest wall, always prints it (trend visibility), and FAILS at the
           # budget so a regression is caught at the PR that causes it.
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
@@ -1398,15 +1538,38 @@ jobs:
           # Fixture timing of shard 2 (MEHO_FIXTURE_TIMING_FILE): the
           # `azure` and `registered` fixtures take 4.3 s per test,
           # `_audit_db_url` 28 s per test file. The gate stays on. The
-          # 30-minute job limit still sits above setup plus 1200 s.
-          budget_s=1200
+          # 30-minute job limit still sat above setup plus 1200 s.
+          # All six shards: 1500 s (#7160). Merge-queue run 46001005720
+          # failed only on time: shard 3 took 1212 s, every test passed.
+          # Measured pytest wall in the green merge-queue runs 45967904368,
+          # 45974330390, 45989298583 and 45989659807: 907-1123 s. Five pull
+          # request runs took 827-1136 s. So every shard was near 1200 s, and
+          # any merge could fail by chance on a busy runner. Fresh file times
+          # do not help: they were refreshed on 2026-11-26 (#7033), and the
+          # split already gives each shard about 2248 s of test time. A
+          # seventh shard needs a seventh runner in the merge-queue runner
+          # set, which is sized outside this repository. Against 1500 s the
+          # slowest measured shard (1212 s) uses 81 percent and the average
+          # shard (about 1040 s) about 70 percent. The gate stays on as the
+          # early warning. The job limit went from 30 to 35 minutes, so it
+          # still sits above setup plus 1500 s.
+          # Fixture timing of shard 3 of 6 (MEHO_FIXTURE_TIMING_FILE +
+          # MEHO_LIFESPAN_TIMING, -n 3 --dist loadscope, local run on
+          # 2026-11-27, all tests passed). Top five fixtures: `kc` 334 setups
+          # 743.6 s, `_audit_db_url` 15 setups 351.3 s, `keycloak` 139
+          # setups 232.4 s, `client_with_operator` 135 setups 215.8 s,
+          # `registered` 33 setups 108.8 s. Top three start-up steps:
+          # `operation_catalog_write` 206 calls 47.1 s,
+          # `_preload_embedding_model` 206 calls 6.9 s,
+          # `_eager_import_connectors` 211 calls 0.3 s.
+          budget_s=1500
           start=$(date +%s)
           # Per-test hang guard (#4270): --timeout=180 arms a per-test SIGALRM
           # in each xdist worker, so a test that stops making progress fails
           # on its own after 180 s with its name and a stack dump of every
           # thread, instead of sitting silent (one dot per test, no names)
-          # until the 30-min job cap. The shard then still lands inside the
-          # 1200 s budget below. Mirrors the python-coverage job's guard;
+          # until the 35-min job cap. The shard then still lands inside the
+          # 1500 s budget below. Mirrors the python-coverage job's guard;
           # --timeout-method=signal (NOT thread) is load-bearing under xdist:
           # thread calls os._exit(), which xdist reads as a worker crash and
           # whose stack dump it swallows. 180 s is ~3x the slowest honest
@@ -1428,7 +1591,46 @@ jobs:
             exit 1
           fi
 
-      - name: Upload per-test times (input for the shard split)
+      - &unit-skip-check
+        name: Check the skipped tests of this shard
+        # A skipped test shows as green. This step fails when a test file
+        # skipped more tests than tests/_skip_limits.json allows for it (0
+        # when it is not listed). The count is per test file, so it holds for
+        # any split and for the short runs. See tests/_skip_limit_check.py.
+        # A run without the spec shelf takes the without_secrets numbers
+        # (the spec tests skip there); this step runs in both kinds of run.
+        # The second-site job has no SPEC_SHELF_READY and no shelf, so it
+        # takes the without_secrets numbers too.
+        # --selection: a file that ran whole and skipped fewer tests gives a
+        # notice to lower its number; a file picked by test id (test map
+        # run) gives none.
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--lane unit --selection "${RUNNER_TEMP}/unit-files.txt")
+          if [ "${SPEC_SHELF_READY:-}" != "true" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-unit-shard.xml
+
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-unit-shard.xml
+
+      - &unit-upload-times
+        name: Upload per-test times (input for the shard split)
         # #4809: tests/_unit_shard_split.py balances the shards with the
         # seconds in tests/_unit_shard_durations.json. Refresh that file
         # from these artifacts (one per shard) of a green run; the module
@@ -1438,7 +1640,7 @@ jobs:
         # never fail or hold the shard.
         # Not on a one-connector run (#5297) or a test map run (#5642): their
         # times cover only some files, so they must not be mixed into a refresh.
-        if: always() && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == '' && needs.changes.outputs.test_map != 'true'
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-unit-shard.xml') != '' && needs.changes.outputs.single_connector == '' && needs.changes.outputs.test_map != 'true'
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1448,7 +1650,8 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Print peak memory
+      - &unit-peak-memory
+        name: Print peak memory
         # Prints how much memory this job's runner container used and how many
         # CPUs it had, so a change to the heavy runner pool can be checked
         # against real numbers. Reads the cgroup files (v2 first, else v1) and
@@ -1500,6 +1703,228 @@ jobs:
           fi
           echo "::notice title=Peak memory (unit shard ${{ matrix.shard }}/6)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
+
+
+  python-unit-shard-second-site:
+    name: Python unit shard ${{ matrix.shard }}/6
+    # Second runner site (#7085). Unit shards 4-6 of a pull request, when the
+    # `changes` job says `second_site=on`: a person switched the site on
+    # (repository variable MEHO_CI_SECOND_SITE), and its smoke check
+    # (second-site-smoke.yml) passed in the last 45 minutes. Then
+    # python-unit-shard runs only shards 1-3. In every other case this job
+    # is skipped and python-unit-shard runs all six shards, with its own
+    # runner, secrets and steps.
+    #
+    # The second site is run by another team, on other machines. So:
+    # - The text of this job names no secret. GitHub may send a job every
+    #   secret its text names, also when a condition makes the value empty,
+    #   so a condition is not enough. A test checks the text
+    #   (backend/tests/test_ci_second_runner_site.py).
+    # - No `environment`, no `id-token`, and a read-only token.
+    # - The test images are the public docker.io names, there is no Docker
+    #   Hub login, and the spec-shelf tests skip, as on a fork.
+    #
+    # The test steps are YAML aliases (`*unit-...`) of the steps of
+    # python-unit-shard, so the two jobs run the same steps. Only the steps
+    # that read a secret, the cache steps and the step "Hide the proxy name
+    # in the test reports" differ. Tests check this.
+    #
+    # Never on a fork pull request, the merge queue, the nightly run or any
+    # other event: the `if:` below, and the pick rules in
+    # scripts/ci/pick_second_site.sh.
+    # No job on the usual runners runs anything from an artifact of this job.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.second_site == 'on'
+    # A re-run (run_attempt above 1) always uses today's pool, so one click
+    # gets a run off a dead site, also with "re-run failed jobs", which keeps
+    # the old `changes` output. The job still names no secret there.
+    runs-on: ${{ github.run_attempt == '1' && 'meho-runners-ci-heavy-site2' || 'meho-runners-ci-heavy' }}
+    permissions:
+      contents: read
+    # The job sets `cache-mode: read`, so GitHub lets its token restore
+    # caches and never save one.
+    cache-mode: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [4, 5, 6]
+    # Same cap as python-unit-shard. A job that waits for a runner is not
+    # stopped by it: the job `second-site-watchdog` covers that.
+    timeout-minutes: 35
+    env:
+      # The spec-shelf checkout does not run here, so this folder does not
+      # exist and the spec-backed tests skip, as on a fork.
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check that this runner is on the second site
+        # On the first attempt, `runs-on` names the second site's label. Its
+        # runners have MEHO_CI_SITE=site2 in their pod env, so this proves
+        # the label reached the second site. A re-run uses today's pool.
+        if: github.run_attempt == '1'
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          if [ "${MEHO_CI_SITE:-}" != "site2" ]; then
+            echo "::error title=Second runner site::This runner does not have MEHO_CI_SITE=site2, so the label of the second site reached another site. Switch the site off (repository variable MEHO_CI_SECOND_SITE) and check the runner set."
+            exit 1
+          fi
+          echo "This runner is on the second site."
+
+      - *unit-checkout
+
+      - &site2-public-images
+        name: Use the public test images
+        # The same script and image lines as the step "Read the CI
+        # repository secrets" of python-unit-shard, but with no secret name
+        # and REQUIRE_SECRETS false. So it writes the public docker.io/
+        # names. The second site pulls them through its own Docker Hub cache.
+        env:
+          REQUIRE_SECRETS: "false"
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
+          MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
+          MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
+          IMAGES
+
+      - *unit-memory-start
+
+      - &site2-uv
+        name: Install uv
+        # The same as in python-unit-shard, but it never saves the uv cache.
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          save-cache: false
+          add-problem-matchers: false
+
+      - *unit-sync
+
+      - &site2-fastembed-restore
+        name: Restore the fastembed model from the cache
+        # The same cache as in python-unit-shard, restore only.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - &site2-drift-guard
+        name: Embedding-model drift guard (evoila/meho#574)
+        # The same command as in python-unit-shard, with no HF_TOKEN: the
+        # model download is anonymous here.
+        env:
+          MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+        run: *unit-warm-run
+
+      - &site2-spacy-restore
+        name: Restore the spaCy model from the cache
+        # The same cache as in python-unit-shard, restore only.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-ci-tools
+          key: ci-tools-spacy-model-${{ runner.os }}-${{ hashFiles('scripts/ci/tool-versions.env') }}
+
+      - *unit-spacy
+      - *unit-helm
+      - *unit-node
+      - *unit-php-name
+      - *unit-php-restore
+      - *unit-php-install
+      - *unit-locale-name
+      - *unit-locale-restore
+      - *unit-locale-install
+      - *unit-download-picked
+      - *unit-pytest
+      - *unit-skip-check
+
+      - name: Hide the proxy name in the test reports
+        # The same step as in python-unit-shard, with no `env:` block, so it
+        # names no secret. The upload below runs only when this step passed.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-unit-shard.xml
+
+      - *unit-upload-times
+      - *unit-peak-memory
+
+  python-unit-shard-hosted-trial:
+    name: Hosted trial, unit shard 6/6 (not required)
+    # A one-day trial (#7187): unit shard 6 of a full pull request run also
+    # runs on a GitHub-hosted runner, beside the normal shard 6, so the wait
+    # and the run time can be compared. The job is removed after the trial.
+    #
+    # It is a copy of python-unit-shard-second-site, with these differences:
+    # - It runs on `ubuntu-latest` and only shard 6.
+    # - It has no step that checks the second site.
+    # - It has no step "Hide the proxy name in the test reports" and no
+    #   upload of the per-test times: the artifact name of the upload is the
+    #   same as the one of the normal shard 6, and the trial times must not
+    #   go into the shard split.
+    # - continue-on-error: a failed trial never fails the run.
+    #
+    # Rules: no job needs it, so no required check changes. The text of this
+    # job names no secret, so it gets none and does not use the image proxy.
+    # It runs only on a full pull request run from this repository, never in
+    # the merge queue or the nightly run. backend/tests/
+    # test_ci_hosted_unit_shard_trial.py checks this.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.backend_python != 'false' &&
+      needs.changes.outputs.single_connector == '' &&
+      needs.changes.outputs.test_map != 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    cache-mode: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [6]
+    timeout-minutes: 35
+    env:
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - *unit-checkout
+      - *site2-public-images
+      - *unit-memory-start
+      - *site2-uv
+      - *unit-sync
+      - *site2-fastembed-restore
+      - *site2-drift-guard
+      - *site2-spacy-restore
+      - *unit-spacy
+      - *unit-helm
+      - *unit-node
+      - *unit-php-name
+      - *unit-php-restore
+      - *unit-php-install
+      - *unit-locale-name
+      - *unit-locale-restore
+      - *unit-locale-install
+      - *unit-download-picked
+      - *unit-pytest
+      - *unit-skip-check
+      - *unit-peak-memory
 
   python-outside-backend:
     name: Python tests that read files outside backend
@@ -1553,10 +1978,20 @@ jobs:
         with:
           version: v3.16.4
 
+      - name: Install Node
+        # tests/test_ci_repo_secrets.py runs a script in node. Same pin as
+        # the unit shards; MEHO_REQUIRE_NODE=1 below makes those tests fail,
+        # not skip, when node is missing.
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
       - name: Pytest (tests that read files outside backend)
         shell: bash
         env:
           MEHO_REQUIRE_HELM: "1"
+          MEHO_REQUIRE_NODE: "1"
         run: |
           set -euo pipefail
           mapfile -t FILES < <(uv run python tests/_outside_backend_tests.py)
@@ -1639,6 +2074,21 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      - name: Read the CI repository secrets
+        # Only in a merge-queue run. The job then runs on the self-hosted
+        # pool, which reaches the image proxy, so it takes the same Python
+        # image, by the same digest, through the proxy. On a pull request the
+        # job runs on a GitHub-hosted runner and pulls IMAGE from Docker Hub
+        # (backend/tests/ci_test_image_exceptions.json).
+        if: github.event_name == 'merge_group'
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PYTHON_IMAGE: PROXY/library/python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015
+          IMAGES
+
       - name: Docker Hub login (for the image pull)
         # Same login as the other jobs of this workflow (see the one in
         # python-tests for the reasons): the job pulls one image, and a
@@ -1719,7 +2169,7 @@ jobs:
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
           # The container's error output goes to a file that is never
           # printed: the job log is public.
-          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${IMAGE}" sh -euc '
+          if ! tar -c -C "${stage}" . | docker run --rm -i -e UV_PYTHON_DOWNLOADS=0 "${MEHO_TEST_PYTHON_IMAGE:-${IMAGE}}" sh -euc '
             work="$(mktemp -d)"
             tar -x -C "${work}"
             cd "${work}/backend"
@@ -1926,7 +2376,12 @@ jobs:
     #  4. No-backend path (#5296). When `backend_python` is `false`, lint and
     #     the shards skip by their own `if:`, and `python-outside-backend`
     #     must pass instead. On every other path that job is skipped.
-    needs: [changes, python-lint, python-unit-shard, python-outside-backend]
+    #  5. Second runner site (#7085). When `second_site` is `on`, shards 1-3
+    #     run in python-unit-shard and shards 4-6 in
+    #     python-unit-shard-second-site, and both must succeed. When it is
+    #     empty, the second-site job must be skipped, and python-unit-shard
+    #     alone stands for the shards.
+    needs: [changes, python-lint, python-unit-shard, python-unit-shard-second-site, python-outside-backend]
     if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the
     # allowlist in test_ci_fork_runner_isolation.py, with its reason.
@@ -1950,6 +2405,8 @@ jobs:
           CHANGES_SINGLE_CONNECTOR: ${{ needs.changes.outputs.single_connector }}
           LINT_RESULT: ${{ needs.python-lint.result }}
           SHARDS_RESULT: ${{ needs.python-unit-shard.result }}
+          CHANGES_SECOND_SITE: ${{ needs.changes.outputs.second_site }}
+          SECOND_SITE_RESULT: ${{ needs.python-unit-shard-second-site.result }}
           OUTSIDE_RESULT: ${{ needs.python-outside-backend.result }}
         run: |
           detect="${CHANGES_RESULT}"
@@ -1963,6 +2420,9 @@ jobs:
           echo "python-unit-shard (aggregate of all 6 shard legs, or the one connector leg): ${shards}"
           echo "single_connector='${CHANGES_SINGLE_CONNECTOR}' (empty = six shards)"
           echo "python-outside-backend (tests that read outside backend/): ${outside}"
+          second_site="${CHANGES_SECOND_SITE}"
+          site2="${SECOND_SITE_RESULT}"
+          echo "second_site='${second_site}' (on = shards 4-6 ran on the second runner site); python-unit-shard-second-site: ${site2}"
 
           # The detect job MUST have succeeded for its docs_only classification
           # to be trustworthy. If not (failure / cancelled / an unexpected
@@ -1971,6 +2431,19 @@ jobs:
           # fork PR too (#4835).
           if [ "${detect}" != "success" ]; then
             echo "::error title=Python unit lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required unit lane closed."
+            exit 1
+          fi
+
+          # Second runner site (#7085). When it is on, the shards are split
+          # over two jobs, and both must succeed: from here on `shards`
+          # stands for both. When it is off, the second-site job must be
+          # skipped, and any other result fails the lane closed.
+          if [ "${second_site}" = "on" ]; then
+            if [ "${shards}" != "success" ] || [ "${site2}" != "success" ]; then
+              shards="failure (shards 1-3: ${shards}, shards 4-6 on the second site: ${site2})"
+            fi
+          elif [ "${site2}" != "skipped" ]; then
+            echo "::error title=Python unit lane red::the second runner site is off for this run, but python-unit-shard-second-site reports '${site2}' instead of 'skipped'. Failing the required unit lane closed."
             exit 1
           fi
 
@@ -2079,7 +2552,7 @@ jobs:
           fi
 
   python-coverage:
-    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/8)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/10)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -2159,6 +2632,14 @@ jobs:
     # all their data; on the 7 GiB heavy runner, 5 shards of ~4,000-4,700
     # tests still ran 19-29 min of pytest and peaked at the memory limit.
     # ~2,700 tests per shard keeps each one near 15-20 min and ~4 GiB.
+    # THREE WORKERS, 10 SHARDS (#7103): with the C tracer (#5642) and a
+    # growing suite, the serial shards ran 35-45+ min, and on 20-26 Nov 2026
+    # nearly every shard hit the 45-min step cap, so no test map was made.
+    # The runner has a 7-CPU and 7 GiB limit, and a serial shard used only
+    # about 2 GiB of program memory (Print peak memory). So each shard runs
+    # -n 3, like the unit shards (devops.md "Runner-CPU rule"). Measured with
+    # 8 shards: pytest 17-37 min, program memory 3.4-3.8 GiB. A fourth worker
+    # would leave too little memory, so the count went to 10 for headroom.
     # If a shard's wall approaches its 45-min step cap, or its memory nears
     # the runner's limit, raise the shard count — bump the matrix, TOTAL in
     # the pytest step AND the combine job's download steps, in lockstep
@@ -2184,12 +2665,12 @@ jobs:
     # runs in the merge queue.
     runs-on: meho-runners-ci-heavy
     strategy:
-      # 8 stride shards (#3172 started with 3) — see the SHARDED paragraph in
+      # 10 stride shards (#3172 started with 3) — see the SHARDED paragraph in
       # the header comment. fail-fast off: one shard's red tests must not
       # cancel the other shards' coverage data (partial coverage beats none).
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -2263,6 +2744,7 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
           MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
           MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
           MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           IMAGES
@@ -2363,6 +2845,7 @@ jobs:
         # 45 (#5642): the shards record which test ran each line (the test
         # map), which needs the slower C tracer. In the measurement (#5298)
         # pytest took 1.7 times as long, and the slowest shard 37 min.
+        # -n 3 (#7103): by 26 Nov 2026 a serial shard needed more than 45 min.
         timeout-minutes: 45
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
@@ -2388,9 +2871,9 @@ jobs:
           # anyway, so name it here. Line counts are the same in both cores
           # (SonarCloud parity).
           COVERAGE_CORE: ctrace
-        # Same unit sweep as the required lane (--ignore=tests/integration), but
-        # -n 1 (serial) to keep the coverage-inflated peak under the pod limit
-        # (see the memory table in this job's header). --dist loadscope keeps a
+        # Same unit sweep as the required lane (--ignore=tests/integration),
+        # with -n 3 like the unit shards (#7103; see THREE WORKERS, 10 SHARDS
+        # in this job's header). Each worker writes its own data file. --dist loadscope keeps a
         # module's tests on one worker so session-scoped fixtures instantiate
         # once. No --maxfail: a coverage run wants the whole suite measured even
         # if one test is flaky; redness here is non-blocking anyway.
@@ -2400,7 +2883,7 @@ jobs:
         # offending test's traceback (the "where it hung" diagnostic) after 300 s
         # — independent of runner health, unlike the step/job `timeout-minutes`
         # a wedged runner never reached on the v0.28.0 cut (run 31199593016).
-        # --timeout-method=signal (NOT thread) is load-bearing under -n 1 xdist:
+        # --timeout-method=signal (NOT thread) is load-bearing under xdist:
         # thread's os._exit() reads to xdist as a worker CRASH, which it re-runs
         # up to --max-worker-restart times (~5×: one 300 s hang balloons to
         # ~25 min → job-cap CANCEL) and whose stack dump xdist swallows. signal
@@ -2426,10 +2909,10 @@ jobs:
           # every 8th file to this shard. File-level split keeps conftest
           # semantics identical to a full run; stride (vs contiguous
           # blocks) spreads the heavyweight suites across shards. The
-          # eight shards partition the full set exactly (NR mod 8 hits
+          # ten shards partition the full set exactly (NR mod 10 hits
           # each residue once); integration stays excluded by the find,
           # matching the old --ignore.
-          TOTAL=8
+          TOTAL=10
           SHARD="${{ matrix.shard }}"
           mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
           echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
@@ -2439,24 +2922,40 @@ jobs:
           fi
           # --junitxml (#5642): every test id of this shard. The combine job
           # turns coverage's test names into pytest test ids with it.
-          uv run pytest -n 1 --dist loadscope -p no:cov \
+          uv run pytest -n 3 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
             --junitxml="pytest-coverage-junit-${SHARD}.xml" \
             "${SHARD_FILES[@]}" 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
+
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-coverage-junit-*.xml pytest-coverage.log
 
       - name: Upload shard coverage data (parallel files)
         # Raw per-worker parallel data files (`.coverage.<host>.<pid>.<rand>`)
         # for THIS shard — the python-coverage-combine job below merges every
         # shard's set and writes the single coverage.xml quality-gate.yml
         # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
-        # data from eight different runners combines cleanly.
+        # data from ten different runners combines cleanly.
         # include-hidden-files: upload-artifact v4+ excludes dotfiles by
         # default, and every coverage data file is a dotfile.
         # timeout-minutes (#3172): same job-cap-cancel hole as every
         # post-pytest step — a hung upload must degrade to an absorbed step
         # failure.
-        if: always()
+        if: always() && steps.hide-proxy-name.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -2476,7 +2975,7 @@ jobs:
         # --timeout). Uploaded whenever the log exists so the NEXT hang says
         # WHERE it hung, not just that the job ran long. continue-on-error is
         # belt-and-suspenders on top of the whole-job continue-on-error.
-        if: always() && hashFiles('backend/pytest-coverage.log') != ''
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-coverage.log') != ''
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
@@ -2538,7 +3037,7 @@ jobs:
           if [ -r "${cg}/cpu.max" ]; then
             echo "- CPU limit: $(awk '{ if ($1 == "max") print "none"; else printf "%.1f CPUs", $1 / $2 }' "${cg}/cpu.max")."
           fi
-          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/8)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
+          echo "::notice title=Peak memory (coverage shard ${{ matrix.shard }}/10)::peak ${peak}; working set $(mib "${ws_max}"); program memory $(mib "${anon_max}"); nproc $(nproc)"
           exit 0
 
   python-coverage-combine:
@@ -2564,11 +3063,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    # 33 > the 29 min of bounded step caps below + ~1-2 min of honest
+    # 37 > the 33 min of bounded step caps below + ~1-2 min of honest
     # checkout/uv/sync — the step caps always fire before this job cap, so
     # a stall degrades to an absorbed step failure, never a run-level
     # cancellation (the #2800/#3172 leak).
-    timeout-minutes: 33
+    timeout-minutes: 37
     continue-on-error: true
     defaults:
       run:
@@ -2592,7 +3091,7 @@ jobs:
 
       - name: Download shard 1 coverage data
         id: shard-1
-        # Same pinned download-artifact as quality-gate.yml. Eight explicit
+        # Same pinned download-artifact as quality-gate.yml. Ten explicit
         # name-addressed downloads (not a pattern match) keep the step free
         # of newer-action feature dependencies; continue-on-error tolerates
         # a shard that produced no artifact (see the job header).
@@ -2666,11 +3165,29 @@ jobs:
           name: python-coverage-data-shard-8
           path: backend
 
+      - name: Download shard 9 coverage data
+        id: shard-9
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-9
+          path: backend
+
+      - name: Download shard 10 coverage data
+        id: shard-10
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: python-coverage-data-shard-10
+          path: backend
+
       - name: Combine coverage + write XML (offline, all shards)
         # Runs in this fan-in job with every shard's pytest long gone, so
         # `coverage combine` merges the downloaded per-worker parallel data
         # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
-        # so paths are repo-relative across the eight shard runners and for
+        # so paths are repo-relative across the ten shard runners and for
         # SonarCloud cross-job mapping (#1987 AC6).
         #
         # `if: always()` + the ls guard: combine whatever shards delivered —
@@ -2691,9 +3208,9 @@ jobs:
         # RELEASING.md tag gate. A step cap converts that hang into an
         # absorbed step FAILURE — run stays `success`, coverage degrades to
         # "none for this run", the documented lossy contract. This fan-in
-        # job's budget: downloads 8 x 2 + this step 4 + upload 2 + the test
-        # map 5 + its upload 2 = 29 min of bounded steps + checkout/uv/sync
-        # (~1-2 min honest) under the 33-min job cap, so step caps always
+        # job's budget: downloads 10 x 2 + this step 4 + upload 2 + the test
+        # map 5 + its upload 2 = 33 min of bounded steps + checkout/uv/sync
+        # (~1-2 min honest) under the 37-min job cap, so step caps always
         # fire first.
         if: always()
         timeout-minutes: 4
@@ -2732,12 +3249,14 @@ jobs:
         # #5642. The map says which tests run each source file. Pull
         # requests use it to run only the tests their change can break (the
         # `changes` job, step `map`). Only the nightly run on `main` makes
-        # it, and only when all 8 shards delivered their data: a map from
+        # it, and only when all 10 shards delivered their data: a map from
         # partial data would pick too few tests. The download steps and the
         # junit count below are not proof of that: a crashed worker leaves
         # a junit file but no coverage data, and the download still works.
         # So the tool refuses a junit file that reports a crashed worker,
-        # or whose tests are not in the coverage data, and makes no map.
+        # or that has a worker (property xdist_worker, set in
+        # tests/conftest.py) none of whose tests are in the coverage data,
+        # and makes no map.
         id: test-map
         if: >-
           always() && github.event_name == 'schedule' &&
@@ -2745,21 +3264,22 @@ jobs:
           steps.shard-1.outcome == 'success' && steps.shard-2.outcome == 'success' &&
           steps.shard-3.outcome == 'success' && steps.shard-4.outcome == 'success' &&
           steps.shard-5.outcome == 'success' && steps.shard-6.outcome == 'success' &&
-          steps.shard-7.outcome == 'success' && steps.shard-8.outcome == 'success'
+          steps.shard-7.outcome == 'success' && steps.shard-8.outcome == 'success' &&
+          steps.shard-9.outcome == 'success' && steps.shard-10.outcome == 'success'
         # No map tonight is fine: pull requests then run all the shards.
         continue-on-error: true
         timeout-minutes: 5
         run: |
           mapfile -t junit < <(ls pytest-coverage-junit-*.xml 2>/dev/null)
-          if [ "${#junit[@]}" -ne 8 ]; then
-            echo "::warning::found ${#junit[@]} of 8 junit files; no test map tonight"
+          if [ "${#junit[@]}" -ne 10 ]; then
+            echo "::warning::found ${#junit[@]} of 10 junit files; no test map tonight"
             exit 0
           fi
           uv run python tests/_unit_test_map.py build --data .coverage \
             --commit "${GITHUB_SHA}" --out unit-test-map.json "${junit[@]}"
 
       - name: Upload the unit test map
-        # Pull requests use a map for at most 7 days, so keep it for 8.
+        # Pull requests pick tests with a map for at most 2 days, and the tool reads a map up to 7 days old to warn about its age, so keep it for 8.
         if: always() && steps.test-map.outcome == 'success' && hashFiles('backend/unit-test-map.json') != ''
         continue-on-error: true
         timeout-minutes: 2
@@ -2779,7 +3299,12 @@ jobs:
     # the same shape as python-unit-shard + python-unit-lane (#5384).
     # Holds the container-heavy tests/integration/ subtree
     # (pgvector/valkey/k3d testcontainers). Kept apart from the unit shards so the required
-    # lint+mypy+unit gate stays fast while integration runs on every PR.
+    # lint+mypy+unit gate stays fast.
+    #
+    # Not on a pull request: the shards run in the merge queue and in
+    # the nightly run only. They were 30 percent of the runner minutes of a
+    # pull request run, and the queue ran them again before every merge. The
+    # fan-in `python-integration` still reports on every pull request.
     # The fan-in has been a required merge gate since 2026-05-20 (#698):
     # it was the structural corrective to the v0.2 / G3.4
     # green-but-hollow incidents (#634 / #697) — the lane that
@@ -2792,26 +3317,14 @@ jobs:
     # the test files, split by measured time (see the pytest step), so the
     # wall is about the slowest shard instead of the sum.
     #
-    # #3252 docs-only skip — SAME shape as the python-migration-tests gate
-    # below (plain `needs: changes` + an `if:` that ANDs in the detect
-    # output), deliberately NOT `always()`: these are HEAVY legs, so keeping
-    # cancel-in-progress (a force-push must cancel them) matters. If the
-    # detect job hard-CRASHES, `needs: changes` skip-cascades these legs to
-    # `skipped`, and the fan-in fails the required context CLOSED (it
-    # checks that `changes` succeeded). The CLASSIFIER itself is fail-safe:
-    # only a proven-docs-only diff sets `docs_only=true`, so a code PR is
-    # never skipped here.
-    #
-    # #5296: the legs also skip when `backend_python` is `false` (a PR that
-    # changes no file under backend/ and not this file), and the fan-in
-    # accepts the skipped legs on that path. A few integration tests read
-    # files outside backend/ (the Keycloak sub-chart, examples/, the CLI);
-    # they need containers, so on such a PR only the merge queue runs them.
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true' &&
-       needs.changes.outputs.backend_python != 'false')
+    # Plain `needs: changes`, deliberately NOT `always()`: these are HEAVY
+    # legs, so keeping cancel-in-progress matters. If the detect job
+    # hard-CRASHES, `needs: changes` skip-cascades these legs to `skipped`,
+    # and the fan-in fails the required context CLOSED (it checks that
+    # `changes` succeeded, and needs strict success outside a pull request).
+    # The `if:` holds no `||`, so no pull request event, also not from a
+    # fork, can start a leg (test_ci_fork_runner_isolation.py).
+    if: github.event_name != 'pull_request'
     needs: changes
     # The normal internal pool, not the heavy one: the tests run serially
     # (no xdist) and mostly wait on containers.
@@ -2866,9 +3379,19 @@ jobs:
         # 600 MB, and anonymous pulls would use up the shared pull limit. So
         # without the proxy (only in another repository) it is empty, and
         # the live Keycloak test skips (tests/integration/
-        # test_auth_keycloak_client_credentials.py). The k3s image uses the
-        # tag of the fixture's own default, so the proxy serves the exact
-        # tag the tests ask for.
+        # test_auth_keycloak_client_credentials.py). The two core images
+        # (MEHO_TEST_CORE_KEYCLOAK_IMAGE, MEHO_TEST_CORE_OPENBAO_IMAGE) name
+        # the digest that the chart pins, because a tag can move. With an
+        # empty core variable the core tests use the chart's own image. The
+        # k3s image uses the tag of the fixture's own default, so the proxy
+        # serves the exact tag the tests ask for. The k3s node does not pull
+        # through the proxy, so the k3d tests copy the busybox and pause
+        # images from this Docker daemon into the node. Every other image a
+        # test pulls or builds from is named here too (docs/codebase/devops.md,
+        # "Test images come through the image proxy");
+        # backend/tests/test_ci_test_images.py pins it. When the live
+        # Keycloak tests skip, the skip limit check takes the
+        # without_secrets numbers of tests/_skip_limits.json.
         env:
           CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
           SPEC_SHELF_REPOSITORY: ${{ secrets.SPEC_SHELF_REPOSITORY }}
@@ -2877,10 +3400,26 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY SPEC_SHELF_REPOSITORY <<'IMAGES'
           MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
           MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
           MEHO_TEST_VAULT_IMAGE: PROXY/hashicorp/vault:1.18
           MEHO_TEST_OPENBAO_IMAGE: PROXY/openbao/openbao:2.7.1
           MEHO_TEST_K3S_IMAGE: PROXY/rancher/k3s:v1.32.5-k3s1
           MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          MEHO_TEST_CORE_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak@sha256:79c623a22abacf3fe6c00a5fb30f5b7843d717b234033b80995891c06116d244
+          MEHO_TEST_CORE_OPENBAO_IMAGE: PROXY/openbao/openbao@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+          MEHO_TEST_DEBIAN_BOOKWORM_IMAGE: PROXY/library/debian:bookworm-slim
+          MEHO_TEST_DEBIAN_TRIXIE_IMAGE: PROXY/library/debian:trixie-slim
+          MEHO_TEST_MONGODB_7_IMAGE: PROXY/library/mongo:7
+          MEHO_TEST_MONGODB_8_IMAGE: PROXY/library/mongo:8
+          MEHO_TEST_POSTGRES_16_IMAGE: PROXY/library/postgres:16-alpine
+          MEHO_TEST_POSTGRES_17_IMAGE: PROXY/library/postgres:17-alpine
+          MEHO_TEST_POSTGRES_18_IMAGE: PROXY/library/postgres:18-alpine
+          MEHO_TEST_HARBOR_DB_IMAGE: PROXY/goharbor/harbor-db:v2.11.0
+          MEHO_TEST_HARBOR_CORE_IMAGE: PROXY/goharbor/harbor-core:v2.11.0
+          MEHO_TEST_HARBOR_REDIS_IMAGE: PROXY/library/redis:7-alpine
+          MEHO_TEST_LDAP_IMAGE: PROXY/osixia/openldap:1.5.0
+          MEHO_TEST_BUSYBOX_IMAGE: PROXY/rancher/mirrored-library-busybox:1.36.1
+          MEHO_TEST_K3S_PAUSE_IMAGE: PROXY/rancher/mirrored-pause:3.6
           IMAGES
 
       - name: Start memory sampling
@@ -3037,13 +3576,45 @@ jobs:
             kill "$(cat "${RUNNER_TEMP}/memory-sampler.pid")" 2>/dev/null || true
           fi
 
+      - name: Check the skipped tests of this shard
+        # Same check as in python-unit-shard, with the integration numbers
+        # of tests/_skip_limits.json. Some k3s skips depend on how fast pods
+        # start, so a file that skipped fewer tests gives only a notice.
+        # Without the Keycloak test image (empty without the image proxy)
+        # the live Keycloak tests skip, so the check takes the
+        # without_secrets numbers; this step runs in both kinds of run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--lane integration)
+          if [ -z "${MEHO_TEST_KEYCLOAK_IMAGE:-}" ]; then
+            args+=(--without-secrets)
+          fi
+          uv run python tests/_skip_limit_check.py "${args[@]}" pytest-integration-shard.xml
+
+      - name: Hide the proxy name in the test reports
+        # GitHub hides a secret in the job log only. A test image name starts
+        # with the proxy's host and project (CI_IMAGE_PROXY), and a failed
+        # container start puts it into an error or skip text of the test
+        # report. scripts/ci/hide_proxy_name.py replaces the value and its
+        # host with PROXY in the reports below. The upload steps run only
+        # when this step passed. continue-on-error: a failure here skips
+        # those uploads and never fails the job.
+        id: hide-proxy-name
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+        run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-integration-shard.xml
+
       - name: Upload per-test times (input for the shard split)
         # Refresh tests/_integration_shard_durations.json from these
         # artifacts (one per shard) of a green run; the docstring of
         # tests/_unit_shard_split.py has the commands. continue-on-error +
         # timeout-minutes: a failed or hung upload must never fail or hold
         # the shard.
-        if: always() && hashFiles('backend/pytest-integration-shard.xml') != ''
+        if: always() && steps.hide-proxy-name.outcome == 'success' && hashFiles('backend/pytest-integration-shard.xml') != ''
         continue-on-error: true
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -3083,6 +3654,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Read the CI repository secrets
+        # Same as the step of the same name in python-unit-shard: it checks
+        # the repository secrets, hides their parts and sets the test images
+        # of the timing test files (with tests/integration/conftest.py).
+        env:
+          CI_IMAGE_PROXY: ${{ secrets.CI_IMAGE_PROXY }}
+          REQUIRE_SECRETS: ${{ github.repository == 'evoila/meho' }}
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
+          MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
+          MEHO_TEST_KEYCLOAK_IMAGE: PROXY_ONLY/keycloak/keycloak:26.0
+          IMAGES
 
       - name: Docker Hub login (for testcontainers pulls)
         if: env.DOCKERHUB_USERNAME != ''
@@ -3133,22 +3718,17 @@ jobs:
     #     failed (a skipped required check counts as Success, #2140), and
     #     the step FAILS on any shard result that is not allowed. A hung
     #     shard hits its own timeout → `cancelled` → this gate fails.
-    #  2. Fork PRs: this job skips by its own `if:`, which reports the
-    #     required context as Success, exactly as the old serial job did.
-    #  3. Docs-only PRs: every shard skips by its detect-gated `if:` and
-    #     this step accepts `skipped` ONLY when `changes` succeeded and
-    #     said docs_only=true. On every other run it needs strict success.
-    #  4. No-backend PRs (#5296): the shards skip the same way when
-    #     `backend_python` is `false`, and this step accepts `skipped` then
-    #     too. The merge queue runs the shards on the merged result.
+    #  2. Pull requests, also from a fork: the shards never start,
+    #     and this step passes with one summary line that says the
+    #     integration tests run in the merge queue. A failed or cancelled
+    #     shard result still fails it.
+    #  3. Merge queue and nightly run: every shard must succeed. A failed,
+    #     cancelled or skipped shard fails this step.
     # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
     # use the internal pool instead (#6325), so the queue never waits for
     # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
-    if: >-
-      always() &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+    if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the
     # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
@@ -3158,33 +3738,28 @@ jobs:
         # needs.python-integration-shard.result is the AGGREGATE of the
         # matrix: success only if every leg succeeded.
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CHANGES_RESULT: ${{ needs.changes.result }}
-          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
           SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
           detect="${CHANGES_RESULT}"
-          docs_only="${CHANGES_DOCS_ONLY}"
-          backend_python="${CHANGES_BACKEND_PYTHON}"
           shards="${SHARDS_RESULT}"
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
+          echo "event: ${EVENT_NAME}"
+          echo "changes (detect): result=${detect}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 
           if [ "${detect}" != "success" ]; then
-            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required integration lane closed."
+            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}'. Failing the required integration lane closed."
             exit 1
           fi
 
-          if [ "${docs_only}" = "true" ]; then
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # PULL REQUEST — the shards never start on a pull
+            # request; the merge queue runs them on the merged result.
             case "${shards}" in
-              success|skipped) echo "Integration lane GREEN (docs-only fast path #3252) — all 4 shards skipped-by-detect." ;;
-              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
-            esac
-          elif [ "${backend_python}" = "false" ]; then
-            # NO-BACKEND PATH (#5296) — the shards were skipped by their
-            # `if:`; the merge queue runs them on the merged result.
-            case "${shards}" in
-              success|skipped) echo "Integration lane GREEN (no backend change, #5296) — all 4 shards skipped-by-detect." ;;
+              success|skipped)
+                echo "The integration tests run in the merge queue." >> "${GITHUB_STEP_SUMMARY}"
+                echo "Integration lane GREEN for a pull request — the integration tests run in the merge queue." ;;
               *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
             esac
           elif [ "${shards}" = "success" ]; then
@@ -3252,6 +3827,7 @@ jobs:
           bash "${GITHUB_WORKSPACE}/scripts/ci/repo_secrets.sh" CI_IMAGE_PROXY <<'IMAGES'
           MEHO_TEST_PGVECTOR_IMAGE: PROXY/pgvector/pgvector@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
           MEHO_TEST_VALKEY_IMAGE: PROXY/valkey/valkey:8
+          RYUK_CONTAINER_IMAGE: PROXY/testcontainers/ryuk:0.8.1
           IMAGES
 
       - name: Docker Hub login (for testcontainers pulls)
@@ -3666,211 +4242,41 @@ jobs:
             /tmp/rendered.yaml
 
   # ---------------------------------------------------------------------------
-  # Merge-queue watchdog (#4732). Stops a merge-queue CI run as soon as its
-  # result no longer counts, so its runners go back to live runs.
+  # Second runner site watchdog (#7085). The site can die after its last good
+  # smoke check, and unit shards 4-6 would then wait for a runner. A job that
+  # has no runner is not stopped by `timeout-minutes`, and GitHub gives up on
+  # it only after 24 hours, so the required check would hang with it. This job
+  # stops the run after 30 minutes, right after a fresh read of the jobs, so
+  # the check goes red instead. A failed read never leads to a cancel.
   #
-  # Why: the queue drops a group when a required check of the group fails,
-  # or when it takes out a pull request ahead of the group and builds the
-  # group again. It then deletes the group's branch. GitHub does not stop
-  # the group's CI run. On 2026-10-21 a broken Go vulnerability scan failed
-  # 31 queue runs in their first minute; the queue dropped every group
-  # within about a minute, but the runs went on for a median of 131 more
-  # minutes and held 73 percent of the heavy runner pool for most of the
-  # morning. Almost half of that day's merge-queue runner time was spent on
-  # runs whose result nobody could use.
-  #
-  # Why not `cancel-in-progress` for merge_group: each group has its own
-  # branch, so a new group never replaces the run of an old group, and a
-  # cancelled live check drops its group (see the `concurrency:` comment).
-  #
-  # What the job does, about once a minute, with 2 API calls per poll (3
-  # on the one poll that finds the branch gone):
-  #   1. Lists this run's jobs. If every job other than this one and the
-  #      `CLI API snapshot freshness` job has finished, it ends with
-  #      success — checked on two polls in a row, because a job that still
-  #      waits on `needs` (the `Python (ruff + mypy + pytest)` fan-in) is
-  #      not listed until its dependencies finish. This check runs BEFORE
-  #      the branch check, so a run that passed and merged (which also
-  #      deletes the queue branch) is never cancelled. The snapshot job is
-  #      left out because the group can merge while it still runs: it is
-  #      not required, so a run that merged with it still open must not be
-  #      cancelled either.
-  #   2. If a job other than `CLI API snapshot freshness` ended in failure,
-  #      cancelled or timed_out, it cancels the run (rule a). Every other
-  #      job of a merge-queue run either carries a required check or feeds
-  #      the required fan-in, so its failure drops the group anyway. The
-  #      snapshot job is not required: its failure alone keeps the group,
-  #      so it must not cancel the run.
-  #   3. Asks GitHub whether this run's queue branch (`github.ref_name`)
-  #      still exists. Only a `404` can cancel the run (rule b). Any other
-  #      answer or error (timeout, 403, 429, 5xx) keeps the run alive.
-  #      Before it cancels, it lists the jobs once more: the last required
-  #      job can pass, and the group can merge, between step 1 and step 3,
-  #      and a merged run has lost its branch too. It cancels only when
-  #      that second look still shows required work open (or a red job).
-  #      If the second look fails, or shows every required job finished,
-  #      the run stays alive.
-  #
-  # It never fails (the runner starts the step with `bash -e`, so every
-  # call is checked; a failed or unreadable call only means "look again
-  # next minute", and no branch check runs while the jobs' state is
-  # unknown), it is not a required check, and
-  # it runs on the internal `meho-runners-ci` pool (#6325). It holds one
-  # slot there for the whole run; the test shards it watches run on the
-  # heavy pools, so it does not take their slots. The queue builds at most
-  # 4 groups at once, so at most
-  # 4 watchdogs run at the same time: about 480 of the 1,000 API calls an
-  # hour that the job token may make per repository, worst case.
+  # Not a required check. It runs only when `changes` picked the second site,
+  # on a GitHub-hosted runner so it does not need that site, and not on a
+  # re-run, because a re-run uses today's pool.
   # ---------------------------------------------------------------------------
-  merge-queue-watchdog:
-    name: Merge queue watchdog
-    # Only merge-queue runs. A pull-request run must still show every failing
-    # job, and the nightly run has no queue group that can be dropped.
-    if: github.event_name == 'merge_group'
-    # Merge-queue runs use our own pool, so the queue never waits for GitHub-hosted runners (#6325).
-    runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci' || 'ubuntu-latest' }}
-    # Backstop only: the loop below stops itself, with success, after 170
-    # minutes. A green merge-queue run took at most 78 minutes (#4732), and
-    # the queue itself gives up on a group long before this cap.
-    timeout-minutes: 180
-    # `actions: write` is what cancelling a run needs. Only this job gets it;
-    # the workflow-wide default stays `contents: read`. `contents: read` is
-    # listed again because a job-level block replaces the workflow-wide one.
+  second-site-watchdog:
+    name: Second runner site watchdog
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.second_site == 'on' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-latest
+    # Backstop only: the script stops itself after about 31 minutes.
+    timeout-minutes: 40
+    # `actions: write` is what cancelling a run needs. Only this job gets it.
+    # `contents: read` is listed again because a job-level block replaces
+    # the workflow-wide one.
     permissions:
       contents: read
       actions: write
     steps:
-      - name: Install gh and jq
-        # The internal runner image ships without the `gh` CLI (#3171).
-        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
-        # step. continue-on-error keeps the watchdog from ever failing: if
-        # the install fails, every gh call below fails too, and the loop
-        # only looks again next minute.
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          missing=()
-          command -v gh >/dev/null 2>&1 || missing+=(gh)
-          command -v jq >/dev/null 2>&1 || missing+=(jq)
-          if [ "${#missing[@]}" -eq 0 ]; then
-            echo "gh and jq are already installed"
-            exit 0
-          fi
-          if ! { sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y \
-            && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}" \
-            && gh --version; }; then
-            echo "::warning::Could not install ${missing[*]}. The watchdog cannot call the API and will not cancel this run."
-            exit 1
-          fi
-      - name: Cancel this run once the queue has dropped its group
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stop this run if unit shards cannot get a runner
         env:
           GH_TOKEN: ${{ github.token }}
-          QUEUE_BRANCH: ${{ github.ref_name }}
-          # Must match this job's `name:` above — the jobs API lists display
-          # names, and the loop has to leave itself out of "all other jobs".
-          SELF_NAME: Merge queue watchdog
-          # The one job that is not required and feeds no required fan-in.
-          # Its failure does not drop the group, and the group can merge
-          # while it still runs. Keep in sync with that job's `name:`.
-          HARMLESS_JOB: CLI API snapshot freshness
-        run: |
-          set -uo pipefail
-          api="repos/${GITHUB_REPOSITORY}"
-          interval=60
-          stop_after=$((170 * 60))
-          quiet_polls=0
-
-          cancel_run() {
-            echo "::notice title=Merge queue watchdog::${1} Cancelling run ${GITHUB_RUN_ID}."
-            if timeout 30 gh run cancel "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}"; then
-              echo "cancel request accepted; GitHub stops the other jobs and then this one"
-              return 0
-            fi
-            echo "cancel request failed; the run keeps going and the next poll tries again"
-            return 1
-          }
-
-          # Reads this run's jobs into `open` (jobs that carry or feed a
-          # required check and are still queued or running) and `red` (such
-          # jobs that did not pass). Returns 1 when the jobs cannot be listed
-          # or read. The caller must then not cancel: a run that passed and
-          # merged has lost its branch too, so the branch alone proves nothing.
-          read_jobs() {
-            local jobs
-            if ! jobs="$(timeout 30 gh api "${api}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>&1)"; then
-              echo "jobs API did not answer (${jobs})"
-              return 1
-            fi
-            # The runner starts this step with `bash -e`, so every jq call is
-            # guarded: an unreadable answer must not end the watchdog.
-            if ! open="$(jq --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
-                  '[.jobs[] | select(.name != $me and .name != $ok and .status != "completed")] | length' <<<"${jobs}")" \
-               || ! red="$(jq -r --arg me "${SELF_NAME}" --arg ok "${HARMLESS_JOB}" \
-                  '[.jobs[] | select(.name != $me and .name != $ok
-                     and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
-                   | .name] | join(", ")' <<<"${jobs}")"; then
-              echo "jobs API answer could not be read"
-              return 1
-            fi
-          }
-
-          echo "watching queue branch '${QUEUE_BRANCH}' for run ${GITHUB_RUN_ID}; one poll every ${interval} s"
-          while [ "${SECONDS}" -lt "${stop_after}" ]; do
-            # 1 + 2: this run's own jobs. Required ones done -> leave. One red -> cancel.
-            # When the jobs cannot be listed or read, this poll ends here: the
-            # branch check below must not run while the jobs' state is unknown.
-            if ! read_jobs; then
-              quiet_polls=0
-              echo "keeping the run alive and looking again next minute"
-              sleep "${interval}"
-              continue
-            fi
-            if [ -n "${red}" ]; then
-              cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
-            elif [ "${open}" -eq 0 ]; then
-              quiet_polls=$((quiet_polls + 1))
-              if [ "${quiet_polls}" -ge 2 ]; then
-                echo "every job that carries or feeds a required check has finished; nothing left to watch"
-                exit 0
-              fi
-              # Do not look at the branch on this poll: with no required job
-              # running there is nothing worth freeing, and a run that just
-              # merged has lost its branch for a good reason.
-              echo "all listed required jobs have finished; one more poll in case a job was still waiting on 'needs'"
-              sleep "${interval}"
-              continue
-            else
-              quiet_polls=0
-              echo "${open} required job(s) still queued or running"
-            fi
-
-            # 3: the queue branch. Only a clear 404 means the group is gone.
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "${GITHUB_API_URL}/${api}/branches/${QUEUE_BRANCH}" 2>/dev/null)" || code="000"
-            case "${code}" in
-              200) echo "queue branch still exists" ;;
-              404)
-                # The last required job can pass, and the queue can merge the
-                # group, between the jobs lookup above and this branch lookup.
-                # A merged run has lost its branch too, so read the jobs once
-                # more: only required work that is still open proves a drop.
-                if ! read_jobs; then
-                  quiet_polls=0
-                  echo "the queue branch is gone, but the jobs could not be read again; keeping the run alive and looking again next minute"
-                elif [ -n "${red}" ]; then
-                  cancel_run "A job that carries or feeds a required check did not pass (${red}), so the queue drops this group." && exit 0
-                elif [ "${open}" -eq 0 ]; then
-                  quiet_polls=1
-                  echo "the queue branch is gone, but every required job has finished since the last look, so the group may have merged; not cancelling"
-                else
-                  cancel_run "The queue branch '${QUEUE_BRANCH}' is gone while ${open} required job(s) still run: the queue has dropped this group and this run's result no longer counts." && exit 0
-                fi ;;
-              *)   echo "branch lookup answered '${code}', which is not conclusive; keeping the run alive" ;;
-            esac
-            sleep "${interval}"
-          done
-          echo "stopped watching after $((stop_after / 60)) minutes; the run goes on without a watchdog"
-          exit 0
+        run: bash scripts/ci/second_site_watchdog.sh

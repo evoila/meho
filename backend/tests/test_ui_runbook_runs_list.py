@@ -901,7 +901,8 @@ def test_start_run_read_only_forbidden_403_no_run_row() -> None:
         )
 
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "operator_required"}
+    # A Reader who asks for a change gets the Reader code.
+    assert response.json()["detail"] == "insufficient_role"
     # Not a CSRF rejection: the middleware stamps no reason header.
     assert "x-csrf-rejection-reason" not in response.headers
     assert _run_rows(_TENANT_A) == []

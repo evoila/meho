@@ -1,5 +1,5 @@
 {
-  "kit_version": "1.5",
+  "kit_version": "1.7",
   "names": {
     "AuthModel": {
       "kind": "class"
@@ -19,6 +19,52 @@
     },
     "ConnectorUpstreamError": {
       "kind": "class"
+    },
+    "CredentialField": {
+      "kind": "class",
+      "parts": {
+        "help": {
+          "kind": "field",
+          "type": "str"
+        },
+        "hidden": {
+          "kind": "field",
+          "type": "bool"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        },
+        "multiline": {
+          "kind": "field",
+          "type": "bool"
+        },
+        "name": {
+          "kind": "field",
+          "type": "str"
+        },
+        "required": {
+          "kind": "field",
+          "type": "bool"
+        }
+      }
+    },
+    "CredentialWay": {
+      "kind": "class",
+      "parts": {
+        "fields": {
+          "kind": "field",
+          "type": "tuple[CredentialField, ...]"
+        },
+        "key": {
+          "kind": "field",
+          "type": "str"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        }
+      }
     },
     "CredentialsReadError": {
       "kind": "class"
@@ -174,6 +220,39 @@
         }
       }
     },
+    "TargetField": {
+      "kind": "class",
+      "parts": {
+        "choices": {
+          "kind": "field",
+          "type": "tuple[str, ...]"
+        },
+        "default": {
+          "kind": "field",
+          "type": "str | int | bool | None"
+        },
+        "help": {
+          "kind": "field",
+          "type": "str"
+        },
+        "key": {
+          "kind": "field",
+          "type": "str"
+        },
+        "kind": {
+          "kind": "field",
+          "type": "TargetFieldKind"
+        },
+        "label": {
+          "kind": "field",
+          "type": "str"
+        },
+        "required": {
+          "kind": "field",
+          "type": "bool"
+        }
+      }
+    },
     "VaultClientError": {
       "kind": "class"
     },
@@ -296,6 +375,8 @@
         "tags: list[str] | None = None",
         "safety_level: Literal['safe', 'caution', 'dangerous', 'destructive'] = 'safe'",
         "requires_approval: bool = False",
+        "hard_to_undo: Literal['deletes', 'stops', 'overwrites'] | None = None",
+        "changes_rights: bool = False",
         "llm_instructions: dict[str, Any] | None = None",
         "custom_description: str | None = None",
         "session: AsyncSession | None = None",

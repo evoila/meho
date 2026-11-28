@@ -571,8 +571,8 @@ async def verify_jwt_and_bind(
     so such a login never counts as a person behind another login.
 
     Returns:
-        The same :class:`Operator` that ``verify_jwt`` produced — the
-        wrapper is transparent to the route handler.
+        The same :class:`Operator` object that ``verify_jwt`` produced,
+        not a copy -- the wrapper is transparent to the route handler.
     """
     return await _bind_operator(request, operator)
 
@@ -590,7 +590,10 @@ async def verify_jwt_and_bind_platform_admin_way_back(
 
 
 async def _bind_operator(request: Request, operator: Operator) -> Operator:
-    """Bind the log context, apply the login cages and seed the tenant."""
+    """Bind the log context, apply the login cages and seed the tenant.
+
+    Returns the same *operator* it gets, not a copy.
+    """
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),

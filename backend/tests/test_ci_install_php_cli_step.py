@@ -97,7 +97,9 @@ def _step_script() -> str:
         for step in job.get("steps", [])
         if step.get("name") == _STEP_NAME
     ]
-    assert len(found) == 1, "ci.yml must have exactly one Install PHP CLI step"
+    # The second-site and hosted-trial shard jobs take the step by YAML
+    # alias, so it is the same step (tests/test_ci_second_runner_site.py).
+    assert len(set(found)) == 1, "ci.yml must have exactly one Install PHP CLI step"
     return cast("str", found[0])
 
 
@@ -238,9 +240,12 @@ def test_step_comment_names_the_new_way() -> None:
 
 def test_the_cache_steps_share_one_path_and_key() -> None:
     doc = yaml.safe_load(_WORKFLOW.read_text())
+    jobs = cast(dict[str, Any], doc["jobs"])
     steps = [
         step
-        for job in cast(dict[str, Any], doc["jobs"]).values()
+        for name, job in jobs.items()
+        # Their steps are aliases of the steps of python-unit-shard.
+        if name not in ("python-unit-shard-second-site", "python-unit-shard-hosted-trial")
         for step in job.get("steps", [])
         if str(step.get("uses", "")).startswith(("actions/cache/restore@", "actions/cache/save@"))
         and "php" in str(step.get("with", {}).get("path", ""))

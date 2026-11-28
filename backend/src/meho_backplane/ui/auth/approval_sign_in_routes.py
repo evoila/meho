@@ -234,6 +234,8 @@ async def _handle_approval_callback(
     operator = await verify_jwt_for_audience(
         f"Bearer {access}", expected_audience=settings.keycloak_audience, allow_unchosen=True
     )
+    # The person signs in at the web console in this moment.
+    operator = operator.model_copy(update={"in_code_kind": "person"})
     if not is_web_approval_sign_in(operator, settings):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OTHER_PERSON_DETAIL)
     async with get_sessionmaker()() as db_session, db_session.begin():

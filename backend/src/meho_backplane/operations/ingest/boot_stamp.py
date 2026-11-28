@@ -91,6 +91,7 @@ def _boot_operator() -> Operator:
         raw_jwt="",
         tenant_id=uuid.UUID(int=0),
         tenant_role=TenantRole.TENANT_ADMIN,
+        in_code_kind="system",
     )
 
 

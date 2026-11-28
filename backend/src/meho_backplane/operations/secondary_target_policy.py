@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
+from meho_backplane.auth.caller_kind import token_login_kind
 from meho_backplane.auth.delegation import ACTOR_SUB_KEY, resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 
@@ -189,14 +190,16 @@ def bind_approved_requester(request: ApprovalRequest) -> Iterator[None]:
     """Bind *request*'s requester while a reviewer runs it.
 
     Who asked comes from the row (``principal_sub`` / ``principal_act``).
-    The card's ``proposed_effect["permission_preflight"]["requester"]``
-    record is kept only when its ``sub`` matches the row. Operations that
+    The card's requester record
+    (:func:`~meho_backplane.operations._preview.stored_requester_record`)
+    is kept only when its ``sub`` matches the row. Operations that
     call :func:`secondary_target_refusal` read the binding, and so does the
     step check of an agent's approved multi-step call
     (:func:`approved_agent_requester`, #6314).
     """
-    preflight = (request.proposed_effect or {}).get("permission_preflight")
-    subject = preflight.get("requester") if isinstance(preflight, dict) else None
+    from meho_backplane.operations._preview import stored_requester_record
+
+    subject = stored_requester_record(request.proposed_effect)
     if not isinstance(subject, Mapping) or subject.get("sub") != request.principal_sub:
         subject = None
     requester = _Requester(
@@ -260,13 +263,16 @@ def approved_requester_subject() -> dict[str, Any] | None:
 
 def _requester_operator(requester: _Requester, subject: Mapping[str, Any]) -> Operator:
     """Rebuild the requester as an :class:`Operator` for the policy gate."""
+    kind = PrincipalKind(subject["principal_kind"])
     return Operator(
         sub=requester.sub,
         raw_jwt="",
         tenant_id=requester.tenant_id,
         tenant_role=TenantRole(subject["tenant_role"]),
-        principal_kind=PrincipalKind(subject["principal_kind"]),
+        principal_kind=kind,
         client_id=subject.get("client_id"),
+        # The requester comes back for the policy gate, never as a web session.
+        in_code_kind=token_login_kind(kind),
     )
 
 

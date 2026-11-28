@@ -61,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connector_packages import installed_connector_package_names
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._left_out import left_out_sql_keys
 from meho_backplane.operations._lookup import (
     enabled_for_tenant_clause,
     group_visible_for_tenant_clause,
@@ -103,10 +104,16 @@ _VISIBLE_SCOPE_SQL = """
                  AND owned.impl_id = :impl_id)))"""
 
 # Raw-SQL twin of :func:`~meho_backplane.operations._lookup.installed_owner_clause`:
-# a row written by a connector package that is not installed is hidden (#5037).
+# a row written by a connector package that is not installed is hidden (#5037),
+# and so is the row of an operation that registration left out
+# (:func:`~meho_backplane.operations._left_out.left_out_sql_keys`).
 _INSTALLED_OWNER_SQL = """
           AND (owner_package IS NULL
-               OR owner_package = ANY(CAST(:installed_packages AS text[])))"""
+               OR owner_package = ANY(CAST(:installed_packages AS text[])))
+          AND NOT (tenant_id IS NULL
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
+                   = ANY(CAST(:left_out_keys AS text[])))"""
 
 # Raw-SQL twin of :func:`~meho_backplane.operations._lookup.enabled_for_tenant_clause`
 # for the same queries: on a built-in row the tenant's own on/off setting wins
@@ -183,6 +190,10 @@ _BM25_CANDIDATES_SQL = text(
                ELSE is_enabled END)
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
+          AND NOT (tenant_id IS NULL
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
+                   = ANY(CAST(:left_out_keys AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND (NOT CAST(:typed_only AS boolean)
                OR source_kind IN ('typed', 'composite'))
@@ -222,6 +233,10 @@ _BM25_CUSTOM_CANDIDATES_SQL = text(
                ELSE is_enabled END)
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
+          AND NOT (tenant_id IS NULL
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
+                   = ANY(CAST(:left_out_keys AS text[])))
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND (NOT CAST(:typed_only AS boolean)
                OR source_kind IN ('typed', 'composite'))
@@ -258,6 +273,10 @@ _COSINE_CANDIDATES_SQL = text(
                ELSE is_enabled END)
           AND (owner_package IS NULL
                OR owner_package = ANY(CAST(:installed_packages AS text[])))
+          AND NOT (tenant_id IS NULL
+               AND source_kind IN ('typed', 'composite')
+               AND concat_ws(chr(31), product, version, impl_id, op_id)
+                   = ANY(CAST(:left_out_keys AS text[])))
           AND embedding IS NOT NULL
           AND (CAST(:group_id AS uuid) IS NULL OR group_id = :group_id)
           AND (NOT CAST(:typed_only AS boolean)
@@ -460,6 +479,7 @@ async def _hybrid_search_pg(
     index is built on.
     """
     installed = sorted(installed_connector_package_names())
+    left_out_keys = left_out_sql_keys()
     query_embedding = await get_embedding_service().encode_one(query)
     embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
@@ -473,6 +493,7 @@ async def _hybrid_search_pg(
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
             "installed_packages": installed,
+            "left_out_keys": left_out_keys,
             "typed_only": typed_only,
             "limit": CANDIDATE_LIMIT,
         },
@@ -489,6 +510,7 @@ async def _hybrid_search_pg(
             "impl_id": impl_id,
             "group_id": str(group_id) if group_id is not None else None,
             "installed_packages": installed,
+            "left_out_keys": left_out_keys,
             "typed_only": typed_only,
             "limit": CANDIDATE_LIMIT,
         },

@@ -31,7 +31,7 @@ __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
 
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 
 @router.post("/class-counts", response_model=AuditClassCounts)

@@ -24,6 +24,7 @@ import pytest
 from meho_backplane.connectors.bind9 import Bind9Connector
 from tests.integration.test_connectors_bind9_container import (
     _CONTAINER_SECRET_PATH,
+    _DEFAULT_BOOKWORM_IMAGE,
     _DOCKERFILE,
     DOCKER_AVAILABLE,
     SKIP_REASON,
@@ -31,7 +32,8 @@ from tests.integration.test_connectors_bind9_container import (
     _container_vault_secrets,  # noqa: F401 -- autouse fixture, re-exported to this module
 )
 
-_TRIXIE_DOCKERFILE: str = _DOCKERFILE.replace("debian:bookworm-slim", "debian:trixie-slim")
+_DEFAULT_TRIXIE_IMAGE = "debian:trixie-slim"
+_TRIXIE_DOCKERFILE: str = _DOCKERFILE.replace(_DEFAULT_BOOKWORM_IMAGE, _DEFAULT_TRIXIE_IMAGE)
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +52,15 @@ def bind9_920_target() -> Iterator[_Bind9Target]:
     with tempfile.TemporaryDirectory() as build_dir:
         (Path(build_dir) / "Dockerfile").write_text(_TRIXIE_DOCKERFILE)
         tag = os.environ.get("MEHO_TEST_BIND9_920_TAG", "meho-test-bind9:9.20-trixie")
-        DockerImage(path=build_dir, tag=tag).build()
+        DockerImage(
+            path=build_dir,
+            tag=tag,
+            buildargs={
+                "DEBIAN_IMAGE": os.environ.get(
+                    "MEHO_TEST_DEBIAN_TRIXIE_IMAGE", _DEFAULT_TRIXIE_IMAGE
+                )
+            },
+        ).build()
 
         container = DockerContainer(tag).with_exposed_ports(22)
         container.start()

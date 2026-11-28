@@ -114,35 +114,49 @@ above (`approval_off_rights_change`), for an operation with a caller-address
 parameter (`approval_off_caller_address`), and for a destructive operation
 (`approval_off_destructive`). The table "Edit rules" in `spec-ingestion.md`
 has the full list.
-At call time one function gives these refusals: `never_covered_reason` in
-`service_grants.py`. It returns the kind and the reason of the first that
-holds: a credential call, per-call approval, a caller-address field,
-always wait, a delete sign. The run approval gate uses the same function
+At call time, for a service login outside sandbox mode, the gate first
+asks `policy/fixed_rules.py::fixed_rule_for`. When it names a rule (a
+credential call, a change of rights or of the policy, a destructive
+operation, a delete, a caller-address field), the gate looks up no
+standing grant and no run approval, and logs
+`policy_gate_fixed_rule_no_grant` with the rule id. The wait reason the
+caller reads stays the same. In the other cases (per-call approval,
+always wait, a root shell command) and in sandbox mode, one function gives
+these refusals: `never_covered_reason` in `service_grants.py`. It returns
+the kind and the reason of the first that holds: a credential call,
+per-call approval, a caller-address field, always wait, a delete sign.
+The run approval gate uses the same function in `_never_covered`, and
+also refuses a root shell command there
 ([run-approvals.md](run-approvals.md)). Only a delete sign leaves room for
 a sandbox delete grant.
 
 ### Credential calls
 
-One rule, in `service_grants.py`: a call that reads, writes or makes a
-credential always waits for a person. No standing grant, no agent grant
-and no run approval covers it.
+One rule, in `service_grants.py`: a call that reads, writes, makes or
+uses a credential always waits for a person. No standing grant, no agent
+grant and no run approval covers it.
 
-- The classes are `credential_read`, `credential_write` and
-  `credential_mint` (`CREDENTIAL_CLASSES`). The class comes from the class
+- The classes are `credential_read`, `credential_write`,
+  `credential_mint` and `credential_use` (`CREDENTIAL_CLASSES`, the same
+  set as `CREDENTIAL_OP_CLASSES` in `op_classes.py`). A person's own call
+  of a `credential_use` operation follows its risk level and approval
+  mark. The class comes from the class
   stored on the row of an ingested operation first, then from the op id
   (`resolve_op_class`: a connector's `declare_op_classes`, or the core
   lists in `broadcast/events.py`). A step of a multi-step operation has
   only its op id.
 - `credential_grant_reason` gives the reason: "A standing grant, an agent
   grant or a run approval never covers 'OP': it reads, writes or makes a
-  credential, so a person approves each call." `never_covered_reason`
+  credential, so a person approves each call." For a `credential_use`
+  operation that no connector marked credential capable it says "it uses
+  a credential" (`only_uses_credential`). `never_covered_reason`
   returns it with the kind `credential`.
 - Grant create refuses such an op by op id before the lookup, and by the
   stored class after it. The answer is the reason plus "Leave it out."
   (`credential_refusal`).
 - `credential_call_waits` says whether such a call waits: every
-  `credential_write` and `credential_mint` call, and a `credential_read`
-  call when its floor applies (a read marked in code as one that returns
+  `credential_write`, `credential_mint` and `credential_use` call, and a
+  `credential_read` call when its floor applies (a read marked in code as one that returns
   no secret value runs at once; `vault.kv.read` waits only with
   `reveal_secret`). The agent verdict and the run approval notes use it.
 - An install or tenant override that turns approval off does not turn it
@@ -177,7 +191,13 @@ and no run approval covers it.
   only `k8s.delete`). In sandbox mode a live delete grant may still cover
   an op marked there, and only a delete grant: no standing grant, no
   agent grant, no run approval and no approval override does. The mark
-  refuses an op with a credential class. `_sandbox_delete_exception` in
+  refuses an op with a credential class. The exception opens only when
+  the op has a delete sign other than `hard_to_undo`: a delete name or
+  pattern, a vendor delete action name, the `destructive` level, the HTTP
+  verb `DELETE` or the `destructive` tag. `hard_to_undo` never opens it,
+  with the switch `CUSTOM_POLICY` on or off: such an op with only
+  `hard_to_undo` is covered by no grant, and a delete grant for it is
+  refused. `_sandbox_delete_exception` in
   `service_grants.py` holds the rule, for the grant lookup, for grant
   create, for a step of a multi-step operation and for the step list
   (`classify_subop_grantability`).
@@ -240,7 +260,9 @@ and no run approval covers it.
   revision and `argocd.app.rollback`.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
-  (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
+  (`service_grants.CREDENTIAL_CARD_LINE`; for a `credential_use` call
+  `CREDENTIAL_USE_CARD_LINE`, which says "it uses a credential"). The
+  approval card shows it.
 - A grant row that names such an op stays stored, but it never runs the
   call. `meho service-principals grants list` shows it as before.
 - The child operation check (`governed_subops.classify_subop_grantability`)
@@ -501,7 +523,8 @@ delete-shaped ops:
 - **by configured pattern** (`Settings.service_grant_delete_shaped_patterns`,
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
   default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`,
-  `POST:/vswitch/*`),
+  `POST:/vswitch/*`; with the switch `CUSTOM_POLICY` on, the setting only
+  adds to these and never removes one),
 - **by vendor action name** (#4632): an ingested op id whose last path part
   starts with `Destroy`, `Delete`, `Remove` or `Unregister`, for example
   `POST:/VirtualMachine/{moId}/Destroy_Task`. The word may also follow a
@@ -517,7 +540,9 @@ delete-shaped ops:
   and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
-  `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
+  `DELETE` verb, a hand-authored `destructive` tag on a typed op, or,
+  with the switch `CUSTOM_POLICY` on, `hard_to_undo` on the operation's
+  own definition.
 
 The first two signs need only the op id (`delete_shaped_refusal_reason`),
 so they also work for an op with no stored row. All three signs are one
@@ -639,7 +664,9 @@ instance holds only disposable test systems: systems built for one test
 and deleted after it. On such an instance a tenant admin may give a
 service principal a **delete grant**: a standing grant for an operation
 with a delete sign (the `destructive` level, the HTTP verb `DELETE`, the
-`destructive` tag, a delete name, or a vendor delete action name), or for
+`destructive` tag, a delete name, a vendor delete action name, or, with
+the switch `CUSTOM_POLICY` on, `hard_to_undo` on the operation's own
+definition), or for
 a delete step of a multi-step operation. So an automated test run can
 build, change and delete its own systems with no wait for a person. Every
 other instance keeps the rules above.

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Final
 
 from meho_backplane.mcp.registry import ToolDefinition
+from meho_backplane.policy.switches import engine_shadow_on
 from meho_backplane.settings import get_settings
 
 __all__ = ["PREVIEW_POLICY_OUTPUT_SCHEMA", "policy_schema_for_settings"]
@@ -50,8 +51,11 @@ PREVIEW_POLICY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
 
 
 def policy_schema_for_settings(definition: ToolDefinition) -> ToolDefinition:
-    """Return the tool without the two output fields while ``POLICY_ENGINE_SHADOW`` is off."""
-    if get_settings().policy_engine_shadow or definition.outputSchema is None:
+    """Return the tool without the two output fields while the policy evaluator is off.
+
+    The evaluator is on with ``POLICY_ENGINE_SHADOW`` or ``CUSTOM_POLICY``.
+    """
+    if engine_shadow_on(get_settings()) or definition.outputSchema is None:
         return definition
     schema = definition.outputSchema
     properties = {

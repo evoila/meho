@@ -285,7 +285,7 @@ async def test_probe_reports_surface_and_never_returns_a_body(
     assert body["tls"] is None  # plain HTTP
     assert body["body_size"] == len(b"hello-body")
     assert body["body_sha256"] == hashlib.sha256(b"hello-body").hexdigest()
-    assert body["final_url"] == f"{srv.origin}/health"
+    assert body["final_url"] == srv.origin
     # A clean response carries no failure evidence.
     assert body["error_detail"] is None
 
@@ -342,8 +342,8 @@ async def test_same_host_redirect_is_followed_to_terminal(
     assert body["reason"] is None
     assert body["status"] == 200
     assert [hop["status"] for hop in body["redirect_chain"]] == [302]
-    assert body["redirect_chain"][0]["url"] == f"{srv.origin}/start"
-    assert body["final_url"] == f"{srv.origin}/final"
+    assert body["redirect_chain"][0]["url"] == srv.origin
+    assert body["final_url"] == srv.origin
     assert "/start" in srv.hits and "/final" in srv.hits
 
 
@@ -454,6 +454,17 @@ async def test_blocked_redirect_log_holds_host_name_only(
     rendered = repr(captured)
     for mark in ("USERMARK", "PASSMARK", "PATHMARK2", "QUERYMARK1", "QUERYMARK2"):
         assert mark not in rendered
+    # The result follows the same rule: host names and origins only.
+    body = result.result
+    assert body["blocked_redirect"] == "127.0.0.1"
+    assert body["final_url"] == f"http://localhost:{second.port}"
+    assert [hop["url"] for hop in body["redirect_chain"]] == [
+        f"http://localhost:{first.port}",
+        f"http://localhost:{second.port}",
+    ]
+    rendered_result = repr(body)
+    for mark in ("USERMARK", "PASSMARK", "PATHMARK2", "QUERYMARK1", "QUERYMARK2"):
+        assert mark not in rendered_result
 
 
 async def test_blocked_redirect_with_backslash_logs_one_fixed_mark(
@@ -491,6 +502,44 @@ async def test_blocked_redirect_with_backslash_logs_one_fixed_mark(
     rendered = repr(captured)
     for mark in ("PATHMARK", "QUERYMARK"):
         assert mark.lower() not in rendered.lower()
+    assert result.result["blocked_redirect"] == UNPARSEABLE_ADDRESS
+    rendered_result = repr(result.result).lower()
+    for mark in ("PATHMARK", "QUERYMARK"):
+        assert mark.lower() not in rendered_result
+
+
+async def test_unreadable_redirect_port_gives_one_fixed_error_text(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_http_probe_op: None,
+) -> None:
+    """A Location with an unreadable port gives one fixed error text, without the port text."""
+    from meho_backplane.connectors._shared.log_host import UNREADABLE_LOCATION_MESSAGE
+
+    server = await _start_http_server(
+        {
+            "/hop1": _Route(
+                status=302,
+                headers={"Location": "http://localhost:PORTMARK/PATHMARK?q=QUERYMARK"},
+            )
+        },
+        host="127.0.0.1",
+    )
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "localhost")
+    try:
+        result = await _dispatch_probe(
+            {"url": f"http://localhost:{server.port}/hop1", "method": "GET"}
+        )
+    finally:
+        server.server.close()
+        await server.server.wait_closed()
+
+    assert result.status == "ok", result.error
+    detail = result.result["error_detail"]
+    assert detail, result.result
+    assert detail[-1]["message"] == UNREADABLE_LOCATION_MESSAGE
+    rendered_result = repr(result.result)
+    for mark in ("PORTMARK", "PATHMARK", "QUERYMARK"):
+        assert mark not in rendered_result
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +575,7 @@ async def test_audit_row_records_url_and_final_url(
     monkeypatch: pytest.MonkeyPatch,
     _registered_http_probe_op: None,
 ) -> None:
-    """The durable audit row's raw_payload carries url + final_url."""
+    """The durable audit row's raw_payload carries the url and the origin of final_url."""
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
     srv = await _start_http_server(
         {
@@ -547,9 +596,10 @@ async def test_audit_row_records_url_and_final_url(
     raw = probe_rows[0].raw_payload
     assert raw is not None
     assert raw["url"] == f"{srv.origin}/a"
-    assert raw["final_url"] == f"{srv.origin}/b"
+    assert raw["final_url"] == srv.origin
     assert "body" not in raw
-    assert f"{srv.origin}/b" in json.dumps(raw)
+    # The address of the redirect hop is the vendor's choice: only its origin is kept.
+    assert f"{srv.origin}/b" not in json.dumps(raw)
 
 
 # ---------------------------------------------------------------------------

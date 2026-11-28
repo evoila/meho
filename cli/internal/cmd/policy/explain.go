@@ -56,10 +56,13 @@ func newExplainCmd() *cobra.Command {
 			"whether the target's connector takes ingested operations. The " +
 			"last line names each check after the policy rules that explain " +
 			"does not ask and that can still refuse the call.\n\n" +
-			"explain works with POLICY_ENGINE_SHADOW off: it then shows today's " +
-			"answer only. Today's checks decide while the policy evaluator is off " +
-			"or in shadow mode. With POLICY_ENGINE_SHADOW on, the answer also lists " +
-			"every rule the evaluator matched, in order, and the floor that decided.\n\n" +
+			"explain works with CUSTOM_POLICY and POLICY_ENGINE_SHADOW off: it then " +
+			"shows today's answer only. Today's checks decide while the policy " +
+			"evaluator is off or in shadow mode. With CUSTOM_POLICY or " +
+			"POLICY_ENGINE_SHADOW on, the answer also lists every rule the " +
+			"evaluator matched, in order, and the floor that decided. Each older " +
+			"switch (POLICY_CLASSIFICATION, POLICY_ENGINE_SHADOW, " +
+			"POLICY_APPROVER_ROUTING) still turns on its own part alone.\n\n" +
 			"Who may approve is a list of MEHO group kinds (MEHO-<kind>), not " +
 			"the names of the login groups of your install.\n\n" +
 			"Only a tenant admin or a platform admin sees the entries of the " +
@@ -222,6 +225,9 @@ func printExplain(w io.Writer, a api.PolicyExplainResponse) {
 	if a.Approvers != nil {
 		printApprovers(w, *a.Approvers)
 	}
+	if a.OwnApproval != nil {
+		printOwnApproval(w, *a.OwnApproval)
+	}
 	if a.Today != nil {
 		line := a.Today.PolicyVerdict
 		if r := deref(a.Today.Reason); r != "" {
@@ -230,7 +236,7 @@ func printExplain(w io.Writer, a api.PolicyExplainResponse) {
 		fmt.Fprintf(w, "Today: %s\n", sanitize(line))
 	}
 	if a.Evaluator == nil {
-		fmt.Fprintln(w, "Policy evaluator: off (POLICY_ENGINE_SHADOW is off)")
+		fmt.Fprintln(w, "Policy evaluator: off (CUSTOM_POLICY and POLICY_ENGINE_SHADOW are off)")
 	} else {
 		printEvaluator(w, *a.Evaluator)
 	}
@@ -259,6 +265,26 @@ func printApprovers(w io.Writer, a api.ExplainApprovers) {
 	}
 	if floor := deref(a.Floor); floor != "" {
 		fmt.Fprintf(w, "Install's floor: %s (a tenant's routing can only narrow it)\n", sanitize(floor))
+	}
+}
+
+// printOwnApproval says whether the person who asked may approve their own
+// request, for each way to approve. Only with CUSTOM_POLICY on. A null value
+// means the answer depends on the values of the call.
+func printOwnApproval(w io.Writer, o api.ExplainOwnApproval) {
+	fmt.Fprintln(w, "May you approve your own request:")
+	fmt.Fprintf(w, "  in the web console: %s (%s)\n", yesNo(o.Web), sanitize(o.WebReason))
+	fmt.Fprintf(w, "  with a token: %s (%s)\n", yesNo(o.Token), sanitize(o.TokenReason))
+}
+
+func yesNo(b *bool) string {
+	switch {
+	case b == nil:
+		return "depends on the values of the call"
+	case *b:
+		return "yes"
+	default:
+		return "no"
 	}
 }
 

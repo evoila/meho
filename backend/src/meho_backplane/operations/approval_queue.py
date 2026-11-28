@@ -15,8 +15,10 @@ dangerous op), the dispatcher creates an
 parks the call durably so a process restart cannot lose the pending
 request. Two REST endpoints (``/api/v1/approvals/{id}/approve`` and
 ``…/reject``) let authorized reviewers decide; approval re-dispatches the
-original call with the original params (gate bypassed via
-``dispatch(..., _approved=True)``).
+original call with the original params
+(``dispatch(..., _approved=True)``). The approval is not asked for again;
+the run checks again what can change while the call waits
+(:mod:`~meho_backplane.operations.approved_run_rights`).
 
 Audit invariant
 ---------------
@@ -102,10 +104,10 @@ from meho_backplane.auth.client_identity import (
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
-from meho_backplane.auth.fresh_sign_in import CLOCK_SKEW_SECONDS
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.auth.principal_block import checking_logins_for_steps
 from meho_backplane.auth.secret_read_as import current_secret_read_as
+from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
 from meho_backplane.auth.tenant_admins import only_admin_note
 from meho_backplane.broadcast.events import (
     HIDDEN_PARAM_MARKER,
@@ -121,7 +123,11 @@ from meho_backplane.db.models import (
     AuditEventClass,
     AuditLog,
 )
-from meho_backplane.op_classes import hidden_stored_param
+from meho_backplane.op_classes import (
+    SECRET_REQUEST_OP_CLASSES,
+    hidden_stored_map_values,
+    hidden_stored_param,
+)
 from meho_backplane.operations._audit import (
     SESSION_FROM_CLIENT_KEY,
     agent_session_id_var,
@@ -129,6 +135,7 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     policy_rule_columns,
+    policy_rule_payload,
     policy_rule_var,
     resolve_audit_session_id,
     run_id_var,
@@ -463,12 +470,14 @@ class PreviewBindingMissingError(ApprovalError):
 class ApprovalSignInReusedError(ApprovalError):
     """This sign-in cannot give this approval: it is used up (#3979, #5515).
 
-    Raised by :func:`approve_request` in two cases, both read from the
-    person's earlier ``approval.decision`` audit rows with the same
-    ``sign_in_key``:
+    Raised by :func:`approve_request` in two cases. Both are read from the
+    person's earlier audit rows with the same ``sign_in_key``: the
+    ``approval.decision`` rows, and the ``principal.unblock`` row of an
+    own-login unblock:
 
     * the request is ``destructive`` and the sign-in already approved
-      something: a destructive approve needs a sign-in of its own;
+      something or removed the person's own block: a destructive approve
+      needs a sign-in of its own;
     * the sign-in already approved a ``destructive`` request: that sign-in
       approves nothing more.
 
@@ -713,9 +722,9 @@ class ApprovalRoleFloorError(UnauthorizedApprovalError):
 
     Raised by :func:`approve_request` when the operation needs a role from
     the person who runs it (:mod:`meho_backplane.operations.role_floors`)
-    and the approver's ``tenant_role`` is below it. The approved call runs
-    with the approval as its authorization, on whichever resume path wins,
-    so the person who approves must hold the role the operation needs.
+    and the approver's ``tenant_role`` is below it. The approver is read as
+    recorded at the decision, on whichever resume path wins, so the person
+    who approves must hold the role the operation needs.
     Checked before any state change: the request stays ``pending`` and no
     decision audit row is written. Subclasses
     :class:`UnauthorizedApprovalError`, so every handler of that error still
@@ -1658,6 +1667,7 @@ def expiry_operator(tenant_id: uuid.UUID) -> Operator:
         raw_jwt="",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        in_code_kind="system",
     )
 
 
@@ -1962,6 +1972,7 @@ async def _write_audit_row(
     # row while the retry's own rule is bound.
     if path in _CALLER_PATHS:
         policy_kwargs.update(_request_row_columns())
+        payload.update(policy_rule_payload())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -2328,12 +2339,18 @@ async def create_pending_request(
     handoff_payload: dict[str, Any] | None = None
     stored_params: dict[str, Any] | None = params
     stored_resume_parent = resume_parent
-    # A credential write, and a call whose param a connector hides (the
+    # A credential write or use, a step of a multi-step operation that is a
+    # credential write or use, and a call whose param a connector hides (the
     # manifest of a k8s.apply of a Secret), keep their params and the
     # parent's params only in the encrypted one-time handoff: the row never
     # holds them, also not when the request is approved and never runs.
-    if classify_op(op_id) == "credential_write" or (
-        params is not None and hidden_stored_param(op_id, params) is not None
+    parent_op_id = resume_parent.get("op_id") if resume_parent is not None else None
+    if (
+        classify_op(op_id) in SECRET_REQUEST_OP_CLASSES
+        or (
+            isinstance(parent_op_id, str) and classify_op(parent_op_id) in SECRET_REQUEST_OP_CLASSES
+        )
+        or (params is not None and hidden_stored_param(op_id, params) is not None)
     ):
         handoff_payload = {"params": params, "resume_parent": resume_parent}
         stored_params = None
@@ -2560,14 +2577,16 @@ async def _check_sign_in_use(
     :class:`ApprovalSignInTooOldError` otherwise): the approval window, or
     for a ``destructive`` request its own limit. Inside the window one
     sign-in may approve several requests (#5515). A ``destructive`` request
-    is the exception: its sign-in must have approved nothing else, and
-    after it that sign-in approves nothing more
-    (:class:`ApprovalSignInReusedError` in both cases). The check is the
-    same for an approve on REST and in the web interface.
+    is the exception: its sign-in must not have approved anything else or
+    removed the person's own block, and after it that sign-in approves
+    nothing more (:class:`ApprovalSignInReusedError` in both cases). The
+    check is the same for an approve on REST and in the web interface.
 
-    The earlier approves of the sign-in are the person's
-    ``approval.decision`` audit rows with the same ``sign_in_key``,
-    written since the sign-in. The scan is short: the window is minutes.
+    The earlier uses of the sign-in are the person's audit rows with the
+    same ``sign_in_key``, written since the sign-in: the
+    ``approval.decision`` rows, and the ``principal.unblock`` row of an
+    own-login unblock (:func:`~meho_backplane.auth.sign_in_use.earlier_sign_in_uses`).
+    The scan is short: the window is minutes.
 
     Two approves with the same sign-in can run at the same moment, on two
     replicas. So the check first takes a transaction-level PostgreSQL
@@ -2595,20 +2614,15 @@ async def _check_sign_in_use(
             max_age_seconds=max_age,
         )
         raise ApprovalSignInTooOldError(request.id, max_age_seconds=max_age)
-    await take_approval_lock(session, "approval-sign-in", key)
-    since = datetime.fromtimestamp(approval_auth.auth_time - CLOCK_SKEW_SECONDS - 1, UTC)
-    rows = await session.execute(
-        select(AuditLog.payload).where(
-            AuditLog.operator_sub == operator.sub,
-            AuditLog.path == "approval.decision",
-            AuditLog.occurred_at >= since,
-        )
+    await take_approval_lock(session, SIGN_IN_LOCK_SCOPE, key)
+    uses = await earlier_sign_in_uses(
+        session, sub=operator.sub, sign_in_key=key, auth_time=approval_auth.auth_time
     )
-    for (payload,) in rows:
-        earlier = payload.get("approval_auth") if isinstance(payload, dict) else None
-        if not isinstance(earlier, dict) or earlier.get("sign_in_key") != key:
-            continue
-        if destructive or earlier.get("single_use") is True:
+    for use in uses:
+        # A destructive approve needs a sign-in no other step used (an approve
+        # or the removal of the person's own block). Any other approve is
+        # refused only after a sign-in that a destructive approve used up.
+        if destructive or use.single_use:
             _log().warning(
                 "approval_sign_in_reused",
                 approval_request_id=str(request.id),
@@ -2678,8 +2692,8 @@ async def approve_request(
        When the operation carries a role floor
        (:mod:`meho_backplane.operations.role_floors`), the approver's role
        must meet it; else 403, :class:`ApprovalRoleFloorError`. The
-       approved call runs with the approval as its authorization, so the
-       person who approves must hold the role the operation needs.
+       approver is read as recorded at the decision, so the person who
+       approves must hold the role the operation needs.
     5. If *params* is supplied, it matches the stored ``params_hash``
        (:func:`params_hash_matches`; else 422, :class:`ParamsMismatchError`).
        The hash check is **skipped** when *params* is ``None`` — the
@@ -2704,10 +2718,11 @@ async def approve_request(
     The **re-dispatch** (executing the approved op) happens *after* the
     caller commits this transaction. The ``POST /api/v1/approvals/{id}/
     approve`` REST route calls :func:`~meho_backplane.operations.dispatcher.dispatch`
-    with ``_approved=True`` (the gate-bypass: the approval is the
-    authorization). The MCP/CLI operator-decision path commits the
-    decision without re-dispatching — the agent picks up execution
-    separately. Separating the decision commit from the re-dispatch
+    with ``_approved=True``: the approval is not asked for again, and the
+    run checks again what can change while the call waits
+    (:mod:`~meho_backplane.operations.approved_run_rights`). The MCP/CLI
+    operator-decision path commits the decision without re-dispatching —
+    the agent picks up execution separately. Separating the decision commit from the re-dispatch
     means the approval is durable even if the re-dispatch fails.
 
     Args:
@@ -2790,6 +2805,9 @@ async def approve_request(
         "reviewed_by": operator.sub,
         "self_approved": self_approved,
         "approval_rule": rule.value,
+        # Read when the risk level of the call goes up before it runs again
+        # (:mod:`~meho_backplane.operations.approved_run_rights`).
+        "approver_may_approve_high_risk": may_approve_high_risk(operator),
         **grant_audit_fields(request, operator),
         **_behind_audit_fields(operator.sub, request),
     }
@@ -3008,8 +3026,12 @@ def params_with_secret_fields_hidden(
     *op_id* declared with
     :func:`~meho_backplane.op_classes.declare_hidden_stored_param` is
     replaced too, when its check flags the params (the manifest of a
-    ``k8s.apply`` that holds a Secret). The other fields keep their value,
-    as in the audit row's raw copy.
+    ``k8s.apply`` that holds a Secret). Each value of the map param that
+    *op_id* named with
+    :func:`~meho_backplane.op_classes.declare_hidden_stored_map_values` is
+    replaced too; its key names stay (the ``extras_changes`` of
+    ``targets.update``). The other fields keep their value, as in the audit
+    row's raw copy.
     """
     if params is None:
         return None
@@ -3018,6 +3040,16 @@ def params_with_secret_fields_hidden(
     if name is not None:
         hidden = {**hidden, name: HIDDEN_PARAM_MARKER}
         found = True
+    map_name = hidden_stored_map_values(op_id)
+    values = hidden.get(map_name) if map_name is not None else None
+    if map_name is not None and isinstance(values, dict) and values:
+        hidden = {
+            **hidden,
+            map_name: {
+                key: None if value is None else HIDDEN_PARAM_MARKER for key, value in values.items()
+            },
+        }
+        found = found or any(value is not None for value in values.values())
     if not found:
         return None
     return cast(dict[str, Any], hidden)
@@ -3169,8 +3201,8 @@ async def find_remote_write_approval(
     the ``remote-write`` (caution) tier mints a capability **only** against a
     committed :class:`ApprovalRequest` for the *identical*
     ``(tenant, op, target, params)`` -- the human approval decision is the
-    mint's authorization, exactly as :func:`resume_dispatch_after_approval`
-    re-dispatches an approved op with the policy gate bypassed
+    mint's authorization, as :func:`resume_dispatch_after_approval` runs an
+    approved op without asking for the approval again
     (``dispatch(..., _approved=True)``). The ``params_hash`` predicate (any of
     :func:`params_hash_candidates` for *params*) is the swap defence
     (#1503 / #3197): a mint whose params differ from the approved ones matches
@@ -3300,11 +3332,12 @@ async def resume_dispatch_after_approval(
     (no original target) keep ``target_id IS NULL`` → ``None`` and
     dispatch normally.
 
-    The re-dispatch bypasses the policy gate (``_approved=True``): the
-    committed approval decision is the authorization. Without the bypass
-    the re-dispatch would re-queue (a human/service principal now routes
+    The re-dispatch does not ask for the approval again (``_approved=True``):
+    without that, it would wait again (a human/service principal routes
     ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
-    re-hits ``needs-approval``), so the approved op would never execute.
+    gets ``needs-approval`` again), so the approved op would never execute.
+    The rights of who asked are still checked as for a new call made now
+    (:mod:`~meho_backplane.operations.approved_run_rights`).
 
     Exactly-one-resumer claim (#2293): every operator surface routes
     through here, and for a run-bound request the in-process agent waiter
@@ -3824,10 +3857,11 @@ async def _refuse_resume_params_unavailable(
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
     """The requester saved on *request* (#4217), with its ``client`` block and record."""
+    from meho_backplane.operations._preview import stored_requester_record
+
     effect = request.proposed_effect or {}
     client = effect.get(CLIENT_PAYLOAD_KEY)
-    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
-    subject = preflight.get(_REQUESTER_KEY) if isinstance(preflight, dict) else None
+    subject = stored_requester_record(effect)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
@@ -3850,16 +3884,27 @@ def _with_requester_record(
     (:func:`~meho_backplane.operations.approved_step_check.approved_step_refusal`).
     A re-park on behalf of an earlier requester keeps that requester's
     record. A record the operation's own preflight stored stays.
+
+    The record is kept under an internal key
+    (:data:`~meho_backplane.operations._preview.AGENT_REQUESTER_RECORD_KEY`).
+    The REST and MCP approval tools leave it out.
+    While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
+    under ``permission_preflight["requester"]``.
     """
+    from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
     from meho_backplane.operations.approved_step_check import requester_record
+    from meho_backplane.settings import get_settings
 
     record = requester_record(operator) if requester is None else requester.subject
     if record is None:
         return proposed_effect
-    preflight = proposed_effect.get(_PERMISSION_PREFLIGHT_KEY)
+    effect = {AGENT_REQUESTER_RECORD_KEY: record, **proposed_effect}
+    if get_settings().agent_grant_required == "off":
+        return effect
+    preflight = effect.get(_PERMISSION_PREFLIGHT_KEY)
     preflight = dict(preflight) if isinstance(preflight, dict) else {}
     preflight.setdefault(_REQUESTER_KEY, record)
-    return {**proposed_effect, _PERMISSION_PREFLIGHT_KEY: preflight}
+    return {**effect, _PERMISSION_PREFLIGHT_KEY: preflight}
 
 
 @contextmanager
@@ -4065,6 +4110,7 @@ async def _dispatch_resume_with_bound_context(
     the values the requester asked for; the dispatcher stamps the choice on
     the audit row of the run.
     """
+    from meho_backplane.operations.approved_run_rights import bind_approved_run
     from meho_backplane.operations.dispatcher import dispatch
     from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 
@@ -4087,6 +4133,7 @@ async def _dispatch_resume_with_bound_context(
         with (
             structlog.contextvars.bound_contextvars(**_run_audit_context(request, rerun_attempt)),
             bind_approved_requester(request),
+            bind_approved_run(request),
             restored_connector_limit(request.allowed_connectors),
             # Each step of the run also checks the person who asked.
             checking_logins_for_steps(request.principal_sub, request.tenant_id),
@@ -4735,10 +4782,10 @@ def _check_approver_role_floor(operator: Operator, request: ApprovalRequest) -> 
 
     A parked ``targets.register`` or ``topology.*`` write needs the
     ``tenant_admin`` role from the person who runs it
-    (:mod:`meho_backplane.operations.role_floors`). Once approved, the call
-    runs with the approval as its authorization: the agent's own resume
-    and the hosted-run resume do not look at who approved. So the role is
-    checked here, at the decision, before any state change. An operation
+    (:mod:`meho_backplane.operations.role_floors`). Once approved, the
+    approver is read as recorded at the decision: the agent's own resume
+    and the hosted-run resume do not look at who approved again. So the
+    role is checked here, at the decision, before any state change. An operation
     without a floor is not affected.
     """
     denial = role_floor_denial(request.op_id, operator.tenant_role)

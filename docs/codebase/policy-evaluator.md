@@ -38,8 +38,56 @@ All are frozen dataclasses.
 | `Asker` | Who asks: kind (`person`, `agent`, `service`, `runner`), sub, tenant, roles (the tenant role plus the flags `approver`, `sa_operator`, `platform_admin`), via (`web` or `token`), the acting agent of a hosted run. |
 | `Asked` | What is asked: connector id, op id, group key, category, risk level, "always wait" (the effective approval flag), labels, mutating, op class marks, caller address, target. |
 | `Lookups` | What the caller found in the database for this call: the matching agent grant (also of the hosted agent), a standing grant, a run approval, the read-scope refusal, sandbox mode, `AGENT_GRANT_REQUIRED`. The evaluator never reads the database itself. |
-| `RuleRef` | The rule that decided: source (`floor`, `tenant_rule`, `default`, `agent_grant`, `standing_grant`, `run_approval`, `read_scope`, `role_floor`), rule id, policy version (empty in part 1), text. |
+| `RuleRef` | The rule that decided: source (see [Rule sources](#rule-sources)), rule id, policy version (empty in part 1), text. |
 | `Decision` | Verdict (`run`, `wait`, `deny`), the rule, the groups that may approve (only for `wait`), `waits_because` (`token_call` for a person's `caution` call that waits only because it came with a token), every step in order (`steps`, each a `Step` with its rule and verdict), and the same steps as text lines (`trace`). |
+
+### Rule sources
+
+A rule is named `<source>:<rule id>` (`RuleStamp.label` in
+`policy/stamp.py`), for example `default:rights_change.admin_in_web_console`.
+An Admin's change of the policy in the web console would be
+`default:policy_change.admin_in_web_console`.
+
+| Source | The rule comes from |
+|---|---|
+| `floor` | A fixed rule in the code (`policy/floors.py`). |
+| `tenant_rule` | A customer's rule. None in part 1. |
+| `default` | The shipped default for the kind of caller. |
+| `agent_grant` | An agent grant. |
+| `standing_grant` | A standing grant of a service login. |
+| `run_approval` | A person's approval of the operation list of a run. |
+| `read_scope` | The read limit of a service login. |
+| `role_floor` | The lowest role an operation needs. |
+| `gate` | Today's gate decided: the evaluator gave another answer, or the shadow failed. Only for the audit row. |
+| `approval` | A person approved this call. Only for the audit row. |
+| `override` | An admin's edit of the operation (its risk level or approval). Only for the audit row. |
+
+The evaluator itself gives no rule with the sources `gate`, `approval`
+and `override` yet.
+
+### The code's own values and the plain mark (`operations/op_policy.py`)
+
+`apply_effective_policy` and `apply_step_policy` set the effective risk
+level and approval flag on the row (after admin edits, classification and
+floors). Before that they keep the code's own values in
+`row.code_safety_level` and `row.code_requires_approval`, and the stored
+parameter schema in `row.code_parameter_schema` (not columns). The shown
+schema then leaves out a field that a switch hides.
+
+`has_plain_mark(descriptor)` is true when the code (or the import) turns
+approval on and the operation has no other reason to wait: no credential
+call, no caller address, no change of rights, no "approve each call" and
+no delete sign. It reads the code's own values, so an admin's edit never
+looks like the code's mark. The caller-address check reads the stored
+schema, as the approval floor does, so a field that a switch hides still
+counts. A delete sign is the code's `destructive` level, the HTTP verb
+`DELETE`, the `destructive` tag or a delete name. It reads the delete
+names from the one setting `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, as
+every other reader of that setting does. With `CUSTOM_POLICY` on, the
+setting holds the built-in names and the install's own names. With the
+switch off, an install's own list takes the place of the built-in names.
+`has_plain_mark` is read only where `CUSTOM_POLICY` is on. It reads no
+database. Nothing decides on it yet.
 
 The op class marks of `Asked` come from the code: `root_shell`,
 `credential_read`, `per_call_approval`, `delete_shaped`,
@@ -54,6 +102,11 @@ The order is fixed.
 
 1. **Floors** (`policy/floors.py`). Rules in the code, never in a file. A
    floor sets the least strict answer; no later step loosens it.
+   - A login with the Reader role (any kind of login, also a hosted agent
+     run that a Reader started) whose call asks for a change (the mark
+     `asks_for_change`) is denied first, with `insufficient_role` and the
+     plain sentence (`reader_change_floor`). The policy gate checks the same
+     rule first.
    - A person below the operation's role floor is denied.
    - A `destructive` call waits for a person. Only a sandbox delete grant
      can run it, for a service login, in sandbox mode.
@@ -84,7 +137,41 @@ The order is fixed.
      wait, never a floor.
 
 A floor names itself when it gives the same verdict as a later step, so
-the rule of a floor-held answer is always the floor.
+the rule of a floor-held answer is always the floor. Among the floors, the
+later one names a tie. With `CUSTOM_POLICY` on, the token floor comes
+before the fixed rules, so a fixed rule names a wait that both make.
+
+### The fixed rules
+
+`policy/fixed_rules.py` holds the fixed rules: rules in the code that no
+policy, no tenant admin and no platform admin can lower. Each has a short
+id and one sentence (`FIXED_RULES`):
+
+| Id | The rule |
+|---|---|
+| `credential_waits` | A call that reads, writes or makes a credential waits for a person. |
+| `rights_change_waits` | A change of rights waits for a person, except an Admin's own change in the web console after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a platform admin) that is not destructive and writes no credential. |
+| `policy_change_waits` | A change of the policy (`policy.apply`, `policy.classify`) waits for a person, except an Admin's own change in the web console after a fresh sign-in. |
+| `agent_never_approves` | An agent, a service login and a runner never approve. |
+| `destructive_waits` | A `destructive` operation always waits for approval. |
+| `delete_waits` | A delete waits for approval, except an Admin's own change of rights in the web console that is not destructive, after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a platform admin); in sandbox mode a delete grant may cover a delete. |
+| `caller_address_waits` | A call to an address that the caller gives always waits for approval. |
+
+`fixed_rule_for(descriptor, caller)` names the rule that holds for one
+call, or `None`. It wraps today's checks (`is_rights_change_op`, the
+credential, caller address and delete checks of `never_covered_reason`,
+the `destructive` level). Every kind of caller gets the same rule, except
+a person's own click in the web console on a change of rights or of the
+policy: there the console check decides (`rights_change_console.py`).
+
+The answer does not make a call wait by itself; today's checks still
+decide. It says that nothing after them may let the call run where they
+make it wait. The call gate asks it before it reads a standing grant or a
+run approval (`_validate._fixed_rule_blocks_grants`); in sandbox mode the
+grant lookup decides, so a delete grant may still cover a delete. The
+floors `destructive_waits` and `credential_waits` take their ids from the
+module. Per-call approval, "always wait", the role floor and the root shell
+mark are not fixed rules; they stay as they are.
 
 Steps that stay in the dispatcher and are not in the evaluator: the
 children of an approved run, the wait of a secret reveal, the announce
@@ -125,15 +212,20 @@ compared.
 
 ### The rule on the audit row and the approval request (#6044)
 
-With the switch on, the gate also keeps the rule the evaluator matched
+With `POLICY_ENGINE_SHADOW` or `CUSTOM_POLICY` on, the gate also keeps the
+rule the evaluator matched, with the evaluator's verdict
 (`policy/stamp.py`: `RuleStamp`, `keep_rule`, `take_rule`). The
 dispatcher takes it right after its gate and binds it to
 `policy_rule_var` (`operations/_audit.py`). Each `dispatch` clears the
 rule when it starts and puts the caller's rule back when it returns. So
 a step of a multi-step operation that is refused before its own gate
-(for example a target of the wrong kind) names no rule. The step gate of a multi-step operation binds the
-step's rule only for its own rows, so the parent's row keeps the
-parent's rule. Then:
+(for example a target of the wrong kind) names no rule. The step gate of
+a multi-step operation binds the step's rule only for its own rows, so
+the parent's row keeps the parent's rule. Each gate first drops a rule an
+earlier gate kept (a preview, for example), so a row never gets the rule
+of another call.
+
+**`CUSTOM_POLICY` off** (rows as before):
 
 - `audit_log.policy_rule` holds `<source>:<rule id> (shadow)`, and
   `audit_log.policy_version` the policy file version (empty today).
@@ -141,13 +233,130 @@ parent's rule. Then:
   `{"source", "rule_id", "text", "decided": false}` and
   `policy_version`. The approvals console shows it in the request
   details.
+- `(shadow)` and `decided: false` mean: the evaluator matched this rule,
+  but today's checks decided. The mismatch line says when the answers
+  differ. With `POLICY_ENGINE_SHADOW` off, or when the shadow fails,
+  nothing is kept and the columns stay empty.
 
-`(shadow)` and `decided: false` mean: the evaluator matched this rule,
-but today's checks decided. The rule can differ from today's answer;
-the mismatch line says when it does. With the switch off, or when the
-shadow fails, nothing is kept and the columns stay empty. Each gate
-first drops a rule an earlier gate kept (a preview, for example), so a
-row never gets the rule of another call.
+**`CUSTOM_POLICY` on** (`row_rule` and `deciding_rule` in
+`policy/stamp.py`). When the dispatcher has its final verdict, it
+compares it with the evaluator's verdict:
+
+- The same answer: the row names the evaluator's rule as the rule that
+  decided (`decided: true`, no `(shadow)` mark).
+- Another answer: the row names `gate:<verdict>` (`run`, `wait` or
+  `deny`). The payload key `policy_rule_shadow` of the audit row holds
+  the evaluator's rule with `(shadow)`. The approval request stores the
+  `gate` rule. The mismatch line is logged as before.
+- The shadow failed: `gate:<verdict>`, never an empty rule.
+- The gate let the call run, then a check after the gate refused it
+  (the announce rule, a connector that takes no generic operations, a
+  blocked login of a step, a refused step of a multi-step operation):
+  the `denied` row names `gate:deny`, and `policy_rule_shadow` holds the
+  evaluator's rule (`refused_rule` in `policy/stamp.py`, applied by the
+  audit writer). The row of a refused call never names a rule that
+  allows.
+- A verdict of the gate that is none of `run`, `wait` and `deny` counts
+  as `deny`: the call is refused and writes its row.
+- An Admin's change of rights in the web console keeps
+  `default:rights_change.admin_in_web_console`, as before.
+
+The final verdict counts, also when the dispatcher changed the gate's
+answer after the gate (a step of an approved run, the wait of a secret
+reveal, the step check of an agent). These paths name their own rule
+later; until then they show `gate:<verdict>`.
+
+Rows that do not name the deciding rule yet, also with the switch on:
+
+- a call refused before the evaluator runs (a revoked agent, the
+  requester check, the MCP profile): `gate:deny`, because the shadow kept
+  no rule;
+- a call that runs after a person approved it (the resume of the
+  approval queue): no rule;
+- the rows of a step of a multi-step operation (`enforce_subop_policy` in
+  `operations/composite.py`): the step's evaluator rule with `(shadow)`.
+  The parent's own row names its deciding rule. Checked by
+  `test_composite_step_row_names_the_step_rule_and_the_parent_keeps_its_own`.
+
+### The rule ids on the audit row
+
+The one list of the rule ids. A label is `<source>:<rule id>`
+(`RuleStamp.label`). The rule id is a fixed id, or a fixed id plus the id
+of a stored object. It never holds a secret, a token or a parameter value.
+New rules add their rows at the end of their group.
+
+**Fixed rules** (`policy/fixed_rules.py`). No policy and no admin can lower
+them.
+
+| Label | The rule |
+|---|---|
+| `floor:credential_waits` | A call that reads, writes or makes a credential waits for a person. |
+| `floor:rights_change_waits` | A change of rights waits for a person. |
+| `floor:policy_change_waits` | A change of the policy waits for a person. |
+| `floor:agent_never_approves` | An agent, a service login and a runner never approve. |
+| `floor:destructive_waits` | A `destructive` operation always waits for approval. |
+| `floor:delete_waits` | A delete waits for approval. |
+| `floor:caller_address_waits` | A call to an address that the caller gives always waits for approval. |
+| `floor:<id>` (#6958, second part) | A root command on a host always waits. |
+| `floor:<id>` (#6958, second part) | A change of rights in a target system waits. |
+
+Today the evaluator names `credential_waits` and `destructive_waits` on a
+call row. The other fixed rules reach the row with the second part of
+#6961.
+
+**Other floors.** Rules in the code that are not fixed rules.
+
+| Label | The rule |
+|---|---|
+| `floor:token_runs_only_safe` | A call made with a token runs only `safe` operations at once. A personal agent rule (#6969) can lift it. |
+| `role_floor:role_floor` | A person below the operation's role floor is denied. |
+| `role_floor:reader_asks_for_change` | A Reader who asks for a change is denied. |
+
+With `CUSTOM_POLICY` on, the token floor comes before the fixed rules in
+`call_floors`. So when both make a call wait (for example an agent's
+credential read, which is always at least `caution`), the fixed rule names
+the wait. With the switch off the order is as before, and the token floor
+names it. The verdict is the same.
+
+**Defaults** (`default`). The shipped default for the kind of caller.
+
+| Label | The rule |
+|---|---|
+| `default:person.safe` | A person's `safe` call runs. |
+| `default:person.web.caution` | A person's `caution` call in the web console runs. |
+| `default:person.<web or token>.<risk>` | A person's call at a higher risk level waits. A runner gets the `token` form. |
+| `default:agent.<risk>` | An agent: `safe` runs, a higher risk level waits, an unknown one is denied. |
+| `default:service.<risk>`, `default:service.dangerous`, `default:service.caution_write`, `default:service.root_shell` | A service login: `dangerous`, a `caution` write and a root command wait; the rest runs. |
+| `default:read_only_ceiling` | The agent of a Reader never runs a call at once. |
+| `default:always_wait` | The operation always waits. |
+| `default:rights_change.console`, `default:rights_change.console_refused` | The evaluator's answer for an Admin's change of rights in the web console. |
+| `default:rights_change.admin_in_web_console` | An Admin's change of rights in the web console ran at once (the dispatcher writes it). |
+| `default:policy_change.admin_in_web_console` | An Admin's change of the policy in the web console ran at once. |
+
+**Grants and limits.**
+
+| Label | The rule |
+|---|---|
+| `agent_grant:agent_grant` | An agent grant decided. |
+| `agent_grant:agent_no_grant` | No grant covers the agent's call, and `AGENT_GRANT_REQUIRED` is on. |
+| `standing_grant:standing_grant` | A standing grant cleared a service login's wait. |
+| `standing_grant:sandbox_delete_grant` | A sandbox delete grant cleared a delete. |
+| `run_approval:run_approval` | A run approval cleared a service login's wait. |
+| `read_scope:read_scope` | The read limit of a service login denied the call. |
+
+**Customer rules and the row's own sources.**
+
+| Label | The rule |
+|---|---|
+| `tenant_rule:<name>` | A tenant admin's agent rule (#6969). |
+| `gate:<verdict>` | The gate decided, with `run`, `wait` or `deny`: the evaluator gave another answer, or the shadow failed. |
+| `approval:<request id>` | A person approved this call (second part of #6961). |
+| `override:<override id>` | An admin's edit of the operation decided (second part of #6961). |
+
+**Who may approve.** `may_approve` (`policy/approve.py`) answers with a
+rule too. The rule `own_personal_agent` (#6971): a person approves the
+request of their own personal agent. It names who may approve a request,
+not the rule of a call row.
 
 ## `meho policy explain` (#6045)
 
@@ -159,6 +368,7 @@ no call to an outside system. The REST request itself is logged as
 
 Code: `policy/explain.py` (the work), `policy/explain_asker.py` (who
 asks), `policy/explain_models.py` (the answer),
+`policy/explain_own_approval.py` (may you approve your own request),
 `policy/who_approves.py` (who may approve; shared with the preview),
 `api/v1/policy.py` (the route), `cli/internal/cmd/policy/explain.go`.
 
@@ -249,6 +459,85 @@ list. The CLI prints the list last (`Not checked: a, b`).
 operations through explain and through the real call (with the step that
 would send the call replaced). It fails on any difference that
 `not_checked` does not name.
+
+**May you approve your own request** (`own_approval`, only with
+`CUSTOM_POLICY` on, and only when the answer is `wait`). Code:
+`policy/explain_own_approval.py`. It says whether the person who asked
+may approve the request that the call makes, once for each way to
+approve:
+
+| Field | Meaning |
+|---|---|
+| `web`, `web_reason` | yes, no or `null` for a click in the web console, and why |
+| `token`, `token_reason` | yes, no or `null` for an approve on the command line or REST, and why |
+
+How it gets the answer: it builds the request in memory, with the fields
+the park would store (who asked, the risk level, "waits only because it
+came with a token" from `waits_only_for_token_call`, the change-of-rights
+mark, and the approver groups of the routing). Nothing is stored. Then it
+asks `approve_right_any_status` (`operations/approval_rights.py`) about
+that request: the same check the approve sign and the approve itself
+run. A machine login never approves, a change of rights only an admin in
+the web console, the own approval rule (`_check_self_approval`: a
+MEHO-Admin, a click on a `caution` change that waited only for its
+token, or `APPROVAL_ALLOW_SELF_APPROVAL` for a `safe` or `caution`
+change), and the routing.
+
+The rule of the part, in the order of the approve step:
+
+- First, who may decide at all: `decide_refusal` in
+  `operations/approval_rights.py`, the check the approve step and the
+  approve sign run first. An agent login or a service login never
+  approves. For them `web` and `token` are `false` for every operation,
+  also the ones of the three functions below, and both reasons are the
+  text of the approve sign: "Only a person can approve. AI tools and
+  other machine logins never approve."
+- For a person, where the approve step reads a fact that only the call
+  has, `web` and `token` are `null`, and `web_reason` and `token_reason` are both "This
+  depends on the values of the call. Explain asks without them." Such
+  facts are the values of the call, and the facts of the approval card
+  that MEHO reads from the values or from the target (the login, the
+  group, the login-realm fact, the platform admin mark and its reason).
+  These are the operations registered with one of three functions:
+  `register_rights_change_check` (a change of rights only for some
+  values), `register_grant_op` (the approval card holds facts that MEHO
+  reads from the values or from the target), and
+  `register_requester_check` (the check of who may ask reads the
+  values). One function decides it: `approve_reads_call_facts` in
+  `operations/grant_approval.py`.
+- For every other operation of a person, `web` and `token` are `true` or `false`,
+  exactly as the approve step decides for that caller, and a refusal has
+  the approve step's reason.
+
+The part answers for the person and the request. The approve still
+checks at the click what can change until then: the sign-in, the
+deadline and the preview binding.
+
+Who sees what: every caller of their own explain answer sees the part, as
+on the approve sign of their own request. A reason can name the
+MEHO-Admins group, the groups that may approve and the setting
+`APPROVAL_ALLOW_SELF_APPROVAL`. Only a tenant admin or a platform admin
+also sees the place of a routing entry (such as `install:routing[0]`)
+when the routing refuses. For anyone else `without_place` gives the
+same sentence without the place; the routing refusal code makes that
+text. A part that has no such text (one not built with `of`, for example
+read from JSON) gets a neutral reason with no place, never the text with
+the place. The answer for a what-if login with groups asks for that made-up
+login.
+
+With `CUSTOM_POLICY` off, or when the answer is not `wait`, the key is
+left out of the answer. The CLI prints the part after the approver
+groups ("May you approve your own request:"); for a `null` value it
+prints "depends on the values of the call" and the reason.
+
+Tests: `tests/test_policy_explain_own_approval.py` asks explain through
+the route, then makes the real call and the real approve by the same
+login, with a click and with a token, for each kind of caller, each risk
+level and both settings of `APPROVAL_ALLOW_SELF_APPROVAL`. It fails when
+the part and the approve differ. `..._values.py` and `..._card.py` cover
+the operations where the part is `null`, `..._routing.py` the routing,
+and `test_policy_explain_switch_off.py` compares the whole answer with
+the switch off with answers recorded from main.
 
 - `answer`: today's answer (`run`, `wait`, `deny`). While the evaluator is
   off or in shadow mode, today's checks decide (`decided_by: today`).
@@ -465,6 +754,9 @@ switch off and on.
   both routing states, and a stored routing that is not valid.
   `backend/tests/test_operations_request_preview.py`: the preview's
   `policy_rule` and `approvers`. `cli/internal/cmd/policy/explain_test.go`.
+  `backend/tests/test_policy_explain_own_approval*.py`: `own_approval` and
+  the real approve agree. `backend/tests/test_policy_explain_switch_off.py`:
+  with `CUSTOM_POLICY` off the answer is the one of main.
 
 ## References
 

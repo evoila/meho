@@ -67,7 +67,8 @@ tenant_id() {
 }
 
 # render_place_values <hostname> <tenant id> <admin user>
-# <pod range> <service range> <addresses of this machine, one per line>:
+# <pod range> <service range> <target networks>
+# <addresses of this machine, one per line>:
 # print the answers of this place as Helm values (form-2 design, section 6).
 # The update writes this file again from the install record, so it also
 # drops the two network-policy ranges older installs wrote here: the chart
@@ -85,7 +86,21 @@ coreKeycloak:
   firstLogin:
     adminUsername: "${admin_user}"
 EOF
-    render_egress_values "$4" "$5" "$6"
+    render_egress_values "$4" "$5" "$7"
+    render_target_values "$6"
+}
+
+# render_target_values <target networks>: the target networks (#6828, the
+# rule is in lib/targets.sh) as the chart value config.targetSsrfAllowlist,
+# which the chart puts into MEHO_TARGET_SSRF_ALLOWLIST of the ConfigMap
+# meho-config. It is the last block of the file, so meho-host
+# target-networks replaces it there (values_with_target_networks). With no
+# list it prints nothing: the chart's default "" keeps the target guard
+# fully on. The list holds only letters, digits and . - / : , so it needs
+# no escaping.
+render_target_values() {
+    [[ -n $1 ]] || return 0
+    printf 'config:\n  targetSsrfAllowlist: "%s"\n' "$1"
 }
 
 # render_egress_values <pod range> <service range> <addresses>: the
@@ -120,8 +135,8 @@ EOF
 }
 
 # write_place_values <hostname> <tenant id> <admin user>
-# <pod range> <service range>: render_place_values with the addresses of
-# this machine, into the file for root only.
+# <pod range> <service range> <target networks>: render_place_values with
+# the addresses of this machine, into the file for root only.
 write_place_values() {
     local addresses
     addresses=$(machine_addresses) || addresses=""
@@ -226,14 +241,15 @@ print_first_start_list() {
 
 # render_install_record <date> <hostname> <public address> <tenant id>
 # <admin user> <pod range> <service range> <join address>
-# <from disk 0|1>: print /etc/meho/install.json. A later run of install.sh
-# reads it to find the install and its answers (form-2 design, section 7),
-# with read_install_record in lib/update.sh, which reads one key per line.
+# <target networks> <from disk 0|1>: print /etc/meho/install.json. A later
+# run of install.sh reads it to find the install and its answers (form-2
+# design, section 7), with read_install_record in lib/update.sh, which
+# reads one key per line.
 # No secret is in it. The values need no escaping: install.sh accepts only
 # letters, digits and a few signs in them.
 render_install_record() {
     local from_disk=false
-    if ((${9})); then
+    if ((${10})); then
         from_disk=true
     fi
     cat <<EOF
@@ -250,6 +266,7 @@ render_install_record() {
     "cluster_cidr": "$6",
     "service_cidr": "$7",
     "join_address": "$8",
+    "target_networks": "$9",
     "from_disk": ${from_disk}
   }
 }
@@ -272,5 +289,16 @@ print_result() {
     if (($2)); then
         printf '  Unseal key:            %s (root only; copy it to your key store, then delete it)\n' "$MEHO_UNSEAL_KEY_FILE"
     fi
+    print_target_networks_line
     print_first_start_list "$1"
+}
+
+# print_target_networks_line: the line of the result that names the target
+# networks, and how to set them when there are none.
+print_target_networks_line() {
+    if [[ -n $TARGET_NETWORKS ]]; then
+        printf '  Target networks:       %s\n' "$TARGET_NETWORKS"
+    else
+        printf '  Target networks:       none, so MEHO accepts no target on a private address. Name the networks of the systems it manages with: sudo meho-host target-networks <list>\n'
+    fi
 }

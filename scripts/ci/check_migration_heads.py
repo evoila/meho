@@ -193,6 +193,17 @@ def find_problems(migrations: list[Migration]) -> list[str]:
     return problems
 
 
+#: Printed under every failure. In the merge queue the tree holds the
+#: pull requests ahead too, so the advice above it can name files that
+#: belong to another pull request; this rule is true in every case.
+RULE = (
+    "Rule: each pull request with a migration must take the next free number "
+    "and set down_revision to the newest migration on main. If the merge queue "
+    "refuses your pull request, wait until the other migration is on main or its "
+    "pull request has left the queue, then merge main and take the next free number again."
+)
+
+
 def _next_number(current: str, offset: int) -> str:
     return str(int(current) + offset).zfill(len(current))
 
@@ -288,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         print(advice(main_migrations, migrations), file=sys.stderr)
+        print(RULE, file=sys.stderr)
         return 1
     found = heads(migrations)
     print(f"Migration chain OK: single head {found[0]} ({len(migrations)} migrations).")

@@ -321,6 +321,19 @@ them. The approval card of `argocd.app.set` and `argocd.appproject.update`
 shows the spec before and after. The card of `argocd.app.sync` shows its
 params (the generic params echo), so a person reads the revision.
 
+**A sync or a rollback that deletes (switch `CUSTOM_POLICY` on).** A
+call of `argocd.app.sync` or `argocd.app.rollback` with `prune` `true`
+deletes the resources that the revision no longer holds. With the switch
+on, such a call has a delete sign: it waits for a person, and no standing
+grant and no run approval covers it. `op_classes.py` registers the checks
+`sync_prunes` and `rollback_prunes` with `declare_delete_check`. They use
+the same test as the handler: `prune` is sent as `bool(value)`. The
+approval card says why the call waits, for example "This sync deletes the
+resources that are no longer in Git." A call with `prune` `false` or
+without `prune` keeps its rules. With the switch off, MEHO does not ask
+the checks. See
+[policy-classification.md](policy-classification.md).
+
 Writes go through the connector's `_write_json` helper (POST/PUT/DELETE,
 **not** retried — a side-effecting verb must not silently re-fire on a 5xx),
 which the base `HttpConnector._request_json` deliberately refuses for

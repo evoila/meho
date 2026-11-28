@@ -219,10 +219,12 @@ _API_KEY = re.compile(
 # is, so the token is hidden alone and inside a sentence, with no label in
 # front of it:
 #
-#   GitHub tokens (``ghp_``, ``gho_``, ``ghu_``, ``ghs_``, ``ghr_`` and
-#   ``github_pat_``), cloud access key ids (``AKIA`` / ``ASIA`` and 16
-#   capitals or digits), chat bot tokens (``xoxb-`` and the other ``xox?-``
-#   forms) and payment secret keys (``sk_live_``, ``rk_live_``).
+#   GitHub tokens (``ghp_``, ``gho_``, ``ghu_``, ``ghs_``, ``ghr_``, and
+#   ``github_pat_`` + 22 letters or digits + ``_`` + 59 letters or digits),
+#   cloud access key ids (``AKIA`` / ``ASIA`` and 16 capitals or digits),
+#   chat tokens (``xox`` + one letter + ``-``, then at least 10 letters,
+#   digits, ``-`` or ``%`` that hold a digit) and payment secret keys
+#   (``sk_live_``, ``rk_live_``).
 #
 # A text with no clear prefix stays visible unless a secret-like label
 # (``api_key``) or a secret-named key stands in front of it: a long hex
@@ -233,9 +235,9 @@ _API_KEY = re.compile(
 _VENDOR_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"gh[pousr]_[A-Za-z0-9]{36,255}"
-    r"|github_pat_[A-Za-z0-9_]{22,255}"
+    r"|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
     r"|(?:AKIA|ASIA)[A-Z0-9]{16}"
-    r"|xox[abposr]-[A-Za-z0-9-]{10,255}"
+    r"|xox[a-z]-(?=[A-Za-z%-]*[0-9])[A-Za-z0-9%-]{10,255}"
     r"|[rs]k_live_[A-Za-z0-9]{24,255}"
     r")(?![A-Za-z0-9_])",
 )

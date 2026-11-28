@@ -77,7 +77,7 @@ Route inventory
 * ``POST /ui/operations/call`` (Task #1881, T3) -- the **dispatch** action,
   the highest-blast-radius surface the console gains: it executes a real
   connector op against a live target. CSRF-gated (a ``POST`` under ``/ui/``)
-  and ``require_ui_operator``-gated; calls
+  and ``require_ui_operator_for_call``-gated; calls
   :func:`~meho_backplane.operations.meta_tools.call_operation` IN-PROCESS --
   the same BFF pattern the approvals decision POSTs use, because the
   Bearer-gated ``POST /api/v1/operations/call`` cannot be authenticated by a
@@ -215,6 +215,8 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import (
     UISessionContext,
     require_ui_operator,
+    require_ui_operator_for_call,
+    require_ui_operator_read,
 )
 from meho_backplane.ui.auth.refresh import (
     load_fresh_session,
@@ -286,6 +288,8 @@ _MAX_PREVIEW_HASH_LENGTH: Final[int] = 128
 #: The ``operator`` role floor of the preview + call POSTs (the same floor
 #: as REST ``/api/v1/operations/call`` and the MCP ``call_operation`` tool).
 _require_operator = Depends(require_ui_operator)
+_require_operator_for_call = Depends(require_ui_operator_for_call)
+_require_operator_read = Depends(require_ui_operator_read)
 _role_probe_dep = Depends(resolve_role_probe)
 
 
@@ -460,7 +464,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/preview", response_class=HTMLResponse)
     async def operations_preview(
         request: Request,
-        session: UISessionContext = _require_operator,
+        session: UISessionContext = _require_operator_read,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -527,7 +531,7 @@ def build_operations_router() -> APIRouter:
     @router.post("/ui/operations/call", response_class=HTMLResponse)
     async def operations_call(
         request: Request,
-        session: UISessionContext = _require_operator,
+        session: UISessionContext = _require_operator_for_call,
         connector_id: str = Form(max_length=_MAX_CONNECTOR_ID_LENGTH),
         op_id: str = Form(max_length=_MAX_OP_ID_LENGTH),
         target: str = Form(default="", max_length=_MAX_TARGET_LENGTH),
@@ -539,8 +543,9 @@ def build_operations_router() -> APIRouter:
 
         The highest-blast-radius action the console gains -- it executes a
         real connector op against a live target. CSRF-gated (a ``POST`` under
-        ``/ui/``) and ``require_ui_operator``-gated (``read_only`` gets 403
-        before anything is dispatched or queued, like on REST); calls
+        ``/ui/``) and ``require_ui_operator_for_call``-gated (``read_only``
+        gets 403 before anything is dispatched or queued, like on REST; the
+        answer depends on the operation, see that check); calls
         :func:`~meho_backplane.operations.meta_tools.call_operation`
         in-process (the same BFF pattern the approvals decision POSTs use).
         The structured envelope is surfaced verbatim

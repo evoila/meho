@@ -44,7 +44,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
 from meho_backplane.ui.auth.flow import clear_discovery_cache, reset_verifier_store_for_testing
-from meho_backplane.ui.auth.middleware import require_ui_operator
+from meho_backplane.ui.auth.middleware import require_ui_operator, require_ui_operator_read
 from meho_backplane.ui.auth.session_store import create_session, reset_fernet_cache_for_testing
 from meho_backplane.ui.csrf import (
     CSRF_COOKIE_NAME,
@@ -220,7 +220,8 @@ def _calls(dependant: Dependant) -> Iterator[Any]:
 
 
 def _has_operator_gate(route: APIRoute) -> bool:
-    return any(call is require_ui_operator for call in _calls(route.dependant))
+    gates = (require_ui_operator, require_ui_operator_read)
+    return any(call in gates for call in _calls(route.dependant))
 
 
 def _rest_floors(route: APIRoute) -> list[TenantRole]:

@@ -426,10 +426,13 @@ is a person who can decide approvals in the tenant: a human principal
 that is `operator` or higher, or has the `approver` capability (the
 same rule as `_check_reviewer_role` in the approvals queue, one list
 for approvals and reviews). Agent, service and runner principals are
-never reviewers. A `read_only` reviewer passes the tool's role gate
-too: the tool is registered with `approver_may_call=True`, so
-`mcp/registry.py::tool_role_gate_met` lets a human with the `approver`
-capability list and call it. Other `read_only` callers stay blocked.
+never reviewers. A login with the Reader role (`read_only`) changes no
+entry, also not its own entry, and also with the `approver` capability:
+the tool needs the `operator` role, and a Reader gets the error
+`insufficient_role` with the Reader sentence (see
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy)).
+MEHO stores nothing: the entry keeps its revision, its text and its
+metadata. The same holds for the write tool of a hosted agent run.
 REST `POST /api/v1/kb` and the console editor stay `tenant_admin` only.
 Only a `tenant_admin` may set the curation keys
 (`may_set_curation_keys`). For every other caller the service:

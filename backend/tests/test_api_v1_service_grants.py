@@ -37,6 +37,7 @@ from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, SandboxDeleteGrant, ServicePrincipalGrant
 from meho_backplane.main import app
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -105,7 +106,11 @@ def test_read_only_role_is_rejected(
         headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.READ_ONLY)}"}
         response = client.request(method, path, headers=headers, json=body)
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role"}
+    expected = {"detail": "insufficient_role"}
+    if method != "GET":
+        # A Reader who asks for a change also reads the plain sentence.
+        expected["message"] = READER_CHANGE_SENTENCE
+    assert response.json() == expected
 
 
 # RUNNER is refused earlier on the wire (401 missing_runner_id and the

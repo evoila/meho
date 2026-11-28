@@ -246,7 +246,9 @@ def project_request_to_view(
         "requester": subject_ref(row.principal_sub, row.principal_name, row.principal_kind),
         **_project_people_behind(row),
         "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
-        "proposed_effect": card_for_reader(row.op_id, row.proposed_effect, reader=reader),
+        "proposed_effect": card_for_reader(
+            row.op_id, row.proposed_effect, reader=reader, whole=True
+        ),
         "reveal_secret": bool(row.reveal_secret),
         "status": row.status,
         "reviewed_by": row.reviewed_by,

@@ -14,6 +14,9 @@ The floors come from the code, never from a file. The two floors that are
 fixed rules take their rule ids from :mod:`meho_backplane.policy.fixed_rules`
 (``destructive_waits`` and ``credential_waits``). They are:
 
+* **Reader asks for a change.** A login with the Reader role is denied a
+  call that asks for a change (the mark ``asks_for_change``), whatever its
+  kind (:func:`reader_change_floor`). It is checked before every other rule.
 * **Role floor.** A person below the role an operation needs is denied
   (:mod:`meho_backplane.operations.role_floors`).
 * **Destructive.** A ``destructive`` call always waits for a person.
@@ -39,7 +42,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
-from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.auth.operator import TenantRole
+from meho_backplane.operations.role_floors import (
+    READER_CHANGE_CODE,
+    reader_change_refusal,
+    role_floor_denial,
+)
 from meho_backplane.policy.fixed_rules import CREDENTIAL_WAITS, DESTRUCTIVE_WAITS
 
 if TYPE_CHECKING:
@@ -53,6 +61,7 @@ __all__ = [
     "FloorHit",
     "call_floors",
     "grant_may_clear",
+    "reader_change_floor",
     "run_approval_may_clear",
 ]
 
@@ -89,6 +98,30 @@ def _token_call(asker: Asker) -> bool:
     if asker.kind in ("agent", "runner"):
         return True
     return asker.kind == "person" and asker.via == "token"
+
+
+#: The mark of :attr:`Asked.op_class` for a call that asks for a change
+#: (:func:`~meho_backplane.operations.role_floors.asks_for_change`).
+ASKS_FOR_CHANGE: Final[str] = "asks_for_change"
+
+#: The rule id of :func:`reader_change_floor`.
+READER_ASKS_FOR_CHANGE: Final[str] = "reader_asks_for_change"
+
+
+def reader_change_floor(asker: Asker, asked: Asked) -> FloorHit | None:
+    """The deny of a Reader who asks for a change, or ``None``.
+
+    The same rule and text as the policy gate
+    (:func:`~meho_backplane.operations.role_floors.reader_change_denial`),
+    for every kind of login.
+    """
+    if asker.tenant_role is not TenantRole.READ_ONLY:
+        return None
+    sentence = reader_change_refusal(asker.tenant_role, is_change=ASKS_FOR_CHANGE in asked.op_class)
+    if sentence is None:
+        return None
+    text = f"{READER_CHANGE_CODE}: {sentence}"
+    return FloorHit("deny", READER_ASKS_FOR_CHANGE, text, source="role_floor")
 
 
 def call_floors(asker: Asker, asked: Asked) -> list[FloorHit]:

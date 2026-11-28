@@ -151,7 +151,7 @@ router = APIRouter(prefix="/api/v1", tags=["docs"])
 #: Module-level ``Depends`` closure for the route's RBAC gate. Built once at
 #: import time (rather than inline) to satisfy ruff's B008 rule, matching the
 #: convention :mod:`meho_backplane.api.v1.search_docs` established.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+_require_operator = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
 
 #: Canonical audit op_id -- the SAME token the MCP ``ask_docs`` tool binds
 #: (``meho.docs.ask``) so a who-touched / ``query_audit`` filter on

@@ -35,9 +35,12 @@ def allow_ui_operator_role(monkeypatch: pytest.MonkeyPatch) -> None:
         minimum: TenantRole,
         detail: str,
         log_prefix: str,
+        is_change: bool = False,
     ) -> UISessionContext:
         if minimum is TenantRole.OPERATOR:
             return session
-        return await real_check(session, minimum=minimum, detail=detail, log_prefix=log_prefix)
+        return await real_check(
+            session, minimum=minimum, detail=detail, log_prefix=log_prefix, is_change=is_change
+        )
 
     monkeypatch.setattr(middleware, "_require_ui_role", _check)

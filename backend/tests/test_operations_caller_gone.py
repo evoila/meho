@@ -309,7 +309,7 @@ async def test_rest_call_route_watches_the_caller(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(operations_api, "call_operation", _slow_call_operation)
     app = FastAPI()
     app.include_router(operations_api.router)
-    app.dependency_overrides[operations_api._require_operator.dependency] = _operator
+    app.dependency_overrides[operations_api._require_operator_for_call.dependency] = _operator
 
     sent = await _post_then_disconnect(
         app,

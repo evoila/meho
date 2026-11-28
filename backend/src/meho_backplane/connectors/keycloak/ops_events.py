@@ -36,6 +36,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _EVENTS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.managed_realm_check import read_managed_realm
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_user_state import _iso
@@ -100,9 +101,13 @@ async def _recording_is_on(
     realm: str,
     flag: str,
 ) -> bool:
-    """Whether the realm saves this kind of event. Not a bool is an error."""
-    body = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    """Whether the realm saves this kind of event. Not a bool is an error.
+
+    A 403 of this read gives the fixed explanation of
+    :func:`.read_managed_realm`, before any event is asked for.
+    """
+    body = await read_managed_realm(
+        connector, target, operator, fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     )
     op_id = "keycloak.events.list" if flag == _LOGIN_FLAG else "keycloak.admin_events.list"
     check_answered_realm(op_id, body, target)

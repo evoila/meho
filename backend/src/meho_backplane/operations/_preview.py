@@ -518,6 +518,11 @@ _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable"
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
 
+#: ``op_id`` -> {parameter name: a function that gives the value of that
+#: parameter with the hiding of the approval card}
+#: (:func:`register_card_param_echo`).
+_CARD_PARAM_ECHOES: dict[str, dict[str, Callable[[PreviewContext], Any]]] = {}
+
 
 def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     """Register *builder* as the preview computation for *op_id*.
@@ -526,6 +531,34 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_card_param_echo(op_id: str, param: str, echo: Callable[[PreviewContext], Any]) -> None:
+    """Show the parameter *param* of *op_id* on a preview through *echo*.
+
+    The preview of the call (``preview_operation``) puts ``echo(ctx)`` in
+    place of the value it would copy from the params. *echo* hides at
+    least what the approval card hides.
+    """
+    _CARD_PARAM_ECHOES.setdefault(op_id, {})[param] = echo
+
+
+def card_param_echoes(ctx: PreviewContext) -> dict[str, Any]:
+    """Each registered parameter of *ctx* (:func:`register_card_param_echo`), shown by its echo.
+
+    Only a parameter present in the params is given. A value whose echo
+    cannot be built is the redaction marker, so nothing shows in clear text.
+    """
+    echoes: dict[str, Any] = {}
+    for param, echo in _CARD_PARAM_ECHOES.get(ctx.descriptor.op_id, {}).items():
+        if param not in ctx.params:
+            continue
+        try:
+            echoes[param] = echo(ctx)
+        except Exception as exc:
+            _log.warning("card_param_echo_failed", param=param, error=type(exc).__name__)
+            echoes[param] = _PARAM_REDACTED
+    return echoes
 
 
 def register_preview_last_step(op_id: str, step: PreviewLastStep) -> None:
@@ -1251,14 +1284,13 @@ def _k8s_apply_manifest_echo(
     from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
-        apply_manifest_echo,
         apply_run_commands,
         apply_subject,
         plain_copy,
     )
 
     _redact = _k8s_apply_redactor(ctx)
-    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    echo: dict[str, Any] = {"manifest": _k8s_apply_manifest_only(ctx)}
     if not ctx.agent_preview:
         run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
         if run_commands:
@@ -1271,10 +1303,46 @@ def _k8s_apply_manifest_echo(
     return echo
 
 
+def _k8s_apply_manifest_only(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of the k8s.apply card, built from the params of *ctx* alone."""
+    from meho_backplane.connectors.kubernetes.ops_write_preview import apply_manifest_echo
+
+    return apply_manifest_echo(ctx.params["manifest"], redact=_k8s_apply_redactor(ctx))
+
+
+def _k8s_apply_manifest_identities(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of a k8s.apply preview: the identity of each document, nothing else.
+
+    Each entry is ``kind`` and ``metadata`` with ``namespace`` and ``name``,
+    read from the top of the parsed document, so the rest of the document
+    is not walked. A field that is not a text is left out. The texts pass
+    the shared hiding of the card (:func:`_k8s_apply_redactor`).
+    """
+    from meho_backplane.connectors.kubernetes._apply_manifest import _parse_manifest
+
+    entries: list[dict[str, Any]] = []
+    for doc in _parse_manifest(ctx.params["manifest"]):
+        raw_metadata = doc.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        entry: dict[str, Any] = {"kind": doc["kind"]} if isinstance(doc.get("kind"), str) else {}
+        entry["metadata"] = {
+            key: metadata[key]
+            for key in ("namespace", "name")
+            if isinstance(metadata.get(key), str)
+        }
+        entries.append(entry)
+    return _k8s_apply_redactor(ctx)(entries)
+
+
 def _k8s_apply_redactor(
     ctx: PreviewContext,
 ) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]]]:
-    """The shared params redaction, run over a list of manifest dicts of *ctx*."""
+    """The shared params redaction, run over a list of manifest dicts of *ctx*.
+
+    The value-shape engine also reads each ``key: value`` pair of a mapping
+    entry with a text value, as it reads that line in the manifest text
+    (:func:`_hide_secret_pairs`).
+    """
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
 
     def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1284,9 +1352,56 @@ def _k8s_apply_redactor(
             tenant=tenant,
             op_id=ctx.descriptor.op_id,
         )
-        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        shown = [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        _hide_secret_pairs(
+            shown, connector_id=ctx.connector_id, tenant=tenant, op_id=ctx.descriptor.op_id
+        )
+        return shown
 
     return _redact
+
+
+def _text_entries(docs: list[dict[str, Any]]) -> list[tuple[dict[Any, Any], Any]]:
+    """Each ``(mapping, key)`` of *docs*, at any depth, whose value is a text not yet hidden."""
+    entries: list[tuple[dict[Any, Any], Any]] = []
+    stack: list[Any] = list(docs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if not isinstance(value, str):
+                    stack.append(value)
+                elif value != _PARAM_REDACTED:
+                    entries.append((node, key))
+    return entries
+
+
+def _hide_secret_pairs(
+    docs: list[dict[str, Any]], *, connector_id: str | None, tenant: str | None, op_id: str
+) -> None:
+    """Hide in place each text value whose ``key: value`` text the value-shape engine hides.
+
+    Some shapes are known by the key and the value together
+    (``Authorization: Basic ...``, ``key: AQ...==``), so the engine reads
+    the pair as one text, the way it reads the line in the manifest text.
+    When it changes the pair, the value becomes :data:`_PARAM_REDACTED`.
+    """
+    entries = _text_entries(docs)
+    if not entries:
+        return
+    # One mapping entry per pair: the engine reads a list of texts as one
+    # text, so a pair could match together with the pair next to it.
+    pairs = {str(index): f"{key}: {node[key]}" for index, (node, key) in enumerate(entries)}
+    shown = apply_connector_boundary_redaction(
+        pairs, connector_id=connector_id, tenant=tenant, op=op_id
+    ).redacted
+    if not isinstance(shown, dict):
+        shown = {}
+    for index, (node, key) in enumerate(entries):
+        if shown.get(str(index)) != pairs[str(index)]:
+            node[key] = _PARAM_REDACTED
 
 
 def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, Any]:
@@ -1433,6 +1548,7 @@ def _register_builtin_builders() -> None:
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
     register_preview_failure_keys("k8s.apply", _k8s_apply_failure_keys)
+    register_card_param_echo("k8s.apply", "manifest", _k8s_apply_manifest_identities)
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",

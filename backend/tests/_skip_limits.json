@@ -63,7 +63,7 @@
     "without_secrets": 2
    },
    "tests/integration/test_connectors_k8s_e2e.py": 1,
-   "tests/integration/test_connectors_k8s_k3d.py": 61,
+   "tests/integration/test_connectors_k8s_k3d.py": 54,
    "tests/integration/test_connectors_k8s_live_vault.py": 1,
    "tests/integration/test_github_composite_dispatch.py": 1,
    "tests/integration/test_keycloak_bootstrap_mcp_login.py": {

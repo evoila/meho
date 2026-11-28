@@ -4229,7 +4229,9 @@ history:</p>
 caller: <code>curl -s https://&lt;your-backplane&gt;/ready | jq .features.approval_custody</code>.
 With your own Secret in <code>metricsAuth.existingSecret</code>, put that Secret's
 name in the command, and the key in <code>metricsAuth.secretKey</code> in place of
-<code>token</code>.</p>
+<code>token</code>. When that key holds a dot (for example <code>metrics.token</code>), write each
+dot as <code>\.</code> in the <code>jsonpath</code>: <code>{.data.metrics\.token}</code>. Without the <code>\</code>,
+kubectl reads nothing.</p>
 <h3 id="your-own-postgresql">Your own PostgreSQL<a class="headerlink" href="#your-own-postgresql" title="Permanent link">&para;</a></h3>
 <p>Set <code>corePostgres.enabled: false</code>. Do both steps below. The built-in
 PostgreSQL does them itself.</p>
@@ -4279,9 +4281,25 @@ one-time operator command. The full rationale is recorded in
 Kubernetes Secret <strong>by name</strong>; the Secret must hold the full database
 DSN at the key <code>url</code>, using the <strong>async</strong> driver prefix:</p>
 <div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>create<span class="w"> </span>namespace<span class="w"> </span>meho
-kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-postgres<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">url</span><span class="o">=</span><span class="s1">'postgresql+asyncpg://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;:5432/meho'</span>
 </code></pre></div>
+<p>Then make the Secret. The password you type is not shown:</p>
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Database password: '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>DB_PASSWORD<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$DB_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'postgresql+asyncpg://&lt;user&gt;:%s@&lt;host&gt;:5432/meho'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$DB_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-postgres<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">url</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No password was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>DB_PASSWORD
+<span class="o">}</span>
+</code></pre></div>
+<p><code>read</code> and <code>printf</code> are built into bash and zsh. They start no program,
+so the password is in no process list and in no shell history. The same
+idea holds for every secret in this guide: it comes from a file or from
+standard input, never from an argument of a command.</p>
+<p>Each such block is one command in braces (<code>{</code> to <code>}</code>). Paste the whole
+block, then type the value. An empty value makes nothing.</p>
 <p>Three things bite here if missed:</p>
 <ul>
 <li>The prefix must be <code>postgresql+asyncpg://</code>. A bare <code>postgresql://</code>
@@ -4307,11 +4325,23 @@ every table, but on the audit log it may only add rows, read them and
 empty the raw-payload column; it cannot change or delete audit rows.
 Create the role as a superuser, give it <code>CONNECT</code>, and put its DSN in a
 second Secret:</p>
-<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">ROLE</span><span class="w"> </span><span class="n">meho_app</span><span class="w"> </span><span class="n">LOGIN</span><span class="w"> </span><span class="n">NOSUPERUSER</span><span class="w"> </span><span class="k">NOCREATEDB</span><span class="w"> </span><span class="n">NOCREATEROLE</span><span class="w"> </span><span class="n">PASSWORD</span><span class="w"> </span><span class="s1">'&lt;password&gt;'</span><span class="p">;</span>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="k">ROLE</span><span class="w"> </span><span class="n">meho_app</span><span class="w"> </span><span class="n">LOGIN</span><span class="w"> </span><span class="n">NOSUPERUSER</span><span class="w"> </span><span class="k">NOCREATEDB</span><span class="w"> </span><span class="n">NOCREATEROLE</span><span class="p">;</span>
 <span class="k">GRANT</span><span class="w"> </span><span class="k">CONNECT</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">DATABASE</span><span class="w"> </span><span class="n">meho</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">meho_app</span><span class="p">;</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-postgres-app<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">url</span><span class="o">=</span><span class="s1">'postgresql+asyncpg://meho_app:&lt;password&gt;@&lt;host&gt;:5432/meho'</span>
+<p>Then set the password in <code>psql</code>. The command asks for it, so the
+password is not in the SQL text and not in the server log:</p>
+<div class="highlight"><pre><span></span><code>\password meho_app
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Password of meho_app: '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>APP_PASSWORD<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$APP_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'postgresql+asyncpg://meho_app:%s@&lt;host&gt;:5432/meho'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$APP_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-postgres-app<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">url</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No password was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>APP_PASSWORD
+<span class="o">}</span>
 </code></pre></div>
 <p>Then name both in the
 <a href="#values-file-for-your-own-parts">values file for your own parts</a>:</p>
@@ -4415,9 +4445,17 @@ role and a database. A one-time Job uses it before Keycloak starts. It is
 safe to run twice: it makes only what is missing. The Job sets the
 password of the Keycloak role to the one in the Secret
 <code>&lt;release&gt;-core-postgres-keycloak</code>, which the install makes by itself.</p>
-<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>keycloak-db-admin<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">username</span><span class="o">=</span>&lt;admin-user&gt;<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">password</span><span class="o">=</span>&lt;admin-password&gt;
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Admin password: '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>DB_ADMIN_PASSWORD<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$DB_ADMIN_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$DB_ADMIN_PASSWORD</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>keycloak-db-admin<span class="w"> </span><span class="se">\</span>
+<span class="w">          </span>--from-literal<span class="o">=</span><span class="nv">username</span><span class="o">=</span>&lt;admin-user&gt;<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">password</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No password was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>DB_ADMIN_PASSWORD
+<span class="o">}</span>
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><span class="nt">corePostgres</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>

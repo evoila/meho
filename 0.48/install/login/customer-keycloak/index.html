@@ -3515,10 +3515,16 @@ them cannot use MEHO.</p>
 <h2 id="3-store-the-client-secret">3. Store the client secret<a class="headerlink" href="#3-store-the-client-secret" title="Permanent link">&para;</a></h2>
 <p>Put the secret from step 1 into a Kubernetes Secret in MEHO's
 namespace. The chart reads it by name and never prints it.</p>
-<div class="highlight"><pre><span></span><code><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="w">     </span><span class="c1"># paste the client secret; it is not shown</span>
-kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-company-login<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">client_secret</span><span class="o">=</span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span>
-<span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Paste the client secret (not shown): '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-company-login<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">client_secret</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No secret was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
+<span class="o">}</span>
 </code></pre></div>
 <p>If a private CA signs your Keycloak's certificate, also store the CA
 in a ConfigMap and set <code>caBundle</code> (see

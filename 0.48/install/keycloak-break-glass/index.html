@@ -3542,10 +3542,16 @@ kubectl<span class="w"> </span>-n<span class="w"> </span><span class="s2">"</spa
 </code></pre></div>
 <h3 id="2-make-the-temporary-admin">2. Make the temporary admin<a class="headerlink" href="#2-make-the-temporary-admin" title="Permanent link">&para;</a></h3>
 <p>Type the new password (it is not shown). Use a long random one.</p>
-<div class="highlight"><pre><span></span><code><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>-p<span class="w"> </span><span class="s2">"Temporary admin password: "</span><span class="w"> </span>TEMP_PW<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
-<span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$TEMP_PW</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$NS</span><span class="s2">"</span><span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>keycloak-temp-admin<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-file<span class="o">=</span><span class="nv">password</span><span class="o">=</span>/dev/stdin
-<span class="nb">unset</span><span class="w"> </span>TEMP_PW
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Temporary admin password: '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>TEMP_PW<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$TEMP_PW</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$TEMP_PW</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$NS</span><span class="s2">"</span><span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>keycloak-temp-admin<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>--from-file<span class="o">=</span><span class="nv">password</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No password was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>TEMP_PW
+<span class="o">}</span>
 </code></pre></div>
 <p>Start a one-off pod. It copies the pod labels, the image, the database
 settings, the security settings, the volumes and the pull secrets from

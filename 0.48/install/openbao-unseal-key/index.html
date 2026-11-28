@@ -3598,10 +3598,16 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span 
 <p>Create the Secret again from your key store. These commands keep the key
    out of your shell history. Spaces or a line break around the key do no
    harm: the helper removes them before it unseals.</p>
-<div class="highlight"><pre><span></span><code><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>KEY<span class="w">    </span><span class="c1"># paste the key, press Enter; it is not shown</span>
-<span class="nb">printf</span><span class="w"> </span>%s<span class="w"> </span><span class="s2">"</span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>&lt;release&gt;-core-vault-unseal<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">key</span><span class="o">=</span>/dev/stdin
-<span class="nb">unset</span><span class="w"> </span>KEY
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Paste the key and press Enter (not shown): '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>KEY<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span>%s<span class="w"> </span><span class="s2">"</span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>-n<span class="w"> </span>&lt;namespace&gt;<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>&lt;release&gt;-core-vault-unseal<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">key</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No key was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>KEY
+<span class="o">}</span>
 </code></pre></div>
 </li>
 <li>

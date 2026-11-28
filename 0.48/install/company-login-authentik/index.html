@@ -3826,10 +3826,16 @@ under <code>coreKeycloak</code>.</p>
 <h3 id="1-store-the-client-secret">1. Store the client secret<a class="headerlink" href="#1-store-the-client-secret" title="Permanent link">&para;</a></h3>
 <p>Put the authentik client secret into a Kubernetes Secret in MEHO's
 namespace. The chart reads it by name and never prints it.</p>
-<div class="highlight"><pre><span></span><code><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="w">     </span><span class="c1"># paste the authentik client secret; it is not shown</span>
-kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-company-login<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--from-literal<span class="o">=</span><span class="nv">client_secret</span><span class="o">=</span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span>
-<span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Paste the authentik client secret (not shown): '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>meho-company-login<span class="w"> </span>-n<span class="w"> </span>meho<span class="w"> </span>--from-file<span class="o">=</span><span class="nv">client_secret</span><span class="o">=</span>/dev/stdin
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No secret was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
+<span class="o">}</span>
 </code></pre></div>
 <p>If a private CA signs authentik's certificate, also store the CA in a
 ConfigMap:</p>
@@ -4023,13 +4029,22 @@ ID:</p>
 <span class="p">}</span>
 </code></pre></div>
 <p>The authentik issuer ends with a <code>/</code>. Keep it. Then run:</p>
-<div class="highlight"><pre><span></span><code><span class="nv">REALM</span><span class="o">=</span>&lt;realm&gt;
-<span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="w">     </span><span class="c1"># paste the authentik client secret; it is not shown</span>
-jq<span class="w"> </span>--arg<span class="w"> </span>s<span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="s1">'.config.clientSecret = $s'</span><span class="w"> </span>company-idp.json<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span><span class="p">|</span><span class="w"> </span>kcadm.sh<span class="w"> </span>create<span class="w"> </span>identity-provider/instances<span class="w"> </span>-r<span class="w"> </span><span class="s2">"</span><span class="nv">$REALM</span><span class="s2">"</span><span class="w"> </span>-f<span class="w"> </span>-
-<span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
-
-<span class="k">for</span><span class="w"> </span>G<span class="w"> </span><span class="k">in</span><span class="w"> </span>MEHO-Readers<span class="w"> </span>MEHO-Operators<span class="w"> </span>MEHO-Admins<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<div class="highlight"><pre><span></span><code><span class="o">{</span>
+<span class="w">  </span><span class="nv">REALM</span><span class="o">=</span>&lt;realm&gt;
+<span class="w">  </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'Paste the authentik client secret (not shown): '</span><span class="p">;</span><span class="w"> </span><span class="nv">IFS</span><span class="o">=</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-rs<span class="w"> </span>CLIENT_SECRET<span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">printf</span><span class="w"> </span><span class="s1">'%s'</span><span class="w"> </span><span class="s2">"</span><span class="nv">$CLIENT_SECRET</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>--rawfile<span class="w"> </span>s<span class="w"> </span>/dev/stdin<span class="w"> </span><span class="s1">'.config.clientSecret = $s'</span><span class="w"> </span>company-idp.json<span class="w"> </span><span class="se">\</span>
+<span class="w">      </span><span class="p">|</span><span class="w"> </span>kcadm.sh<span class="w"> </span>create<span class="w"> </span>identity-provider/instances<span class="w"> </span>-r<span class="w"> </span><span class="s2">"</span><span class="nv">$REALM</span><span class="s2">"</span><span class="w"> </span>-f<span class="w"> </span>-
+<span class="w">  </span><span class="k">else</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s1">'No secret was typed. Nothing was made.'</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nb">unset</span><span class="w"> </span>CLIENT_SECRET
+<span class="o">}</span>
+</code></pre></div>
+<p><code>jq</code> reads the secret on standard input, so it is not an argument of
+<code>jq</code>. Then add the group mappers and the login step:</p>
+<div class="highlight"><pre><span></span><code><span class="k">for</span><span class="w"> </span>G<span class="w"> </span><span class="k">in</span><span class="w"> </span>MEHO-Readers<span class="w"> </span>MEHO-Operators<span class="w"> </span>MEHO-Admins<span class="p">;</span><span class="w"> </span><span class="k">do</span>
 <span class="w">  </span>jq<span class="w"> </span>-n<span class="w"> </span>--arg<span class="w"> </span>g<span class="w"> </span><span class="s2">"</span><span class="nv">$G</span><span class="s2">"</span><span class="w"> </span><span class="s1">'{name: ("meho-group-" + $g), identityProviderAlias: "company",</span>
 <span class="s1">      identityProviderMapper: "oidc-advanced-group-idp-mapper",</span>
 <span class="s1">      config: {syncMode: "FORCE", "are.claim.values.regex": "false", group: ("/" + $g),</span>

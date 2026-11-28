@@ -327,7 +327,14 @@ def test_every_named_rule_is_in_the_list() -> None:
     named = {rule for by_caller in _RULE_BY_CASE.values() for rule in by_caller.values()}
     assert named - {None} <= set(FIXED_RULES)
     # An agent never approves: a rule of the approve path, never of a call.
-    assert set(FIXED_RULES) - named == {"agent_never_approves"}
+    # A standing grant may cover a root shell call, so its rule is not the
+    # answer either. A change of rights in a target system counts only with
+    # the switch on (test_fixed_rules_second_part.py).
+    assert set(FIXED_RULES) - named == {
+        "agent_never_approves",
+        "root_shell_waits",
+        "target_rights_waits",
+    }
 
 
 def test_each_rule_has_one_plain_sentence() -> None:

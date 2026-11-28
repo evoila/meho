@@ -769,11 +769,12 @@ def test_operator_chip_button_shrinks_below_its_content(ui_env: Environment) -> 
 
 
 def test_operator_chip_wrapper_and_label_allow_truncation() -> None:
-    """The chip's flex wrapper + mono label let the label truncate (#2445).
+    """The chip's flex wrapper + name label let the label truncate (#2445).
 
     The chip button's flex wrapper (``div.relative``) needs ``min-w-0`` so it
-    can shrink within the account row, and the mono ``sub`` label needs
-    ``min-w-0 truncate`` so it ellipsises (its ``max-w-[7.5rem]`` cap alone
+    can shrink within the account row, and the name label
+    (``data-field="user-label"``) needs ``min-w-0 truncate`` so it
+    ellipsises (its ``max-w-[7.5rem]`` cap alone
     sets a flex min-width floor that would keep the row over-wide). This is
     what makes the chip -- not the bell -- absorb the width deficit.
     """
@@ -784,16 +785,16 @@ def test_operator_chip_wrapper_and_label_allow_truncation() -> None:
         r'<div\b[^>]*class="[^"]*\bmin-w-0\b[^"]*"[^>]*x-on:click\.outside="userMenuOpen',
         source,
     ), "user-menu wrapper div must carry min-w-0 so the chip can shrink in the row"
-    # The mono sub label carries both min-w-0 and truncate on the same element.
+    # The name label carries both min-w-0 and truncate on the same element.
     labels_with_truncate = [
         tag
         for tag in re.findall(r"<span\b[^>]*>", source)
-        if "truncate" in tag and "font-mono" in tag and "max-w-[7.5rem]" in tag
+        if 'data-field="user-label"' in tag and "truncate" in tag and "max-w-[7.5rem]" in tag
     ]
-    assert labels_with_truncate, "operator-sub mono label (truncate + max-w-[7.5rem]) not found"
+    assert labels_with_truncate, "user-menu name label (truncate + max-w-[7.5rem]) not found"
     for tag in labels_with_truncate:
         assert "min-w-0" in tag, (
-            "the operator-sub label must carry min-w-0 alongside truncate so its "
+            "the user-menu name label must carry min-w-0 alongside truncate so its "
             f"ellipsis engages when the chip shrinks; tag: {tag!r}"
         )
 

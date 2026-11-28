@@ -85,9 +85,17 @@ The status of that row stays `expired`.
 ## Control flow at call time
 
 The policy gate (`_validate.py::_service_grant_verdict`) runs for a
-service principal whose call would wait for approval. It first looks for
-a standing grant ([service-principal-grants.md](service-principal-grants.md)).
-When none covers the call, it calls `consult_and_record_run_approval`:
+service principal whose call would wait for approval. First it asks
+`policy/fixed_rules.py::fixed_rule_for` which fixed rule holds for the
+call ([policy-evaluator.md](policy-evaluator.md)). Outside sandbox mode,
+when it names a rule (a credential call, a change of rights or of the
+policy, a destructive operation, a delete, a caller-address field), the
+gate looks up no standing grant and no run approval. It logs
+`policy_gate_fixed_rule_no_grant` with the rule id, and the call waits.
+The wait reason the caller reads stays the same. In the other cases, and
+in sandbox mode, it looks for a standing grant
+([service-principal-grants.md](service-principal-grants.md)). When none
+covers the call, it calls `consult_and_record_run_approval`:
 
 - It reads the run reference from `work_ref_var` (bound from
   `Meho-Work-Ref`). No run reference: no cover.
@@ -96,7 +104,9 @@ When none covers the call, it calls `consult_and_record_run_approval`:
   for per-call approval, one that connects to an address the caller
   gives, one classified to always wait, or one with a delete sign (the
   `destructive` level, the HTTP verb `DELETE`, the `destructive` tag, a
-  delete name or pattern). The standing grant check uses the same
+  delete name or pattern, or, with the switch `CUSTOM_POLICY` on,
+  `hard_to_undo` on the operation's own definition). The standing grant
+  check uses the same
   function. On top of it, a run approval never covers an operation that
   runs a command as root on the host. Those wait for a person on each call.
 - It looks for a live row: same tenant, same token subject (`sub`), same
@@ -152,6 +162,30 @@ the gateway, static route, alias, alias member and NAT deletes. A read with
 a fixed command, for example `linux.firewall.show` or `pfsense.diag.ping`,
 is not marked: it does not change the host.
 
+## The steps of an approved multi-step operation, with `CUSTOM_POLICY` on
+
+This is a different approval: a person approves one whole multi-step
+operation, and its steps go ahead under that approval. With the switch
+`CUSTOM_POLICY` off, a step keeps its own approval when it is
+`destructive`, marked `requires_approval`, "always wait" or a credential
+call. With the switch on, a step keeps its own approval also when one of
+these holds (`operations/run_step_rules.py`):
+
+- a fixed rule (`policy/fixed_rules.fixed_rule_for`), asked as a caller
+  who is not in the web console: a change of rights or of the policy keeps
+  its own approval whoever approved the run;
+- a rule that no run approval covers (`never_covered_reason`, plus the
+  root shell mark above, the same check as `_never_covered` here).
+
+`fixed_rule_for` alone is not enough: it has no root-shell rule. A step
+with only the plain "always ask" mark goes ahead under the run's approval.
+These rules hold for a step of the step gate, which reads the stored facts
+of the step's operation (the built-in row and the caller's tenant's row
+both count), and for a child call. In a run after an approval they hold
+also when the step's policy answer lets it run at once, and the stored
+reason of the wait names the rule.
+Details: [approvals.md](approvals.md#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
+
 ## Never covered: a call a person approves one by one
 
 A connector marks an operation with `declare_per_call_approval(op_ids)`
@@ -189,13 +223,15 @@ Marked today:
   themselves. Examples: `policy.classify` and the Keycloak writes that
   change what a token says or who has a role.
 
-## Never covered: an operation that reads, writes or makes a credential
+## Never covered: an operation that reads, writes, makes or uses a credential
 
-A call that reads, writes or makes a credential always waits for a
+A call that reads, writes, makes or uses a credential always waits for a
 person. No standing grant, no agent grant and no run approval covers it.
 The classes are `credential_read` (for example `k8s.secret.read_to_ref`
-or `vault.kv.read`), `credential_write` (for example `vault.kv.put`) and
-`credential_mint` (for example `vault.token.create`). The class comes from
+or `vault.kv.read`), `credential_write` (for example `vault.kv.put`),
+`credential_mint` (for example `vault.token.create`) and `credential_use`
+(declared by a connector). A person's own call of a `credential_use`
+operation follows its risk level and approval mark. The class comes from
 the class stored on the row of an ingested operation, or from the op id (a
 connector's `declare_op_classes`, or the core lists of
 `broadcast/events.py`). An operation a connector marks with
@@ -205,12 +241,17 @@ Secret or cannot be read. The rule is the one of the standing grants
 (`service_grants.credential_grant_reason`,
 [service-principal-grants.md](service-principal-grants.md#credential-calls)):
 
-- At call time `_never_covered` in `run_approval_gate.py` refuses it, and
-  logs `run_approval_refused_credential` with the reason "A standing
+- For a service login outside sandbox mode, `fixed_rule_for` names the
+  rule `credential_waits`. The gate then looks up no standing grant and no
+  run approval, and logs `policy_gate_fixed_rule_no_grant`. It does not
+  reach `_never_covered`.
+- In sandbox mode, `_never_covered` in `run_approval_gate.py` refuses it,
+  and logs `run_approval_refused_credential` with the reason "A standing
   grant, an agent grant or a run approval never covers 'OP': it reads,
-  writes or makes a credential, so a person approves each call." The call
-  gets the same answer as with no run approval. The shadow evaluator
-  (`policy/floors.py::run_approval_may_clear`) gives the same answer.
+  writes or makes a credential, so a person approves each call."
+- Either way the call gets the same answer as with no run approval. The
+  shadow evaluator (`policy/floors.py::run_approval_may_clear`) gives the
+  same answer.
 - When such a service call waits, its reason ends with "the operation
   reads, writes or makes a credential, so no standing grant, no agent
   grant and no run approval covers it; a person approves each call"
@@ -227,8 +268,9 @@ Secret or cannot be read. The rule is the one of the standing grants
   entry whose calls wait (`service_grants.credential_call_waits`), with
   its position (`entry`), `connector_id`, `op_id` and the reason "reads,
   writes or makes a credential. A run approval never covers it: each call
-  waits for a person" (`operations/run_approval_notes.py`). For
-  `vault.kv.read` the reason is "reads a credential. A run approval never
+  waits for a person" (`operations/run_approval_notes.py`). For a
+  `credential_use` operation it says "uses a credential" in place of
+  "reads, writes or makes a credential". For `vault.kv.read` the reason is "reads a credential. A run approval never
   covers it: each call with reveal_secret waits for a person". A read
   that returns no secret value gets no note. Request answers have an empty
   list. The list, revoke and end routes leave the field `null`, because

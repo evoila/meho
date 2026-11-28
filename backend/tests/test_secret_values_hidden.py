@@ -217,7 +217,9 @@ async def _register(
     )
 
 
-async def _read(operator: Operator, *, reveal: bool, op_id: str = "vault.kv.read") -> Any:
+async def _read(
+    operator: Operator, *, reveal: bool, op_id: str = "vault.kv.read", approved: bool = False
+) -> Any:
     params: dict[str, Any] = {"path": "app/db"}
     if reveal:
         params["reveal_secret"] = True
@@ -227,6 +229,7 @@ async def _read(operator: Operator, *, reveal: bool, op_id: str = "vault.kv.read
         op_id=op_id,
         target=None,
         params=params,
+        _approved=approved,
     )
 
 
@@ -733,7 +736,8 @@ async def test_an_operation_that_makes_a_credential_still_returns_it(
     op_id = "vault.auth.approle.generate_secret_id"
     await _register(op_id, _mint_handler, stub_embedding_service)
 
-    result = await _read(_operator(PrincipalKind.USER), reveal=False, op_id=op_id)
+    # It waits for a person: this is the run after the approval.
+    result = await _read(_operator(PrincipalKind.USER), reveal=False, op_id=op_id, approved=True)
 
     assert result.status == "ok", result.error
     assert result.result["secret_id"] == _TOKEN

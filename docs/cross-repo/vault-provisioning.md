@@ -94,9 +94,10 @@ side.
 
 ### 2. Role `meho-mcp`
 
-Bound to the Keycloak realm and to the backplane's audience, on the
-dedicated `jwt` mount from surface 1. Default role name `meho-mcp`
-per [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
+Bound to the Keycloak realm, to the backplane's audience and to the
+addresses MEHO uses, on the dedicated `jwt` mount from surface 1. Default
+role name `meho-mcp` per
+[`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
 `VAULT_OIDC_ROLE`; configurable via env var if a different name fits
 the operator's Vault conventions.
 
@@ -105,27 +106,151 @@ vault write auth/jwt/role/meho-mcp \
   role_type=jwt \
   user_claim=sub \
   bound_audiences=<keycloak-audience> \
+  token_bound_cidrs=<meho-address-1>,<meho-address-2> \
   policies=meho-mcp \
-  token_ttl=1h
+  token_ttl=5m
 ```
 
 The `bound_audiences` value must match `KEYCLOAK_AUDIENCE` in the
 backplane's ConfigMap. (Substitute `jwt` with your chosen mount path
 if you didn't use the default.)
 
+`token_bound_cidrs` lists the addresses MEHO's pods use to reach your
+Vault. Bind the role to them: only MEHO needs to reach the Vault login
+path, and the token Vault issues works only from those addresses.
+Bind an address range (CIDR) that covers every address MEHO can use: the
+pod network range when Vault sees pod addresses. Do not bind a single pod
+address. A pod gets a new address at each restart and rollout, and then
+every Vault login of MEHO fails.
+`token_ttl=5m` is enough, because MEHO revokes its Vault token after each
+use.
+
+The binding uses the address Vault sees on the connection. When MEHO
+reaches Vault through a proxy, a load balancer or node address
+translation, Vault may see another address. Then bind the addresses
+Vault sees: every node address, or the outbound address of the
+translation. Check the address in the Vault audit log (`remote_address`)
+after a first login.
+
 ### 3. Policy `meho-mcp`
 
-Grants the role the read paths the backplane exercises. v0.1 needs
-**read** on the entire `secret/meho/*` subtree because operators
-delegate per-secret authorisation to their Keycloak group
-membership (groups → Vault external-group bindings → richer
-policies) rather than per-path Vault policy:
+One recipe: the per-tenant policy. Each tenant reads only
+`secret/tenants/<tenant_id>/`, which is MEHO's default target layout.
+The three per-tenant policies (read-only, operator, admin) and the
+identity wiring that makes them resolve are in
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§2 to §4. Bind them to the role's logins through identity groups, and
+give each tenant's callers the group that matches their `tenant_role`.
+
+The per-tenant policy grants only the tenant folders. A target whose
+`secret_ref`, or for VCF Automation whose `extras.provider_secret_ref`,
+points somewhere else (for example under `secret/meho/`) needs its secret
+moved. Keep the old policy and its grants until the move
+is done, and do the steps in this order:
+
+1. Set up the login of every person and every agent that uses MEHO (the
+   entity metadata and the group below).
+2. Bind the per-tenant policies through the groups next to the old
+   policy, so each login reads both the old paths and its tenant folder.
+   If Sensors check targets, add the new paths to the check runner's
+   policy too (surface 7), and keep its old paths.
+3. Copy each distinct secret once into `secret/tenants/<tenant_id>/`.
+   Targets of one tenant that shared a secret point to the same new
+   path. Update the target's `secret_ref` or `provider_secret_ref`.
+   `meho targets list --json` does not show `extras`: read
+   `provider_secret_ref` of each VCF Automation target with
+   `meho targets describe <name> --json`. It is optional, so a target
+   without it has nothing to move. For `provider_secret_ref`, keep every
+   other key of `extras` with its value and type.
+   `meho targets update --extra` replaces the whole map and writes every
+   value as text. When `extras` holds a value that is not text (a
+   boolean, a number, a list or an object), take `extras` from the raw
+   answer of `GET /api/v1/targets/<name>` and save it. Do not take it
+   from `meho targets describe`: the CLI reads numbers as decimals and
+   can round a large whole number. Change only `provider_secret_ref`
+   with a JSON tool that keeps whole numbers exact (for example the
+   `json` module of Python), and send the full object in one
+   `PATCH /api/v1/targets/<name>` with the body `{"extras": {...}}`.
+   A change made with a person's token only asks for approval: the
+   PATCH answers `202` and `meho targets update` exits 0. Wait until a
+   person approves each request (or make the change in the web console,
+   where it applies at once). Then check that the target shows the new
+   path. After a PATCH, read `GET /api/v1/targets/<name>` again and
+   compare its `extras` with the saved answer, with the same exact JSON
+   tool. Go to step 4 only after this check, because the old grants
+   still let the old path work.
+4. Check that MEHO reads the moved secret through the target: run a
+   read-only operation on the target, and for a moved provider secret
+   also a read-only operation of the provider plane. A direct Vault read
+   of the new path does not prove that the target points to it, and
+   `meho targets probe` alone does not prove it either, because some
+   connectors probe without a login. For a target that a
+   Sensor checks, also check that its next scheduled run shows a real
+   state, not `unknown`.
+5. Only then remove the old grants. Without the setup of step 1, each
+   read of that person or agent fails after the old grants are gone,
+   while the health check still passes.
+
+The steps are in
+[`vault-per-tenant-migration.md`](./vault-per-tenant-migration.md).
+
+Set the tenant metadata and the group on the entity that the JWT login
+really uses. Vault finds that entity by its alias: the alias name is the
+caller's `sub` claim (`user_claim=sub`), on the accessor of the `jwt`
+mount. An entity whose `name` is the same `sub` is not linked by the name
+alone. So for each caller:
+
+```bash
+# The accessor of the jwt mount (use your mount path if it is not jwt/).
+ACCESSOR=$(vault auth list -format=json | jq -r '."jwt/".accessor')
+
+# a) The caller has not logged in yet: create the entity and link the
+#    login to it with an alias.
+ENTITY_ID=$(vault write -format=json identity/entity \
+  name="<operator-sub>" metadata=tenant_id="<tenant-uuid>" | jq -r .data.id)
+vault write identity/entity-alias \
+  name="<operator-sub>" canonical_id="$ENTITY_ID" mount_accessor="$ACCESSOR"
+
+# b) The caller has logged in once: Vault already made an entity and an
+#    alias for the login. Find that entity and set the metadata on it.
+ENTITY_ID=$(vault write -format=json identity/lookup/entity \
+  alias_name="<operator-sub>" alias_mount_accessor="$ACCESSOR" | jq -r .data.id)
+vault write identity/entity/id/"$ENTITY_ID" metadata=tenant_id="<tenant-uuid>"
+
+# Then put this entity id into the tenant's role group
+# (connector-vault-tenant-policy.md §4, member_entity_ids).
+```
+
+**One tenant for each login identity.** The entity holds one `tenant_id`
+value. A person who works in more than one tenant (`meho tenants use`)
+keeps the same `sub`, so the same entity. Setting `tenant_id` again
+replaces the first value, and then that person cannot read the first
+tenant's secrets. So this recipe needs a separate login identity (its own
+`sub`) for each tenant a person works in. If one login is used in more
+than one tenant, check the read in each tenant (steps 2 and 3 of
+[`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§5) before you remove the old grants.
+
+Check the result with the caller's own login, not with a root token. Log
+in as [`connector-vault-tenant-policy.md`](./connector-vault-tenant-policy.md)
+§5 says, from one of the addresses in `token_bound_cidrs`. Then check that
+the login uses this entity:
+
+```bash
+vault token lookup -format=json | jq -r .data.entity_id   # Expect: $ENTITY_ID
+```
+
+Steps 2 and 3 of that §5 check the read of the tenant's own secret and the
+refused read of another tenant's secret.
+
+The policy `meho-mcp` on the role itself grants only the health test
+secret (surface 5):
 
 ```hcl
-path "secret/data/meho/*" {
+path "secret/data/meho/test/federation" {
   capabilities = ["read"]
 }
-path "secret/metadata/meho/*" {
+path "secret/metadata/meho/test/federation" {
   capabilities = ["read"]
 }
 ```
@@ -429,21 +554,15 @@ the policy needs `read` on `secret/data/tenants/+/event-sources/*` (and
 the matching `secret/metadata/...` path). Without it, every event source
 with a secret answers 503 and the sender keeps retrying.
 
-Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
-`bound_audiences` as its *only* binding and no `bound_subject` /
-`bound_claims`, paired with a policy that grants read on the whole
-`secret/data/meho/*` subtree. Any Keycloak principal whose token carries
-`aud=<keycloak-audience>` is therefore accepted by it, including a
-confidential service-account client. `check_runner_jwt()` mints the
+Role `meho-mcp` above accepts a token that carries
+`aud=<keycloak-audience>` from the addresses MEHO uses, and its policy is
+the per-tenant policy of surface 3. `check_runner_jwt()` mints the
 runner's token with `audience=KEYCLOAK_AUDIENCE`
 (`backend/src/meho_backplane/auth/runner_identity.py`), and the realm
 recipe in [`docs/deploying.md`](../deploying.md) tells you to give the
-client the matching audience mapper. Net effect of turning the flag on
-with the role as provisioned: Vault accepts the runner principal as-is,
-and every scheduled evaluation runs with read on **all** target
-credentials under `secret/meho/*`. That silently removes the
-"system-initiated calls cannot perform an operator-context Vault read"
-carve-out the rest of the credential layer is built around.
+client the matching audience mapper. To keep the runner's reads to the
+secrets that Sensors evaluate, give the runner a role of its own, as
+below.
 
 Pick one of two guardrails before enabling the flag.
 
@@ -573,15 +692,18 @@ vault write auth/jwt/role/meho-mcp - <<'JSON'
   "user_claim": "sub",
   "bound_audiences": "<keycloak-audience>",
   "bound_claims": {"/realm_access/roles": "meho-operator"},
+  "token_bound_cidrs": ["<meho-address-1>", "<meho-address-2>"],
   "policies": "meho-mcp",
-  "token_ttl": "1h"
+  "token_ttl": "5m"
 }
 JSON
 ```
 
 The request goes in as JSON on stdin (the `-` argument). `bound_claims` is
 a map, and the `key=value` form of `vault write` can only send a string
-for it, which Vault rejects.
+for it, which Vault rejects. The JSON sets `token_bound_cidrs` and
+`token_ttl` to the values of surface 2, so the role keeps MEHO's addresses
+and its 5-minute token.
 
 Note what is deliberately **absent**: no `bound_claims_type`. Its default is
 `string`, under which bound values "will be treated as literals and must
@@ -765,29 +887,36 @@ and in which order.
 
 ## Verification
 
-Run from any host with the operator's Vault token (`vault login`
-against the operator's Keycloak identity, OR a service-account
-JWT bound to the same role).
+Commands 1 to 4 read Vault's configuration. Run them with a Vault
+administrator login: the policies of this guide do not grant these reads.
+Run command 5 with the operator's login: log in with the operator's
+Keycloak identity or a service-account JWT bound to the same role, from an
+address in `token_bound_cidrs` (for example, from a MEHO pod). The role
+refuses a login from any other address. A working operator login also
+shows that the address binding covers that address.
 
 ```bash
 # 1. JWT auth method exists with correct discovery URL
-#    (auth/jwt/ — the dedicated mount, NOT auth/oidc/)
+#    (auth/jwt/ — the dedicated mount, NOT auth/oidc/). Administrator login.
 vault read -format=json auth/jwt/config \
-  | jq '{oidc_discovery_url, default_role}'
+  | jq '.data | {oidc_discovery_url, default_role}'
 
-# 2. Role exists with correct audience binding
+# 2. Role exists with correct audience binding. Administrator login.
 vault read -format=json auth/jwt/role/meho-mcp \
-  | jq '{bound_audiences, user_claim, role_type, policies}'
+  | jq '.data | {bound_audiences, user_claim, role_type, policies, token_bound_cidrs, token_ttl}'
+# Expect: token_bound_cidrs covers MEHO's addresses, token_ttl is 300.
 
-# 3. Policy grants meho/* read
+# 3. Policy grants read on the health test secret (surface 5).
+#    Administrator login.
 vault policy read meho-mcp
 
-# 4. KV mount is v2 at the expected prefix
+# 4. KV mount is v2 at the expected prefix. Administrator login.
 vault secrets list -format=json \
   | jq '."secret/" | {type, options}'
 # Expect: type="kv", options.version="2"
 
-# 5. Federation-proof fixture exists
+# 5. Federation-proof fixture exists and the operator login reads it.
+#    Operator login.
 vault kv get -format=json secret/meho/test/federation \
   | jq '.data.metadata.version'
 # Expect: a positive integer (the KV-v2 version number).
@@ -813,10 +942,10 @@ everything it needs from Vault.
 | Failure | Diagnostic on the producer side | Consumer-side fix |
 | --- | --- | --- |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultUnreachableError"` | TCP / TLS / timeout to `VAULT_ADDR`. The readiness probe `/ready` also reports `vault` as unhealthy. | Verify `VAULT_ADDR` resolves and is reachable from the backplane Pod's network policy (egress to Vault is in the chart's NetworkPolicy by default — check `networkPolicy.vaultCIDR`) |
-| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`) |
+| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`). The address binding is another cause: compare `remote_address` in the Vault audit log with `token_bound_cidrs` of the role, and bind a range that covers that address |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: …"`; Vault server log shows `error configuring token validator: unsupported config type` | The `meho-mcp` `role_type=jwt` role was created on an `auth/oidc/` mount that's in OIDC-login mode. Vault (≥1.21.2) refuses `role_type=jwt` on an OIDC-configured mount. | Move the JWT method + role to a **dedicated mount** per surface 1 (`vault auth enable -path=jwt jwt`) and set `VAULT_OIDC_MOUNT_PATH` to match. Do not co-locate with an interactive-OIDC-login mount. (evoila/meho#553) |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
-| `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on `secret/meho/*`. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/*` and `secret/metadata/meho/*` |
+| `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on the health test secret. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/test/federation` and `secret/metadata/meho/test/federation` |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: KeyError"` or `read_failed: TypeError` | Vault returned an unexpected payload shape — KV-v1 mount instead of v2, proxy mangling the response, etc. | Verify surface 4 (KV v2 mount); the mount must be type `kv` with `options.version="2"` |
 | Agent-principal registration fails — REST `502 scheduler_vault_write_error`, or MCP `meho_agent_principals_register` JSON-RPC `-32602` "scheduler Vault write failed" — while reads/listing still work | **Under-scoped surface 6** — `VAULT_SCHEDULER_TOKEN` policy grants read but not write on the agent-credentials path, so the secret-mint write is denied (Vault 403). The backplane probed `auth/token/lookup-self` after that 403 and did **not** get a 403 back, so the token is live (or Vault could not answer the probe — check for an outage first) and the policy is the remaining fault. Reads stay healthy because the read path is read-only-sufficient. | Verify surface 6 (`vault token capabilities "$VAULT_SCHEDULER_TOKEN" secret/data/agents/<name>/credentials`); widen the `meho-scheduler` policy to include `create`+`update` on `secret/data/agents/+/credentials` |
 | Agent- or runner-principal registration fails with `scheduler_vault_token_invalid: the scheduler Vault token is invalid or expired …` (REST 502 detail, MCP `-32602` message, `/ui/agents/principals` register banner) | **Dead surface-6 token** — the `VAULT_SCHEDULER_TOKEN` value was revoked, hit its TTL, or is a periodic token whose lease lapsed (a `-period=768h` token expires that long after its *last* renewal, so a scheduler that was down for a month comes back with a dead token). Vault answers both this and the under-scoped-policy case with a 403; the backplane told them apart by getting a 403 from `auth/token/lookup-self` too. **Policy, path pattern, and mount are irrelevant here — do not widen the policy.** | Confirm with `VAULT_TOKEN="$VAULT_SCHEDULER_TOKEN" vault token lookup` (errors on a dead token). Re-mint against the same policy with the surface-6 command above (`vault token create -policy=meho-scheduler -period=768h -field=token`), then update the deployment secret the backplane reads (`VAULT_SCHEDULER_TOKEN`, or the file `VAULT_SCHEDULER_TOKEN_FILE` points at). The file sink is re-read on every use, so a Vault-Agent sidecar rewrite needs no pod restart; an env-var change does need a rollout. Watch the `scheduler_vault_token_verified` log event (`ttl_seconds` / `expire_time`) to confirm recovery |

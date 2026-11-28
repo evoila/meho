@@ -51,7 +51,8 @@ Design contract
   reuses the single-sourced sensitivity classification from
   :func:`~meho_backplane.broadcast.events.classify_op` (shipped by
   G11.7-T1 #1401): an op that classifies as a credential class
-  (``credential_read`` / ``credential_mint`` / ``credential_write``) gets
+  (``credential_read`` / ``credential_mint`` / ``credential_write`` /
+  ``credential_use``) gets
   **no generic params-echo default** -- the generic echo can only do
   key-name / value-shape redaction and is not trusted to scrub a
   connector-specific secret shape, so a credential-class op with no
@@ -90,19 +91,24 @@ from meho_backplane.broadcast.events import (
     is_snmp_community_key,
     resolve_op_class,
 )
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 from meho_backplane.settings import parse_bool_env
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import ApplySummaries
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "AGENT_REQUESTER_RECORD_KEY",
     "BLAST_RADIUS_KEY",
     "INTERNAL_EFFECT_KEYS",
     "PERSON_ONLY_EFFECT_KEYS",
+    "PREVIEW_FAILURE_ECHO_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
+    "PREVIEW_REASON_CREDENTIAL_USE_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "SWITCHED_EFFECT_KEYS",
     "PreviewContext",
@@ -127,6 +133,7 @@ __all__ = [
     "register_preview_builder_switch",
     "register_preview_failure_keys",
     "register_preview_last_step",
+    "stored_requester_record",
     "without_internal_effect_keys",
     "without_person_only_effect_keys",
     "without_switched_object_field",
@@ -137,9 +144,7 @@ _log = structlog.get_logger(__name__)
 #: Sensitivity classes whose preview must never be stored verbatim.
 #: Mirrors the aggregate-only set in
 #: :func:`~meho_backplane.broadcast.events.redact_payload`.
-_SENSITIVE_CLASSES: frozenset[str] = frozenset(
-    {"credential_read", "credential_mint", "credential_write"}
-)
+_SENSITIVE_CLASSES: frozenset[str] = CREDENTIAL_OP_CLASSES
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default *because the op is a
@@ -149,6 +154,11 @@ _SENSITIVE_CLASSES: frozenset[str] = frozenset(
 #: populated a preview" so the approval surface can style it as
 #: elevated-risk rather than merely incomplete.
 PREVIEW_REASON_CREDENTIAL_REDACTED = "credential_write_redacted"
+
+#: The reason code for the same collapsed envelope when the op is of class
+#: ``credential_use``: the call uses a credential, so the card says that in
+#: place of "credential-class write".
+PREVIEW_REASON_CREDENTIAL_USE_REDACTED = "credential_use_redacted"
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default for a *non*-credential op —
@@ -240,11 +250,13 @@ def preview_failure_reason(exc: Exception) -> str:
     password or token into its ``Status`` message (#3876), and the
     marker is stored in the durable approval row. Redaction runs first
     so the cap cannot cut a secret into a fragment the patterns no
-    longer match. If the redactor fails, the message is withheld.
+    longer match. If the redactor fails, the message is withheld. A null
+    character becomes the two characters ``\\0``, as PostgreSQL cannot
+    store it in the row.
     """
     message = str(exc)
     if message:
-        message = _redact_preview_message(message)
+        message = _redact_preview_message(message).replace("\x00", "\\0")
     reason = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     if len(reason) > _PREVIEW_ERROR_MAX_LEN:
         reason = reason[:_PREVIEW_ERROR_MAX_LEN] + " [truncated]"
@@ -497,7 +509,7 @@ _AGENT_PREVIEW_FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = 
 
 #: ``op_id`` -> a function that gives the keys a failed preview of the op
 #: still shows a person (:func:`register_preview_failure_keys`).
-_PREVIEW_FAILURE_KEYS: dict[str, Callable[[PreviewContext], dict[str, Any]]] = {}
+_PREVIEW_FAILURE_KEYS: dict[str, Callable[[PreviewContext, Exception], dict[str, Any]]] = {}
 
 #: The keys a builder's result puts on a stored ``proposed_effect``.
 _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable", "preview_error")
@@ -505,6 +517,11 @@ _BUILDER_RESULT_KEYS: Final[tuple[str, ...]] = ("preview", "preview_unavailable"
 #: ``op_id`` -> registered permission preflight. Opt-in: absence ⇒ no
 #: preflight (and no entry in the approval row's ``permission_preflight``).
 _PERMISSION_PREFLIGHTS: dict[str, PermissionPreflight] = {}
+
+#: ``op_id`` -> {parameter name: a function that gives the value of that
+#: parameter with the hiding of the approval card}
+#: (:func:`register_card_param_echo`).
+_CARD_PARAM_ECHOES: dict[str, dict[str, Callable[[PreviewContext], Any]]] = {}
 
 
 def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
@@ -514,6 +531,34 @@ def register_preview_builder(op_id: str, builder: PreviewBuilder) -> None:
     import time so a re-import (test reload) is a no-op-equivalent.
     """
     _PREVIEW_BUILDERS[op_id] = builder
+
+
+def register_card_param_echo(op_id: str, param: str, echo: Callable[[PreviewContext], Any]) -> None:
+    """Show the parameter *param* of *op_id* on a preview through *echo*.
+
+    The preview of the call (``preview_operation``) puts ``echo(ctx)`` in
+    place of the value it would copy from the params. *echo* hides at
+    least what the approval card hides.
+    """
+    _CARD_PARAM_ECHOES.setdefault(op_id, {})[param] = echo
+
+
+def card_param_echoes(ctx: PreviewContext) -> dict[str, Any]:
+    """Each registered parameter of *ctx* (:func:`register_card_param_echo`), shown by its echo.
+
+    Only a parameter present in the params is given. A value whose echo
+    cannot be built is the redaction marker, so nothing shows in clear text.
+    """
+    echoes: dict[str, Any] = {}
+    for param, echo in _CARD_PARAM_ECHOES.get(ctx.descriptor.op_id, {}).items():
+        if param not in ctx.params:
+            continue
+        try:
+            echoes[param] = echo(ctx)
+        except Exception as exc:
+            _log.warning("card_param_echo_failed", param=param, error=type(exc).__name__)
+            echoes[param] = _PARAM_REDACTED
+    return echoes
 
 
 def register_preview_last_step(op_id: str, step: PreviewLastStep) -> None:
@@ -551,16 +596,17 @@ def register_person_only_preview_keys(
 
 
 def register_preview_failure_keys(
-    op_id: str, build: Callable[[PreviewContext], dict[str, Any]]
+    op_id: str, build: Callable[[PreviewContext, Exception], dict[str, Any]]
 ) -> None:
-    """Add the keys *build* gives to the failed preview of *op_id*, for a person only.
+    """Add the keys *build* gives to the failed preview of *op_id*.
 
     When the builder of *op_id* raises, the stored request holds the
-    ``preview_unavailable`` marker. *build* adds what the card can still show
-    from the params alone. MEHO keeps only the keys of
-    :data:`PERSON_ONLY_EFFECT_KEYS`, so a caller that is not a person never
-    reads them. The agent's own preview gets none, and a *build* that raises
-    adds nothing.
+    ``preview_unavailable`` marker. *build* gets the context and the error,
+    and adds what the card can still show from the params alone. MEHO keeps
+    only the keys of :data:`PERSON_ONLY_EFFECT_KEYS` and of
+    :data:`PREVIEW_FAILURE_ECHO_KEYS`, which a caller that is not a person
+    never reads. The agent's own preview gets none, and a *build* that
+    raises adds nothing.
     """
     _PREVIEW_FAILURE_KEYS[op_id] = build
 
@@ -583,6 +629,15 @@ def register_agent_preview_filter(
 #: (:func:`register_preview_failure_keys`).
 PERSON_ONLY_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"credential_wait", "run_commands"})
 
+#: Top-level keys that a failed preview still holds for the card a person
+#: reads, with the values hidden as on a preview that worked: the
+#: ``k8s.apply`` manifest, its subject line, and the document its dry run
+#: stopped at (:func:`register_preview_failure_keys`). A caller that is not a
+#: person reads the failed preview without them (:func:`proposed_effect_for_agent`).
+PREVIEW_FAILURE_ECHO_KEYS: Final[frozenset[str]] = frozenset(
+    {"manifest", "subject", "dry_run_stop"}
+)
+
 #: Top-level keys of a stored ``proposed_effect`` that a caller reads only
 #: while a switch is on, each with its env name. A person always reads them:
 #: the realm a Keycloak target works on.
@@ -595,10 +650,35 @@ SWITCHED_OBJECT_FIELDS: Final[dict[str, tuple[str, str]]] = {
     "keycloak.realm.delete": ("id", "KEYCLOAK_ANSWER_REALM")
 }
 
+#: The key of the record of the agent that asked, which an approvals surface
+#: rebuilds the agent from to check its rights when the call runs
+#: (:mod:`~meho_backplane.operations.approved_run_rights`).
+AGENT_REQUESTER_RECORD_KEY: Final[str] = "agent_requester_record"
+
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
-#: checks and never returns to a caller: where a change of rights was asked
-#: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`).
-INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset({"asked_in_web_console"})
+#: checks: where a change of rights was asked
+#: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`),
+#: and the record of the agent that asked. The REST and MCP approval tools
+#: leave them out.
+INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
+    {"asked_in_web_console", AGENT_REQUESTER_RECORD_KEY}
+)
+
+
+def stored_requester_record(effect: Mapping[str, Any] | None) -> Any:
+    """The requester record of a card, as stored; ``None`` when it has none.
+
+    The internal record first, then the ``permission_preflight["requester"]``
+    record that a card shows when ``AGENT_GRANT_REQUIRED`` is not ``off``.
+    The caller checks the shape.
+    """
+    if not effect:
+        return None
+    record = effect.get(AGENT_REQUESTER_RECORD_KEY)
+    if record is not None:
+        return record
+    preflight = effect.get("permission_preflight")
+    return preflight.get("requester") if isinstance(preflight, Mapping) else None
 
 
 def without_internal_effect_keys(effect: dict[str, Any]) -> dict[str, Any]:
@@ -680,8 +760,10 @@ def proposed_effect_for_agent(
       (:func:`register_agent_preview_filter`), after the person-only keys
       are gone.
 
-    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`) and
-    the internal keys (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
+    The top-level person-only keys (:data:`PERSON_ONLY_EFFECT_KEYS`),
+    the keys a failed preview keeps for the card
+    (:data:`PREVIEW_FAILURE_ECHO_KEYS`) and the internal keys
+    (:data:`INTERNAL_EFFECT_KEYS`) are never in it. A key
     of :data:`SWITCHED_EFFECT_KEYS` or a field of :data:`SWITCHED_OBJECT_FIELDS`
     is in it only while its switch is on. Every other ``proposed_effect`` comes
     back unchanged.
@@ -689,6 +771,12 @@ def proposed_effect_for_agent(
     if not isinstance(effect, dict):
         return effect
     effect = without_person_only_effect_keys(effect)
+    if effect.get("preview_unavailable") is True and not PREVIEW_FAILURE_ECHO_KEYS.isdisjoint(
+        effect
+    ):
+        effect = {
+            key: value for key, value in effect.items() if key not in PREVIEW_FAILURE_ECHO_KEYS
+        }
     switch = _PREVIEW_BUILDER_SWITCHES.get(op_id)
     if switch is not None and not switch() and any(key in effect for key in _BUILDER_RESULT_KEYS):
         shown = {key: value for key, value in effect.items() if key not in _BUILDER_RESULT_KEYS}
@@ -853,7 +941,7 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
         # safety-relevant action. Never let a dry-run fault block it.
         marker = _preview_unavailable_marker(ctx, exc, op_id=op_id, op_class=op_class)
         if not ctx.agent_preview:
-            marker.update(_preview_failure_keys(ctx, op_id=op_id, marker=marker))
+            marker.update(_preview_failure_keys(ctx, exc, op_id=op_id, marker=marker))
         return marker
 
     if preview is None:
@@ -894,18 +982,19 @@ def _preview_unavailable_marker(
 
 
 def _preview_failure_keys(
-    ctx: PreviewContext, *, op_id: str, marker: dict[str, Any]
+    ctx: PreviewContext, error: Exception, *, op_id: str, marker: dict[str, Any]
 ) -> dict[str, Any]:
-    """The person-only keys a failed preview of *op_id* still shows.
+    """The keys a failed preview of *op_id* still shows.
 
-    Only keys of :data:`PERSON_ONLY_EFFECT_KEYS` that the marker does not
-    hold yet. Empty when *op_id* registered none or its function raised.
+    Only keys of :data:`PERSON_ONLY_EFFECT_KEYS` and
+    :data:`PREVIEW_FAILURE_ECHO_KEYS` that the marker does not hold yet.
+    Empty when *op_id* registered none or its function raised.
     """
     build = _PREVIEW_FAILURE_KEYS.get(op_id)
     if build is None:
         return {}
     try:
-        keys = build(ctx)
+        keys = build(ctx, error)
     except Exception as exc:
         _log.warning(
             "proposed_effect_failure_keys_failed",
@@ -916,7 +1005,7 @@ def _preview_failure_keys(
     return {
         key: value
         for key, value in keys.items()
-        if key in PERSON_ONLY_EFFECT_KEYS and key not in marker
+        if key in PERSON_ONLY_EFFECT_KEYS | PREVIEW_FAILURE_ECHO_KEYS and key not in marker
     }
 
 
@@ -942,6 +1031,8 @@ def describe_preview_provenance(
       - :data:`PREVIEW_REASON_CREDENTIAL_REDACTED` when the op is a
         credential class (its preview is intentionally suppressed absent a
         bespoke builder).
+      - :data:`PREVIEW_REASON_CREDENTIAL_USE_REDACTED` in place of it when
+        that class is ``credential_use``.
       - :data:`PREVIEW_REASON_NOT_POPULATED` otherwise (no builder /
         nothing to echo).
 
@@ -959,7 +1050,10 @@ def describe_preview_provenance(
     # Collapsed to the identifier-only default: name WHY so the approver
     # sees a deliberately-redacted credential write distinctly from a
     # connector that simply never populated a preview.
-    if resolve_op_class(op_id, stored_op_class) in _SENSITIVE_CLASSES:
+    op_class = resolve_op_class(op_id, stored_op_class)
+    if op_class == "credential_use":
+        return False, PREVIEW_REASON_CREDENTIAL_USE_REDACTED
+    if op_class in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
 
@@ -1084,13 +1178,20 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     ``preview_error``, so the reviewer sees that the apply will be
     rejected instead of a clean-looking preview with no
     ``resourceVersion`` and no ``uid`` (#3876). For a person, that marker
-    still names what each container runs (:func:`_k8s_apply_failure_keys`).
+    still holds the manifest, the subject line, the document the dry run
+    stopped at and what each container runs (:func:`_k8s_apply_failure_keys`).
     """
     if ctx.connector_instance is None or ctx.target is None:
         return None
 
+    from meho_backplane.auth.operator import TenantRole
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import (
+        ApplySummaries,
+        apply_summaries_var,
+    )
     from meho_backplane.connectors.kubernetes.ops_write_dangerous import k8s_apply
+    from meho_backplane.connectors.kubernetes.ops_write_preview import plain_copy
 
     if not isinstance(ctx.connector_instance, KubernetesConnector):
         return None
@@ -1099,16 +1200,70 @@ async def _k8s_apply_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     # the preview must never persist, even if the parked call itself was
     # a real apply (dry_run="none").
     preview_params = {**ctx.params, "dry_run": "server"}
-    result = await k8s_apply(
-        ctx.connector_instance,
-        ctx.target,
-        ctx.operator,
-        preview_params,
+    # Only the card of a person gets the object summary. The live object is
+    # read only for a login whose role may run an apply; the preview an
+    # agent reads has no summary and makes no extra read.
+    summaries = (
+        None
+        if ctx.agent_preview
+        else ApplySummaries(
+            read_live=ctx.operator.tenant_role in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN)
+        )
     )
-    return {**result, **_k8s_apply_manifest_echo(ctx, result)}
+    token = apply_summaries_var.set(summaries)
+    try:
+        result = await k8s_apply(
+            ctx.connector_instance,
+            ctx.target,
+            ctx.operator,
+            preview_params,
+        )
+    except Exception as exc:
+        if summaries is not None:
+            setattr(exc, _APPLY_DOCUMENTS_DONE, len(summaries.entries))
+        _name_objects_as_on_card(ctx, exc)
+        raise
+    finally:
+        apply_summaries_var.reset(token)
+    shown = plain_copy(result)
+    return {**shown, **_k8s_apply_manifest_echo(ctx, shown, summaries)}
 
 
-def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dict[str, Any]:
+def _name_objects_as_on_card(ctx: PreviewContext, exc: Exception) -> None:
+    """Write each object name in the message of *exc* as the card writes it.
+
+    The message becomes the ``preview_error`` of the stored request and of
+    an agent's own preview. A redaction rule that hides a name on the card
+    hides it in the error too (``ops_write_preview.names_as_on_card``).
+    When the names cannot be read, the message stays.
+    """
+    from meho_backplane.connectors.base import ConnectorUpstreamError
+    from meho_backplane.connectors.kubernetes.ops_write_dangerous import ApplyManifestError
+    from meho_backplane.connectors.kubernetes.ops_write_preview import names_as_on_card
+
+    message = exc.args[0] if len(exc.args) == 1 else None
+    if isinstance(exc, ApplyManifestError) or not isinstance(message, str):
+        return
+    manifest = ctx.params["manifest"]
+    try:
+        redact = _k8s_apply_redactor(ctx)
+        exc.args = (names_as_on_card(manifest, message, redact=redact),)
+        if isinstance(exc, ConnectorUpstreamError) and exc.upstream_message is not None:
+            exc.upstream_message = names_as_on_card(manifest, exc.upstream_message, redact=redact)
+    except Exception as failure:
+        _log.warning("k8s_apply_error_names_failed", error=type(failure).__name__)
+
+
+#: The attribute of a failed ``k8s.apply`` dry run's error that counts the
+#: documents whose dry run worked (set only for a person's card).
+_APPLY_DOCUMENTS_DONE = "k8s_apply_documents_done"
+
+
+def _k8s_apply_manifest_echo(
+    ctx: PreviewContext,
+    result: dict[str, Any],
+    summaries: ApplySummaries | None = None,
+) -> dict[str, Any]:
     """The ``subject`` and ``manifest`` keys the k8s.apply preview adds (#3877).
 
     The dry-run summary names each object but not what the apply sets on
@@ -1118,33 +1273,76 @@ def _k8s_apply_manifest_echo(ctx: PreviewContext, result: dict[str, Any]) -> dic
     connector applies its size limit after that redaction, so the stored
     echo is what is measured. ``subject`` names the objects for the
     reviewer context. ``run_commands`` names what each container runs, with
-    secret values hidden (``ops_write_preview.apply_run_commands``). Only a
-    person reads it: an agent's own preview has no such key, and the
-    stored request an agent reads leaves it out.
+    secret values hidden (``ops_write_preview.apply_run_commands``).
+    ``object_summary`` has one entry for each object: new or existing, who
+    else owns its fields, and its risky fields
+    (``ops_write_apply_summary``); it is the *summaries* the dry run
+    collected, redacted like the manifest. Only a person reads these two
+    keys: an agent's own preview has none, and the stored request an agent
+    reads leaves them out.
     """
+    from meho_backplane.connectors.kubernetes.ops_write_apply_summary import OBJECT_SUMMARY_KEY
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
-        apply_manifest_echo,
         apply_run_commands,
         apply_subject,
+        plain_copy,
     )
 
     _redact = _k8s_apply_redactor(ctx)
-    echo: dict[str, Any] = {"manifest": apply_manifest_echo(ctx.params["manifest"], redact=_redact)}
+    echo: dict[str, Any] = {"manifest": _k8s_apply_manifest_only(ctx)}
     if not ctx.agent_preview:
         run_commands = apply_run_commands(ctx.params["manifest"], redact=_redact)
         if run_commands:
             echo[RUN_COMMANDS_KEY] = run_commands
+    if summaries is not None and summaries.entries:
+        echo[OBJECT_SUMMARY_KEY] = _redact(plain_copy(summaries.entries))
     subject = apply_subject(result.get("applied"))
     if subject is not None:
         echo["subject"] = subject
     return echo
 
 
+def _k8s_apply_manifest_only(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of the k8s.apply card, built from the params of *ctx* alone."""
+    from meho_backplane.connectors.kubernetes.ops_write_preview import apply_manifest_echo
+
+    return apply_manifest_echo(ctx.params["manifest"], redact=_k8s_apply_redactor(ctx))
+
+
+def _k8s_apply_manifest_identities(ctx: PreviewContext) -> list[dict[str, Any]]:
+    """The ``manifest`` of a k8s.apply preview: the identity of each document, nothing else.
+
+    Each entry is ``kind`` and ``metadata`` with ``namespace`` and ``name``,
+    read from the top of the parsed document, so the rest of the document
+    is not walked. A field that is not a text is left out. The texts pass
+    the shared hiding of the card (:func:`_k8s_apply_redactor`).
+    """
+    from meho_backplane.connectors.kubernetes._apply_manifest import _parse_manifest
+
+    entries: list[dict[str, Any]] = []
+    for doc in _parse_manifest(ctx.params["manifest"]):
+        raw_metadata = doc.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        entry: dict[str, Any] = {"kind": doc["kind"]} if isinstance(doc.get("kind"), str) else {}
+        entry["metadata"] = {
+            key: metadata[key]
+            for key in ("namespace", "name")
+            if isinstance(metadata.get(key), str)
+        }
+        entries.append(entry)
+    return _k8s_apply_redactor(ctx)(entries)
+
+
 def _k8s_apply_redactor(
     ctx: PreviewContext,
 ) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]]]:
-    """The shared params redaction, run over a list of manifest dicts of *ctx*."""
+    """The shared params redaction, run over a list of manifest dicts of *ctx*.
+
+    The value-shape engine also reads each ``key: value`` pair of a mapping
+    entry with a text value, as it reads that line in the manifest text
+    (:func:`_hide_secret_pairs`).
+    """
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
 
     def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1154,28 +1352,130 @@ def _k8s_apply_redactor(
             tenant=tenant,
             op_id=ctx.descriptor.op_id,
         )
-        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        shown = [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        _hide_secret_pairs(
+            shown, connector_id=ctx.connector_id, tenant=tenant, op_id=ctx.descriptor.op_id
+        )
+        return shown
 
     return _redact
 
 
-def _k8s_apply_failure_keys(ctx: PreviewContext) -> dict[str, Any]:
-    """``run_commands`` for the card of a ``k8s.apply`` whose dry run failed.
+def _text_entries(docs: list[dict[str, Any]]) -> list[tuple[dict[Any, Any], Any]]:
+    """Each ``(mapping, key)`` of *docs*, at any depth, whose value is a text not yet hidden."""
+    entries: list[tuple[dict[Any, Any], Any]] = []
+    stack: list[Any] = list(docs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if not isinstance(value, str):
+                    stack.append(value)
+                elif value != _PARAM_REDACTED:
+                    entries.append((node, key))
+    return entries
 
-    MEHO builds it from the manifest text, the same as on a preview that
-    worked (``ops_write_preview.apply_run_commands``). The card still says
-    that the preview is not available.
+
+def _hide_secret_pairs(
+    docs: list[dict[str, Any]], *, connector_id: str | None, tenant: str | None, op_id: str
+) -> None:
+    """Hide in place each text value whose ``key: value`` text the value-shape engine hides.
+
+    Some shapes are known by the key and the value together
+    (``Authorization: Basic ...``, ``key: AQ...==``), so the engine reads
+    the pair as one text, the way it reads the line in the manifest text.
+    When it changes the pair, the value becomes :data:`_PARAM_REDACTED`.
+    """
+    entries = _text_entries(docs)
+    if not entries:
+        return
+    # One mapping entry per pair: the engine reads a list of texts as one
+    # text, so a pair could match together with the pair next to it.
+    pairs = {str(index): f"{key}: {node[key]}" for index, (node, key) in enumerate(entries)}
+    shown = apply_connector_boundary_redaction(
+        pairs, connector_id=connector_id, tenant=tenant, op=op_id
+    ).redacted
+    if not isinstance(shown, dict):
+        shown = {}
+    for index, (node, key) in enumerate(entries):
+        if shown.get(str(index)) != pairs[str(index)]:
+            node[key] = _PARAM_REDACTED
+
+
+def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, Any]:
+    """What the card of a ``k8s.apply`` whose dry run failed still shows.
+
+    MEHO builds each key from the manifest text, with the same hiding as on
+    a preview that worked: ``manifest`` and ``subject``
+    (``ops_write_preview``), ``dry_run_stop`` for a manifest of more than
+    one document, and ``run_commands`` (for a person only). A key that
+    cannot be built is left out; the others stay. The card still says that
+    the preview is not available.
     """
     from meho_backplane.connectors.kubernetes.ops_write_preview import (
         RUN_COMMANDS_KEY,
+        apply_manifest_echo,
         apply_run_commands,
+        apply_subject,
+        card_documents,
     )
 
     manifest = ctx.params.get("manifest")
     if not isinstance(manifest, str):
         return {}
-    run_commands = apply_run_commands(manifest, redact=_k8s_apply_redactor(ctx))
-    return {RUN_COMMANDS_KEY: run_commands} if run_commands else {}
+    redactor = _k8s_apply_redactor(ctx)
+
+    def _identities() -> list[dict[str, Any]]:
+        # The whole documents are redacted in their own shape, as for the
+        # manifest echo, so a rule for a field path such as
+        # ``manifest.*.metadata.name`` hides the same name in each label.
+        return [_identity(doc) for doc in redactor(card_documents(manifest))]
+
+    builders: dict[str, Callable[[], Any]] = {
+        "manifest": lambda: apply_manifest_echo(manifest, redact=redactor),
+        "subject": lambda: apply_subject(_identities()),
+        "dry_run_stop": lambda: _dry_run_stop(_identities(), error),
+        RUN_COMMANDS_KEY: lambda: apply_run_commands(manifest, redact=redactor),
+    }
+    keys: dict[str, Any] = {}
+    for key, build in builders.items():
+        try:
+            value = build()
+        except Exception as exc:
+            _log.warning("k8s_apply_failure_key_failed", key=key, error=type(exc).__name__)
+            continue
+        if value:
+            keys[key] = value
+    return keys
+
+
+def _identity(doc: dict[str, Any]) -> dict[str, Any]:
+    """``kind``, ``namespace`` and ``name`` of a manifest document."""
+    metadata = doc.get("metadata") or {}
+    return {
+        "kind": doc.get("kind"),
+        "namespace": metadata.get("namespace"),
+        "name": metadata.get("name"),
+    }
+
+
+def _dry_run_stop(identities: list[dict[str, Any]], error: Exception) -> str | None:
+    """Which document of a manifest of more than one document the dry run stopped at.
+
+    *identities* are the redacted ``kind``, ``namespace`` and ``name`` of each document.
+    """
+    done = getattr(error, _APPLY_DOCUMENTS_DONE, None)
+    if len(identities) < 2 or not isinstance(done, int) or not 0 <= done < len(identities):
+        return None
+    from meho_backplane.connectors.kubernetes.ops_write_preview import apply_subject
+
+    label = apply_subject([identities[done]])
+    sentence = f"The dry run stopped at document {done + 1} of {len(identities)} ({label})."
+    if done + 1 < len(identities):
+        sentence += " The documents after it had no dry run."
+    return sentence
 
 
 async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | None:
@@ -1248,6 +1548,7 @@ def _register_builtin_builders() -> None:
     """
     register_preview_builder("k8s.apply", _k8s_apply_preview)
     register_preview_failure_keys("k8s.apply", _k8s_apply_failure_keys)
+    register_card_param_echo("k8s.apply", "manifest", _k8s_apply_manifest_identities)
     for _write_op in (
         "vault.kv.put",
         "vault.kv.patch",

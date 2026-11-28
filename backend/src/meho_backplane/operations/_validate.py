@@ -36,6 +36,7 @@ from typing import Any, Final
 import structlog
 from jsonschema import Draft202012Validator
 from referencing.exceptions import Unresolvable
+from sqlalchemy import select
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator, PrincipalKind, is_human_principal
@@ -53,7 +54,12 @@ from meho_backplane.operations.rights_change_console import (
     keep_console_run_sign_in,
     runs_at_once_in_console,
 )
-from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
+from meho_backplane.operations.role_floors import (
+    reader_change_denial,
+    requester_check_denial,
+    role_floor_denial,
+)
+from meho_backplane.policy.fixed_rules import fixed_rule_for
 from meho_backplane.policy.stamp import forget_rule
 from meho_backplane.sandbox_mode import sandbox_mode_active
 from meho_backplane.settings import get_settings
@@ -669,12 +675,12 @@ async def _service_grant_verdict(
     target-scoped and the only live candidate for this
     ``(principal, op, connector)`` is a null-target grant (the operator
     likely created it believing null = "any target").
+
+    When a fixed rule holds (:mod:`meho_backplane.policy.fixed_rules`), no
+    grant and no run approval is looked up (:func:`_fixed_rule_blocks_grants`).
     """
     from meho_backplane.operations.grant_cover_check import grant_cover_refusal
-    from meho_backplane.operations.service_grants import (
-        consult_and_record_grant,
-        descriptor_credential_reason,
-    )
+    from meho_backplane.operations.service_grants import descriptor_credential_reason
 
     refused = await grant_cover_refusal(operator, descriptor, target, connector_id, params)
     if refused is not None:
@@ -683,6 +689,80 @@ async def _service_grant_verdict(
         ):
             refused = f"{refused}; {CREDENTIAL_WAIT_NOTE}"
         return None, f"{gate_reason}; {refused}" if gate_reason else refused
+
+    if not _fixed_rule_blocks_grants(operator, descriptor):
+        cleared = await _grant_or_run_approval(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+            target_id_str=target_id_str,
+            preview_hash=preview_hash,
+            params=params,
+            decide_only=decide_only,
+        )
+        if cleared is not None:
+            return cleared
+
+    notes: list[str] = []
+    if has_caller_address(descriptor.parameter_schema):
+        notes.append(
+            "the operation connects to an address the caller gives, so no "
+            "standing grant covers it; a person approves each call"
+        )
+    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and descriptor_credential_reason(descriptor):
+        notes.append(CREDENTIAL_WAIT_NOTE)
+    if notes:
+        note = "; ".join(notes)
+        return None, f"{gate_reason}; {note}" if gate_reason else note
+
+    hint = await _null_target_park_hint(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+    )
+    if hint is not None:
+        gate_reason = f"{gate_reason}; {hint}" if gate_reason else hint
+    return None, gate_reason
+
+
+def _fixed_rule_blocks_grants(operator: Operator, descriptor: EndpointDescriptor) -> bool:
+    """True when a fixed rule holds, so no standing grant and no run approval is looked up.
+
+    The gate asks :func:`~meho_backplane.policy.fixed_rules.fixed_rule_for`
+    before it reads a grant. In sandbox mode the grant lookup decides, so
+    a delete grant may still cover a delete (``docs/decisions/sandbox-mode.md``).
+    """
+    if sandbox_mode_active():
+        return False
+    rule = fixed_rule_for(descriptor, operator)
+    if rule is None:
+        return False
+    _log.info(
+        "policy_gate_fixed_rule_no_grant",
+        operator_sub=operator.sub,
+        tenant_id=str(operator.tenant_id),
+        op_id=descriptor.op_id,
+        fixed_rule=rule,
+    )
+    return True
+
+
+async def _grant_or_run_approval(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    target_id_str: str | None,
+    preview_hash: str | None,
+    params: dict[str, Any] | None,
+    decide_only: bool,
+) -> tuple[PermissionVerdict, str] | None:
+    """A live standing grant (#3151) or run approval (#4126) that clears the call, or ``None``."""
+    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
+    from meho_backplane.operations.service_grants import consult_and_record_grant
 
     grant_id = await consult_and_record_grant(
         operator=operator,
@@ -715,8 +795,6 @@ async def _service_grant_verdict(
         return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
 
     # #4126: a person approved the operation list of this run once.
-    from meho_backplane.operations.run_approval_gate import consult_and_record_run_approval
-
     run_approval_id = await consult_and_record_run_approval(
         operator=operator,
         descriptor=descriptor,
@@ -726,28 +804,7 @@ async def _service_grant_verdict(
     )
     if run_approval_id is not None:
         return PermissionVerdict.AUTO_EXECUTE, f"auto-approved by run approval {run_approval_id}"
-
-    notes: list[str] = []
-    if has_caller_address(descriptor.parameter_schema):
-        notes.append(
-            "the operation connects to an address the caller gives, so no "
-            "standing grant covers it; a person approves each call"
-        )
-    if CREDENTIAL_WAIT_NOTE not in (gate_reason or "") and descriptor_credential_reason(descriptor):
-        notes.append(CREDENTIAL_WAIT_NOTE)
-    if notes:
-        note = "; ".join(notes)
-        return None, f"{gate_reason}; {note}" if gate_reason else note
-
-    hint = await _null_target_park_hint(
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        connector_id=connector_id,
-    )
-    if hint is not None:
-        gate_reason = f"{gate_reason}; {hint}" if gate_reason else hint
-    return None, gate_reason
+    return None
 
 
 def waits_only_for_token_call(operator: Operator, descriptor: EndpointDescriptor) -> bool:
@@ -1010,6 +1067,28 @@ async def _console_rights_verdict(
     return PermissionVerdict.AUTO_EXECUTE, CONSOLE_RUN_REASON
 
 
+def _reader_change_denial(
+    operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """Why a caller with the Reader role may not ask for this call, or ``None``.
+
+    See :func:`~meho_backplane.operations.role_floors.reader_change_denial`.
+    It holds for every kind of login, so the call is ``DENY`` before an
+    approval request or its preview is built.
+    """
+    denial = reader_change_denial(operator, descriptor, params)
+    if denial is not None:
+        _log.info(
+            "policy_gate_reader_change_denied",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+        )
+    return denial
+
+
 def _requester_denial(
     operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
 ) -> str | None:
@@ -1030,6 +1109,20 @@ def _requester_denial(
             op_id=descriptor.op_id,
         )
     return denial
+
+
+def _asker_denial(
+    operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """Why *operator* may not ask for this call at all, or ``None``.
+
+    A Reader who asks for a change is denied first
+    (:func:`_reader_change_denial`), then the op's requester check runs
+    (:func:`_requester_denial`).
+    """
+    return _reader_change_denial(operator, descriptor, params) or _requester_denial(
+        operator, descriptor, params
+    )
 
 
 async def policy_gate(
@@ -1114,9 +1207,12 @@ async def policy_gate(
     :func:`~meho_backplane.policy.stamp.take_rule` (#6044). An MCP profile
     with a connector list may deny first (:func:`_profile_denial`, #6099)."""
     forget_rule()
-    requester_denial = _requester_denial(operator, descriptor, params)
-    if requester_denial is not None:
-        return PermissionVerdict.DENY, requester_denial
+    revoked = await _revoked_agent_denial(operator)
+    if revoked is not None:
+        return PermissionVerdict.DENY, revoked
+    asker_denial = _asker_denial(operator, descriptor, params)
+    if asker_denial is not None:
+        return PermissionVerdict.DENY, asker_denial
     profile_denial = await _profile_denial(operator, descriptor, connector_id, target)
     if profile_denial is not None:
         return PermissionVerdict.DENY, profile_denial
@@ -1129,6 +1225,44 @@ async def policy_gate(
         params=params,
         decide_only=decide_only,
     )
+
+
+async def _revoked_agent_denial(operator: Operator) -> str | None:
+    """Why an agent login that MEHO revoked may not call, or ``None``.
+
+    Read from the agent's row (``DELETE /api/v1/agent-principals/{name}/revoke``),
+    so a token that has not ended yet is refused too. Both logins are
+    checked: the caller, when it is an agent login, and the acting agent of
+    a hosted agent run (:func:`resolve_actor_sub`). A login with no row is
+    left to the other checks.
+    """
+    from meho_backplane.db.models import AgentPrincipal
+
+    client_ids = []
+    if operator.principal_kind is PrincipalKind.AGENT and operator.client_id:
+        client_ids.append(operator.client_id)
+    actor_sub = resolve_actor_sub()
+    if actor_sub is not None:
+        client_ids.append(actor_sub)
+    if not client_ids:
+        return None
+    async with get_sessionmaker()() as session:
+        revoked = (
+            (
+                await session.execute(
+                    select(AgentPrincipal.keycloak_client_id).where(
+                        AgentPrincipal.tenant_id == operator.tenant_id,
+                        AgentPrincipal.keycloak_client_id.in_(client_ids),
+                        AgentPrincipal.revoked.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+    if revoked is None:
+        return None
+    return f"policy_denied: the agent login {revoked!r} is revoked in MEHO"
 
 
 async def _profile_denial(

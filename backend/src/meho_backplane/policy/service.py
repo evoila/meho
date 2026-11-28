@@ -44,6 +44,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
+from meho_backplane.policy.agent_rules_plan import agents_plan
 from meho_backplane.policy.bindings import routing_enabled, shipped_binding_documents
 from meho_backplane.policy.classification import (
     Classification,
@@ -57,12 +58,15 @@ from meho_backplane.policy.classification import (
 )
 from meho_backplane.policy.document import (
     POLICY_VERSION,
+    ParsedPolicy,
     canonical_sha256,
     document_of,
     file_sha256,
     normalise_document,
     parse_policy_file,
 )
+from meho_backplane.policy.limits import limits_diff
+from meho_backplane.policy.risk_levels import risk_levels_mistakes, stored_risk_levels
 from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.routing_floor import (
     floor_warnings,
@@ -85,6 +89,7 @@ __all__ = [
     "build_plan",
     "builtin_install_document",
     "export_policy",
+    "install_limits_sha256",
     "list_history",
 ]
 
@@ -156,6 +161,12 @@ async def _stored_document(
     if stored is not None:
         return stored.document
     return builtin_install_document() if scope == "install" else None
+
+
+async def install_limits_sha256(session: AsyncSession) -> str:
+    """The hash of the ``limits`` and ``classifications`` of the install's stored policy."""
+    document = await _stored_document(session, "install", None) or {}
+    return canonical_sha256({key: document.get(key) for key in ("limits", "classifications")})
 
 
 def _stored_name(scope: Scope, tenant_id: uuid.UUID | None) -> str:
@@ -359,6 +370,7 @@ def _build_diff(
     ops: Sequence[KnownOp],
     old_side: _Side,
     new_side: _Side,
+    custom_policy: bool,
 ) -> dict[str, Any]:
     changed = {
         i
@@ -381,6 +393,7 @@ def _build_diff(
         "bindings": _bindings_diff(
             list(old.get("bindings") or []), list(after.get("bindings") or [])
         ),
+        **limits_diff(old, after, custom_policy=custom_policy),
         "operations_changed": len(changed),
     }
 
@@ -391,8 +404,21 @@ async def build_plan(
     scope: Scope,
     tenant_id: uuid.UUID | None,
     content: bytes,
+    custom_policy: bool = False,
 ) -> PolicyPlan:
-    """Check *content* for *scope* and work out what it would change. Writes nothing."""
+    """Check *content* for *scope* and work out what it would change. Writes nothing.
+
+    *custom_policy* says whether the ``CUSTOM_POLICY`` switch is on. With
+    it off, a file that holds ``limits`` or ``agents`` is refused, and the
+    stored parts are ignored: the diff has no ``limits`` or ``agents``
+    section, a file that equals the stored policy apart from those parts
+    is "No change.", and the planned document keeps the stored parts as
+    they are. With it on, the diff also shows the personal agent rules
+    (:func:`~meho_backplane.policy.agent_rules_plan.agents_plan`), and a
+    ``risk_levels`` part that is not exactly the stored risk-level edits is
+    a mistake (:func:`~meho_backplane.policy.risk_levels.risk_levels_mistakes`).
+    The planned document never holds that part: the import changes no edit.
+    """
     before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
         scope=scope,
@@ -400,7 +426,7 @@ async def build_plan(
         file_sha256=file_sha256(content),
         based_on=canonical_sha256(before),
     )
-    parsed = parse_policy_file(content)
+    parsed = parse_policy_file(content, custom_policy=custom_policy, read_risk_levels=custom_policy)
     if parsed.model is None:
         plan.mistakes = parsed.mistakes
         return plan
@@ -420,9 +446,12 @@ async def build_plan(
             install_document=install_document,
             ops=ops,
             other_entries=other,
+            custom_policy=custom_policy,
         )
     except ValueError as exc:
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
+    if custom_policy:
+        plan.mistakes += await _part_mistakes(session, content, parsed, scope, tenant_id)
     if plan.mistakes:
         return plan
     if scope == "tenant":
@@ -436,21 +465,60 @@ async def build_plan(
         notes=plan.warnings,
         name=_stored_name(scope, tenant_id),
     )
+    _keep_switched_parts(document, before, custom_policy=custom_policy)
     plan.document = document
     plan.no_change = canonical_sha256(document) == plan.based_on
     plan.diff = _build_diff(
-        before, document, scope=scope, ops=ops, old_side=old_side, new_side=new_side
+        before,
+        document,
+        scope=scope,
+        ops=ops,
+        old_side=old_side,
+        new_side=new_side,
+        custom_policy=custom_policy,
     )
     if scope == "install" and routing_enabled():
         plan.diff["routing_floor"] = await tenants_wider(session, document)
         plan.warnings.extend(floor_warnings(plan.diff["routing_floor"]))
+    sections, warnings = await agents_plan(
+        session,
+        scope=scope,
+        tenant_id=tenant_id,
+        before=before,
+        document=document,
+        install_document=install_document,
+        sides=((old_side.entries, old_side.taxonomy), (new_side.entries, new_side.taxonomy)),
+        custom_policy=custom_policy,
+    )
+    plan.diff.update(sections)
+    plan.warnings.extend(warnings)
     return plan
+
+
+def _keep_switched_parts(
+    document: dict[str, Any], before: dict[str, Any] | None, *, custom_policy: bool
+) -> None:
+    """With the switch off, keep the stored ``limits`` and ``agents`` parts as they are."""
+    if custom_policy or before is None:
+        return
+    for key in ("limits", "agents"):
+        if key in before:
+            document[key] = before[key]
 
 
 def _summary(diff: dict[str, Any]) -> dict[str, int]:
     return {
         f"{section}_{kind}": len(diff[section][kind])
-        for section in ("description", "taxonomy", "classifications", "routing", "bindings")
+        for section in (
+            "description",
+            "taxonomy",
+            "classifications",
+            "routing",
+            "bindings",
+            "limits",
+            "agents",
+        )
+        if section in diff
         for kind in ("added", "changed", "removed")
     }
 
@@ -484,6 +552,7 @@ async def apply_policy(
     based_on: str,
     imported_by: str,
     approved_by: str,
+    custom_policy: bool = False,
 ) -> dict[str, Any]:
     """Store the file after the approval; return what happened.
 
@@ -495,7 +564,9 @@ async def apply_policy(
         raise PolicyApplyError("The file does not match its SHA-256. Run the import again.")
     lock_id = tenant_id if scope == "tenant" and tenant_id is not None else _INSTALL_LOCK_ID
     await _lock_tenant_policy(session, lock_id)
-    plan = await build_plan(session, scope=scope, tenant_id=tenant_id, content=content)
+    plan = await build_plan(
+        session, scope=scope, tenant_id=tenant_id, content=content, custom_policy=custom_policy
+    )
     if plan.based_on != based_on:
         raise PolicyApplyError(POLICY_CHANGED)
     if plan.mistakes or plan.document is None or plan.diff is None:
@@ -552,6 +623,24 @@ def _dump(value: Any) -> str:
     return text
 
 
+async def _part_mistakes(
+    session: AsyncSession,
+    content: bytes,
+    parsed: ParsedPolicy,
+    scope: Scope,
+    tenant_id: uuid.UUID | None,
+) -> list[str]:
+    """The mistakes of the ``risk_levels`` part, each edit read back as :func:`_dump` writes it."""
+    return await risk_levels_mistakes(
+        session,
+        content=content,
+        in_file=parsed.risk_levels_in_file,
+        write=_dump,
+        scope=scope,
+        tenant_id=tenant_id,
+    )
+
+
 async def _no_effect_notes(
     session: AsyncSession, tenant_id: uuid.UUID | None, entries: list[dict[str, Any]]
 ) -> dict[int, list[str]]:
@@ -585,8 +674,21 @@ async def _no_effect_notes(
     return notes
 
 
-async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.UUID | None) -> str:
+async def export_policy(
+    session: AsyncSession,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID | None,
+    custom_policy: bool = False,
+) -> str:
     """The stored policy of *scope* as a ``policy: v1`` file (see :func:`_stored_document`).
+
+    The file holds the stored ``limits`` and ``agents`` parts, and the
+    ``risk_levels`` part with the risk-level edits of *scope*
+    (:func:`~meho_backplane.policy.risk_levels.stored_risk_levels`), only
+    when *custom_policy* says the ``CUSTOM_POLICY`` switch is on; with it
+    off, the exported file imports again. The file has no ``risk_levels``
+    part when *scope* has no risk-level edit. The export only reads.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
@@ -602,15 +704,22 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
     """
     document = normalise_document(await _stored_document(session, scope, tenant_id))
     head: dict[str, Any] = {"policy": POLICY_VERSION}
-    for key in ("description", "taxonomy"):
+    for key in ("description", "taxonomy", *(("limits",) if custom_policy else ())):
         if key in document:
             head[key] = document[key]
     routes = list(document.get("routing") or [])
-    bindings: dict[str, Any] = {}
+    end: dict[str, Any] = {}
     if document.get("bindings"):
-        bindings["bindings"] = list(document["bindings"])
+        end["bindings"] = list(document["bindings"])
     elif scope == "tenant" and routing_enabled():
-        bindings["bindings"] = shipped_binding_documents(get_settings())
+        end["bindings"] = shipped_binding_documents(get_settings())
+    if custom_policy and document.get("agents"):
+        end["agents"] = document["agents"]
+    edits = (
+        await stored_risk_levels(session, scope=scope, tenant_id=tenant_id) if custom_policy else []
+    )
+    if edits:
+        end["risk_levels"] = edits
     entries = list(document.get("classifications") or [])
     route_notes = (
         tenant_wider_notes(document, await _stored_document(session, "install", None))
@@ -619,14 +728,14 @@ async def export_policy(session: AsyncSession, *, scope: Scope, tenant_id: uuid.
     )
     if not entries and not route_notes:
         tail = {"routing": routes} if routes else {}
-        return _dump({**head, "classifications": [], **tail, **bindings})
+        return _dump({**head, "classifications": [], **tail, **end})
     notes = await _no_effect_notes(session, tenant_id, entries) if scope == "tenant" else {}
     parts = [_dump(head)]
     parts.append(_noted("classifications", entries, notes, "Has no effect"))
     if routes:
         parts.append(_noted("routing", routes, route_notes, "Has no effect where wider"))
-    if bindings:
-        parts.append(_dump(bindings))
+    if end:
+        parts.append(_dump(end))
     return "".join(parts)
 
 

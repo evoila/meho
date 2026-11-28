@@ -182,6 +182,7 @@ async def register_harbor_project_create_operation(
         tags=["write", "harbor", "project"],
         safety_level="caution",
         requires_approval=True,
+        changes_rights=True,
         llm_instructions=_PROJECT_CREATE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

@@ -1,0 +1,1974 @@
+{
+  "Admin, token / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, token / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, token / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, token / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Admin, token / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, web console / caution": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Admin, web console / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; in the web interface only safe and caution operations run at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, web console / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Admin, web console / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Admin, web console / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, token / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, token / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, token / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, token / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Operator, token / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, web console / caution": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Operator, web console / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; in the web interface only safe and caution operations run at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, web console / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Operator, web console / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Operator, web console / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, token / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, token / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; a call made with a token runs only safe operations at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, token / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, token / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Platform admin, token / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, web console / caution": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Platform admin, web console / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; in the web interface only safe and caution operations run at once, so this waits for an approval click (#3980)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, web console / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "Platform admin, web console / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "Platform admin, web console / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "web"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  },
+  "agent login / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "agent",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "verdict=needs-approval; source=safety_level default (caution)",
+      "verdict": "wait"
+    }
+  },
+  "agent login / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "agent",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "verdict=needs-approval; source=safety_level default (dangerous)",
+      "verdict": "wait"
+    }
+  },
+  "agent login / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "agent",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "verdict=needs-approval; source=safety_level default (destructive)",
+      "verdict": "wait"
+    }
+  },
+  "agent login / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "agent",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": "verdict=auto-execute; source=safety_level default (safe)",
+      "verdict": "run"
+    }
+  },
+  "agent login / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "agent",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "verdict=auto-execute; source=safety_level default (safe); floored to needs-approval (descriptor.requires_approval)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Admin, token / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for adm-token: verdict=needs-approval; source=safety_level default (caution)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Admin, token / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for adm-token: verdict=needs-approval; source=safety_level default (dangerous)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Admin, token / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "tenant_admin",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for adm-token: verdict=auto-execute; source=safety_level default (safe); floored to needs-approval (descriptor.requires_approval)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Operator, token / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for op-token: verdict=needs-approval; source=safety_level default (caution)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Operator, token / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for op-token: verdict=needs-approval; source=safety_level default (dangerous)",
+      "verdict": "wait"
+    }
+  },
+  "hosted run, Operator, token / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": "default"
+    },
+    "asker": {
+      "groups": [],
+      "kind": "user",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "agent agent:hosted acting for op-token: verdict=auto-execute; source=safety_level default (safe); floored to needs-approval (descriptor.requires_approval)",
+      "verdict": "wait"
+    }
+  },
+  "service login / caution": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "service",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "caution"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.caution",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=caution mutating op; service-principal mutations park unless a standing grant covers them (#3152)",
+      "verdict": "wait"
+    }
+  },
+  "service login / dangerous": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "service",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "dangerous"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.dangerous",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=dangerous; service-principal mutations park (routed to the approval queue) unless a standing grant covers them (#3152)",
+      "verdict": "wait"
+    }
+  },
+  "service login / destructive": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "service",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "destructive"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "destructive_preview_binding",
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.destructive",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "safety_level=destructive; mandatory human approval \u2014 every non-agent principal parks (routed to the approval queue), never auto-executes, and no standing grant can pre-clear it (#3183)",
+      "verdict": "wait"
+    }
+  },
+  "service login / safe": {
+    "answer": "run",
+    "approvers": null,
+    "asker": {
+      "groups": [],
+      "kind": "service",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": false,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "auto-execute",
+      "reason": null,
+      "verdict": "run"
+    }
+  },
+  "service login / safe-marked": {
+    "answer": "wait",
+    "approvers": {
+      "floor": null,
+      "groups": [
+        "MEHO-Operators",
+        "MEHO-Admins"
+      ],
+      "rule": null
+    },
+    "asker": {
+      "groups": [],
+      "kind": "service",
+      "me": true,
+      "role": "operator",
+      "via": "token"
+    },
+    "classification": {
+      "category": null,
+      "entries": [],
+      "labels": {},
+      "requires_approval": true,
+      "risk_level": "safe"
+    },
+    "connector_id": "demo-1.x",
+    "decided_by": "today",
+    "engine": "off",
+    "error": null,
+    "evaluator": null,
+    "extras": null,
+    "file": false,
+    "not_checked": [
+      "idempotency_key",
+      "connector_resolution"
+    ],
+    "op_id": "demo.vm.safe-marked",
+    "request": null,
+    "status": "ok",
+    "target": null,
+    "today": {
+      "policy_verdict": "needs-approval",
+      "reason": "requires_approval is True; routed to the approval queue (G11.7-T1)",
+      "verdict": "wait"
+    }
+  }
+}

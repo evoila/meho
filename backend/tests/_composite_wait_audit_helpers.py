@@ -372,11 +372,14 @@ async def request(request_id: UUID) -> ApprovalRequest:
         return found
 
 
-async def approve(request_id: UUID, *, sub: str = "op-approver") -> ApprovalRequest:
+async def approve(
+    request_id: UUID, *, sub: str = "op-approver", role: TenantRole = TenantRole.OPERATOR
+) -> ApprovalRequest:
     """A second person approves; returns the approved row."""
+    approver = operator(sub=sub).model_copy(update={"tenant_role": role})
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
-        await approve_request(s, request_id, operator=operator(sub=sub), params=None)
+        await approve_request(s, request_id, operator=approver, params=None)
         await s.commit()
     return await request(request_id)
 

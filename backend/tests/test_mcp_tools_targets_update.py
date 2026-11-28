@@ -12,8 +12,10 @@ The ``targets.update`` operation itself is covered in
   ``tools/call`` is refused.
 * A ``tenant_admin``'s call and an agent's call wait for approval and
   change nothing until a person approves them.
-* A field outside the schema, and a call without ``target_id``, give
-  ``-32602``.
+* A call with ``extras_changes`` waits, and after the approval and the run
+  the named key changes and every other key keeps its value and its type.
+* A field outside the schema, a call with ``extras`` and ``extras_changes``,
+  and a call without ``target_id``, give ``-32602``.
 """
 
 from __future__ import annotations
@@ -36,6 +38,10 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from tests._targets_helpers import _insert_target
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -81,6 +87,13 @@ async def _stored_ref(target_id: uuid.UUID) -> str | None:
         row = await session.get(TargetORM, target_id)
     assert row is not None
     return row.secret_ref
+
+
+async def _stored_extras(target_id: uuid.UUID) -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        row = await session.get(TargetORM, target_id)
+    assert row is not None
+    return dict(row.extras)
 
 
 async def _approval_count() -> int:
@@ -192,6 +205,51 @@ async def test_an_agent_call_waits_for_approval(
     assert await _stored_ref(_seeded_target.id) == _OLD_REF
 
 
+async def test_an_extras_changes_call_waits_then_changes_only_the_named_key(
+    _agent_client: TestClient,
+    _seeded_target: TargetORM,
+) -> None:
+    start = {"tags": ["a"], "limits": {"cpu": 2}, "strict": True, "retries": 3, "gone": "x"}
+    async with get_sessionmaker()() as session, session.begin():
+        stored = await session.get(TargetORM, _seeded_target.id)
+        assert stored is not None
+        stored.extras = dict(start)
+
+    body = _update_call(
+        _agent_client,
+        {
+            "target_id": str(_seeded_target.id),
+            "extras_changes": {"retries": 4, "gone": None},
+        },
+    )
+
+    payload = body["result"]["structuredContent"]
+    assert payload["status"] == "awaiting_approval", body
+    assert await _stored_extras(_seeded_target.id) == start
+    approver = Operator(
+        sub="second-person",
+        name=None,
+        email=None,
+        raw_jwt="fixture-jwt-not-real",
+        tenant_id=OPERATOR_TENANT_ID,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        principal_kind=PrincipalKind.USER,
+        web_session=True,
+    )
+    async with get_sessionmaker()() as session:
+        approved = await approve_request(
+            session, uuid.UUID(payload["approval_request_id"]), operator=approver
+        )
+        await session.commit()
+    result = await resume_dispatch_after_approval(operator=approver, request=approved)
+
+    assert result.status == "ok", result
+    extras = await _stored_extras(_seeded_target.id)
+    assert extras == {"tags": ["a"], "limits": {"cpu": 2}, "strict": True, "retries": 4}
+    assert type(extras["strict"]) is bool
+    assert type(extras["retries"]) is int
+
+
 # ---------------------------------------------------------------------------
 # Refused input
 # ---------------------------------------------------------------------------
@@ -204,8 +262,9 @@ async def test_an_agent_call_waits_for_approval(
         {"secret_ref": "tenants/x/y", "name": "renamed"},
         {"secret_ref": "tenants/x/y", "fingerprint": {"vendor": "x"}},
         {"secret_ref": "tenants/x/y", "tenant_id": str(uuid.uuid4())},
+        {"extras": {"a": 1}, "extras_changes": {"b": 2}},
     ],
-    ids=["rename", "fingerprint", "tenant_id"],
+    ids=["rename", "fingerprint", "tenant_id", "extras-and-extras-changes"],
 )
 async def test_a_field_outside_the_schema_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811

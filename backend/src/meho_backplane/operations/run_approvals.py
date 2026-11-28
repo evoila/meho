@@ -42,8 +42,9 @@ Rules that never change:
 * An operation that a connector marks for per-call approval
   (:func:`~meho_backplane.op_classes.needs_per_call_approval`) is never
   covered either.
-* An operation that reads, writes or makes a credential (the classes
-  ``credential_read``, ``credential_write`` and ``credential_mint``,
+* An operation that reads, writes, makes or uses a credential (the classes
+  ``credential_read``, ``credential_write``, ``credential_mint`` and
+  ``credential_use``,
   :func:`~meho_backplane.operations.service_grants.credential_grant_reason`)
   is never covered either: each call waits for a person. A request that
   lists one is refused. A request made before this rule can still list

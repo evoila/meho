@@ -20,10 +20,10 @@ checks it (:mod:`meho_backplane.operations.role_floors`).
   ``tenant_admin`` approves it, and the agent's own resume then runs.
 * **After approval** -- the approver's role counts again when a person
   runs the approved call: an ``operator`` approver is refused, a
-  ``tenant_admin`` approver runs the call. The requester's own run is
-  not checked again, the person's approval is the authorization: an
-  agent's own resume runs, and a service login with the ``operator``
-  role runs its approved call again after a failed run.
+  ``tenant_admin`` approver runs the call. The requester's own run gets
+  the checks of its own login: an agent's own resume runs, and a service
+  login with the ``operator`` role runs its approved call again after a
+  failed run (the floor applies to people).
 * **The topology writes** -- the same rule on all five.
 """
 
@@ -66,7 +66,11 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError, approve_request
 from meho_backplane.operations.approval_rerun import rerun_failed_request
 from meho_backplane.operations.meta_tools import preview_operation
-from meho_backplane.operations.role_floors import role_floor_denial, role_floor_for
+from meho_backplane.operations.role_floors import (
+    READER_CHANGE_SENTENCE,
+    role_floor_denial,
+    role_floor_for,
+)
 from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_known_person
@@ -262,7 +266,9 @@ async def test_a_person_below_the_floor_is_denied(_registered_ops: None, role: T
 
     assert result.status == "denied", result
     assert result.error is not None
-    assert "tenant_admin" in result.error
+    # A Reader who asks for a change is refused first, with the plain sentence.
+    expected = "tenant_admin" if role is TenantRole.OPERATOR else READER_CHANGE_SENTENCE
+    assert expected in result.error
     assert await _target_rows() == []
     assert await _approval_rows() == []
     (audit,) = await _audit_rows(TARGETS_REGISTER_OP_ID)
@@ -328,7 +334,7 @@ async def test_a_service_login_still_waits_for_approval(
 async def test_a_person_below_the_floor_cannot_approve_the_parked_call(
     _registered_ops: None, role: TenantRole
 ) -> None:
-    """The approval is the authorization for every resume, so the approver needs the role."""
+    """The approver is read as recorded at the decision on every resume, so they need the role."""
     agent = _person(TenantRole.OPERATOR, kind=PrincipalKind.AGENT, sub="agent:a")
     request_id = await _park_for_approval(agent)
     # ``approver=True`` lets a ``read_only`` person decide requests at all.

@@ -105,6 +105,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.op_classes import (
+    CREDENTIAL_OP_CLASSES,
     is_credential_capable,
     needs_per_call_approval,
     params_make_credential_call,
@@ -116,11 +117,13 @@ from meho_backplane.operations.credential_read import has_credential_read_floor
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate, ServiceGrantRead
 from meho_backplane.policy.explain_asker import WHAT_IF_SUB, WHAT_IF_SUB_REFUSAL
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_mode_active
 
 __all__ = [
     "CREDENTIAL_CARD_LINE",
     "CREDENTIAL_CLASSES",
+    "CREDENTIAL_USE_CARD_LINE",
     "DeleteGrantConsoleOnlyError",
     "DeleteGrantNeedsTenantAdminError",
     "GrantModel",
@@ -136,11 +139,13 @@ __all__ = [
     "credential_refusal",
     "delete_grant_reason",
     "delete_shaped_refusal_reason",
+    "descriptor_credential_card_line",
     "descriptor_credential_reason",
     "descriptor_credential_waits",
     "find_live_grant",
     "never_covered_reason",
     "null_target_only_park_hint",
+    "only_uses_credential",
     "per_call_approval_grant_reason",
 ]
 
@@ -323,10 +328,10 @@ def delete_grant_reason(
 
     One rule for every reader: a configured name pattern, a vendor delete
     action name (#4632), and, when a descriptor is given, the ``destructive``
-    safety level, the HTTP verb ``DELETE`` or the ``destructive`` tag.
-    ``None`` when the op has no delete sign. In sandbox mode (#4622) an op
-    with a delete sign needs a delete grant; elsewhere it can never be
-    granted.
+    safety level, the HTTP verb ``DELETE``, the ``destructive`` tag or, with
+    the switch ``CUSTOM_POLICY`` on, ``hard_to_undo``. ``None`` when the
+    op has no delete sign. In sandbox mode (#4622) an op with a delete sign
+    needs a delete grant; elsewhere it can never be granted.
     """
     reason = delete_shaped_refusal_reason(op_id, patterns)
     if reason is None and descriptor is not None:
@@ -334,17 +339,15 @@ def delete_grant_reason(
     return reason
 
 
-#: The op classes of an operation that reads, writes or makes a credential.
-CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_write", "credential_mint"}
-)
+#: The op classes of an operation that reads, writes, makes or uses a credential.
+CREDENTIAL_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES
 
 
 def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
     """Return why no grant and no run approval covers *op_id*, or ``None`` when one can.
 
-    An operation that reads, writes or makes a credential (the classes in
-    :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
+    An operation that reads, writes, makes or uses a credential (the classes
+    in :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
     grant, no agent grant and no run approval covers it. The class comes
     from *stored_op_class* (the class a connector's safety floor stored on
     the row of an ingested operation) and from the op id
@@ -358,13 +361,22 @@ def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> s
         and resolve_op_class(op_id, stored_op_class) not in CREDENTIAL_CLASSES
     ):
         return None
-    return _credential_reason_text(op_id)
+    return _credential_reason_text(op_id, only_uses=only_uses_credential(op_id, stored_op_class))
 
 
-def _credential_reason_text(op_id: str) -> str:
+def only_uses_credential(op_id: str, stored_op_class: str | None = None) -> bool:
+    """True for a ``credential_use`` operation that no connector marked credential capable."""
+    return (
+        not is_credential_capable(op_id)
+        and resolve_op_class(op_id, stored_op_class) == "credential_use"
+    )
+
+
+def _credential_reason_text(op_id: str, *, only_uses: bool) -> str:
+    action = "uses a credential" if only_uses else "reads, writes or makes a credential"
     return (
         f"A standing grant, an agent grant or a run approval never covers {op_id!r}: "
-        "it reads, writes or makes a credential, so a person approves each call."
+        f"it {action}, so a person approves each call."
     )
 
 
@@ -382,7 +394,8 @@ def credential_refusal(op_id: str, stored_op_class: str | None = None) -> str | 
 def credential_call_waits(op_id: str, stored_op_class: str | None = None) -> bool:
     """Return whether a call of *op_id* waits for a person because of its credential class.
 
-    True for every ``credential_mint`` and ``credential_write`` operation.
+    True for every ``credential_mint``, ``credential_write`` and
+    ``credential_use`` operation.
     A ``credential_read`` operation waits when its floor applies
     (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`):
     a read that is marked in code as one that returns no secret value runs
@@ -405,6 +418,12 @@ CREDENTIAL_CARD_LINE: Final[str] = (
     "so no standing grant, agent grant or run approval covers it."
 )
 
+#: The line on the approval card of a ``credential_use`` call.
+CREDENTIAL_USE_CARD_LINE: Final[str] = (
+    "This call waits for a person every time: it uses a credential, "
+    "so no standing grant, agent grant or run approval covers it."
+)
+
 
 def descriptor_credential_reason(descriptor: EndpointDescriptor) -> str | None:
     """:func:`credential_grant_reason` for the row of one call.
@@ -414,8 +433,17 @@ def descriptor_credential_reason(descriptor: EndpointDescriptor) -> str | None:
     :func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     if getattr(descriptor, "credential_call", False):
-        return _credential_reason_text(descriptor.op_id)
+        return _credential_reason_text(descriptor.op_id, only_uses=False)
     return credential_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None))
+
+
+def descriptor_credential_card_line(descriptor: EndpointDescriptor) -> str:
+    """The approval card line of a credential call: :data:`CREDENTIAL_USE_CARD_LINE` for a use."""
+    if not getattr(descriptor, "credential_call", False) and only_uses_credential(
+        descriptor.op_id, getattr(descriptor, "op_class", None)
+    ):
+        return CREDENTIAL_USE_CARD_LINE
+    return CREDENTIAL_CARD_LINE
 
 
 def descriptor_credential_waits(descriptor: EndpointDescriptor) -> bool:
@@ -521,9 +549,12 @@ def _sandbox_delete_exception(
     :func:`~meho_backplane.op_classes.declare_sandbox_delete_grant`; the op
     has no credential class; the params (when known) do not make the call a
     credential call; no other rule of :func:`never_covered_reason`
-    holds; and the op has a delete sign (:func:`delete_grant_reason`). Only a
-    delete grant may then cover the call: no standing grant, no agent grant
-    and no run approval does.
+    holds; and the op has a delete sign other than ``hard_to_undo``: a
+    configured name pattern, a vendor delete action name, the
+    ``destructive`` level, the HTTP verb ``DELETE`` or the ``destructive``
+    tag. ``hard_to_undo`` never opens the exception, with the switch
+    ``CUSTOM_POLICY`` on or off. Only a delete grant may then cover the
+    call: no standing grant, no agent grant and no run approval does.
     """
     from meho_backplane.settings import get_settings
 
@@ -540,7 +571,9 @@ def _sandbox_delete_exception(
     ):
         return False
     patterns = get_settings().service_grant_delete_shaped_patterns
-    return delete_grant_reason(op_id, patterns, descriptor) is not None
+    if delete_shaped_refusal_reason(op_id, patterns) is not None:
+        return True
+    return descriptor is not None and _delete_reason_by_descriptor_fields(descriptor) is not None
 
 
 def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
@@ -608,7 +641,20 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
     ``destructive``-tagged typed ops are the shapes an operator resolves
     into the ``destructive`` tier, so once the tier is set it is itself the
     authoritative signal.
+
+    With the switch ``CUSTOM_POLICY`` on, a fourth sign counts: the
+    operation's own definition says a call is hard to undo
+    (:attr:`~meho_backplane.db.models.EndpointDescriptor.hard_to_undo`).
+    With the switch off, the field changes no answer.
     """
+    reason = _delete_reason_by_descriptor_fields(descriptor)
+    if reason is None:
+        reason = _hard_to_undo_reason(descriptor)
+    return reason
+
+
+def _delete_reason_by_descriptor_fields(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason for the level, the HTTP verb or the tag, without ``hard_to_undo``."""
     if descriptor.safety_level == "destructive":
         return (
             f"op {descriptor.op_id!r} is safety_level=destructive; delete-shaped "
@@ -628,6 +674,19 @@ def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str |
             "delete-shaped operations are never grantable"
         )
     return None
+
+
+def _hard_to_undo_reason(descriptor: EndpointDescriptor) -> str | None:
+    """Return a refusal reason when the switch is on and the op is hard to undo."""
+    from meho_backplane.settings import get_settings
+
+    kind = getattr(descriptor, "hard_to_undo", None)
+    if kind is None or not custom_policy_on(get_settings()):
+        return None
+    return (
+        f"op {descriptor.op_id!r} is hard to undo (hard_to_undo={kind!r}); "
+        "it counts as a delete, so no standing grant and no run approval covers it"
+    )
 
 
 async def _resolve_descriptor_for_classification(

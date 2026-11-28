@@ -145,11 +145,17 @@ first two are always needed:
    `writes` module.
 4. **Declare the op classes**, if an operation needs an exact class for
    the broadcast feed, the approval queue and the flight recorder: a read
-   whose answer holds a secret (`credential_read`), a change that returns
-   a new secret (`credential_mint`), a change whose request carries or
-   sends a secret (`credential_write`), or a change whose op id does not
-   end in a write word (`write`). The package does this in its own
-   `op_classes.py`, imported from `__init__.py`:
+   whose answer holds a secret (`credential_read`), a change that makes
+   a new credential (`credential_mint`), a change that sets, changes or
+   stores a password, key, token or certificate (`credential_write`), a
+   call that carries or sends a secret but writes and makes no credential
+   (`credential_use`), or a change whose op id does not end in a write
+   word (`write`). A `credential_use` operation does not count as a
+   write for the announce gate, the announce reminder and the target
+   activity warning. An operation that changes the target keeps a class
+   that counts as a write (`write`, `credential_write` or
+   `credential_mint`) and is not declared `credential_use`. The package
+   does this in its own `op_classes.py`, imported from `__init__.py`:
 
    ```python
    # meho_backplane/connectors/example_widget/op_classes.py
@@ -795,10 +801,17 @@ build refuses a connector package without a range, and uv refuses a range
 that the kit in the image does not fit. MEHO checks the range again at
 start (see "The kit range at start").
 
-- The **first** number goes up when a name is removed or its inputs change.
+- The **first** number goes up when a name is removed, or its inputs
+  change in a way that can break a package: a new input that can be given
+  by its place, a new input with no default, a changed default, type or
+  meaning of an input that exists, a new input on a function with a `**`
+  input, or any other change of the name (for example its answer type).
   A package may break.
-- The **second** number goes up when names are only added, or a name is
-  marked as old.
+- The **second** number goes up when names are only added, a name is
+  marked as old, or a function only gets new inputs that are given only by
+  name (after the `*` or after a `*args` input) and have a default. A
+  function with no such input before may get the `*` together with the
+  new inputs. A package keeps working.
 
 For three classes, the kit also promises some of their insides:
 `HttpConnector` (`__init__`, `auth_headers`, `aclose`,
@@ -827,6 +840,16 @@ For every other class the kit promises only the name.
    `uv run python -m scripts.write_connector_kit_names`, then `uv lock`.
    The command writes the list file again, raises the right number of the
    kit version, and writes the version into the kit's `pyproject.toml`.
+   The first number goes up when a name is removed, or its inputs change
+   in a way that can break a package: a new input that can be given by its
+   place, a new input with no default, a changed default, type or meaning
+   of an input that exists, a new input on a function with a `**` input,
+   or any other change of the name (for example its answer type). The
+   second number goes up when names are only added, a name is marked as
+   old, or a function only gets new inputs that are given only by name
+   (after the `*` or after a `*args` input) and have a default. A function
+   with no such input before may get the `*` together with the new inputs.
+   `scripts/release/check_connector_kit_release.py` uses the same rule.
 4. **The owner.** `.github/CODEOWNERS` names the kit owner for
    `backend/connector-kit/`, so the pull request asks the kit owner to
    review the changed list file. It is a required review only when the

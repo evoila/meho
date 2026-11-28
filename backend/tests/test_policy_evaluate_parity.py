@@ -350,7 +350,7 @@ def _today_class(verdict: PermissionVerdict, reason: str | None) -> str:
         if "permission row" in text or "tied rows" in text:
             return "agent_grant"
         return "default"
-    if "role; your role is" in text:
+    if "role; your role is" in text or text.startswith("insufficient_role: "):
         return "role_floor"
     if "agent_no_grant" in text:
         return "agent_no_grant"

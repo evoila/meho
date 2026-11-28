@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -64,6 +65,9 @@ type updateFlags struct {
 	preferredImpl string
 	note          string
 	extras        []string
+	setExtras     []string
+	setExtrasJSON []string
+	unsetExtras   []string
 	secretFields  []string
 	clear         []string
 }
@@ -77,6 +81,8 @@ type updateFlags struct {
 //	  [--secret-ref <ref>] [--auth-model <m>] [--verify-tls=false] \
 //	  [--tls-ca-pin <pin>] [--tls-server-name <sni>] [--vpn-required=bool] \
 //	  [--preferred-impl <id>] [--note <n>] [--extra key=value ...] \
+//	  [--set-extra key=value ...] [--set-extra-json key=<json> ...] \
+//	  [--unset-extra key ...] \
 //	  [--secret-field <connector_field>=<source_field> ...] \
 //	  [--clear <field> ...] [--json] [--backplane <url>]
 //
@@ -102,6 +108,15 @@ func newUpdateCmd() *cobra.Command {
 			"Only the flags you pass are sent; every other field keeps its " +
 			"current value. The flags match `meho targets add`.\n\n" +
 			dispatch.RESTWriteApprovalNote +
+			"`--set-extra key=value` (repeatable) sets one key of `extras` as " +
+			"text, `--set-extra-json key=<json>` sets one key with its JSON " +
+			"type (a number, true or false, a list, a map), and " +
+			"`--unset-extra key` removes one key. Every other key keeps its " +
+			"value and its type, also a key that was added while the change " +
+			"waited for approval. The answer of such a change names the keys " +
+			"that were set and removed, not their values. To see the values, " +
+			"read the target with `meho targets describe`. They cannot be " +
+			"used with `--extra`.\n\n" +
 			"`--alias` replaces the whole alias list, and `--extra " +
 			"key=value` replaces the whole `extras` map (pass every key " +
 			"you want to keep). `--clear <field>` (repeatable) removes a " +
@@ -164,6 +179,12 @@ func registerUpdateFlags(cmd *cobra.Command, f *updateFlags) {
 	fs.StringVar(&f.note, "note", "", "free-form operator note stored on the target")
 	fs.StringArrayVar(&f.extras, "extra", nil,
 		"key=value for the target's extras map, e.g. scheme=http (repeatable; replaces the whole map)")
+	fs.StringArrayVar(&f.setExtras, "set-extra", nil,
+		"key=value to set in the extras map as text; the other keys stay (repeatable)")
+	fs.StringArrayVar(&f.setExtrasJSON, "set-extra-json", nil,
+		"key=<json> to set in the extras map with its JSON type, e.g. retries=3 or tags=[\"a\"] (repeatable)")
+	fs.StringArrayVar(&f.unsetExtras, "unset-extra", nil,
+		"key to remove from the extras map; the other keys stay (repeatable)")
 	fs.StringArrayVar(&f.secretFields, "secret-field", nil,
 		"connector_field=source_field to add or replace in the secret field map; connector_field= removes it (repeatable)")
 	fs.StringArrayVar(&f.clear, "clear", nil,
@@ -207,6 +228,11 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 		}
 		body["extras"] = parsed
 	}
+	if changes, cerr := buildExtrasChanges(cmd, f); cerr != nil {
+		return nil, cerr
+	} else if changes != nil {
+		body["extras_changes"] = changes
+	}
 	if fs.Changed("secret-field") {
 		parsed, perr := parseSecretFieldFlags(f.secretFields, true)
 		if perr != nil {
@@ -232,6 +258,86 @@ func buildUpdateBody(cmd *cobra.Command, f *updateFlags) (map[string]any, *outpu
 			"nothing to update: pass at least one field flag or --clear")
 	}
 	return body, nil
+}
+
+// buildExtrasChanges folds `--set-extra`, `--set-extra-json` and
+// `--unset-extra` into the `extras_changes` body: a value sets that key,
+// null removes it. It returns nil when none of the three flags is set. A
+// key named twice, a value that is not JSON, and a mix with `--extra` or
+// `--clear extra` (which replace the whole map) are errors.
+func buildExtrasChanges(cmd *cobra.Command, f *updateFlags) (map[string]any, *output.StructuredError) {
+	fs := cmd.Flags()
+	if !fs.Changed("set-extra") && !fs.Changed("set-extra-json") && !fs.Changed("unset-extra") {
+		return nil, nil
+	}
+	if fs.Changed("extra") || slices.Contains(f.clear, "extra") {
+		return nil, output.Unexpected(
+			"--set-extra, --set-extra-json and --unset-extra change single keys; " +
+				"they cannot be used with --extra or --clear extra, which replace the whole map")
+	}
+	changes := map[string]any{}
+	add := func(key string, value any) *output.StructuredError {
+		if _, dup := changes[key]; dup {
+			return output.Unexpected(fmt.Sprintf(
+				"extras key %q is named more than once; name each key one time", key))
+		}
+		changes[key] = value
+		return nil
+	}
+	for _, pair := range f.setExtras {
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok || key == "" {
+			return nil, output.Unexpected("invalid --set-extra: expected key=value")
+		}
+		if err := add(key, value); err != nil {
+			return nil, err
+		}
+	}
+	for _, pair := range f.setExtrasJSON {
+		key, raw, ok := strings.Cut(pair, "=")
+		if !ok || key == "" {
+			return nil, output.Unexpected("invalid --set-extra-json: expected key=<json>")
+		}
+		value, ok := decodeJSONValue(raw)
+		if !ok {
+			// The value may be a secret, so the text names only the key.
+			return nil, output.Unexpected(fmt.Sprintf(
+				"invalid --set-extra-json for key %q: the value is not JSON", key))
+		}
+		if value == nil {
+			return nil, output.Unexpected(fmt.Sprintf(
+				"invalid --set-extra-json for key %q: null removes a key, use --unset-extra %s", key, key))
+		}
+		if err := add(key, value); err != nil {
+			return nil, err
+		}
+	}
+	for _, key := range f.unsetExtras {
+		if key == "" {
+			return nil, output.Unexpected("invalid --unset-extra: the key is empty")
+		}
+		if err := add(key, nil); err != nil {
+			return nil, err
+		}
+	}
+	return changes, nil
+}
+
+// decodeJSONValue decodes one JSON value and keeps each number as the
+// digits typed (json.Number), also inside a list or a map, so a big number
+// is not rounded to a float64. ok is false when raw is not exactly one
+// JSON value.
+func decodeJSONValue(raw string) (any, bool) {
+	if !json.Valid([]byte(raw)) {
+		return nil, false
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 // clearValue returns the TargetUpdate key and the value `--clear name`

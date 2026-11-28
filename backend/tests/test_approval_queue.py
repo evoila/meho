@@ -87,6 +87,12 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.policy.stamp import RuleStamp
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_agent_a_known_person
+from tests._secret_class_standins import (  # noqa: F401 -- standin_ops is a fixture
+    NOTE,
+    STANDIN_OPS,
+    made_up_value,
+    standin_ops,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level handlers (closures are rejected by derive_handler_ref)
@@ -267,22 +273,26 @@ async def test_create_pending_request_inserts_row(session: AsyncSession) -> None
 
 
 @pytest.mark.asyncio
-async def test_credential_write_parks_only_an_opaque_handle(session: AsyncSession) -> None:
-    """Credential-write inputs never persist on the approval row or read views."""
+@pytest.mark.usefixtures("standin_ops")
+@pytest.mark.parametrize("op_class", sorted(STANDIN_OPS))
+async def test_credential_write_parks_only_an_opaque_handle(
+    session: AsyncSession, op_class: str
+) -> None:
+    """The inputs of a credential write or use never persist on the approval row or read views."""
     from meho_backplane.api.v1.approvals import _view
     from meho_backplane.mcp.tools.approvals import _row_to_dict
 
-    secret = "test-only-credential-value"
-    params = {"path": "kv/app", "value": secret}
+    secret = made_up_value()
+    params = {"path": "kv/app", NOTE: secret}
     request = await create_pending_request(
         session,
         operator=_make_operator(),
-        connector_id="vault-1.x",
-        op_id="vault.kv.put",
+        connector_id="standin-1.x",
+        op_id=STANDIN_OPS[op_class],
         target=None,
         params=params,
         params_hash=compute_params_hash(params),
-        resume_parent={"op_id": "composite.rotate", "params": {"password": secret}},
+        resume_parent={"op_id": "composite.rotate", "params": {NOTE: secret}},
     )
     await session.commit()
 
@@ -1006,7 +1016,11 @@ async def test_approve_and_reject_reason_payloads_are_symmetric(
     assert reject_payload["reason"] == "why-reject"
     # Same key set up to the decision-specific value, plus the two
     # approval-only fields (#3328).
-    assert set(approve_payload) == set(reject_payload) | {"self_approved", "approval_rule"}
+    assert set(approve_payload) == set(reject_payload) | {
+        "self_approved",
+        "approval_rule",
+        "approver_may_approve_high_risk",
+    }
 
 
 @pytest.mark.asyncio

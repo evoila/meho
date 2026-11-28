@@ -478,18 +478,25 @@ async def _register_op(
     )
 
 
+@pytest.mark.parametrize("custom_policy", [False, True], ids=["switch-off", "switch-on"])
 @pytest.mark.parametrize("session", [_SESSION, None], ids=["mcp-session", "cli-no-session"])
 async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     session: UUID | None,
+    custom_policy: bool,
     stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agent + enabled tenant + caution write + no claim -> denied, both surfaces.
 
     Parametrised over an MCP session and a session-less CLI dispatch: the
     gate keys on announce-state, not on the surface, so both are rejected
     identically -- the shared-dispatch parity the acceptance criteria
-    require.
+    require. With ``CUSTOM_POLICY`` on, the row names ``gate:deny`` and
+    keeps the evaluator's rule, which let the call run, as its shadow.
     """
+    monkeypatch.setenv("CUSTOM_POLICY", "true" if custom_policy else "false")
+    monkeypatch.setenv("POLICY_ENGINE_SHADOW", "true")
+    get_settings.cache_clear()
     await _seed_tenant(enabled=True)
     await _register_op("vault.kv.delete", stub_embedding_service)
     with (
@@ -520,6 +527,9 @@ async def test_dispatch_rejected_when_gate_enabled_and_no_claim(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "denied"
     assert result.audit_id == rows[0].id
+    rule = (rows[0].policy_rule, rows[0].payload.get("policy_rule_shadow"))
+    allow = "default:person.web.caution (shadow)"
+    assert rule == (("gate:deny", allow) if custom_policy else (allow, None))
 
 
 async def test_dispatch_rejects_a_write_whose_last_word_is_unknown(

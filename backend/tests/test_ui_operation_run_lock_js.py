@@ -152,7 +152,7 @@ def _real_views(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     )
     _use(monkeypatch, failing)
     with mock, client:
-        running, _ = _run(client, csrf)
+        running = _run(client, csrf)
         run_id = _run_id_of(client)
         failing.release.set()
         deadline = time.monotonic() + 10
@@ -163,7 +163,7 @@ def _real_views(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         quick = _SlowDispatcher(_OK)
         quick.release.set()
         _use(monkeypatch, quick)
-        finished, _ = _run(client, csrf)
+        finished = _run(client, csrf)
     assert running.status_code == 200
     assert "data-run-lock" in running.text
     assert poll.status_code == 400

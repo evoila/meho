@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""A call that reads, writes or makes a credential always waits for a person.
+"""A call that reads, writes, makes or uses a credential always waits for a person.
 
 No standing grant, no agent grant and no run approval covers it. One rule
 says so (``service_grants.never_covered_reason``), for the classes
-``credential_read``, ``credential_write`` and ``credential_mint``.
+``credential_read``, ``credential_write``, ``credential_mint`` and
+``credential_use``.
 
-* The guard goes over every registered operation of the three classes,
+* The guard goes over every registered operation of these classes,
   taken from the registry, plus an ingested row that stores the class and
-  an ingested row whose op id is declared with the class. With a live
+  ingested rows whose op id is declared with a class. With a live
   standing grant, a live run approval and an agent grant row that name it,
   each call that waits for a person still waits, and the shadow evaluator
   gives the same answer as the policy gate. A new operation of one of
@@ -92,6 +93,7 @@ _RUN = "run-credential-calls"
 _MINT = "vault.token.create"
 _STORED_WRITE = "POST:/v1/example/users/{id}/passphrase"
 _DECLARED_WRITE = "PUT:/v1/example/service-keys/{id}"
+_DECLARED_USE = "GET:/v1/example/guests/{id}/files"
 
 _FROM_TODAY = {
     PermissionVerdict.AUTO_EXECUTE: Verdict.RUN,
@@ -120,6 +122,16 @@ def declared_write() -> Iterator[str]:
         yield _DECLARED_WRITE
     finally:
         _DECLARED.pop(_DECLARED_WRITE, None)
+
+
+@pytest.fixture
+def declared_use() -> Iterator[str]:
+    """Declare one raw API op id as ``credential_use`` for one test, as a connector would."""
+    declare_op_classes(credential_use=(_DECLARED_USE,))
+    try:
+        yield _DECLARED_USE
+    finally:
+        _DECLARED.pop(_DECLARED_USE, None)
 
 
 def _service() -> Operator:
@@ -276,14 +288,17 @@ async def test_the_registry_lists_every_credential_write_and_mint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_grant_covers_any_registered_credential_call(declared_write: str) -> None:
+async def test_no_grant_covers_any_registered_credential_call(
+    declared_write: str, declared_use: str
+) -> None:
     async with get_sessionmaker()() as session, session.begin():
         session.add(_ingested_row(_STORED_WRITE, "POST", "credential_write"))
         session.add(_ingested_row(declared_write, "PUT", None))
+        session.add(_ingested_row(declared_use, "GET", None))
     rows = _credential_rows(await _register_all())
     classes = {resolve_op_class(row.op_id, row.op_class) for row in rows}
     assert classes == set(CREDENTIAL_CLASSES)
-    assert {_STORED_WRITE, declared_write, _MINT} <= {row.op_id for row in rows}
+    assert {_STORED_WRITE, declared_write, declared_use, _MINT} <= {row.op_id for row in rows}
     await _name_in_every_grant(rows)
 
     for row in rows:

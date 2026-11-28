@@ -8,6 +8,10 @@
 # Drop `meho-runners` here when the old pool is retired.
 # The two heavy sets: `meho-runners-ci-heavy-queue` (merge-queue runs only)
 # and `meho-runners-ci-heavy` (every other event).
+# `meho-runners-ci-heavy-site2` is the second runner site (unit shards 4-6 of
+# a pull request, and its smoke check). Only the job
+# python-unit-shard-second-site in ci.yml and second-site-smoke.yml may name
+# it; backend/tests/test_ci_second_runner_site.py checks every workflow file.
 #
 # Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
@@ -16,3 +20,16 @@ self-hosted-runner:
     - meho-runners-ci
     - meho-runners-ci-heavy
     - meho-runners-ci-heavy-queue
+    - meho-runners-ci-heavy-site2
+
+# actionlint 1.7.12 does not know the job key `cache-mode` yet (GitHub's
+# "Workflow syntax for GitHub Actions", `jobs.<job_id>.cache-mode`). Only
+# these two files set it. The pattern matches only the message for that one
+# key, so every other message still counts.
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "job" section'
+  .github/workflows/second-site-smoke.yml:
+    ignore:
+      - 'unexpected key "cache-mode" for "job" section'

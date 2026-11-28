@@ -40,9 +40,15 @@
   <header class="meho-reveal">
     <h1 class="font-display text-3xl font-bold tracking-tight">Operator Console</h1>
     <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-subtle">
+      {#- The person's name, never the Keycloak ``sub``. No name
+          in the login token: the line just names the tenant. -#}
+      {% if session_display_name %}
       <span>Signed in as</span>
-      <code class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-muted ring-1 ring-base-content/10">{{ operator_sub }}</code>
+      <span class="font-medium text-muted" data-field="signed-in-name">{{ session_display_name }}</span>
       <span>in tenant</span>
+      {% else %}
+      <span>Signed in to tenant</span>
+      {% endif %}
       <code
         class="rounded-md bg-base-100 px-1.5 py-0.5 font-mono text-xs text-muted ring-1 ring-base-content/10"
         title="{{ tenant_id }}"

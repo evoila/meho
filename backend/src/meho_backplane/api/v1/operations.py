@@ -52,7 +52,7 @@ from meho_backplane.api.v1._freetext_filter import (
     resolve_free_text_filter,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import require_operator_for_call, require_role
 from meho_backplane.no_store import answer_scope, set_no_store
 from meho_backplane.operation_picks.recorder import (
     recorded_background_call,
@@ -130,6 +130,10 @@ router = APIRouter(prefix="/api/v1/operations", tags=["operations"])
 #: :mod:`meho_backplane.api.v1.targets` and
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
+#: For the ``POST`` routes that only read (a preview, a result read).
+_require_operator_read = Depends(require_role(TenantRole.OPERATOR, reads_only=True))
+#: For the general call route: a Reader's answer depends on the operation.
+_require_operator_for_call = Depends(require_operator_for_call)
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 
@@ -370,7 +374,7 @@ async def post_call(
     body: CallOperationBody,
     request: Request,
     response: Response,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_for_call,
 ) -> dict[str, Any]:
     """Invoke :func:`~meho_backplane.operations.dispatch` for an op id.
 
@@ -523,7 +527,7 @@ class ResultQueryBody(BaseModel):
 @router.post("/result-query")
 async def post_result_query(
     body: ResultQueryBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_read,
 ) -> dict[str, Any]:
     """Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.
 
@@ -656,7 +660,7 @@ async def _run_result_query_body(
 @router.post("/preview", response_model_exclude_unset=True)
 async def post_preview(
     body: PreviewOperationBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_operator_read,
 ) -> PreviewOperationResponse:
     """Resolve an op + params to the literal would-be HTTP request, without sending.
 

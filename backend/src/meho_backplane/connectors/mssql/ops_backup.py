@@ -94,7 +94,9 @@ BACKUP_OPS: tuple[MssqlOp, ...] = (
         llm_instructions={
             "when_to_use": (
                 "Back up a database to a disk device the SQL Server service "
-                "account can write. Recoverable; safety_level=caution. " + TDS_TRANSPORT_NOTE
+                "account can write. It overwrites an older backup at the same "
+                "path: that older backup is gone. "
+                "Recoverable; safety_level=caution. " + TDS_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "database": "Required. The database to back up.",
@@ -133,6 +135,8 @@ BACKUP_OPS: tuple[MssqlOp, ...] = (
         tags=("write", "restore", "mssql"),
         safety_level="dangerous",
         requires_approval=True,
+        hard_to_undo="overwrites",
+        changes_rights=True,
         llm_instructions={
             "when_to_use": (
                 "Restore a database from a backup device — OVERWRITES data. "

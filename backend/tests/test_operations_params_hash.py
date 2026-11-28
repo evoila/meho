@@ -349,13 +349,15 @@ async def test_password_operation_audit_hash_does_not_depend_on_the_password(
     await _register(op_id, schema, stub_embedding_service)
 
     for password in ("first-test-value", "second-test-value"):
+        # A credential write always waits for a person: this is the run
+        # after the approval (the approval-queue resume sets ``_approved``).
         result = await dispatch(
-            # A person: an agent's credential write waits for a person.
             operator=_operator("person-hashcheck", PrincipalKind.USER),
             connector_id="hashcheck-1.x",
             op_id=op_id,
             target=_Target(),
             params={**other_params, "password": password},
+            _approved=True,
         )
         assert result.status == "ok", result.error
 

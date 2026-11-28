@@ -101,12 +101,15 @@ def managed_realm_missing_message(name: str | None = None) -> str:
     )
 
 
-def keycloak_realm_problem(extras: Any, name: str | None = None) -> str | None:
+def keycloak_realm_problem(
+    extras: Any, name: str | None = None, *, quote_value: bool = True
+) -> str | None:
     """Say what is wrong with the realms of a Keycloak target, or ``None``.
 
     The managed realm must be set and be a plain name. The admin realm is
     optional (absent, ``None`` or empty means the default); when set, it
-    must be a plain name too.
+    must be a plain name too. With ``quote_value=False`` the text names the
+    field and the reason, not the value.
     """
     if not has_managed_realm(extras):
         return managed_realm_missing_message(name)
@@ -117,14 +120,17 @@ def keycloak_realm_problem(extras: Any, name: str | None = None) -> str | None:
             continue
         problem = realm_name_problem(value)
         if problem is not None:
-            return f"{label}extras.{key} {value!r} is not a plain realm name: {problem}."
+            shown = f" {value!r}" if quote_value else ""
+            return f"{label}extras.{key}{shown} is not a plain realm name: {problem}."
     return None
 
 
-def check_keycloak_managed_realm(product: str | None, extras: Any, name: str | None = None) -> None:
+def check_keycloak_managed_realm(
+    product: str | None, extras: Any, name: str | None = None, *, quote_value: bool = True
+) -> None:
     """Raise :class:`ValueError` when a Keycloak target's realms are missing or not plain names."""
     if not isinstance(product, str) or product.strip().lower() != KEYCLOAK_PRODUCT:
         return
-    problem = keycloak_realm_problem(extras, name)
+    problem = keycloak_realm_problem(extras, name, quote_value=quote_value)
     if problem is not None:
         raise ValueError(problem)

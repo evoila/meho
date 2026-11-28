@@ -236,11 +236,17 @@
             "type": "string"
           },
           "delivery": {
-            "enum": [
-              "complete",
-              "partial",
-              "unavailable",
-              null
+            "anyOf": [
+              {
+                "enum": [
+                  "complete",
+                  "partial",
+                  "unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
             "type": [
               "string",
@@ -1510,6 +1516,7 @@
               "credential_read",
               "credential_write",
               "credential_mint",
+              "credential_use",
               "audit_query",
               "approval",
               "other"
@@ -1664,6 +1671,7 @@
                   "credential_read",
                   "credential_write",
                   "credential_mint",
+                  "credential_use",
                   "audit_query",
                   "approval",
                   "checks",
@@ -1735,6 +1743,7 @@
                   "credential_read",
                   "credential_write",
                   "credential_mint",
+                  "credential_use",
                   "audit_query",
                   "approval",
                   "checks",
@@ -3288,6 +3297,10 @@
           "extras": {
             "type": "object"
           },
+          "extras_changes": {
+            "minProperties": 1,
+            "type": "object"
+          },
           "flight_recorder_capture": {
             "type": [
               "boolean",
@@ -3392,6 +3405,18 @@
         "oneOf": [
           {
             "properties": {
+              "extras_keys_removed": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "extras_keys_set": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "host": {
                 "type": "string"
               },
@@ -4300,6 +4325,7 @@
               "credential_read",
               "credential_write",
               "credential_mint",
+              "credential_use",
               "audit_query",
               "approval",
               "checks",

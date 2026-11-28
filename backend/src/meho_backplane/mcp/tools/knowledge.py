@@ -688,8 +688,6 @@ register_mcp_tool(
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
-        # A reviewer with the read_only role may still correct entries.
-        approver_may_call=True,
         op_class=_OP_CLASS_WRITE,
         for_settings=with_short_text(ADD_TO_KNOWLEDGE_SHORT, then=similar_check_for_settings),
     ),

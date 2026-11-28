@@ -102,6 +102,9 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.connectors_ingest import (
     set_llm_client_factory,
 )
+from meho_backplane.api.v1.connectors_target_form import (
+    router as api_v1_connectors_target_form_router,
+)
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.event_source import router as api_v1_event_source_router
@@ -170,6 +173,7 @@ from meho_backplane.auth.jwt import (
     AUDIENCE_NOT_CONFIGURED_REMEDIATION,
     keycloak_readiness_probe,
 )
+from meho_backplane.auth.role_refusal import RoleRefusedError, role_refused_handler
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
@@ -1135,6 +1139,8 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# A Reader who asks for a change gets the code and a plain sentence.
+app.add_exception_handler(RoleRefusedError, role_refused_handler)
 # A 422 for a bad request body that encodes even when the refused input
 # holds a lone surrogate (FastAPI's stock handler answers that with a 500).
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
@@ -1274,6 +1280,9 @@ app.include_router(api_v1_operations_router)
 # claim; mutating routes are tenant_admin-gated, read routes are
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
+# The target form route goes first: ``/target-form`` must not be read as a
+# connector id by the ``/{connector_id}`` routes of the ingest router.
+app.include_router(api_v1_connectors_target_form_router)
 app.include_router(api_v1_connectors_ingest_router)
 # #4711 -- the override report: operator overrides of risk levels and
 # approval flags, and the "operations running with reduced approval" list.

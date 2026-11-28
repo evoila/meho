@@ -346,7 +346,9 @@ for these fields. This covers every admin read
 that goes through the recorded `_get_admin_json` path: the curated read
 ops, and the client reads inside `keycloak.client.update`, the client
 delete lookup and the realm delete. An empty answer is recorded as it is; an
-answer that is not JSON is replaced by a fixed marker. The shared trace
+answer that is not JSON is replaced by a fixed marker. The answer of the
+realm name check (the read of the realm before the name is compared) is
+replaced by the same marker. The shared trace
 engine (`docs/codebase/redaction.md`) still runs on what the hook returns
 and masks secret-named fields by name as well.
 `tests/test_connectors_keycloak_trace_mask.py` dispatches
@@ -1763,7 +1765,13 @@ use `keycloak.realm.update` with `enabled: false`; that can be undone.
   approval card. There the handler compares with the realm id of the fresh
   preview that MEHO built for that call
   (`destructive_binding_evidence` in `operations/dispatcher.py` keeps it in
-  `grant_preview_var` for that one call). So every run compares the id.
+  `grant_preview_var` for that one call). So every run compares the id. When
+  neither a card nor a preview is bound to the call, the handler refuses with
+  the `no_approved_id` code and sends no DELETE.
+- **Time between read and DELETE.** Keycloak deletes a realm by name. So
+  between MEHO's last read of the realm and the DELETE there is one request
+  of time in which a person with Keycloak admin rights could replace the
+  realm.
 - **Approval** cannot be turned off for this operation.
 - **Safe to run twice.** If `GET /admin/realms/{realm}` answers 404, no
   DELETE is sent and the result is `{realm, deleted: false, already_absent:
@@ -2290,11 +2298,15 @@ before a write of the realm settings, so a wrong answer returns nothing and
 sends nothing. This covers approval cards and the `keycloak:` sides of
 `secret.move` too. `keycloak.user.check_login` runs it before it sends the
 password. An operation that reads the realm settings also checks that
-answer. A passed check counts only inside one run of an operation, and
+answer; `keycloak.authflow.ensure_passkey_code_skip` checks both realm reads
+around its write (a wrong answer before the write sends no PUT). A passed check counts only inside one run of an operation, and
 there for at most 5 seconds; each run starts with a new one. A request
 outside a run (a `keycloak:` side of `secret.move`, an approval card, the
 check before an approved run) reads the realm first every time, so a call
-never uses a check of an earlier call. Every admin login with at least one
+never uses a check of an earlier call. An operation that sends another one
+through the connector's `execute` shim starts a run for the inner call, so the
+inner approval card and the check before its approved run read the realm
+themselves. Every admin login with at least one
 `realm-management` role in the realm can read the name. When Keycloak
 refuses this read with 403, also the read that `realm.update` makes before
 its write and the read that `events.list`, `admin_events.list` and

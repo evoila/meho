@@ -503,7 +503,17 @@ async def _bind(
     must not be written back to its old value. The op stops when the realm's
     browser flow is no longer *expected_flow*.
     """
+    managed = resolve_realm_config(target).managed_realm
     before = await connector._get_admin_json(target, realm_path, operator=operator)
+    try:
+        check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, before, target)
+    except ValueError:
+        raise KeycloakPasskeyFlowError(
+            "realm_changed",
+            f"Keycloak did not answer with the realm {managed!r} right before the bind. "
+            f"MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step, and did not bind "
+            "the realm's browser flow to it. Check the managed realm of the target.",
+        ) from None
     if before.get("browserFlow") != expected_flow:
         raise KeycloakPasskeyFlowError(
             "realm_changed",
@@ -521,6 +531,17 @@ async def _bind(
         idempotent_conflict=False,
     )
     after = await connector._get_admin_json(target, realm_path, operator=operator)
+    try:
+        check_answered_realm(ENSURE_PASSKEY_CODE_SKIP_OP_ID, after, target)
+    except ValueError:
+        raise KeycloakPasskeyFlowError(
+            "check_failed",
+            f"Keycloak did not answer with the realm {managed!r} when MEHO read it back "
+            f"after the bind. MEHO has written flow {PASSKEY_FLOW_ALIAS!r} with the step, and "
+            f"has sent the bind of the realm's browser flow to {PASSKEY_FLOW_ALIAS!r}. MEHO "
+            "could not check which realm the bind reached. Check the managed realm of the "
+            "target and its browser flow.",
+        ) from None
     if after.get("browserFlow") != PASSKEY_FLOW_ALIAS:
         raise KeycloakPasskeyFlowError(
             "check_failed",

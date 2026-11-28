@@ -82,6 +82,7 @@ References
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -116,7 +117,10 @@ from meho_backplane.connectors.keycloak._paths import (
     fill_path,
 )
 from meho_backplane.connectors.keycloak.answer_realm import answer_realm_on, name_the_realm
-from meho_backplane.connectors.keycloak.managed_realm_check import ManagedRealmChecks
+from meho_backplane.connectors.keycloak.managed_realm_check import (
+    ManagedRealmChecks,
+    reading_realm_name,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_trace_fields
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -664,10 +668,15 @@ class KeycloakConnector(HttpConnector):
         (:func:`~meho_backplane.connectors.keycloak.redaction.redact_trace_fields`),
         so the stored trace and the agent copy hold ``***REDACTED***`` there.
         An empty body is recorded as it is. A body that is not JSON is
-        replaced by a fixed marker. Never raises.
+        replaced by a fixed marker. The answer of the realm name check is left
+        out the same way: the realm it names is not yet known to be the
+        managed realm. Never raises.
         """
         if not response.content:
             return None
+        if reading_realm_name():
+            # JSON text: the trace engine reads it back as the marker string.
+            return json.dumps(_TRACE_BODY_WITHHELD)
         try:
             body = response.json()
         except ValueError:
@@ -1614,13 +1623,17 @@ class KeycloakConnector(HttpConnector):
             in_code_kind="system",
         )
         connector_id = f"{self.impl_id}-{self.version}"
-        return await dispatch(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=target,
-            params=params,
-        )
+        # The inner call is a run of its own: its approval card and the check
+        # before an approved run read the realm, and use no check that an outer
+        # run passed.
+        with self._realm_checks.run():
+            return await dispatch(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=target,
+                params=params,
+            )
 
     async def invalidate_credentials(self, target: KeycloakTargetLike) -> None:
         """Drop the kept admin token for *target* (#2396, #3879).

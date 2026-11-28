@@ -632,6 +632,51 @@ async def test_browser_flow_changed_during_flow_setup_stops_before_the_bind(
     assert fake.code_steps(_COPY_CODE_SUB) == _WANTED_CODE_STEPS
 
 
+async def test_other_realm_answered_before_the_bind_sends_no_write(
+    kc: KeycloakConnector,
+) -> None:
+    fake = _fake()
+
+    def another_realm_answers() -> None:
+        fake.realm["realm"] = "Example-Realm"
+
+    fake.on_first_flow_write = another_realm_answers
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "did not answer with the realm" in text
+    assert "changes nothing" not in text
+    assert "realm_changed" in text
+    assert "has written flow" in text
+    assert "did not bind" in text
+    assert not any(path == _ADMIN for _, path, _ in fake.writes)
+
+
+async def test_other_realm_answered_after_the_bind_is_an_error(kc: KeycloakConnector) -> None:
+    fake = _fake()
+    real_realm = fake._realm
+
+    def realm_then_other(request: httpx.Request) -> httpx.Response:
+        response = real_realm(request)
+        if request.method == "PUT":
+            fake.realm = {**fake.realm, "realm": "Example-Realm"}
+        return response
+
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        fake.mount(mock)
+        mock.route(path=_ADMIN).mock(side_effect=realm_then_other)
+        result = await _run()
+    assert result["status"] != "ok"
+    text = json.dumps(result)
+    assert "did not answer with the realm" in text
+    assert "changes nothing" not in text
+    assert "check_failed" in text
+    assert "has written flow" in text
+    assert "has sent the bind" in text
+
+
 async def test_realm_with_the_step_is_not_changed(kc: KeycloakConnector) -> None:
     fake = _fake(with_condition=True)
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:

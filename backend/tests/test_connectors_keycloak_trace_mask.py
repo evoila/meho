@@ -387,3 +387,92 @@ async def test_lock_status_trace_and_agent_copy_hold_no_failure_ip(
     assert window["total_rows"] >= 1
     assert _FAILURE_IP not in json.dumps(window)
     assert _FAILURE_IP not in json.dumps(handle_json)
+
+
+_OTHER_REALM_MARKER = "made-up-display-name-of-another-realm"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_managed_realm_check")
+async def test_realm_name_check_with_another_realm_stores_nothing_of_its_answer(
+    recorded_keycloak: Operator,
+) -> None:
+    """The check reads a realm that is not the managed one: the trace holds none of its settings."""
+    operator = recorded_keycloak
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "kc-admin-token", "expires_in": 300}
+        )
+        realm_route = mock.get(f"/admin/realms/{_MANAGED_REALM}").respond(
+            200,
+            json={
+                "realm": "Example-Realm",
+                "displayName": _OTHER_REALM_MARKER,
+                "smtpServer": {"password": _MADE_UP_SMTP_PASSWORD},
+            },
+        )
+        users_route = mock.get(f"/admin/realms/{_MANAGED_REALM}/users").respond(200, json=[])
+        result = await call_operation(
+            operator,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.user.list",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+    assert realm_route.called
+    assert not users_route.called
+    assert result["status"] != "ok"
+    assert _OTHER_REALM_MARKER not in json.dumps(result)
+
+    _, spans = await _stored_spans(operator.tenant_id)
+    stored = json.dumps([span.attributes for span in spans])
+    assert _OTHER_REALM_MARKER not in stored
+    assert _MADE_UP_SMTP_PASSWORD not in stored
+    realm_calls = [span for span in spans if span.span_kind == "vendor_call"]
+    assert len(realm_calls) == 1
+    assert not isinstance(realm_calls[0].attributes["response_body"], dict)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_managed_realm_check")
+async def test_a_call_with_a_passed_realm_check_keeps_the_trace_link(
+    recorded_keycloak: Operator,
+    shared_store: ResultHandleStore,
+) -> None:
+    """The managed realm answers the check: the trace is shareable and the agent gets its link."""
+    operator = recorded_keycloak
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "kc-admin-token", "expires_in": 300}
+        )
+        realm_route = mock.get(f"/admin/realms/{_MANAGED_REALM}").respond(
+            200, json={"realm": _MANAGED_REALM, "id": "realm-id"}
+        )
+        mock.get(f"/admin/realms/{_MANAGED_REALM}/clients/{_CLIENT_UUID}").respond(
+            200, json=_CLIENT_ANSWER
+        )
+        result = await call_operation(
+            operator,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.client.get",
+                "target": {"name": _TARGET_NAME},
+                "params": {"id": _CLIENT_UUID},
+            },
+        )
+    assert realm_route.called
+    assert result["status"] == "ok", f"client.get failed: {result.get('error')}"
+
+    header, spans = await _stored_spans(operator.tenant_id)
+    assert header.redaction_uncertain is False
+    vendor_calls = [span for span in spans if span.span_kind == "vendor_call"]
+    assert len(vendor_calls) == 2
+    assert vendor_calls[0].attributes["response_body"] == _TRACE_BODY_WITHHELD
+    assert vendor_calls[1].attributes["response_body"]["secret"] == REDACTED
+
+    handle_json = result["extras"][AGENT_TRACE_HANDLE_EXTRA_KEY]
+    window = await read_result_window(operator, UUID(handle_json["handle_id"]), offset=0, limit=50)
+    assert window["total_rows"] >= 2
+    assert _MADE_UP_SECRET not in json.dumps(window)

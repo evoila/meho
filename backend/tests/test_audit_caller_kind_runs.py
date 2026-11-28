@@ -10,6 +10,8 @@ the audit rows:
   kind of the login that runs it (here the approver, a person's token), the
   same login as its ``operator_sub``. The ``approval.request`` row and the
   waiting request keep the requester's kind;
+* a step that waits again while a person resumes an agent's run: the new
+  request keeps the agent's kind, not the person's;
 * a hosted agent run that a person started from the web console: every
   row is ``service_agent``. The acting agent counts before the web session;
 * a check of the check runner: ``system``, the kind its login has;
@@ -41,6 +43,8 @@ from meho_backplane.checks.runner import _run_evaluation, _SensorSnapshot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRunStatus, AuditLog
 from meho_backplane.operations import dispatcher, shutdown_drain
+from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_queue import create_pending_request, requester_of
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.refresh import verify_access_token_with_refresh
 from meho_backplane.ui.auth.session_store import DecryptedSession
@@ -114,6 +118,36 @@ async def test_an_approved_call_runs_under_the_kind_of_who_runs_it(
     (ran,) = [row for row in await _rows(path=_OP) if row.payload["result_status"] == "ok"]
     assert ran.operator_sub == "reviewer-1"
     assert ran.caller_kind == "personal_agent"
+
+
+@pytest.mark.usefixtures("op")
+async def test_a_step_that_waits_again_keeps_the_kind_of_the_requester() -> None:
+    first = await _request(await _park(_requester("agent")))
+    assert first.proposed_effect["caller_kind"] == "service_agent"
+    reviewer = Operator(
+        sub="reviewer-1",
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=first.tenant_id,
+        tenant_role=TenantRole.OPERATOR,
+        token_checked=True,
+    )
+    params = {"path": "secret/next"}
+
+    async with get_sessionmaker()() as session:
+        second = await create_pending_request(
+            session,
+            operator=reviewer,
+            connector_id=first.connector_id,
+            op_id=_OP,
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            proposed_effect={"op_id": _OP, "safety_level": "caution"},
+            requester=requester_of(first),
+        )
+        await session.commit()
+
+    assert (await _request(second.id)).proposed_effect["caller_kind"] == "service_agent"
 
 
 async def test_a_hosted_run_started_in_the_web_console_writes_service_agent(

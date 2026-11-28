@@ -3537,7 +3537,7 @@ the history names a real person.</p>
 web console. This is the same rule as for the target API, where a call
 with a token waits for approval. When you send such a file with a token
 (the CLI, a script or an AI tool), MEHO saves nothing and answers <code>403</code>:</p>
-<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"detail"</span><span class="p">:</span><span class="w"> </span><span class="s2">"A settings file that adds or changes targets is applied in the web console. A call with a token cannot write targets at once."</span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"detail"</span><span class="p">:</span><span class="w"> </span><span class="s2">"A settings file that adds or changes targets is applied on the settings file page of the web console (/ui/settings). A call with a token cannot write targets at once."</span><span class="p">}</span>
 </code></pre></div>
 <ul>
 <li>The preview still works with a token. It shows the target changes.</li>
@@ -3545,8 +3545,7 @@ with a token waits for approval. When you send such a file with a token
   the file that is the same as the stored one is no change.</li>
 <li>Two policies change only in the web console:
   <code>run_approval_target_kinds</code> turned on and <code>announce_gate_enabled</code>
-  turned off. Apply such a file on the <strong>Settings file</strong> page of the web
-  console. See
+  turned off. See
   <a href="#approval-policies-change-only-in-the-web-console">Approval policies change only in the web console</a>.
   The other policies and the conventions apply with a token.</li>
 </ul>

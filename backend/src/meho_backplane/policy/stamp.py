@@ -93,11 +93,13 @@ def row_rule(kept: RuleStamp | None, verdict: PermissionVerdict) -> RuleStamp | 
     *kept* is the stamp the shadow kept for the call (:func:`take_rule`).
     With ``CUSTOM_POLICY`` off it stays as it is: a rule that did not
     decide, or none. With it on, :func:`deciding_rule` names the rule that
-    decided.
+    decided. A verdict that is none of the known three counts as ``deny``:
+    the dispatcher refuses such a call.
     """
     if not custom_policy_on(get_settings()):
         return kept
-    return deciding_rule(kept, _EVALUATOR_VERDICT[verdict])
+    known = isinstance(verdict, PermissionVerdict)
+    return deciding_rule(kept, _EVALUATOR_VERDICT.get(verdict, "deny") if known else "deny")
 
 
 #: The rule of the last policy gate in this context, until :func:`take_rule`.

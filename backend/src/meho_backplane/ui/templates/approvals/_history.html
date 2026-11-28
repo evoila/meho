@@ -53,6 +53,10 @@
     order             -- str: the order in use, "oldest" or "newest" (#3596)
     order_choice      -- str: the operator's explicit choice, "" when none
     work_ref_error    -- str | None: why the work_ref filter was refused (no rows)
+    new_notice        -- bool: the list has a new-requests line (Pending and
+                         For you tabs only, #6932)
+    list_baseline     -- int | None: the bell's count, taken before the rows
+                         were read; drawn as ``data-baseline`` on that line
     in_order_work_ref -- str | None: the change ticket the "Approve group in
                          order" button runs (#3597); None hides the button
 -#}
@@ -66,6 +70,32 @@
   hx-trigger="meho:approval-bump from:body, meho:approval-decided from:body"
   hx-include="[name='work_ref']"
 >
+  {# ---------- New-requests line (#6932) ---------- #}
+  {#- ``data-baseline`` is the bell's count, taken before the rows were
+      read. ``approvals-bell.js`` shows the line when a later bell count
+      differs. A request that arrives between the count and the rows can
+      show the line once too often, never too seldom. "Show" fetches the
+      region again, like a tab. The poll does not fetch the region, so
+      "Load more" pages stay until the person clicks. -#}
+  {% if new_notice %}
+    <div hidden data-approvals-new-notice
+      {%- if list_baseline is not none %} data-baseline="{{ list_baseline }}"{% endif %}>
+      <div role="status" class="alert alert-info flex items-center gap-3 text-sm">
+        <span data-approvals-new-notice-text></span>
+        <button
+          type="button"
+          class="btn btn-sm"
+          hx-get="/ui/approvals/list?tab={{ active_tab }}{{ order_q }}"
+          hx-target="#approvals-history"
+          hx-swap="outerHTML"
+          hx-include="[name='work_ref']"
+        >
+          Show
+        </button>
+      </div>
+    </div>
+  {% endif %}
+
   {# ---------- Status tabs ---------- #}
   {#- ``tabs`` wraps its tabs (flex-wrap), so on a phone (#6000) the six
       status tabs take two lines instead of pushing the page sideways. -#}

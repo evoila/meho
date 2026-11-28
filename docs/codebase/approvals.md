@@ -5086,8 +5086,21 @@ columns are **never** projected onto any UI view, the badge, or a
 broadcast frame: the `render.project_request_to_view` projection omits
 them by construction. Live updates ride the app-shell bell's body-wide
 `meho:approval-bump` / `meho:approval-decided` events — the history list
-re-fetches its active tab on them, so a decision made elsewhere drops out
-of the open Pending tab without a reload. The decision **reason** lives on
+re-fetches its active tab on them, so a decision made in the open page
+drops out of its Pending tab without a reload. A new request, or a
+decision made by another person, does not re-fetch the list (that would
+drop its "Load more" pages). The Pending and For you lists have a
+new-requests line (`data-approvals-new-notice`, `_history.html`). Every
+answer that draws one of these lists (the full page and each list fetch)
+takes the bell's count with `_badge_count`, the function the bell badge
+uses, before it reads the rows, and draws it as `data-baseline`. A request
+that arrives between the count and the rows can show the line once too
+often, never too seldom. This costs one count query per list draw; the
+"Load more" rows send none and have no line. When a later bell badge swap
+brings another count, `approvals-bell.js` shows "N new requests." or "The
+waiting list changed." with a "Show" button that re-fetches the list like
+a tab. The script keeps no count of its own and sends no request of its
+own. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).
@@ -6291,7 +6304,9 @@ group rules (only a MEHO-Admin approves their own delete).
   so a refused call leaves no `approval.decision` row. The grant-use row
   stores the hash and the blast radius in `payload`.
 - A delete below `destructive` (the verb `DELETE`, the `destructive` tag,
-  a delete name, a delete step) runs under a delete grant with no hash;
+  a delete name, a delete step, or, with the switch `CUSTOM_POLICY` on,
+  `hard_to_undo` on the operation's own definition) runs under a delete
+  grant with no hash;
   its grant-use row stores the proposed effect.
 - A `destructive` step gate or child call stays refused: it cannot carry a
   preview hash (`preview_binding_required`, as today).

@@ -53,6 +53,7 @@ from meho_backplane.connectors._shared.credential_backend import (
     parse_credential_scheme,
     split_credential_ref,
 )
+from meho_backplane.connectors._shared.log_host import redirect_status_text
 from meho_backplane.connectors._shared.soap_fault import parse_soap_fault, soap_fault_of
 from meho_backplane.connectors._shared.vault_creds import (
     DEFAULT_KV_MOUNT,
@@ -1718,8 +1719,11 @@ def result_connector_error(
     #3567: ``extras.upstream_fault`` is set from the response body as above,
     or from a SOAP fault the ESXi path attached to *exc* (see
     :func:`_add_attached_upstream_fault`).
+
+    A 3xx answer gets the text of :func:`redirect_status_text`, with
+    host names only.
     """
-    msg = _sanitize_free_text(str(exc))
+    msg = _sanitize_free_text(redirect_status_text(exc) or str(exc))
     extras: dict[str, Any] = {
         "error_code": "connector_error",
         "exception_class": type(exc).__name__,

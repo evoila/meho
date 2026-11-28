@@ -102,6 +102,11 @@ The order is fixed.
 
 1. **Floors** (`policy/floors.py`). Rules in the code, never in a file. A
    floor sets the least strict answer; no later step loosens it.
+   - A login with the Reader role (any kind of login, also a hosted agent
+     run that a Reader started) whose call asks for a change (the mark
+     `asks_for_change`) is denied first, with `insufficient_role` and the
+     plain sentence (`reader_change_floor`). The policy gate checks the same
+     rule first.
    - A person below the operation's role floor is denied.
    - A `destructive` call waits for a person. Only a sandbox delete grant
      can run it, for a service login, in sandbox mode.

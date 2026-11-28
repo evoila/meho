@@ -578,6 +578,9 @@ def _rest_app(operator: Operator) -> FastAPI:
     app.include_router(operations_api.router)
     app.include_router(picks_api.router)
     app.dependency_overrides[operations_api._require_operator.dependency] = lambda: operator
+    app.dependency_overrides[operations_api._require_operator_for_call.dependency] = lambda: (
+        operator
+    )
     app.dependency_overrides[picks_api._require_operator.dependency] = lambda: operator
     return app
 

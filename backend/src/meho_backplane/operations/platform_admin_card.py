@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The parts of an approval card that only a platform admin reads.
+"""How each reader reads a stored approval card.
+
+Each view that shows a stored card (the REST approvals routes, the MCP
+approval tools, the web console) shapes it in one call of
+:func:`card_for_reader`. First the op's view, when it has one
+(:func:`register_card_view`), gives the card for the kind of reader. Then
+the parts that only a platform admin reads stay out for every other
+reader.
 
 Some cards hold data of other tenants. The card of an import of the
 install's policy file is one: it names each tenant whose stored policy
@@ -34,11 +41,28 @@ if TYPE_CHECKING:
 __all__ = [
     "card_for_reader",
     "reads_platform_admin_parts",
+    "register_card_view",
     "register_platform_admin_card_filter",
 ]
 
 #: ``op_id`` -> the filter that takes the platform admin parts out of a card.
 _FILTERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+
+#: ``op_id`` -> how a reader sees the stored card of the op
+#: (:func:`register_card_view`).
+_VIEWS: dict[str, Callable[[dict[str, Any], bool], dict[str, Any]]] = {}
+
+
+def register_card_view(op_id: str, view: Callable[[dict[str, Any], bool], dict[str, Any]]) -> None:
+    """Give each reader the stored card of *op_id* as ``view(effect, whole)`` returns it.
+
+    *whole* is true for a person in the web console or over REST, and false
+    for the MCP approval tools and for an agent, service or runner login
+    over REST. The view reads its own switch and gives back a new dict; it
+    never changes the stored one.
+    """
+    _VIEWS[op_id] = view
 
 
 def register_platform_admin_card_filter(
@@ -63,10 +87,17 @@ def reads_platform_admin_parts(reader: Operator | None) -> bool:
     )
 
 
-def card_for_reader(
-    op_id: str, effect: dict[str, Any], *, reader: Operator | None
-) -> dict[str, Any]:
-    """The stored ``proposed_effect`` *effect* of *op_id*, as *reader* may read it."""
+def card_for_reader(op_id: str, effect: Any, *, reader: Operator | None, whole: bool) -> Any:
+    """The stored ``proposed_effect`` *effect* of *op_id*, as *reader* may read it.
+
+    *whole* is passed to the op's view (:func:`register_card_view`). A
+    *effect* that is not a dict comes back as it is.
+    """
+    if not isinstance(effect, dict):
+        return effect
+    view = _VIEWS.get(op_id)
+    if view is not None:
+        effect = view(effect, whole)
     card_filter = _FILTERS.get(op_id)
     if card_filter is None or reads_platform_admin_parts(reader):
         return effect

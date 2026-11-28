@@ -54,7 +54,7 @@ from meho_backplane.operations.approval_queue import (
     resume_dispatch_after_approval,
 )
 from meho_backplane.operations.meta_tools import call_operation, preview_operation
-from meho_backplane.operations.role_floors import role_floor_for
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE, role_floor_for
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_known_person
 
@@ -383,7 +383,9 @@ async def test_a_person_below_tenant_admin_is_denied_through_call_operation(
     )
 
     assert call["status"] == "denied", call
-    assert "tenant_admin" in str(call.get("error"))
+    # A Reader who asks for a change is refused first, with the plain sentence.
+    expected = "tenant_admin" if role is TenantRole.OPERATOR else READER_CHANGE_SENTENCE
+    assert expected in str(call.get("error"))
     assert (await _row(row.id)).secret_ref == _OLD_REF
     assert await _approval_rows() == []
     (audit,) = await _audit_rows()

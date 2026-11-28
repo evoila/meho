@@ -44,6 +44,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.mcp.tools.knowledge import _MAX_BODY_CHARS, _MAX_QUERY_CHARS
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.retrieval.retriever import CANDIDATE_LIMIT, RetrievalHit
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START
 from tests._kb_embedding_stub import fake_embedding_service
@@ -842,53 +843,47 @@ async def test_tools_call_add_to_knowledge_reviewer_can_overwrite_another_princi
     [TenantRole.READ_ONLY],
     indirect=True,
 )
-async def test_tools_call_add_to_knowledge_read_only_reviewer_can_overwrite(
+async def test_tools_call_add_to_knowledge_read_only_reviewer_is_refused(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stub_embedding: AsyncMock,
 ) -> None:
-    """A read_only person who can decide approvals is a reviewer and passes the role gate.
+    """A read_only login is refused, also a person or an agent with the approver flag.
 
-    A read_only caller who cannot decide approvals stays blocked.
+    The entry keeps its revision, its text and its metadata.
     """
     client, reader = client_with_operator
-    reviewer = reader.model_copy(update={"approver": True})
     service = KbService()
     old, _ = await service.create_entry(
         tenant_id=reader.tenant_id, slug="team-runbook", body="old body", actor_sub="someone-else"
     )
-
-    blocked = _add_to_knowledge(client, {"slug": "team-runbook", "body": "reader body"})
-    error = blocked["error"]
-    assert isinstance(error, dict)
-    assert "requires a higher role" in error["message"]
-
-    async def _verify_reviewer() -> Operator:
-        return reviewer
-
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_reviewer
-    changed = _add_to_knowledge(
-        client,
-        {
-            "slug": "team-runbook",
-            "body": "reviewed body",
-            "expected_revision": str(old.revision_id),
-        },
-    )
-    assert "error" not in changed
-    kept = await service.get_entry(tenant_id=reader.tenant_id, slug="team-runbook")
-    assert kept is not None
-    assert kept.body == "reviewed body"
-
+    reviewer = reader.model_copy(update={"approver": True})
     agent = reviewer.model_copy(update={"principal_kind": PrincipalKind.AGENT})
 
-    async def _verify_agent() -> Operator:
-        return agent
+    for caller in (reader, reviewer, agent):
 
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify_agent
-    refused = _add_to_knowledge(client, {"slug": "team-runbook", "body": "agent body"})
-    refused_error = refused["error"]
-    assert isinstance(refused_error, dict)
-    assert "requires a higher role" in refused_error["message"]
+        async def _verify(caller: Operator = caller) -> Operator:
+            return caller
+
+        app.dependency_overrides[verify_mcp_jwt_and_bind] = _verify
+        refused = _add_to_knowledge(
+            client,
+            {
+                "slug": "team-runbook",
+                "body": "reviewed body",
+                "expected_revision": str(old.revision_id),
+            },
+        )
+        error = refused["error"]
+        assert isinstance(error, dict)
+        assert error["message"] == f"insufficient_role: {READER_CHANGE_SENTENCE}"
+
+    kept = await service.get_entry(tenant_id=reader.tenant_id, slug="team-runbook")
+    assert kept is not None
+    assert (kept.revision_id, kept.body, kept.metadata) == (
+        old.revision_id,
+        old.body,
+        old.metadata,
+    )
 
 
 @pytest.mark.parametrize(

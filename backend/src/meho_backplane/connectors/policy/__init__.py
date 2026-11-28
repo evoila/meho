@@ -32,6 +32,7 @@ from meho_backplane.connectors.policy.apply import (
     record_policy_apply_requester,
     register_policy_apply_operation,
 )
+from meho_backplane.connectors.policy.apply_card import policy_card_as_read
 from meho_backplane.connectors.policy.apply_card_readers import card_without_tenant_parts
 from meho_backplane.connectors.policy.classify import (
     POLICY_CLASSIFY_OP_ID,
@@ -50,7 +51,10 @@ from meho_backplane.operations._preview import (
 )
 from meho_backplane.operations.grant_approval import register_rights_change_op
 from meho_backplane.operations.op_policy import register_policy_repair_op
-from meho_backplane.operations.platform_admin_card import register_platform_admin_card_filter
+from meho_backplane.operations.platform_admin_card import (
+    register_card_view,
+    register_platform_admin_card_filter,
+)
 from meho_backplane.operations.rights_change_console import register_no_login_realm_op
 from meho_backplane.operations.role_floors import register_requester_check, register_role_floor
 from meho_backplane.operations.typed_register import register_typed_op_registrar
@@ -73,6 +77,7 @@ register_no_login_realm_op(POLICY_APPLY_OP_ID)
 declare_per_call_approval([POLICY_APPLY_OP_ID])
 register_requester_check(POLICY_APPLY_OP_ID, policy_apply_requester_refusal)
 register_preview_builder(POLICY_APPLY_OP_ID, build_policy_apply_preview)
+register_card_view(POLICY_APPLY_OP_ID, policy_card_as_read)
 register_permission_preflight(POLICY_APPLY_OP_ID, record_policy_apply_requester)
 register_platform_admin_card_filter(POLICY_APPLY_OP_ID, card_without_tenant_parts)
 register_policy_repair_op("policy-registry", POLICY_APPLY_OP_ID)

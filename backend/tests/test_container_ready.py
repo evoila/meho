@@ -14,7 +14,12 @@ from collections.abc import Iterator
 import bson
 import pytest
 
-from tests._container_ready import ContainerNotReadyError, ping_mongodb, wait_until_ready
+from tests._container_ready import (
+    ContainerNotReadyError,
+    docker_stopped,
+    ping_mongodb,
+    wait_until_ready,
+)
 
 
 class _FakeClock:
@@ -75,6 +80,86 @@ def test_fails_with_a_clear_message_when_the_probe_never_works() -> None:
     assert message.startswith("container not ready: mongodb gave no answer in 10 s")
     assert "ConnectionRefusedError" in message
     assert fake.now <= 11.0
+
+
+def _refused() -> None:
+    raise ConnectionRefusedError("connection refused")
+
+
+def test_a_stopped_container_ends_the_wait_at_once_with_its_reason() -> None:
+    fake = _FakeClock()
+
+    with pytest.raises(ContainerNotReadyError) as excinfo:
+        wait_until_ready(
+            _refused,
+            what="mongodb",
+            timeout=120,
+            interval=1,
+            stopped=lambda: "state exited, exit code 14",
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert message.startswith("container not ready: mongodb stopped before it answered")
+    assert "exit code 14" in message
+    assert "ConnectionRefusedError" in message
+    assert fake.now == 0.0
+
+
+def test_a_running_container_is_waited_for_until_the_time_limit() -> None:
+    fake = _FakeClock()
+    asked: list[int] = []
+
+    def stopped() -> None:
+        asked.append(1)
+
+    with pytest.raises(ContainerNotReadyError, match="gave no answer in 10 s"):
+        wait_until_ready(
+            _refused,
+            what="mongodb",
+            timeout=10,
+            interval=1,
+            stopped=stopped,
+            clock=fake.clock,
+            sleep=fake.sleep,
+        )
+
+    assert len(asked) == 11
+
+
+class _FakeDockerContainer:
+    def __init__(self, status: str, *, broken: bool = False) -> None:
+        self.status = status
+        self.broken = broken
+        self.attrs = {"State": {"Status": status, "ExitCode": 14}}
+        self.tail: int | None = None
+
+    def reload(self) -> None:
+        if self.broken:
+            raise ConnectionError("docker down")
+
+    def logs(self, *, tail: int) -> bytes:
+        self.tail = tail
+        return b"line one\nCannot start server\n"
+
+
+@pytest.mark.parametrize("status", ["created", "running"])
+def test_docker_stopped_says_nothing_while_the_container_runs(status: str) -> None:
+    assert docker_stopped(_FakeDockerContainer(status))() is None
+
+
+def test_docker_stopped_gives_state_exit_code_and_last_log_lines() -> None:
+    container = _FakeDockerContainer("exited")
+
+    why = docker_stopped(container)()
+
+    assert why == "state exited, exit code 14; last log lines:\nline one\nCannot start server"
+    assert container.tail == 20
+
+
+def test_docker_stopped_keeps_waiting_when_docker_cannot_answer() -> None:
+    assert docker_stopped(_FakeDockerContainer("exited", broken=True))() is None
 
 
 def test_real_port_that_opens_late_is_waited_for() -> None:

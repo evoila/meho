@@ -221,6 +221,19 @@ jobs:
             "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VER}/kubeconform-linux-amd64.tar.gz" \
             "${KUBECONFORM_SHA}" kubeconform
 
+      - name: Restore the Kubernetes schemas from the cache
+        # kubeconform checks each kind against a JSON schema that it would
+        # download from an outside server. scripts/ci/kubeconform.sh keeps
+        # the schemas in this folder, so a run reads them from the cache.
+        # Runs on main save the folder there. A new
+        # chart file makes a new key; the restore key brings the last folder,
+        # and only a schema it does not have yet is downloaded.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/meho-kubeconform-schemas
+          key: kubeconform-schemas-chart-${{ hashFiles('deploy/charts/meho/**') }}
+          restore-keys: kubeconform-schemas-chart-
+
       - name: Verify kubeconform on PATH for subsequent steps
         # Independent of the install step's own shell. By the time this
         # step starts, the runner has merged `$GITHUB_PATH` into PATH, so
@@ -287,7 +300,7 @@ jobs:
             --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
             > /tmp/rendered.yaml
 
-          kubeconform \
+          "${GITHUB_WORKSPACE}/scripts/ci/kubeconform.sh" \
             -strict \
             -kubernetes-version 1.28.0 \
             -ignore-missing-schemas \
@@ -319,7 +332,7 @@ jobs:
             --set ingress.host=meho.test \
             --set coreKeycloak.hostname=meho.test \
             --set coreKeycloak.firstTenantId=3f1c2a7e-9b4d-4e2a-8c1f-5d6e7f8a9b0c > /tmp/rendered-core.yaml  # gitleaks:allow
-          kubeconform \
+          "${GITHUB_WORKSPACE}/scripts/ci/kubeconform.sh" \
             -strict \
             -kubernetes-version 1.28.0 \
             -ignore-missing-schemas \
@@ -478,7 +491,7 @@ jobs:
             --set agent.openai.defaultModel=openai:test-model \
             > /tmp/rendered-openai.yaml
 
-          kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered-openai.yaml
+          "${GITHUB_WORKSPACE}/scripts/ci/kubeconform.sh" -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered-openai.yaml
 
           grep -A2 -F -e '- name: OPENAI_API_KEY' /tmp/rendered-openai.yaml \
             | grep -F 'secretKeyRef' \
@@ -718,7 +731,7 @@ jobs:
               $extra > /tmp/rendered-core-postgres.yaml
             grep -Eq '^kind: StatefulSet$' /tmp/rendered-core-postgres.yaml \
               || { echo "::error::corePostgres.enabled=true did not render the PostgreSQL StatefulSet"; exit 1; }
-            kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary \
+            "${GITHUB_WORKSPACE}/scripts/ci/kubeconform.sh" -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary \
               /tmp/rendered-core-postgres.yaml
           done
 

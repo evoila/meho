@@ -342,21 +342,33 @@ def test_stack_logger_level_lowered_after_setup_is_still_held(
     assert values["header"] in out
 
 
-def _logger_tree() -> dict[str, tuple[int, bool, list[logging.Handler], bool]]:
-    """The level, on/off state, handlers and ``propagate`` of every logger and the root."""
+def _logger_tree(
+    capture: list[logging.Handler],
+) -> dict[str, tuple[int, bool, list[logging.Handler], bool]]:
+    """The level, on/off state, handlers and ``propagate`` of every logger and the root.
+
+    The root leaves out the ``capture`` handlers: pytest puts them on the root
+    for each test phase, and the database set-up of a first test can take them
+    off again.
+    """
     loggers = {
         n: lg for n, lg in logging.root.manager.loggerDict.items() if isinstance(lg, logging.Logger)
     }
-    loggers[""] = logging.root
-    return {n: (lg.level, lg.disabled, lg.handlers[:], lg.propagate) for n, lg in loggers.items()}
+    tree = {n: (lg.level, lg.disabled, lg.handlers[:], lg.propagate) for n, lg in loggers.items()}
+    root = logging.root
+    root_handlers = [h for h in root.handlers if h not in capture]
+    tree[""] = (root.level, root.disabled, root_handlers, root.propagate)
+    return tree
 
 
 @pytest.fixture
-def _logger_tree_unchanged() -> Iterator[None]:
+def _logger_tree_unchanged(request: pytest.FixtureRequest) -> Iterator[None]:
     """Check that the test leaves every logger of the tree as it found it."""
-    before = _logger_tree()
+    plugin = request.config.pluginmanager.get_plugin("logging-plugin")
+    capture = [plugin.caplog_handler, plugin.report_handler] if plugin else []
+    before = _logger_tree(capture)
     yield
-    after = _logger_tree()
+    after = _logger_tree(capture)
     assert {n: after.get(n) for n in before} == before
 
 

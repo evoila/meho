@@ -2691,6 +2691,9 @@ shards 4-6" in the `changes` job (`scripts/ci/pick_second_site.sh`) writes
 - the repository variable `MEHO_CI_SECOND_SITE` is exactly `on` (lower
   case; `ON` counts as off);
 - the event is `pull_request`, from this repository (not a fork);
+- the pull request does not have the label `ci-coverage-validate`. The
+  coverage job joins the coverage files of all shards and works in the
+  checked-out code, so all the files it joins come from the usual runners;
 - the actor is not Dependabot;
 - it is the first attempt of the run;
 - all six shards really run (not docs-only, a backend change, not a

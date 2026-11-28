@@ -547,6 +547,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           ACTOR: ${{ github.actor }}
+          COVERAGE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate') && 'true' || 'false' }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           DOCS_ONLY: ${{ steps.detect.outputs.docs_only }}
           BACKEND_PYTHON: ${{ steps.detect.outputs.backend_python }}
@@ -1664,6 +1665,7 @@ jobs:
     # Never on a fork pull request, the merge queue, the nightly run or any
     # other event: the `if:` below, and the pick rules in
     # scripts/ci/pick_second_site.sh.
+    # No job on the usual runners runs anything from an artifact of this job.
     needs: changes
     if: >-
       github.event_name == 'pull_request' &&

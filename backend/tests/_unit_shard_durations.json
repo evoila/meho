@@ -340,6 +340,7 @@
   "tests/test_ci_merge_queue_watchdog.py": 4.54,
   "tests/test_ci_redaction_compare_summary_only.py": 6.54,
   "tests/test_ci_repo_secrets.py": 31.06,
+  "tests/test_ci_runner_allow_list.py": 1.0,
   "tests/test_ci_security_weekly_issue.py": 0.67,
   "tests/test_ci_spec_shelf_lists.py": 2.88,
   "tests/test_ci_test_images.py": 20.0,

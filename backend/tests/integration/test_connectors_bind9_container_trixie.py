@@ -15,9 +15,7 @@ image build or container start fails the test.
 from __future__ import annotations
 
 import os
-import tempfile
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 
@@ -43,41 +41,35 @@ def bind9_920_target() -> Iterator[_Bind9Target]:
         pytest.skip(SKIP_REASON)
 
     from testcontainers.core.container import DockerContainer
-    from testcontainers.core.image import DockerImage
 
     from tests._strategies import wait_for_log_message
+    from tests._test_image_build import build_test_image
 
     assert _TRIXIE_DOCKERFILE != _DOCKERFILE, "the base image line was not replaced"
 
-    with tempfile.TemporaryDirectory() as build_dir:
-        (Path(build_dir) / "Dockerfile").write_text(_TRIXIE_DOCKERFILE)
-        tag = os.environ.get("MEHO_TEST_BIND9_920_TAG", "meho-test-bind9:9.20-trixie")
-        DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_TRIXIE_IMAGE", _DEFAULT_TRIXIE_IMAGE
-                )
-            },
-        ).build()
+    tag = os.environ.get("MEHO_TEST_BIND9_920_TAG", "meho-test-bind9:9.20-trixie")
+    build_test_image(
+        _TRIXIE_DOCKERFILE,
+        tag,
+        {"DEBIAN_IMAGE": os.environ.get("MEHO_TEST_DEBIAN_TRIXIE_IMAGE", _DEFAULT_TRIXIE_IMAGE)},
+    )
 
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
-        try:
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
-            # named starts just before sshd; give it a moment to be seen.
-            import time
+    container = DockerContainer(tag).with_exposed_ports(22)
+    container.start()
+    try:
+        wait_for_log_message(container, "Server listening on", timeout=30.0)
+        # named starts just before sshd; give it a moment to be seen.
+        import time
 
-            time.sleep(2.0)
-            yield _Bind9Target(
-                name="bind9-920-test",
-                host=container.get_container_host_ip(),
-                port=int(container.get_exposed_port(22)),
-                secret_ref=_CONTAINER_SECRET_PATH,
-            )
-        finally:
-            container.stop()
+        time.sleep(2.0)
+        yield _Bind9Target(
+            name="bind9-920-test",
+            host=container.get_container_host_ip(),
+            port=int(container.get_exposed_port(22)),
+            secret_ref=_CONTAINER_SECRET_PATH,
+        )
+    finally:
+        container.stop()
 
 
 @pytest.mark.asyncio

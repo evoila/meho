@@ -40,7 +40,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-import tempfile
 import textwrap
 import time
 from collections.abc import Iterator
@@ -232,61 +231,54 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
     # sandbox.
     try:
         from testcontainers.core.container import DockerContainer
-        from testcontainers.core.image import DockerImage
 
         from tests._strategies import wait_for_log_message
+        from tests._test_image_build import build_test_image
     except ImportError as exc:  # pragma: no cover -- testcontainers ships these in 4.x
         pytest.skip(f"testcontainers missing module: {exc}")
 
-    with tempfile.TemporaryDirectory() as build_dir:
-        dockerfile = Path(build_dir) / "Dockerfile"
-        dockerfile.write_text(_DOCKERFILE)
+    # ``MEHO_TEST_BIND9_TAG`` lets CI mirror the locally-built tag
+    # to a registry / pin it across runs; default tag stays local-
+    # only so a missing override does not race to publish.
+    tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
 
-        # ``MEHO_TEST_BIND9_TAG`` lets CI mirror the locally-built tag
-        # to a registry / pin it across runs; default tag stays local-
-        # only so a missing override does not race to publish.
-        tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
-
-        # Build the image. ``DOCKER_AVAILABLE`` is already true here, so
-        # any build failure is a real Dockerfile / package / index-fetch
-        # regression and must surface as a test failure rather than a
-        # skip. The pre-fix shape wrapped this in ``except Exception:
-        # pytest.skip(...)`` and lost CI signal on broken images.
-        image = DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
-                )
-            },
-        )
-        image.build()
-
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
-        try:
-            # Wait for sshd to log readiness before tests connect.
-            # ``wait_for_log_message`` raises ``TimeoutError`` after 30 s
-            # of no match; we let it propagate so a regression in the
-            # inline entrypoint surfaces rather than silently skipping.
-            # The container is torn down in the outer ``finally``
-            # regardless.
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
-            host = container.get_container_host_ip()
-            port = int(container.get_exposed_port(22))
-            # named starts in the background just before sshd; give
-            # it a moment for ``pgrep -x named`` to see the process.
-            time.sleep(2.0)
-            target = _Bind9Target(
-                name="bind9-test",
-                host=host,
-                port=port,
-                secret_ref=_CONTAINER_SECRET_PATH,
+    # Build the image. ``DOCKER_AVAILABLE`` is already true here, so
+    # any build failure is a real Dockerfile / package / index-fetch
+    # regression and must surface as a test failure rather than a
+    # skip. The build takes the base image that CI pulled before pytest.
+    build_test_image(
+        _DOCKERFILE,
+        tag,
+        {
+            "DEBIAN_IMAGE": os.environ.get(
+                "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
             )
-            yield target
-        finally:
-            container.stop()
+        },
+    )
+
+    container = DockerContainer(tag).with_exposed_ports(22)
+    container.start()
+    try:
+        # Wait for sshd to log readiness before tests connect.
+        # ``wait_for_log_message`` raises ``TimeoutError`` after 30 s
+        # of no match; we let it propagate so a regression in the
+        # inline entrypoint surfaces rather than silently skipping.
+        # The container is torn down in the ``finally`` regardless.
+        wait_for_log_message(container, "Server listening on", timeout=30.0)
+        host = container.get_container_host_ip()
+        port = int(container.get_exposed_port(22))
+        # named starts in the background just before sshd; give
+        # it a moment for ``pgrep -x named`` to see the process.
+        time.sleep(2.0)
+        target = _Bind9Target(
+            name="bind9-test",
+            host=host,
+            port=port,
+            secret_ref=_CONTAINER_SECRET_PATH,
+        )
+        yield target
+    finally:
+        container.stop()
 
 
 # ---------------------------------------------------------------------------

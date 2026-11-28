@@ -89,7 +89,7 @@ _SECOND_SITE_ONLY_STEPS = {
     "Hide the proxy name in the test reports",
 }
 _HIDE_STEP = "Hide the proxy name in the test reports"
-# The alias of the sync step is also in the hosted-trial job. With the line
+# The alias of the sync step is also in the GitHub-hosted shard job. With the line
 # after it, it is found only in the second-site job.
 _SYNC_ALIAS = "      - *unit-sync\n"
 _SYNC_IN_THE_SECOND_SITE_JOB = _SYNC_ALIAS + "\n      - &site2-fastembed-restore\n"
@@ -210,6 +210,7 @@ def _outputs(
     second_site: str = "", single_connector: str = "", test_map: str = "false"
 ) -> dict[str, str]:
     return {
+        "needs.changes.outputs.pr_hosted": "",
         "needs.changes.outputs.second_site": second_site,
         "needs.changes.outputs.single_connector": single_connector,
         "needs.changes.outputs.test_map": test_map,
@@ -799,6 +800,8 @@ def _fan_in(
         "SHARDS_RESULT": shards,
         "CHANGES_SECOND_SITE": second_site,
         "SECOND_SITE_RESULT": site2,
+        "CHANGES_PR_HOSTED": "",
+        "HOSTED_RESULT": "skipped",
         "OUTSIDE_RESULT": "skipped",
     }
     return _bash_step(script, tmp_path, values)
@@ -835,6 +838,7 @@ def test_fan_in_needs_both_shard_jobs() -> None:
         "python-lint",
         "python-unit-shard",
         _NEW_JOB,
+        "python-unit-shard-hosted",
         "python-outside-backend",
     ]
     assert lane["if"] == "always()"
@@ -1220,7 +1224,9 @@ def test_pick_unreadable_time(tmp_path: Path) -> None:
 def test_pick_step_can_never_break_the_changes_job() -> None:
     changes = _ci_jobs()["changes"]
     (step,) = [s for s in changes["steps"] if s.get("id") == "second-site"]
-    assert step is changes["steps"][-1]
+    # Only the pick step of the GitHub-hosted unit shards comes after it.
+    assert step is changes["steps"][-2]
+    assert changes["steps"][-1]["id"] == "pr-hosted"
     assert step["continue-on-error"] is True
     assert step["timeout-minutes"] <= 2
     assert step["run"] == "bash scripts/ci/pick_second_site.sh"

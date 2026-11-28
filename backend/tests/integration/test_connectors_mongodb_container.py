@@ -30,7 +30,6 @@ meaningful.
 
 from __future__ import annotations
 
-import contextlib
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -43,9 +42,9 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.mongodb import MongoDbConnector
 from meho_backplane.settings import get_settings
 
-from .._container_ready import ping_mongodb, start_until_ready
+from .._container_ready import ping_mongodb, start_test_container
 from .._vault_fakes import install_fake_client
-from ._image_tags import ImageRun, image_param, image_without_registry, major_of_image
+from ._image_tags import ImageRun, image_param, major_of_image
 
 
 def _docker_socket_present() -> bool:
@@ -119,22 +118,10 @@ class _Container:
 @pytest.fixture(scope="module", params=_MONGO_IMAGES)
 def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     """Boot a stock Mongo (root auth), seed a collection + TTL index, yield coords."""
-    from docker.errors import APIError as _DockerAPIError
     from testcontainers.mongodb import MongoDbContainer
 
     run: ImageRun = request.param
     image = run.image
-
-    def start() -> MongoDbContainer:
-        container = MongoDbContainer(image)
-        try:
-            container.start()
-        except BaseException:
-            # A start that times out leaves a running container behind.
-            with contextlib.suppress(Exception):
-                container.stop()
-            raise
-        return container
 
     def ping(container: MongoDbContainer) -> None:
         ping_mongodb(
@@ -144,18 +131,9 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
             password=container.password,
         )
 
-    try:
-        mongo = start_until_ready(
-            start, ping, what=f"mongodb ({run.label}, image {image_without_registry(image)})"
-        )
-    except _DockerAPIError as exc:
-        msg = str(exc).lower()
-        if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            reason = f"image pull rate-limited for {run.label}; set MEHO_TEST_MONGODB_IMAGE"
-            if os.environ.get("GITHUB_ACTIONS"):
-                pytest.fail(reason)
-            pytest.skip(reason)
-        raise
+    mongo = start_test_container(
+        lambda: MongoDbContainer(image), image=image, what=f"mongodb {run.label}", probe=ping
+    )
     try:
         coords = _Container(
             host=mongo.get_container_host_ip(),

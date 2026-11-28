@@ -43,6 +43,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from meho_backplane.core.vault_init import HttpBao, Plan, set_up
+from tests._container_ready import run_docker_step, start_test_container
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 _CHART = Path(__file__).resolve().parents[3] / "deploy" / "charts" / "meho"
@@ -158,53 +159,62 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
 
     tmp = tmp_path_factory.mktemp("openbao")
 
-    network = Network()
-    network.create()
-    keycloak = (
-        DockerContainer(_image("keycloak", "MEHO_TEST_CORE_KEYCLOAK_IMAGE"))
-        .with_network(network)
-        .with_network_aliases("keycloak")
-        .with_command("start-dev --import-realm")
-        .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
-        .with_env("KC_HOSTNAME", f"{_PUBLIC_URL}/auth")
-        .with_env("KC_HOSTNAME_BACKCHANNEL_DYNAMIC", "true")
-        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
-        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _PASSWORD)
-        .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
-        .with_env("MEHO_REALM_TENANT_ID", _TENANT_A)
-        .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", secrets.token_hex(16))
-        .with_env("MEHO_REALM_WEB_CLIENT_SECRET", secrets.token_hex(16))
-        .with_env("MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", secrets.token_hex(16))
-        .with_volume_mapping(
-            str(_CHART / "charts" / "keycloak" / "files"), "/opt/keycloak/data/import", "ro"
+    network = run_docker_step(
+        lambda: Network().create(), what="test network", failed="network create failed"
+    )
+    keycloak_image = _image("keycloak", "MEHO_TEST_CORE_KEYCLOAK_IMAGE")
+    openbao_image = _image("openbao", "MEHO_TEST_CORE_OPENBAO_IMAGE")
+
+    def make_keycloak() -> DockerContainer:
+        return (
+            DockerContainer(keycloak_image)
+            .with_network(network)
+            .with_network_aliases("keycloak")
+            .with_command("start-dev --import-realm")
+            .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
+            .with_env("KC_HOSTNAME", f"{_PUBLIC_URL}/auth")
+            .with_env("KC_HOSTNAME_BACKCHANNEL_DYNAMIC", "true")
+            .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
+            .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _PASSWORD)
+            .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
+            .with_env("MEHO_REALM_TENANT_ID", _TENANT_A)
+            .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", secrets.token_hex(16))
+            .with_env("MEHO_REALM_WEB_CLIENT_SECRET", secrets.token_hex(16))
+            .with_env("MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", secrets.token_hex(16))
+            .with_volume_mapping(
+                str(_CHART / "charts" / "keycloak" / "files"), "/opt/keycloak/data/import", "ro"
+            )
+            .with_exposed_ports(8080)
         )
-        .with_exposed_ports(8080)
-    )
-    openbao = (
-        DockerContainer(_image("openbao", "MEHO_TEST_CORE_OPENBAO_IMAGE"))
-        .with_network(network)
-        .with_network_aliases("openbao")
-        .with_command("server")
-        .with_env("SKIP_CHOWN", "true")
-        .with_volume_mapping(str(_OPENBAO_CONFIG), "/openbao/config", "ro")
-        .with_exposed_ports(8200)
-        # No DNS search domains. A CI runner passes its own search domains
-        # and "ndots:5" into the container, so "keycloak" is first looked up
-        # with each domain added. A real host found that way would win over
-        # the Keycloak container on this network.
-        .with_kwargs(dns_search=["."])
-    )
+
+    def make_openbao() -> DockerContainer:
+        return (
+            DockerContainer(openbao_image)
+            .with_network(network)
+            .with_network_aliases("openbao")
+            .with_command("server")
+            .with_env("SKIP_CHOWN", "true")
+            .with_volume_mapping(str(_OPENBAO_CONFIG), "/openbao/config", "ro")
+            .with_exposed_ports(8200)
+            # No DNS search domains. A CI runner passes its own search domains
+            # and "ndots:5" into the container, so "keycloak" is first looked up
+            # with each domain added. A real host found that way would win over
+            # the Keycloak container on this network.
+            .with_kwargs(dns_search=["."])
+        )
+
+    started: list[DockerContainer] = []
     try:
-        keycloak.start()
-        openbao.start()
-    except Exception as exc:
-        network.remove()
-        reason = f"a container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(keycloak, "Listening on:", timeout=240)
+        keycloak = start_test_container(
+            make_keycloak,
+            image=keycloak_image,
+            what="Keycloak",
+            probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=240),
+            timeout=240,
+        )
+        started.append(keycloak)
+        openbao = start_test_container(make_openbao, image=openbao_image, what="OpenBao")
+        started.append(openbao)
         kc_url = f"http://{keycloak.get_container_host_ip()}:{keycloak.get_exposed_port(8080)}/auth"
         bao_url = f"http://{openbao.get_container_host_ip()}:{openbao.get_exposed_port(8200)}"
         _wait(f"{kc_url}/realms/meho/.well-known/openid-configuration", 120)
@@ -232,8 +242,8 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Env]:
         _make_users(kc_url)
         yield env
     finally:
-        openbao.stop()
-        keycloak.stop()
+        for container in reversed(started):
+            container.stop()
         network.remove()
 
 

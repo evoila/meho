@@ -65,6 +65,7 @@ from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
 )
+from tests._container_ready import start_test_container
 
 # ---------------------------------------------------------------------------
 # Docker-availability gate — identical heuristic to
@@ -145,25 +146,23 @@ def vault_dev_addr() -> Iterator[str]:
     from tests._strategies import wait_for_log_message
 
     image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18")
-    container = (
-        DockerContainer(image)
-        .with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN)
-        .with_env("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
-        .with_exposed_ports(8200)
-        .with_kwargs(cap_add=["IPC_LOCK"])
+
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN)
+            .with_env("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
+            .with_exposed_ports(8200)
+            .with_kwargs(cap_add=["IPC_LOCK"])
+        )
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="vault",
+        probe=lambda c: wait_for_log_message(c, "Vault server started!", timeout=60),
     )
     try:
-        container.start()
-    except Exception as exc:
-        # Any boot failure → clean skip on a laptop. Under CI the test
-        # fails instead, the same as the other container fixtures.
-        reason = f"vault dev container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-
-    try:
-        wait_for_log_message(container, "Vault server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         addr = f"http://{host}:{port}"

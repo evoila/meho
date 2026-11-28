@@ -50,6 +50,7 @@ from pathlib import Path
 import pytest
 
 from meho_backplane.connectors.bind9 import Bind9Connector
+from tests._container_ready import run_docker_step, start_test_container
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
 
 # ---------------------------------------------------------------------------
@@ -249,30 +250,32 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
 
         # Build the image. ``DOCKER_AVAILABLE`` is already true here, so
         # any build failure is a real Dockerfile / package / index-fetch
-        # regression and must surface as a test failure rather than a
-        # skip. The pre-fix shape wrapped this in ``except Exception:
-        # pytest.skip(...)`` and lost CI signal on broken images.
-        image = DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
-                )
-            },
+        # regression: under CI it fails the test, with the image name and
+        # the kind of error only.
+        run_docker_step(
+            lambda: DockerImage(
+                path=build_dir,
+                tag=tag,
+                buildargs={
+                    "DEBIAN_IMAGE": os.environ.get(
+                        "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
+                    )
+                },
+            ).build(),
+            what="bind9",
+            image=tag,
+            failed="image build failed",
         )
-        image.build()
 
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
+        # The helper waits for sshd to log readiness before tests connect,
+        # and under CI a container that never gets there fails the test.
+        container = start_test_container(
+            lambda: DockerContainer(tag).with_exposed_ports(22),
+            image=tag,
+            what="bind9",
+            probe=lambda c: wait_for_log_message(c, "Server listening on", timeout=30.0),
+        )
         try:
-            # Wait for sshd to log readiness before tests connect.
-            # ``wait_for_log_message`` raises ``TimeoutError`` after 30 s
-            # of no match; we let it propagate so a regression in the
-            # inline entrypoint surfaces rather than silently skipping.
-            # The container is torn down in the outer ``finally``
-            # regardless.
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
             host = container.get_container_host_ip()
             port = int(container.get_exposed_port(22))
             # named starts in the background just before sshd; give

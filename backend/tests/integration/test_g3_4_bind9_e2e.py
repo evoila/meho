@@ -99,6 +99,7 @@ from meho_backplane.operations.meta_tools import (  # type: ignore[import-untype
     search_operations,
 )
 from meho_backplane.operations.reducer import PassThroughReducer  # type: ignore[import-untyped]
+from tests._container_ready import run_docker_step, start_test_container
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -331,21 +332,28 @@ def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
         dockerfile.write_text(_DOCKERFILE)
         tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
 
-        image = DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
-                )
-            },
+        run_docker_step(
+            lambda: DockerImage(
+                path=build_dir,
+                tag=tag,
+                buildargs={
+                    "DEBIAN_IMAGE": os.environ.get(
+                        "MEHO_TEST_DEBIAN_BOOKWORM_IMAGE", _DEFAULT_BOOKWORM_IMAGE
+                    )
+                },
+            ).build(),
+            what="bind9",
+            image=tag,
+            failed="image build failed",
         )
-        image.build()
 
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
+        container = start_test_container(
+            lambda: DockerContainer(tag).with_exposed_ports(22),
+            image=tag,
+            what="bind9",
+            probe=lambda c: wait_for_log_message(c, "Server listening on", timeout=30.0),
+        )
         try:
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
             host = container.get_container_host_ip()
             port = int(container.get_exposed_port(22))
             # named starts in the background just before sshd; give

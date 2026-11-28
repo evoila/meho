@@ -17,6 +17,16 @@ one for the whole round trip).
 The message starts with ``container not ready`` so a person (or the
 fleet's loop) can tell a set-up failure from a failing test.
 
+``start_test_container`` is the one way an integration fixture starts a
+container. It makes a fresh container with ``make``, starts it through
+``start_until_ready`` and returns it. When the container does not start,
+it fails the test under CI (``GITHUB_ACTIONS`` set) and skips it on a
+laptop. Its message names the image without its registry part and the
+kind of error (a fixed word and the error's class name). It holds no
+text of the Docker daemon, and the failure has no traceback. A registry
+that refuses the pull for too many requests gets the same answer on the
+first and on the second try.
+
 ``start_until_ready`` starts a container and waits for it. When the
 container gives no answer in time, it stops it and starts a fresh one
 once, with a longer wait. A second start shows as one
@@ -30,20 +40,24 @@ error message: the CI logs of this repository are public.
 
 Usage::
 
-    container = start_until_ready(
-        start_mongo,  # makes and starts a fresh container
-        lambda c: ping_mongodb(c.host, c.port, username=user, password=password),
+    container = start_test_container(
+        lambda: MongoDbContainer(image),  # makes a fresh container, not started
+        image=image,
         what="mongodb",
+        probe=lambda c: ping_mongodb(c.host, c.port, username=user, password=password),
     )
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 import warnings
 from collections.abc import Callable
-from typing import Protocol
+from typing import NoReturn, Protocol
+
+import pytest
 
 
 class ContainerNotReadyError(RuntimeError):
@@ -58,6 +72,12 @@ class StartedContainer(Protocol):
     """The parts of a started testcontainers container that the helper uses."""
 
     def stop(self) -> None: ...
+
+
+class StartableContainer(StartedContainer, Protocol):
+    """A testcontainers container that is made but not started yet."""
+
+    def start(self) -> object: ...
 
 
 def wait_until_ready(
@@ -87,7 +107,7 @@ def wait_until_ready(
         sleep(interval)
     raise ContainerNotReadyError(
         f"container not ready: {what} gave no answer in {timeout:g} s "
-        f"(last error: {type(last_error).__name__}: {last_error})"
+        f"(last error: {type(last_error).__name__})"
     )
 
 
@@ -121,6 +141,9 @@ def start_until_ready[C: StartedContainer](
     second = _try_start(start, probe, what, second_timeout, interval, clock, sleep, Exception)
     if not isinstance(second, Exception):
         return second
+    if _pull_refused_for_too_many_requests(second):
+        # The same answer as a refused pull on the first try.
+        raise second
     if isinstance(second, ContainerNotReadyError | TimeoutError):
         try_2 = f"no answer in {second_timeout:g} s"
     else:
@@ -166,6 +189,111 @@ def _try_start[C: StartedContainer](
         _stop_quietly(container)
         raise
     return container
+
+
+def start_test_container[C: StartableContainer](
+    make: Callable[[], C],
+    *,
+    image: str,
+    what: str,
+    probe: Callable[[C], object] | None = None,
+    timeout: float = 60.0,
+    second_timeout: float = 120.0,
+    interval: float = 0.5,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> C:
+    """Start a fresh container from ``make`` until ``probe`` works, or end the test.
+
+    ``make`` returns a container that is not started yet; it is called
+    again for the second try. ``probe`` gets the started container; with
+    no probe, a container whose ``start()`` returns is ready. ``image``
+    and ``what`` name the container in the message. The caller stops the
+    returned container.
+    """
+
+    def start() -> C:
+        container = make()
+        try:
+            container.start()
+        except BaseException:
+            # A start that fails can leave a running container behind.
+            _stop_quietly(container)
+            raise
+        return container
+
+    label = f"{what} (image {_image_without_registry(image)})"
+    try:
+        return start_until_ready(
+            start,
+            probe if probe is not None else _no_probe,
+            what=label,
+            timeout=timeout,
+            second_timeout=second_timeout,
+            interval=interval,
+            clock=clock,
+            sleep=sleep,
+        )
+    except Exception as exc:
+        message = container_start_message(label, exc)
+    _end_test(message)
+
+
+def run_docker_step[T](
+    step: Callable[[], T], *, what: str, failed: str, image: str | None = None
+) -> T:
+    """Run a Docker step before a container start (an image build, a network) the same way.
+
+    When ``step`` raises, the test ends as in ``start_test_container``: it
+    fails under CI and skips on a laptop. ``failed`` names the step in the
+    message, for example ``"image build failed"``.
+    """
+    label = what if image is None else f"{what} (image {_image_without_registry(image)})"
+    try:
+        return step()
+    except Exception as exc:
+        message = container_start_message(label, exc, failed=failed)
+    _end_test(message)
+
+
+def container_start_message(
+    label: str, error: BaseException, *, failed: str = "start failed"
+) -> str:
+    """The fixed message for a container that did not start: never the error's own text."""
+    if isinstance(error, ContainerNotReadyError):
+        # Built only from fixed words, wait times and class names.
+        return str(error)
+    kind = type(error).__name__
+    if _pull_refused_for_too_many_requests(error):
+        return (
+            f"container did not start: {label}: "
+            f"the registry refused the pull, too many requests ({kind})"
+        )
+    return f"container did not start: {label}: {failed} ({kind})"
+
+
+def _end_test(message: str) -> NoReturn:
+    # Called out of the ``except`` block, so the error is not chained to the failure.
+    if os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail(message, pytrace=False)
+    pytest.skip(message)
+
+
+def _pull_refused_for_too_many_requests(error: BaseException) -> bool:
+    # The text is read to sort the error, never printed.
+    if getattr(error, "status_code", None) == 429:
+        return True
+    text = str(error).lower()
+    return "too many requests" in text or "rate limit" in text
+
+
+def _image_without_registry(image: str) -> str:
+    # The registry part can name a private mirror; keep only the image's own name.
+    return image.rsplit("/", 1)[-1]
+
+
+def _no_probe(container: object) -> None:
+    return None
 
 
 def _stop_quietly(container: StartedContainer) -> None:

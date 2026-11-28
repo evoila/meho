@@ -71,6 +71,7 @@ Skip conditions
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -109,6 +110,7 @@ from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.tenancy import ensure_tenant
+from tests._container_ready import run_docker_step, start_test_container
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -187,76 +189,68 @@ def harbor_core_addr() -> Iterator[str]:
     core_secret = "e2e-core-secret-622"
     job_secret = "e2e-job-secret-622"
 
-    network = Network()
-    network.create()
-
-    db_container = (
-        DockerContainer(db_image)
-        .with_name(f"harbor-db-{network.id[:8]}")
-        .with_network(network)
-        .with_network_aliases(_DB_ALIAS)
+    network = run_docker_step(
+        lambda: Network().create(), what="test network", failed="network create failed"
     )
-    redis_container = (
-        DockerContainer(redis_image)
-        .with_name(f"harbor-redis-{network.id[:8]}")
-        .with_network(network)
-        .with_network_aliases(_REDIS_ALIAS)
-    )
-    core_container = (
-        DockerContainer(core_image)
-        .with_name(f"harbor-core-{network.id[:8]}")
-        .with_network(network)
-        .with_network_aliases(_CORE_ALIAS)
-        .with_env("DATABASE_TYPE", "postgresql")
-        .with_env("POSTGRESQL_HOST", _DB_ALIAS)
-        .with_env("POSTGRESQL_PORT", "5432")
-        .with_env("POSTGRESQL_USERNAME", "postgres")
-        .with_env("POSTGRESQL_PASSWORD", "root123")
-        .with_env("POSTGRESQL_DATABASE", "registry")
-        .with_env("_REDIS_URL_CORE", f"redis://{_REDIS_ALIAS}:6379/0")
-        .with_env("HARBOR_ADMIN_PASSWORD", _HARBOR_ADMIN_PASSWORD)
-        .with_env("CORE_SECRET", core_secret)
-        .with_env("JOBSERVICE_SECRET", job_secret)
-        # Self-referential token service URL for standalone core.
-        .with_env("TOKEN_SERVICE_URL", f"http://{_CORE_ALIAS}:8080/service/token")
-        # Disable registry + notary features not available in standalone mode.
-        .with_env("REGISTRY_URL", "")
-        .with_env("REGISTRY_CONTROLLER_URL", "")
-        .with_exposed_ports(8080)
-    )
+    with contextlib.ExitStack() as stack:
+        stack.callback(network.remove)
 
-    try:
-        db_container.start()
-        redis_container.start()
-    except Exception as exc:
-        db_container.stop()
-        redis_container.stop()
-        network.remove()
-        reason = f"harbor-db/redis containers failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+        def make_db() -> DockerContainer:
+            return (
+                DockerContainer(db_image)
+                .with_name(f"harbor-db-{network.id[:8]}")
+                .with_network(network)
+                .with_network_aliases(_DB_ALIAS)
+            )
 
-    try:
-        # Give DB time to reach ready state before starting core.
-        wait_for_log_message(db_container, "PostgreSQL init process complete", timeout=30)
-    except Exception:
-        # Some harbor-db images don't log this line; fall through and
-        # let core fail-fast if the DB isn't ready.
-        time.sleep(5)
+        def make_redis() -> DockerContainer:
+            return (
+                DockerContainer(redis_image)
+                .with_name(f"harbor-redis-{network.id[:8]}")
+                .with_network(network)
+                .with_network_aliases(_REDIS_ALIAS)
+            )
 
-    try:
-        core_container.start()
-    except Exception as exc:
-        db_container.stop()
-        redis_container.stop()
-        network.remove()
-        reason = f"harbor-core container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+        def make_core() -> DockerContainer:
+            return (
+                DockerContainer(core_image)
+                .with_name(f"harbor-core-{network.id[:8]}")
+                .with_network(network)
+                .with_network_aliases(_CORE_ALIAS)
+                .with_env("DATABASE_TYPE", "postgresql")
+                .with_env("POSTGRESQL_HOST", _DB_ALIAS)
+                .with_env("POSTGRESQL_PORT", "5432")
+                .with_env("POSTGRESQL_USERNAME", "postgres")
+                .with_env("POSTGRESQL_PASSWORD", "root123")
+                .with_env("POSTGRESQL_DATABASE", "registry")
+                .with_env("_REDIS_URL_CORE", f"redis://{_REDIS_ALIAS}:6379/0")
+                .with_env("HARBOR_ADMIN_PASSWORD", _HARBOR_ADMIN_PASSWORD)
+                .with_env("CORE_SECRET", core_secret)
+                .with_env("JOBSERVICE_SECRET", job_secret)
+                # Self-referential token service URL for standalone core.
+                .with_env("TOKEN_SERVICE_URL", f"http://{_CORE_ALIAS}:8080/service/token")
+                # Disable registry + notary features not available in standalone mode.
+                .with_env("REGISTRY_URL", "")
+                .with_env("REGISTRY_CONTROLLER_URL", "")
+                .with_exposed_ports(8080)
+            )
 
-    try:
+        db_container = start_test_container(make_db, image=db_image, what="harbor-db")
+        stack.callback(db_container.stop)
+        redis_container = start_test_container(make_redis, image=redis_image, what="harbor-redis")
+        stack.callback(redis_container.stop)
+
+        try:
+            # Give DB time to reach ready state before starting core.
+            wait_for_log_message(db_container, "PostgreSQL init process complete", timeout=30)
+        except Exception:
+            # Some harbor-db images don't log this line; fall through and
+            # let core fail-fast if the DB isn't ready.
+            time.sleep(5)
+
+        core_container = start_test_container(make_core, image=core_image, what="harbor-core")
+        stack.callback(core_container.stop)
+
         try:
             wait_for_log_message(core_container, "HTTP proxy is up", timeout=60)
         except Exception:
@@ -273,11 +267,6 @@ def harbor_core_addr() -> Iterator[str]:
         _seed_harbor(base_url)
 
         yield base_url
-    finally:
-        core_container.stop()
-        db_container.stop()
-        redis_container.stop()
-        network.remove()
 
 
 def _wait_for_harbor_ready(base_url: str, timeout: int) -> None:

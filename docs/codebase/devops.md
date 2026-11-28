@@ -3377,6 +3377,21 @@ A job must not fail because a download failed once. The rules:
   (`GITHUB_ACTIONS` set) a container test whose container does not start
   fails instead of skipping. `tests/test_ci_pull_test_images.py` checks
   the step, the script and the fixtures.
+- Every fixture under `backend/tests/integration/` starts its containers
+  with `start_test_container` from `backend/tests/_container_ready.py`.
+  An image build or a network for a container goes through
+  `run_docker_step` from the same file. The helper waits until the
+  container answers, and starts a fresh container once when it gives no
+  answer in time. A container that does not start ends the test with a
+  fixed message: the image name without its registry part, and the kind
+  of error (a fixed word and the error's class name). The message never
+  holds the text of the Docker daemon's error, because the logs and the
+  junit files are public. Under CI the test fails with this message and
+  no traceback; on a laptop it skips. A registry that refuses a pull for
+  too many requests gets the same answer on both tries.
+  `tests/test_integration_container_start_guard.py` fails when a fixture
+  calls `start()`, `build()` or `create()` itself, or puts a Docker
+  client error into a text.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
   run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in

@@ -45,6 +45,7 @@ from meho_backplane.connectors.kubernetes import (
     KubernetesTargetLike,
     parse_kubeconfig_yaml,
 )
+from tests._container_ready import start_test_container
 
 from ._k3s_node_images import load_into_node, pause_image
 
@@ -172,19 +173,17 @@ def k3s_kubeconfig_and_target(request: pytest.FixtureRequest) -> Any:
     # ``kubernetes_asyncio>=32,<33``; the newer lines check the connector
     # against the servers its range also claims.
     image = request.param
-    try:
+
+    def make() -> K3SContainer:
         container = K3SContainer(image=image)
         # The node gets its pause image from load_into_node, under this name.
         container.with_command(
             "server --disable traefik"
             f" --tls-san={container.get_container_host_ip()} --pause-image={pause_image()}"
         )
-        container.start()
-    except Exception as exc:
-        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+        return container
+
+    container = start_test_container(make, image=image, what="k3s")
     load_into_node(container, [pause_image(), _busybox_image()])
 
     try:

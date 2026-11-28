@@ -87,6 +87,7 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from tests._oidc_jwt_helpers import ISSUER as _ISSUER
 from tests._pgvector_image import pgvector_test_image
@@ -170,7 +171,6 @@ def async_pg_url() -> Iterator[str]:
     # the fixture body means modules that inherit this conftest don't
     # crash at collection time on a no-Docker sandbox — they collect
     # fine and skip the consuming tests.
-    from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
     # The chart's own PostgreSQL 17 image with the pgvector extension
@@ -186,26 +186,11 @@ def async_pg_url() -> Iterator[str]:
     # cache, internal Harbor) does not require a code change — same
     # env-knob shape ``test_db_engine`` / ``test_migration_rollback``
     # honour.
+    # A pull that the registry refuses for too many requests skips on a
+    # laptop and fails under CI, so a missing image cannot hide. Fix: set
+    # MEHO_TEST_PGVECTOR_IMAGE to a GHCR or Harbor mirror.
     image = pgvector_test_image()
-    pg = PostgresContainer(image)
-    try:
-        pg.start()
-    except _DockerAPIError as exc:
-        # Docker Hub rate-limit (429 / "too many requests") surfaces here
-        # when CI runners exhaust the unauthenticated pull quota. Convert
-        # to a skip on a laptop. Under CI the test fails instead, so a
-        # missing image cannot hide. Fix: set MEHO_TEST_PGVECTOR_IMAGE to a
-        # GHCR or Harbor mirror, or add Docker Hub credentials to CI.
-        msg = str(exc).lower()
-        if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            reason = (
-                "Docker Hub pull rate-limited for the pgvector image; "
-                "set MEHO_TEST_PGVECTOR_IMAGE to a GHCR/Harbor mirror to fix"
-            )
-            if os.environ.get("GITHUB_ACTIONS"):
-                pytest.fail(reason)
-            pytest.skip(reason)
-        raise
+    pg = start_test_container(lambda: PostgresContainer(image), image=image, what="pgvector")
     try:
         sync_url = pg.get_connection_url()
         async_url = _async_url_from(sync_url)
@@ -852,9 +837,9 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
        same reason as every other testcontainers-driven suite in this
        directory (uniform skip heuristic).
     3. Container failed to start (privileged denied, image pull
-       rate-limit, cgroup refusal) → skip with the exception class
-       name, same pattern :func:`vault_dev_addr` in
-       :mod:`tests.integration.test_connectors_vault_dev_e2e` uses.
+       rate-limit, cgroup refusal) → ``start_test_container`` skips on a
+       laptop and fails under CI, with the image name and the kind of
+       error only.
 
     Bootstrapping shape: a realm-import JSON committed under
     ``tests/integration/_fixtures/`` is bind-mounted read-only at
@@ -904,48 +889,37 @@ def keycloak_bootstrap() -> Iterator[KeycloakBootstrap]:
             "expected committed under tests/integration/_fixtures/."
         )
 
-    container = (
-        DockerContainer(image)
-        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME)
-        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD)
-        .with_command("start-dev --import-realm")
-        # ``ro`` mount: the realm file is read at startup and never
-        # written back, so denying writes hardens against an accidental
-        # in-container overwrite (and matches the principle the test
-        # fixtures committed to: deterministic, reproducible inputs).
-        .with_volume_mapping(
-            str(realm_file.parent),
-            "/opt/keycloak/data/import",
-            "ro",
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME)
+            .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _KEYCLOAK_BOOTSTRAP_ADMIN_PASSWORD)
+            .with_command("start-dev --import-realm")
+            # ``ro`` mount: the realm file is read at startup and never
+            # written back, so denying writes hardens against an accidental
+            # in-container overwrite (and matches the principle the test
+            # fixtures committed to: deterministic, reproducible inputs).
+            .with_volume_mapping(
+                str(realm_file.parent),
+                "/opt/keycloak/data/import",
+                "ro",
+            )
+            .with_exposed_ports(8080)
         )
-        .with_exposed_ports(8080)
+
+    # Quarkus logs ``started in <N>.<N>s. Listening on: http://...:8080``
+    # once the server is up and serving. Wait on the unambiguous
+    # "Listening on" prefix — the realm-import line that precedes
+    # it is itself a useful but slightly Keycloak-version-specific
+    # signal, so anchor on the Quarkus boot line instead.
+    container = start_test_container(
+        make,
+        image=image,
+        what="Keycloak",
+        probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=120),
+        timeout=120,
     )
-
     try:
-        container.start()
-    except Exception as exc:
-        # Broad catch is intentional: testcontainers wraps the docker
-        # SDK's varied failure modes (privileged denied, cgroup
-        # refusal, registry rate-limit, manifest-not-found, daemon
-        # socket missing) under a heterogeneous set of exceptions; the
-        # only useful response is "skip with the class name and
-        # message" so the suite stays diagnosable without enumerating
-        # every transitive docker.errors subtype. Under CI the test fails
-        # instead of skipping, so a missing image cannot hide. Mirrors the same
-        # pattern in :func:`vault_dev_addr` of
-        # :mod:`tests.integration.test_connectors_vault_dev_e2e`.
-        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-
-    try:
-        # Quarkus logs ``started in <N>.<N>s. Listening on: http://...:8080``
-        # once the server is up and serving. Wait on the unambiguous
-        # "Listening on" prefix — the realm-import line that precedes
-        # it is itself a useful but slightly Keycloak-version-specific
-        # signal, so anchor on the Quarkus boot line instead.
-        wait_for_log_message(container, "Listening on:", timeout=120)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8080)
         base_url = f"http://{host}:{port}"

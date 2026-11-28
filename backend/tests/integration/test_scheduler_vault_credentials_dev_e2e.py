@@ -63,6 +63,7 @@ from meho_backplane.scheduler.vault_credentials import (
     write_agent_secret,
 )
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 
 
 def _docker_socket_present() -> bool:
@@ -110,23 +111,23 @@ def vault_dev_addr() -> Iterator[str]:
     from tests._strategies import wait_for_log_message
 
     image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18")
-    container = (
-        DockerContainer(image)
-        .with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN)
-        .with_env("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
-        .with_exposed_ports(8200)
-        .with_kwargs(cap_add=["IPC_LOCK"])
+
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN)
+            .with_env("VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
+            .with_exposed_ports(8200)
+            .with_kwargs(cap_add=["IPC_LOCK"])
+        )
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="vault",
+        probe=lambda c: wait_for_log_message(c, "Vault server started!", timeout=60),
     )
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"vault dev container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-
-    try:
-        wait_for_log_message(container, "Vault server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         yield f"http://{host}:{port}"

@@ -52,6 +52,7 @@ from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.tools import meho_status as meho_status_tool
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 from tests._vault_fakes import install_fake_vault
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 from tests.integration.test_keycloak_bootstrap_mcp_login import (
@@ -136,22 +137,23 @@ def todays_keycloak(meho_binary: Path) -> Iterator[str]:
 
     from tests._strategies import wait_for_log_message
 
-    container = (
-        DockerContainer(image)
-        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _KC_ADMIN_USER)
-        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _KC_ADMIN_PASSWORD)
-        .with_command("start-dev")
-        .with_exposed_ports(8080)
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", _KC_ADMIN_USER)
+            .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", _KC_ADMIN_PASSWORD)
+            .with_command("start-dev")
+            .with_exposed_ports(8080)
+        )
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="Keycloak",
+        probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=120),
+        timeout=120,
     )
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(container, "Listening on:", timeout=120)
         base_url = f"http://{container.get_container_host_ip()}:{container.get_exposed_port(8080)}"
         _create_realm_per_docs(base_url)
         _run_bootstrap(meho_binary, base_url)

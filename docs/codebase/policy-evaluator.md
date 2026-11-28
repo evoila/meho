@@ -156,22 +156,48 @@ id and one sentence (`FIXED_RULES`):
 | `destructive_waits` | A `destructive` operation always waits for approval. |
 | `delete_waits` | A delete waits for approval, except an Admin's own change of rights in the web console that is not destructive, after a fresh sign-in (a tenant Admin outside MEHO's own login realm, or a platform admin); in sandbox mode a delete grant may cover a delete. |
 | `caller_address_waits` | A call to an address that the caller gives always waits for approval. |
+| `root_shell_waits` | A command that runs as root on a host always waits for approval. No run approval covers it; a standing grant made for the operation may. |
+| `target_rights_waits` | With the switch `CUSTOM_POLICY` on, a change of rights in a target system (the field `changes_rights`) waits for approval, and no standing grant and no run approval covers it. |
 
 `fixed_rule_for(descriptor, caller)` names the rule that holds for one
 call, or `None`. It wraps today's checks (`is_rights_change_op`, the
 credential, caller address and delete checks of `never_covered_reason`,
-the `destructive` level). Every kind of caller gets the same rule, except
-a person's own click in the web console on a change of rights or of the
-policy: there the console check decides (`rights_change_console.py`).
+the `destructive` level). The `destructive` level counts on the row and in
+the code (`code_safety_level`), and so does the delete sign
+(`_delete_shaped_reason_by_descriptor`): a call stays a delete when an
+admin's edit lowers its level. With the switch `CUSTOM_POLICY` on, it also
+names `target_rights_waits` for an operation with `changes_rights`. Every
+kind of caller gets the same rule, except a person's own click in the web
+console on a change of rights or of the policy: there the console check
+decides (`rights_change_console.py`).
 
 The answer does not make a call wait by itself; today's checks still
 decide. It says that nothing after them may let the call run where they
 make it wait. The call gate asks it before it reads a standing grant or a
-run approval (`_validate._fixed_rule_blocks_grants`); in sandbox mode the
-grant lookup decides, so a delete grant may still cover a delete. The
-floors `destructive_waits` and `credential_waits` take their ids from the
-module. Per-call approval, "always wait", the role floor and the root shell
-mark are not fixed rules; they stay as they are.
+run approval (`_validate._fixed_rule_blocks_grants`). In sandbox mode the
+grant lookup decides the other rules, so a delete grant may still cover a
+delete; a change of rights or of the policy is held by the gate there too.
+The floors `destructive_waits` and `credential_waits` take their ids from
+the module. Per-call approval, "always wait" and the role floor are not
+fixed rules; they stay as they are.
+
+Two rules are never the answer of `fixed_rule_for`:
+`agent_never_approves` is a rule of the approve path, and
+`root_shell_waits` lets a standing grant made for the operation cover a
+call. `root_shell_rule(op_id)` names the root shell rule; the run approval
+check asks it (`run_approval_gate._never_covered`).
+
+**With the switch `CUSTOM_POLICY` on, two more things hold:**
+
+- The edit checks (`_new_approval_field`, `_refuse_unless_may_end_approval`
+  in `operations/op_policy.py`) ask `fixed_rule_of_operation(descriptor)`:
+  the rule for some caller, with the root shell mark. When a rule holds,
+  "approval off" is refused, and the error names the rule id
+  (`approval_off_fixed_rule`, or the old code for `destructive_waits`,
+  `caller_address_waits` and the changes of rights). With the switch off,
+  "approval off" is refused only where it was before: a `destructive`
+  operation, an address the caller gives, and a change of rights.
+- An operation with `changes_rights` waits for approval (`_with_floors`).
 
 Steps that stay in the dispatcher and are not in the evaluator: the
 children of an approved run, the wait of a secret reveal, the announce

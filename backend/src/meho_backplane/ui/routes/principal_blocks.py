@@ -41,7 +41,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
@@ -69,7 +68,6 @@ __all__ = ["build_principal_blocks_router"]
 
 _PAGE = "/ui/blocked-people"
 _UNBLOCK_PAGE = f"{_PAGE}/unblock"
-_log = structlog.get_logger(__name__)
 _session = Depends(require_ui_session)
 
 
@@ -155,8 +153,7 @@ async def _readable_blocks(operator: Operator) -> list[BlockedPerson]:
     """The blocks the admin may see; ``503`` when MEHO cannot read the list."""
     try:
         return await list_blocked(operator)
-    except Exception as exc:
-        _log.warning("principal_block_list_read_failed", exc_info=True)
+    except PrincipalBlockUnavailableError as exc:
         raise _unavailable() from exc
 
 

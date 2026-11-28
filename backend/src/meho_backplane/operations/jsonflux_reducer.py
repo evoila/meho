@@ -88,6 +88,7 @@ from meho_backplane.jsonflux.query.result_catalog import (
     ResultFieldCatalog,
     _build_catalog_from_admitted,
 )
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 from meho_backplane.operations.answer_ready import (
     COUNTS_BYTE_BUDGET,
     ITEMS_BYTE_BUDGET,
@@ -367,7 +368,7 @@ _SCALAR_VALUE_TYPES = (str, int, float)
 #: whose scalars are NOT kept by default (#3633 / #3549). Their ops keep the
 #: explicit ``result_scalars`` opt-in, so an automatic copy never surfaces a
 #: secret-shaped value. Same set as ``operations.approval_context``.
-_CREDENTIAL_CLASSES = frozenset({"credential_read", "credential_mint", "credential_write"})
+_CREDENTIAL_CLASSES = CREDENTIAL_OP_CLASSES
 
 #: Bounds for the default scalar-sibling rule (#3633 / #3549). Without an
 #: op hint, the reducer keeps a reduced payload's scalar siblings inline, but

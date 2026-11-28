@@ -55,8 +55,9 @@ The rules:
   (:mod:`meho_backplane.operations.credential_read`) is at least
   ``caution`` and waits for approval. No override removes this.
 * **Credential write or mint.** An operation that writes or makes a
-  credential (class ``credential_write`` or ``credential_mint``) keeps the
-  approval its code turns on. No override removes it.
+  credential (class ``credential_write`` or ``credential_mint``) always
+  waits for approval, also when its connector registered it without the
+  approval flag. No override removes it.
 * **Fixed rules.** With the switch ``CUSTOM_POLICY`` on, approval cannot be
   turned off for an operation that any fixed rule holds
   (:func:`~meho_backplane.policy.fixed_rules.fixed_rule_of_operation`); the
@@ -94,7 +95,11 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import resolve_op_class
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationPolicyOverride
-from meho_backplane.op_classes import is_credential_capable, needs_per_call_approval
+from meho_backplane.op_classes import (
+    CREDENTIAL_CHANGE_OP_CLASSES,
+    is_credential_capable,
+    needs_per_call_approval,
+)
 from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
@@ -145,6 +150,7 @@ __all__ = [
     "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
+    "writes_a_credential",
 ]
 
 #: Order of the four risk levels, lowest first.
@@ -155,11 +161,14 @@ SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2, "
 #: switch is off, so those answers stay exactly as they were.
 CLASSIFICATION_FIELDS: Final[frozenset[str]] = frozenset({"category", "labels"})
 
-#: The classes of an operation that writes or makes a credential. When the
-#: code turns approval on for such an operation, no override turns it off.
-_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_write", "credential_mint"}
-)
+#: The classes of an operation that writes or makes a credential. Such an
+#: operation always waits for approval: no connector and no override turns it off.
+_CREDENTIAL_CHANGE_CLASSES: Final[frozenset[str]] = CREDENTIAL_CHANGE_OP_CLASSES
+
+
+def writes_a_credential(op_id: str, declared: str | None = None) -> bool:
+    """True when *op_id* writes or makes a credential (its resolved class)."""
+    return resolve_op_class(op_id, declared) in _CREDENTIAL_CHANGE_CLASSES
 
 
 def hidden_classification_fields() -> set[str]:
@@ -493,10 +502,13 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
     :func:`~meho_backplane.operations.grant_approval.register_rights_change_op`
     or :func:`~meho_backplane.operations.grant_approval.register_grant_op`)
     always waits for approval, also when an older override turned it off.
-    An operation that writes or makes a credential keeps the approval its
-    code turns on, also when an install or tenant override turns it off. So
-    does an operation a connector marked with
-    :func:`~meho_backplane.op_classes.declare_credential_capable`.
+    An operation that writes or makes a credential always waits for
+    approval: also when its connector registered it without the approval
+    flag, and also when an install or tenant override turns it off. An
+    operation a connector marked with
+    :func:`~meho_backplane.op_classes.declare_credential_capable` keeps the
+    approval its code turns on; each of its calls waits anyway
+    (:func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     stored_op_class = getattr(row, "op_class", None)
     safety_level, requires_approval = raise_for_credential_read(
@@ -505,9 +517,8 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         requires_approval=policy.requires_approval,
         stored_op_class=stored_op_class,
     )
-    if row.requires_approval and (
-        is_credential_capable(row.op_id)
-        or resolve_op_class(row.op_id, stored_op_class) in _CREDENTIAL_CHANGE_CLASSES
+    if writes_a_credential(row.op_id, stored_op_class) or (
+        row.requires_approval and is_credential_capable(row.op_id)
     ):
         requires_approval = True
     safety_level, requires_approval = raise_for_caller_address(
@@ -584,6 +595,11 @@ async def apply_step_policy(
     standing grant and no approval of the run clears an "always wait"
     step. The category and labels of an override row count too, so the
     step's approval request is routed like a direct call's.
+
+    A step whose operation writes or makes a credential (class
+    ``credential_write`` or ``credential_mint``) always gets the approval
+    flag, the same as :func:`_with_floors` gives it to a called operation.
+    Its risk level stays as it is.
     """
     key = OpKey.of(step)
     async with get_sessionmaker()() as session:
@@ -603,6 +619,8 @@ async def apply_step_policy(
         )
     if classified is not None:
         policy = _with_classification(policy, classified)
+    if writes_a_credential(step.op_id, getattr(step, "op_class", None)):
+        policy = replace(policy, requires_approval=True)
     _keep_code_values(step)
     step.safety_level = policy.safety_level
     step.requires_approval = policy.requires_approval

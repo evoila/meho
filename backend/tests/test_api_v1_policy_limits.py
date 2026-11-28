@@ -8,7 +8,9 @@
   approved import keeps the stored part.
 * ``apply_policy`` plans with the switch value it is given: the run after
   the approval refuses a file with ``limits`` while the switch is off.
-* The six refused keys, in any form, are refused with one sentence.
+* The five refused keys, in any form, are refused with one sentence; with
+  ``CUSTOM_POLICY`` on, ``risk_levels`` gets the sentence of
+  :mod:`meho_backplane.policy.risk_levels` instead.
 * A file that holds the key ``limits`` is refused whatever its value, where
   ``limits`` is not allowed; nothing waits.
 * The refusal is the same sentence whether the environment sets
@@ -45,8 +47,10 @@ from meho_backplane.operations.approval_queue import (
 )
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
+from meho_backplane.policy.agent_rules import AGENTS_IN_INSTALL_FILE, AGENTS_NEED_CUSTOM_POLICY
 from meho_backplane.policy.document import file_sha256
 from meho_backplane.policy.limits import LIMITS_NEED_CUSTOM_POLICY, personal_agent_limit
+from meho_backplane.policy.risk_levels import RISK_LEVELS_NOT_IN_THIS_VERSION
 from meho_backplane.policy.service import apply_policy, build_plan
 from meho_backplane.policy.validate import check_document
 from meho_backplane.settings import get_settings
@@ -74,6 +78,12 @@ _FILE_P2 = _FILE_P + "  - {match: {op: limapi.*}, always_wait: true}\n"
 _TENANT_SENTENCE = (
     "`limits` belongs to the install's policy file. Only a platform admin sets the "
     "outer limit; a tenant's file stays inside it."
+)
+
+
+#: The answer to ``risk_levels: {example-name: example-value-7}`` with the switch on.
+_RISK_LEVELS_NOT_A_LIST = (
+    f"Line 2: `risk_levels` is not the list of risk-level edits. {RISK_LEVELS_NOT_IN_THIS_VERSION}"
 )
 
 
@@ -275,10 +285,10 @@ async def test_the_approved_run_refuses_limits_with_the_switch_off(embedding: As
 
 
 # ---------------------------------------------------------------------------
-# The six refused keys
+# The five refused keys
 # ---------------------------------------------------------------------------
 
-_SIX = ["agents", "approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
+_FIVE = ["approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
 _FORMS = ["{example-name: example-value-7}", "[example-value-7]", "example-value-7", "null"]
 
 
@@ -289,7 +299,7 @@ def test_each_refused_key_in_each_form_is_one_sentence(client: TestClient, scope
     with respx.mock as r:
         mock_discovery_and_jwks(r, public_jwks(key))
         token = _token(key, platform_admin=scope == "install")
-        for name in _SIX:
+        for name in _FIVE:
             for form in _FORMS:
                 content = f"policy: v1\n{name}: {form}\n"
                 for path, extra in (("validate", {}), ("import", {"preview": "true"})):
@@ -299,7 +309,7 @@ def test_each_refused_key_in_each_form_is_one_sentence(client: TestClient, scope
                     assert resp.json()["mistakes"] == [_not_read(name)]
                     assert "example-value-7" not in resp.text
                     answers += 1
-    assert answers == 6 * 4 * 2
+    assert answers == 5 * 4 * 2
 
 
 # ---------------------------------------------------------------------------
@@ -369,17 +379,18 @@ async def test_a_limits_part_of_the_wrong_type_is_refused(
 
 
 # ---------------------------------------------------------------------------
-# The six refused keys are one sentence with the switch on and off; ``limits`` follows it
+# The five refused keys are one sentence with the switch on and off; ``limits`` follows it
 # ---------------------------------------------------------------------------
 
 _SEVEN_FILES = {
     "limits": "limits: {personal_agent_up_to: caution}",
-    **{name: f"{name}: {{example-name: example-value-7}}" for name in _SIX},
+    "agents": "agents: [example-value-7]",
+    **{name: f"{name}: {{example-name: example-value-7}}" for name in _FIVE},
 }
 
 
 @pytest.mark.parametrize("environment", [None, "true"])
-def test_the_six_keys_are_refused_whatever_the_environment_and_limits_follows_it(
+def test_the_five_keys_are_refused_whatever_the_environment_and_limits_follows_it(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, environment: str | None
 ) -> None:
     if environment is None:
@@ -400,6 +411,11 @@ def test_the_six_keys_are_refused_whatever_the_environment_and_limits_follows_it
                     assert resp.json()["mistakes"] == []
                 elif name == "limits":
                     assert resp.json()["mistakes"] == [LIMITS_NEED_CUSTOM_POLICY]
+                elif name == "agents":
+                    sentence = AGENTS_IN_INSTALL_FILE if environment else AGENTS_NEED_CUSTOM_POLICY
+                    assert resp.json()["mistakes"] == [sentence]
+                elif name == "risk_levels" and environment == "true":
+                    assert resp.json()["mistakes"] == [_RISK_LEVELS_NOT_A_LIST]
                 else:
                     assert resp.json()["mistakes"] == [_not_read(name)]
         tenant = _post(client, "validate", _token(key), f"policy: v1\n{_SEVEN_FILES['limits']}\n")
@@ -410,7 +426,7 @@ def test_the_six_keys_are_refused_whatever_the_environment_and_limits_follows_it
 @pytest.mark.asyncio
 async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
     async with get_sessionmaker()() as session:
-        for name in _SIX:
+        for name in _FIVE:
             plan = await build_plan(
                 session,
                 scope="install",
@@ -418,7 +434,9 @@ async def test_only_the_caller_opens_limits_in_the_install_file() -> None:
                 content=f"policy: v1\n{_SEVEN_FILES[name]}\n".encode(),
                 custom_policy=True,
             )
-            assert plan.mistakes == [_not_read(name)]
+            # With the switch on, the import reads `risk_levels` (policy/risk_levels.py).
+            expected = _RISK_LEVELS_NOT_A_LIST if name == "risk_levels" else _not_read(name)
+            assert plan.mistakes == [expected]
         content = f"policy: v1\n{_SEVEN_FILES['limits']}\n".encode()
         plan = await build_plan(
             session, scope="install", tenant_id=None, content=content, custom_policy=True

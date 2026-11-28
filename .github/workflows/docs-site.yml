@@ -68,6 +68,8 @@ on:
       - 'docs/upgrade-rows/**'
       - 'docs/deploying.md'
       - 'scripts/ci/upgrade_rows.py'
+      - 'scripts/ci/check_install_secrets.py'
+      - 'deploy/charts/meho/templates/NOTES.txt'
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'docs/compatibility/**'
@@ -141,6 +143,13 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref }}
         run: python3 scripts/ci/upgrade_rows.py --check-new-rows "$BASE_REF"
+
+      - name: Check install commands for secrets
+        # No command of the install guide or the install notes may hold a
+        # secret as an argument. Needs only Python. The Python unit tests
+        # are skipped for a docs-only change, so this step is the check
+        # that runs on such a pull request.
+        run: python3 scripts/ci/check_install_secrets.py
 
       - name: Check "tested live" claims
         # A page or the release notes may say a version was tested live

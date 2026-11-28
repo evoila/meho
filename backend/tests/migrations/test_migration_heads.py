@@ -262,3 +262,39 @@ def test_branch_file_that_replaces_a_main_file_is_not_counted_as_new(
     _write(branch, "0108_mine.py", "0108", "0106")
     assert _module.main([str(branch), "--main", str(main)]) == 1
     assert "What to do: main is at 0107. Set down_revision to '0107'." in capfd.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param(("0108_first.py", "0108"), ("0108_second.py", "0108"), id="same-number"),
+        pytest.param(("0108_first.py", "0108"), ("0109_second.py", "0109"), id="same-parent"),
+    ],
+)
+def test_two_pull_requests_in_the_merge_queue_with_a_migration_on_the_same_parent(
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+    first: tuple[str, str],
+    second: tuple[str, str],
+) -> None:
+    """The tree of a merge-queue run holds main plus every pull request
+    ahead in the queue. Two of them each add a migration on top of 0107.
+    The check must fail, name both files and say the rule."""
+    main = _main_chain(tmp_path)
+    queue_tree = tmp_path / "queue"
+    queue_tree.mkdir()
+    for path in main.iterdir():
+        (queue_tree / path.name).write_text(path.read_text())
+    _write(queue_tree, first[0], first[1], "0107")
+    _write(queue_tree, second[0], second[1], "0107")
+    assert _module.main([str(queue_tree), "--main", str(main)]) == 1
+    err = capfd.readouterr().err
+    assert "Migration chain check FAILED" in err
+    assert first[0] in err
+    assert second[0] in err
+    assert (
+        "Rule: each pull request with a migration must take the next free number "
+        "and set down_revision to the newest migration on main. If the merge queue "
+        "refuses your pull request, wait until the other migration is on main or its "
+        "pull request has left the queue, then merge main and take the next free number again."
+    ) in err

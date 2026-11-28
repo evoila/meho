@@ -121,6 +121,7 @@ const (
 	BroadcastAnnounceRequestPlannedOpClassAuditQuery      BroadcastAnnounceRequestPlannedOpClass = "audit_query"
 	BroadcastAnnounceRequestPlannedOpClassCredentialMint  BroadcastAnnounceRequestPlannedOpClass = "credential_mint"
 	BroadcastAnnounceRequestPlannedOpClassCredentialRead  BroadcastAnnounceRequestPlannedOpClass = "credential_read"
+	BroadcastAnnounceRequestPlannedOpClassCredentialUse   BroadcastAnnounceRequestPlannedOpClass = "credential_use"
 	BroadcastAnnounceRequestPlannedOpClassCredentialWrite BroadcastAnnounceRequestPlannedOpClass = "credential_write"
 	BroadcastAnnounceRequestPlannedOpClassOther           BroadcastAnnounceRequestPlannedOpClass = "other"
 	BroadcastAnnounceRequestPlannedOpClassRead            BroadcastAnnounceRequestPlannedOpClass = "read"
@@ -12407,6 +12408,7 @@ type TargetUpdate struct {
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
 	AuthModel             *AuthModel              `json:"auth_model,omitempty"`
 	Extras                *map[string]interface{} `json:"extras"`
+	ExtrasChanges         *map[string]interface{} `json:"extras_changes"`
 	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
 	Fqdn                  *string                 `json:"fqdn"`
 	Host                  *string                 `json:"host"`

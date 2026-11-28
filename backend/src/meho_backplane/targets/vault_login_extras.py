@@ -17,13 +17,15 @@ would store. A caller without ``platform_admin`` may send ``extras`` as long
 as neither key changes: adding, changing or removing one is refused with
 HTTP 403 ``vault_login_role_requires_platform_admin``. A target that
 already carries a role keeps it, and a ``PATCH`` that re-sends the same
-value (the UI import does that) passes. Values are compared as stored; a
-blank string is a change like any other, even though the login treats it
-as "no role".
+value (the UI import does that) passes. Values are compared as stored,
+with their JSON type: a blank string is a change like any other, even
+though the login treats it as "no role", and so is a change of only the
+type (``1`` to ``true`` or ``1.0``), which Python counts as equal.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -52,11 +54,18 @@ def changed_vault_login_keys(
 
     ``None`` stands for "no extras" (a new target, a SQL ``NULL`` row, or a
     ``PATCH`` that clears ``extras``). A key that is absent on one side and
-    present on the other counts as changed.
+    present on the other counts as changed. The values are compared as JSON
+    text, so a change of only the JSON type (``1`` to ``true``) counts too.
     """
     old = before or {}
     new = after or {}
-    return [key for key in VAULT_LOGIN_EXTRAS_KEYS if old.get(key) != new.get(key)]
+    return [
+        key for key in VAULT_LOGIN_EXTRAS_KEYS if _as_json(old.get(key)) != _as_json(new.get(key))
+    ]
+
+
+def _as_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def enforce_vault_login_extras_platform_admin(

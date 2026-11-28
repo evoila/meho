@@ -74,6 +74,7 @@ from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.op_classes import SECRET_REQUEST_OP_CLASSES
 from meho_backplane.operations._branches import resolve_ingested_request
 from meho_backplane.operations._catalog_guard import (
     CatalogRefusal,
@@ -776,14 +777,15 @@ def _redact_request_body(
     no new raw-secret surface. A ``None`` body (no requestBody) round-trips
     to ``None`` without touching the engine.
 
-    For a credential write (``classify_op`` gives ``credential_write``) each
+    For a call whose request carries a secret (``classify_op`` gives
+    ``credential_write`` or ``credential_use``) each
     value under a secret name is first replaced by the fixed mark
     (:func:`~meho_backplane.operations._preview._scrub_secret_param_keys`),
     the same name rule and the same mark the echo of a waiting call uses.
     """
     if body is None:
         return None
-    if classify_op(op_id) == "credential_write":
+    if classify_op(op_id) in SECRET_REQUEST_OP_CLASSES:
         body = _scrub_secret_param_keys(body)
     tenant = str(operator.tenant_id) if operator.tenant_id is not None else None
     redaction = apply_connector_boundary_redaction(
@@ -911,10 +913,10 @@ def _ok_ingested_envelope(
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
-    # A credential write shows its query inputs with the same mark as its
+    # A credential write or use shows its query inputs with the same mark as its
     # body. The keyed digest of the literal query and body keeps the hash
     # bound to each hidden value; it goes into the hash, not the answer.
-    credential_write = classify_op(op_id) == "credential_write"
+    credential_write = classify_op(op_id) in SECRET_REQUEST_OP_CLASSES
     query = request.query
     if query and credential_write:
         query = _redact_request_body(

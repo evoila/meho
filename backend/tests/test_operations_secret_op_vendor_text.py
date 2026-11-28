@@ -461,12 +461,15 @@ async def _dispatch(
         product=_PRODUCT, version=_VERSION, impl_id=_FailingConnector.impl_id, cls=_FailingConnector
     )
     await _seed(session, op_id, tags)
+    # A credential write waits for a person: this is the run after the
+    # approval (the approval-queue resume sets ``_approved``).
     result = await dispatch(
         operator=_operator(),
         connector_id=f"{_FailingConnector.impl_id}-{_VERSION}",
         op_id=op_id,
         target=_DispatchTarget(),
         params={},
+        _approved=True,
     )
     async with get_sessionmaker()() as fresh:
         rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()

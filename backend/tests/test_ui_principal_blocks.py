@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1 import principal_blocks as rest_principal_blocks
 from meho_backplane.audit import AuditMiddleware
@@ -576,11 +577,16 @@ def test_first_unblock_click_and_page_answer_503_when_the_block_list_cannot_be_r
     _tenants()
     _seed_blocks(("in-a", str(_TENANT_A), "reason a"))
 
-    async def _unreadable(*_args: Any, **_kwargs: Any) -> Any:
-        raise OperationalError("SELECT", {}, Exception("database is down"))
+    execute = AsyncSession.execute
+
+    async def _unreadable(self: AsyncSession, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        # Only the list an admin sees fails; the block check of the request reads.
+        if "principal_block.blocked_at DESC" in str(statement):
+            raise OperationalError("SELECT", {}, Exception("database is down"))
+        return await execute(self, statement, *args, **kwargs)
 
     client, mock, csrf = _client()
-    monkeypatch.setattr(ui_principal_blocks, "list_blocked", _unreadable)
+    monkeypatch.setattr(AsyncSession, "execute", _unreadable)
     try:
         first = client.post(_UNBLOCK, data={"sub": "in-a"}, headers=_csrf_headers(csrf))
         page = client.get(_PAGE)

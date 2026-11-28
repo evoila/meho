@@ -29,6 +29,12 @@ import pytest
 from pydantic import ValidationError
 
 from meho_backplane.broadcast import BroadcastEvent, classify_op, redact_payload
+from tests._secret_class_standins import (  # noqa: F401 -- standin_ops is a fixture
+    NOTE,
+    STANDIN_OPS,
+    made_up_value,
+    standin_ops,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures — one ready-to-use canonical event for the schema tests
@@ -512,6 +518,7 @@ class TestClassifyOp:
         import textwrap
 
         from meho_backplane.broadcast import OP_CLASS_ENUM
+        from meho_backplane.op_classes import DECLARABLE_OP_CLASSES
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(classify_op)))
         classifier_range = {
@@ -524,6 +531,8 @@ class TestClassifyOp:
         # Guard the extraction itself: a refactor that stops returning
         # plain string literals would silently shrink the extracted set.
         assert classifier_range, "extracted no return literals from classify_op"
+        # classify_op also returns any class a connector declares.
+        classifier_range |= DECLARABLE_OP_CLASSES
         assert set(OP_CLASS_ENUM) == classifier_range, (
             f"OP_CLASS_ENUM and classify_op's range drifted: "
             f"enum-only={sorted(set(OP_CLASS_ENUM) - classifier_range)}, "
@@ -550,21 +559,22 @@ class TestRedactPayload:
         assert "path" not in result
         assert "key" not in result
 
-    def test_credential_write_drops_secret_params(self) -> None:
-        """G11.7-T1 #1401 — a request-secret write redacts to aggregate-only.
+    @pytest.mark.usefixtures("standin_ops")
+    @pytest.mark.parametrize("op_class", sorted(STANDIN_OPS))
+    def test_credential_write_drops_secret_params(self, op_class: str) -> None:
+        """A call whose request carries a secret redacts to aggregate-only.
 
-        The written credential lives in ``params``; the broadcast ships
-        params, so ``credential_write`` must collapse to
-        ``{op_class, result_status}`` with no trace of the secret.
+        The secret lives in ``params``; the broadcast ships params, so a
+        ``credential_write`` or ``credential_use`` call must collapse to
+        ``{op_class, result_status}``. The made-up value sits under a name
+        that no name rule hides, so only the class decides.
         """
-        result = redact_payload(
-            "credential_write",
-            {"path": "secret/db", "data": {"password": "s3kr3t-sentinel"}},
-            "ok",
-        )
-        assert result == {"op_class": "credential_write", "result_status": "ok"}
-        assert "s3kr3t-sentinel" not in str(result)
-        assert "data" not in result
+        value = made_up_value()
+        resolved = classify_op(STANDIN_OPS[op_class])
+        result = redact_payload(resolved, {"path": "notes/db", NOTE: value}, "ok")
+        assert result == {"op_class": op_class, "result_status": "ok"}
+        assert value not in str(result)
+        assert NOTE not in result
         assert "params" not in result
 
     def test_credential_mint_drops_response_secret(self) -> None:

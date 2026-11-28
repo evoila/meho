@@ -29,6 +29,16 @@
       "reason": "GitHub-hosted runner, so no image proxy. It runs on pull requests only, and tests/test_db_engine.py starts the chart's PostgreSQL image. The merge queue runs the same tests in the unit shards, through the proxy."
     },
     {
+      "workflow": "ci.yml",
+      "job": "python-unit-shard-second-site",
+      "reason": "The job names no secret, so it reads no proxy name. Its step \"Use the public test images\" sets the same image lines as python-unit-shard, with the public docker.io/ names, and test_image_step_uses_the_same_image_lines_with_no_secret keeps the lines equal."
+    },
+    {
+      "workflow": "ci.yml",
+      "job": "python-unit-shard-hosted-trial",
+      "reason": "A one-day trial on a GitHub-hosted runner, which cannot reach the image proxy. The job names no secret. It takes its step \"Use the public test images\" by alias from python-unit-shard-second-site, so it sets the same public docker.io/ names."
+    },
+    {
       "workflow": "chart.yml",
       "job": "helm-test",
       "reason": "GitHub-hosted runner, so no image proxy. kind pulls its node image, and the job pulls the Valkey and pgvector images before it loads them into kind."

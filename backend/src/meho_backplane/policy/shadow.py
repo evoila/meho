@@ -24,7 +24,8 @@ With the switch off, nothing here runs.
 :func:`shadow_call` also keeps the rule the evaluator matched
 (:func:`~meho_backplane.policy.stamp.take_rule`). The dispatcher takes it right after the gate
 and writes it on the audit row and the approval request, marked as a rule
-that did not decide (#6044).
+that did not decide (#6044). With ``CUSTOM_POLICY`` on, the dispatcher
+names the deciding rule instead (:func:`~meho_backplane.policy.stamp.row_rule`).
 """
 
 from __future__ import annotations
@@ -118,12 +119,14 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
+    from meho_backplane.operations.role_floors import asks_for_change
     from meho_backplane.operations.service_grants import (
         _sandbox_delete_exception,
         delete_grant_reason,
         descriptor_credential_reason,
         descriptor_credential_waits,
     )
+    from meho_backplane.policy.floors import ASKS_FOR_CHANGE
 
     op_id = descriptor.op_id
     patterns = get_settings().service_grant_delete_shaped_patterns
@@ -140,6 +143,7 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
             op_id, getattr(descriptor, "op_class", None), descriptor
         ),
         "rights_change": is_rights_change_op(op_id),
+        ASKS_FOR_CHANGE: asks_for_change(descriptor, params),
     }
     return frozenset(name for name, on in marks.items() if on)
 
@@ -299,6 +303,7 @@ def _shadow_stamp(decision: Decision) -> RuleStamp:
         text=rule.text,
         policy_version=rule.policy_version,
         decided=False,
+        verdict=decision.verdict.value,
     )
 
 

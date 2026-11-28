@@ -54,7 +54,11 @@ from meho_backplane.operations.rights_change_console import (
     keep_console_run_sign_in,
     runs_at_once_in_console,
 )
-from meho_backplane.operations.role_floors import requester_check_denial, role_floor_denial
+from meho_backplane.operations.role_floors import (
+    reader_change_denial,
+    requester_check_denial,
+    role_floor_denial,
+)
 from meho_backplane.policy.fixed_rules import (
     POLICY_CHANGE_WAITS,
     RIGHTS_CHANGE_WAITS,
@@ -1076,6 +1080,28 @@ async def _console_rights_verdict(
     return PermissionVerdict.AUTO_EXECUTE, CONSOLE_RUN_REASON
 
 
+def _reader_change_denial(
+    operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """Why a caller with the Reader role may not ask for this call, or ``None``.
+
+    See :func:`~meho_backplane.operations.role_floors.reader_change_denial`.
+    It holds for every kind of login, so the call is ``DENY`` before an
+    approval request or its preview is built.
+    """
+    denial = reader_change_denial(operator, descriptor, params)
+    if denial is not None:
+        _log.info(
+            "policy_gate_reader_change_denied",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+        )
+    return denial
+
+
 def _requester_denial(
     operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
 ) -> str | None:
@@ -1102,6 +1128,20 @@ def _requester_denial(
             op_id=descriptor.op_id,
         )
     return denial
+
+
+def _asker_denial(
+    operator: Operator, descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """Why *operator* may not ask for this call at all, or ``None``.
+
+    A Reader who asks for a change is denied first
+    (:func:`_reader_change_denial`), then the op's requester check runs
+    (:func:`_requester_denial`).
+    """
+    return _reader_change_denial(operator, descriptor, params) or _requester_denial(
+        operator, descriptor, params
+    )
 
 
 async def policy_gate(
@@ -1189,9 +1229,9 @@ async def policy_gate(
     revoked = await _revoked_agent_denial(operator)
     if revoked is not None:
         return PermissionVerdict.DENY, revoked
-    requester_denial = _requester_denial(operator, descriptor, params)
-    if requester_denial is not None:
-        return PermissionVerdict.DENY, requester_denial
+    asker_denial = _asker_denial(operator, descriptor, params)
+    if asker_denial is not None:
+        return PermissionVerdict.DENY, asker_denial
     profile_denial = await _profile_denial(operator, descriptor, connector_id, target)
     if profile_denial is not None:
         return PermissionVerdict.DENY, profile_denial

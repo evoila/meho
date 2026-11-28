@@ -191,7 +191,7 @@ WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
 
   Confirm what the role actually accepts -- an error, not a token, means
   the binding is in force:
-       vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt="$RUNNER_TOKEN"
+       printf '%s' "$RUNNER_TOKEN" | vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt=-
 {{- end }}
 {{- if not (include "meho.approvalHandoff" . | fromYaml).enabled }}
 
@@ -214,7 +214,7 @@ WARNING: approvalHandoff.enabled=false, so APPROVAL_HANDOFF_ENCRYPTION_KEY is no
   {{ include "meho.metricsAuthSecretName" . }} (key {{ .Values.metricsAuth.secretKey }}).
   This command gives it to curl on standard input, never on the command line
   (curl 7.55.0 or newer):
-    kubectl -n {{ .Release.Namespace }} get secret {{ include "meho.metricsAuthSecretName" . }} -o jsonpath='{{ printf "{.data.%s}" .Values.metricsAuth.secretKey }}' \
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "meho.metricsAuthSecretName" . }} -o jsonpath='{{ printf "{.data.%s}" (.Values.metricsAuth.secretKey | replace "." "\\.") }}' \
       | base64 -d | sed 's/^/Authorization: Bearer /' \
       | curl -s -H @- https://<your-backplane>/ready
 {{- end }}

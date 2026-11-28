@@ -105,6 +105,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.delete_names import destructive_action_name_in_op_id
 from meho_backplane.op_classes import (
+    CREDENTIAL_OP_CLASSES,
     is_credential_capable,
     needs_per_call_approval,
     params_make_credential_call,
@@ -122,6 +123,7 @@ from meho_backplane.sandbox_mode import SANDBOX_DELETE_GRANT_MAX_DAYS, sandbox_m
 __all__ = [
     "CREDENTIAL_CARD_LINE",
     "CREDENTIAL_CLASSES",
+    "CREDENTIAL_USE_CARD_LINE",
     "DeleteGrantConsoleOnlyError",
     "DeleteGrantNeedsTenantAdminError",
     "GrantModel",
@@ -137,11 +139,13 @@ __all__ = [
     "credential_refusal",
     "delete_grant_reason",
     "delete_shaped_refusal_reason",
+    "descriptor_credential_card_line",
     "descriptor_credential_reason",
     "descriptor_credential_waits",
     "find_live_grant",
     "never_covered_reason",
     "null_target_only_park_hint",
+    "only_uses_credential",
     "per_call_approval_grant_reason",
 ]
 
@@ -335,17 +339,15 @@ def delete_grant_reason(
     return reason
 
 
-#: The op classes of an operation that reads, writes or makes a credential.
-CREDENTIAL_CLASSES: Final[frozenset[str]] = frozenset(
-    {"credential_read", "credential_write", "credential_mint"}
-)
+#: The op classes of an operation that reads, writes, makes or uses a credential.
+CREDENTIAL_CLASSES: Final[frozenset[str]] = CREDENTIAL_OP_CLASSES
 
 
 def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> str | None:
     """Return why no grant and no run approval covers *op_id*, or ``None`` when one can.
 
-    An operation that reads, writes or makes a credential (the classes in
-    :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
+    An operation that reads, writes, makes or uses a credential (the classes
+    in :data:`CREDENTIAL_CLASSES`) waits for a person on each call. No standing
     grant, no agent grant and no run approval covers it. The class comes
     from *stored_op_class* (the class a connector's safety floor stored on
     the row of an ingested operation) and from the op id
@@ -359,13 +361,22 @@ def credential_grant_reason(op_id: str, stored_op_class: str | None = None) -> s
         and resolve_op_class(op_id, stored_op_class) not in CREDENTIAL_CLASSES
     ):
         return None
-    return _credential_reason_text(op_id)
+    return _credential_reason_text(op_id, only_uses=only_uses_credential(op_id, stored_op_class))
 
 
-def _credential_reason_text(op_id: str) -> str:
+def only_uses_credential(op_id: str, stored_op_class: str | None = None) -> bool:
+    """True for a ``credential_use`` operation that no connector marked credential capable."""
+    return (
+        not is_credential_capable(op_id)
+        and resolve_op_class(op_id, stored_op_class) == "credential_use"
+    )
+
+
+def _credential_reason_text(op_id: str, *, only_uses: bool) -> str:
+    action = "uses a credential" if only_uses else "reads, writes or makes a credential"
     return (
         f"A standing grant, an agent grant or a run approval never covers {op_id!r}: "
-        "it reads, writes or makes a credential, so a person approves each call."
+        f"it {action}, so a person approves each call."
     )
 
 
@@ -383,7 +394,8 @@ def credential_refusal(op_id: str, stored_op_class: str | None = None) -> str | 
 def credential_call_waits(op_id: str, stored_op_class: str | None = None) -> bool:
     """Return whether a call of *op_id* waits for a person because of its credential class.
 
-    True for every ``credential_mint`` and ``credential_write`` operation.
+    True for every ``credential_mint``, ``credential_write`` and
+    ``credential_use`` operation.
     A ``credential_read`` operation waits when its floor applies
     (:func:`~meho_backplane.operations.credential_read.has_credential_read_floor`):
     a read that is marked in code as one that returns no secret value runs
@@ -406,6 +418,12 @@ CREDENTIAL_CARD_LINE: Final[str] = (
     "so no standing grant, agent grant or run approval covers it."
 )
 
+#: The line on the approval card of a ``credential_use`` call.
+CREDENTIAL_USE_CARD_LINE: Final[str] = (
+    "This call waits for a person every time: it uses a credential, "
+    "so no standing grant, agent grant or run approval covers it."
+)
+
 
 def descriptor_credential_reason(descriptor: EndpointDescriptor) -> str | None:
     """:func:`credential_grant_reason` for the row of one call.
@@ -415,8 +433,17 @@ def descriptor_credential_reason(descriptor: EndpointDescriptor) -> str | None:
     :func:`~meho_backplane.operations.wait_when_set.raise_descriptor_for_params`).
     """
     if getattr(descriptor, "credential_call", False):
-        return _credential_reason_text(descriptor.op_id)
+        return _credential_reason_text(descriptor.op_id, only_uses=False)
     return credential_grant_reason(descriptor.op_id, getattr(descriptor, "op_class", None))
+
+
+def descriptor_credential_card_line(descriptor: EndpointDescriptor) -> str:
+    """The approval card line of a credential call: :data:`CREDENTIAL_USE_CARD_LINE` for a use."""
+    if not getattr(descriptor, "credential_call", False) and only_uses_credential(
+        descriptor.op_id, getattr(descriptor, "op_class", None)
+    ):
+        return CREDENTIAL_USE_CARD_LINE
+    return CREDENTIAL_CARD_LINE
 
 
 def descriptor_credential_waits(descriptor: EndpointDescriptor) -> bool:

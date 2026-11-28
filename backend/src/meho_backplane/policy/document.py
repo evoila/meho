@@ -75,6 +75,7 @@ from meho_backplane.instance_settings.schema import (
     render_path,
 )
 from meho_backplane.policy.agent_rules import AGENTS_NEED_CUSTOM_POLICY, stored_agents
+from meho_backplane.policy.classification import MAX_CLASSIFICATIONS
 from meho_backplane.policy.limits import PolicyLimits, not_read_mistake
 from meho_backplane.policy.store import _check_labels
 
@@ -325,7 +326,9 @@ class PolicyFile(_Strict):
     policy: str
     description: Annotated[str, Field(max_length=2000)] | None = None
     taxonomy: PolicyTaxonomy | None = None
-    classifications: list[PolicyClassification] = Field(default_factory=list, max_length=2000)
+    classifications: list[PolicyClassification] = Field(
+        default_factory=list, max_length=MAX_CLASSIFICATIONS
+    )
     routing: list[PolicyRoute] = Field(default_factory=list, max_length=200)
     bindings: list[PolicyBinding] = Field(default_factory=list, max_length=500)
     limits: PolicyLimits | None = None

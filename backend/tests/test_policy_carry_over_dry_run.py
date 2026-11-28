@@ -35,6 +35,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
@@ -61,6 +62,7 @@ from ._carry_over_helpers import (
     SANDBOX,
     TENANT,
     add_steps,
+    auth,
     call,
     dry_run,
     op,
@@ -70,8 +72,9 @@ from ._carry_over_helpers import (
     setup,
     step_text,
     tenant_row,
+    token,
 )
-from ._oidc_jwt_helpers import make_rsa_keypair
+from ._oidc_jwt_helpers import make_rsa_keypair, mock_discovery_and_jwks, public_jwks
 from ._targets_helpers import (
     _empty_connector_registry,  # noqa: F401
     _isolated_jwks_cache,  # noqa: F401
@@ -358,6 +361,39 @@ async def test_a_turned_off_operation_is_not_listed_as_a_call(
 
     answer = call(client, key, "cowapi.vm.list")
     assert answer["status"] == "error" and answer["error"].startswith("unknown_op"), answer
+
+
+def _turn(client: TestClient, key: Any, op_id: str, *, enabled: bool) -> None:
+    """Turn *op_id* off or on for tenant A through the REST route of a tenant admin."""
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.put(
+            f"/api/v1/connectors/{CONNECTOR}/tenant-settings/operations/{op_id}",
+            json={"enabled": enabled},
+            headers=auth(token(key)),
+        )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("classification_on")
+async def test_an_entry_counts_again_when_its_operation_is_turned_on_again(
+    client: TestClient, embedding: AsyncMock
+) -> None:
+    await register(embedding, "cowapi.vm.list", "compute", "safe")
+    await policy(TENANT, [{"match": {"op": "cowapi.vm.list"}, "always_wait": True}])
+    key = _admin_key("off-on")
+
+    _turn(client, key, "cowapi.vm.list", enabled=False)
+    (off,) = dry_run(client, key).json()["settings"]
+    _turn(client, key, "cowapi.vm.list", enabled=True)
+    (on,) = dry_run(client, key).json()["settings"]
+
+    assert off["operations"] == []
+    assert off["warnings"] == [NO_OPERATION, PREVIEW]
+    assert on["ref"] == off["ref"]
+    assert on["operations"] == [op("cowapi.vm.list")]
+    assert on["warnings"] == [PREVIEW]
 
 
 async def _imported_next_to_a_missing_handler() -> None:

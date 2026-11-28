@@ -61,10 +61,58 @@ classifications:
     risk: dangerous
 ```
 
-- `match` holds `connector` (the connector id `<impl_id>-<version>`),
-  `group` (the group key) and `op` (the operation id). Each is a pattern:
+- `match` holds `connector` (the connector id `<impl_id>-<version>`; with
+  `CUSTOM_POLICY` on, also the product for a connector with no
+  implementation id or no version, see the next point), `group` (the
+  group key) and `op` (the operation id). Each is a pattern:
   `*` is any text, `?` is one character, no wildcard is an exact match.
   Upper and lower case count. Every field given must match.
+- **One rule for the connector id.** Every reader names a connector with
+  `connector_id_of` and builds what an entry matches with `coordinates_of`
+  (`policy/store.py`): the gate, explain, the bulk edit, the import check,
+  `policy.classify_preview`, the carry-over dry run and the overrides
+  report. A test fails when a reader builds the id itself
+  (`test_policy_connector_without_version.py`).
+  - With `CUSTOM_POLICY` off (`product_form_on()` is false), a policy
+    entry matches a connector with no version by the id `-`. The
+    overrides report names it by its implementation id, the empty text,
+    and the carry-over dry run names it by its product. A call and its
+    approval card name the connector by the id the caller used.
+    `test_policy_connector_without_version_switch_off.py` checks these
+    answers.
+  - The carry-over dry run's list reads no switch; only its first field,
+    `custom_policy_on`, says whether `CUSTOM_POLICY` is on. It names such a connector by
+    its product with every switch state: it calls `connector_id_of` and
+    `coordinates_of` with `product_form=True`.
+  - With `CUSTOM_POLICY` on, such a connector is named by its product.
+    Its operation has two forms of the id (`OpCoordinates.forms()`): the
+    form with the dash and the product. `classify` decides each form in
+    each scope with that scope's own entries, and takes field by field
+    the stricter result: `always_wait` when either form waits, the higher
+    `risk` (no level is the lowest), the conflict of either form; the
+    `category`, `install_category` and `labels` of the form with the
+    dash. The `rule_ref` (the approval card's `classification_rule`) is
+    an entry whose value the card shows: the entry of the form with the
+    dash that gave the category, else the most specific one that gave a
+    shown label, else `taxonomy.default` (`_shown_ref`). A category
+    cleared by a conflict names no entry. So an entry that
+    matches only by the product can add a wait or raise a level, and never
+    takes a wait away, lowers a level or changes the category or the
+    labels. `meho policy explain` names the entry that makes the operation
+    wait: it decides each form as `classify` does, the form with the dash
+    first (`_wait_path` in `policy/explain.py`). The import check and the
+    single edit (`install_wait_undone`, `install_risk_lowered`) compare a
+    tenant entry with the install's wait and level of both forms, so a
+    tenant entry that matches one form cannot end a wait that an install
+    entry sets on the other form. For the level, each side's level is the
+    higher of its two forms, each form decided by that side's own
+    entries; a tenant entry is refused only when it decides the tenant's
+    level in a form and the tenant's level is below the install's. An
+    override row's category and labels count only for its own connector
+    (`ClassificationEntry.for_connector`), also where two connectors share
+    the form with the dash. The carry-over dry run
+    lists the operation under every entry that makes it wait in either
+    form. `test_policy_connector_product_form.py` runs the cases.
 - **Taxonomy.** One category list per install. Without an install
   document MEHO uses its built-in list (`DEFAULT_TAXONOMY` in
   `policy/classification.py`). A tenant's document can add categories
@@ -113,8 +161,30 @@ The rules are in `policy/classification.py` (`classify`, no database):
    its connector, because the same op id can exist on another connector.
    When the refused entry names a group, the suggested entry names the
    group too; without it, the suggested entry ranks below the refused one.
-   An entry that matches the op on two connectors counts as wide. The
-   single edit has no `risk` field, so it refuses only the
+   An entry that matches the op on two connectors counts as wide. With
+   `CUSTOM_POLICY` on, an operation of a connector with no version has
+   its own text (`_product_risk_text`): it names every operation the
+   entry lowers, also those of connectors with a version, each with its
+   connector (a connector with no version by its product), up to five and
+   a count of the rest. It gives a fix for every lowered operation, also
+   those past the five (`_fix_text`). For each row it says to set `risk`
+   on the tenant's entry that already has exactly the match needed
+   (`_exact_entry`), or it suggests a new entry for that connector, never
+   for the form with the dash. Rows with the same fix get one fix, at the
+   higher level: the same exact entry, or the same match of a new entry.
+   So two rows of one operation (a built-in row and the tenant's own) get
+   one new entry, but when they are in two groups and each group has its
+   own entry, each of those entries gets its own fix. When the new entries
+   do not fit into the file (`MAX_CLASSIFICATIONS`, 2,000 entries), it
+   suggests one entry per connector instead (`_per_connector`): the
+   refused entry's match with the connector's own id. When even that does
+   not fit, or the refused entry already names that connector, it says
+   how many new entries the fix needs and how many more the file can
+   take, and names no entry to change. A suggested entry quotes each
+   value (`_entry_text`), so it parses as written. It suggests a change
+   of the refused entry only when the entry matches that one operation
+   alone, because two products
+   share the form with the dash. The single edit has no `risk` field, so it refuses only the
    `always_wait: false` part (`install_wait_undone`).
 5. **Ties** (same rank): for `risk` the higher level wins, for
    `always_wait` `true` wins. A different `category`, or a different value

@@ -55,7 +55,7 @@ from meho_backplane.policy.store import (
     ClassificationEdit,
     EditPlan,
     classification_enabled,
-    connector_id_of,
+    coordinates_of,
     plan_edit,
 )
 
@@ -225,7 +225,7 @@ async def _descriptor_rows(
             .where(visible, EndpointDescriptor.op_id.in_(op_ids))
         )
         for row, group_key in (await session.execute(stmt)).tuples():
-            coords = OpCoordinates(connector_id_of(row), group_key, row.op_id)
+            coords = coordinates_of(row, group_key)
             if coords in wanted_set and (coords not in found or row.tenant_id is not None):
                 found[coords] = row
     return found

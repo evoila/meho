@@ -95,6 +95,23 @@ classifications:
 
 - `match` says what the entry is for: a connector, an operation group, an
   operation, or a mix. `*` is any text, `?` is one character.
+- A connector is matched by its id, for example `harbor-rest-2.x`. A
+  connector with no version has the id `-` in the policy.
+- With `CUSTOM_POLICY` on, a connector with no version is also matched by
+  its product name, the id a call uses, for example `acmedb`. MEHO checks
+  its operations twice, once by `-` and once by the product, and the
+  stricter result counts. So an entry that matches only by the product can
+  add a wait or raise the risk level. It never takes a wait away, lowers a
+  level, or changes the category or the labels. A tenant entry that ends
+  an install wait is refused, whichever of the two forms each entry
+  matches. A tenant entry that sets a risk level is refused when it
+  decides the tenant's level and the tenant's level is below the
+  install's: each side's level is the higher of its two forms.
+- With `CUSTOM_POLICY` off, a policy entry matches a connector with no
+  version by the id `-`. The overrides report names it by its
+  implementation id, the empty text, and the carry-over dry run names it
+  by its product. A call and its approval card name the connector by the
+  id the caller used.
 - An entry sets one or more of: `category`, `labels`, `risk`
   (`safe`, `caution`, `dangerous`, `destructive`) and `always_wait`.
 - `labels` follow the same rules as a single label change: at most 32
@@ -541,14 +558,37 @@ refused, and the message names the entry and the operation.
   leave the operation out of the match. With such an entry, the file is
   accepted. The message names the operation and its connector. Put both
   in the new entry, for example
-  `{match: {connector: X, op: <op-id>}, risk: <level>}`. The same
+  `{match: {connector: "X", op: "<op-id>"}, risk: "<level>"}`. Put each
+  value in quotes: an operation id such as `GET:/widgets/{id}` holds
+  characters that YAML reads differently without them. The same
   operation id can exist on another connector, for example on another
   version of the product. An entry without the connector sets that
   operation's level too. When the refused entry names a group, the
   message names the group as well. Put it in the new entry too, for
-  example `{match: {connector: X, group: <group>, op: <op-id>}, risk: <level>}`.
+  example `{match: {connector: "X", group: "<group>", op: "<op-id>"}, risk: "<level>"}`.
   Without the group, the new entry is less specific than the refused
   one, and the file is refused again.
+- With `CUSTOM_POLICY` on, a connector with no version is named by its
+  product. Then the message names the operation with its product, for
+  example `` `<op-id>` of `acmedb` ``, and suggests an entry for that
+  product: `{match: {connector: "acmedb", op: "<op-id>"}, risk: "<level>"}`.
+  Each value is in quotes, so you can paste the entry into the file as it
+  is. Two such products share the id `-`. So the message suggests a
+  change of the refused entry only when the entry matches that one
+  operation alone. Otherwise the entry can stay, and the message suggests
+  one new entry for each operation it names. When your file already has
+  an entry with exactly that match, the message names that entry and
+  says to set `risk` on it; its other fields can stay. One message names
+  every operation whose level the entry lowers, also those of connectors
+  with a version, each with its connector, up to five; it says how many
+  more there are. It gives a fix for every one of them, also those past
+  the five, and each fix only once. A file has at most 2,000 entries.
+  When the new entries would not fit, the message suggests one entry for
+  each connector instead. Such an entry raises every operation of its
+  connector that the refused entry matches. When even those would not
+  fit, the message says how many new entries the fix needs and how many
+  more your file can take, and names no entry to change. Otherwise, when
+  you follow the whole message, the file passes the check.
 - Which install values make **every** call wait: `always_wait: true` and
   `risk: destructive`. With `risk: dangerous`, a call waits too, but
   two things can still let it run without a new approval: a standing
@@ -684,13 +724,20 @@ file entry with `always_wait: true`.
 
 The dry run lists every saved "always wait" and what changes for each
 setting if MEHO reads it as `destructive`. It only reads: it changes no
-setting and no answer, and it reads no setting switch. It writes only its
-audit row.
+setting and no answer. The list reads no setting switch; only the first
+field of the answer, `custom_policy_on`, says whether `CUSTOM_POLICY` is
+on at that moment. `meho policy carry-over --dry-run` prints it as its
+first line. It writes only its audit row.
 
 ```bash
 meho policy carry-over --dry-run                   # your tenant's settings
 meho policy carry-over --dry-run --scope install   # the install's (platform admin)
 ```
+
+The install's "always wait" settings count for the calls and steps of
+every tenant. A tenant admin's dry run lists only the tenant's own
+settings. A platform admin who is a person sees the install's settings
+with `--scope install`.
 
 For each setting it shows:
 
@@ -699,9 +746,19 @@ For each setting it shows:
 - the operations it matches. A policy file entry is matched against the
   operations a call of the tenant can use, and against every step of a
   multi-step operation, with the group the step check finds for it, also
-  a step with no row a call can use. A policy file entry makes an
-  operation wait only with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY` on;
-  the dry run lists its matches with every switch;
+  a step with no row a call can use. An operation that a call of the
+  tenant cannot use is not listed as a call: one that is turned off, of a
+  package that is not installed, or whose code is not in this MEHO. An
+  entry that matches only such operations says that it matches none.
+  When the operation is turned on again, the entry counts for it again.
+  A connector with no version is listed by its product name, with every
+  switch state, one line per product, under every entry that makes it wait
+  by `-` or by the product. The list shows what waits once
+  `CUSTOM_POLICY` is on. An entry that names a connector with no version
+  by its product makes a call wait only with `CUSTOM_POLICY` on; any other
+  entry makes a call wait with `POLICY_CLASSIFICATION` or `CUSTOM_POLICY`
+  on. The first field of the answer, `custom_policy_on`, says whether
+  `CUSTOM_POLICY` is on at that moment;
 - a warning when the setting makes a step of a multi-step operation
   wait, with every multi-step operation that runs it, at every level. A
   setting of the install counts when it makes the step wait for at least

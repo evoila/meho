@@ -4573,11 +4573,15 @@ type CapabilityRead struct {
 }
 
 // CarryOverDryRun The answer of the dry run: every saved "always wait" of “scope“. Nothing is changed.
+//
+// “custom_policy_on“ says whether “CUSTOM_POLICY“ is on at that
+// moment; the list is the same in every switch state.
 type CarryOverDryRun struct {
-	Message     *string              `json:"message,omitempty"`
-	SandboxMode bool                 `json:"sandbox_mode"`
-	Scope       CarryOverDryRunScope `json:"scope"`
-	Settings    []CarryOverSetting   `json:"settings"`
+	CustomPolicyOn bool                 `json:"custom_policy_on"`
+	Message        *string              `json:"message,omitempty"`
+	SandboxMode    bool                 `json:"sandbox_mode"`
+	Scope          CarryOverDryRunScope `json:"scope"`
+	Settings       []CarryOverSetting   `json:"settings"`
 }
 
 // CarryOverDryRunScope defines model for CarryOverDryRun.Scope.

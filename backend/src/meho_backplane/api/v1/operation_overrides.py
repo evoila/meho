@@ -21,11 +21,13 @@ from fastapi import APIRouter, Depends, Query
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import OperationPolicyOverride
 from meho_backplane.operations.ingest.api_schemas import (
     OperationOverrideList,
     OperationOverrideRow,
 )
 from meho_backplane.operations.op_policy import list_overrides
+from meho_backplane.policy.store import connector_id_of, product_form_on
 
 __all__ = ["load_override_rows", "router"]
 
@@ -38,9 +40,15 @@ _reduced_approval_query = Query(
 )
 
 
-def _connector_id(impl_id: str, version: str) -> str:
-    """Return the ``<impl_id>-<version>`` id, or ``impl_id`` alone without a version."""
-    return f"{impl_id}-{version}" if version else impl_id
+def _connector_id(row: OperationPolicyOverride) -> str:
+    """The policy's connector id with ``CUSTOM_POLICY`` on.
+
+    With the switch off: ``<impl_id>-<version>``, or ``impl_id`` alone
+    without a version, as before the policy named a connector by product.
+    """
+    if product_form_on():
+        return connector_id_of(row)
+    return f"{row.impl_id}-{row.version}" if row.version else row.impl_id
 
 
 async def load_override_rows(
@@ -53,7 +61,7 @@ async def load_override_rows(
         )
     return [
         OperationOverrideRow(
-            connector_id=_connector_id(row.impl_id, row.version),
+            connector_id=_connector_id(row),
             op_id=row.op_id,
             scope="install" if row.tenant_id is None else "tenant",
             tenant_id=row.tenant_id,

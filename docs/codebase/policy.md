@@ -446,9 +446,28 @@ read the install's routing as it is now too (`InstallFloor`), so they say
 what the click decides. The approve audit row names the install entry
 that counted at the click (`approver_floor`).
 
+One rule names the connector of an operation in every policy answer:
+`connector_id_of` and `coordinates_of` in `policy/store.py`. With
+`CUSTOM_POLICY` off, a policy entry matches a connector with no version by
+the id `-`. The overrides report names it by its implementation id, the
+empty text, and the carry-over dry run names it by its product. A call
+and its approval card name the connector by the id the caller used.
+The dry run's list reads no switch; its first field, `custom_policy_on`,
+says whether `CUSTOM_POLICY` is on at that moment. With `CUSTOM_POLICY` on, it is named by its product.
+An entry that matches it only by the product can then add a wait or raise
+a level. It never takes a wait away, lowers a level or changes the
+category or the labels. The details are in
+[policy-classification.md](policy-classification.md).
+
 A step of a multi-step operation gets the same categories as a direct
 call of the same operation: the step gate reads the classification
-entries and the override rows of the operation (`classify_step`). So a
+entries and the override rows of the operation (`classify_step`). The
+group of a step comes from one shared rule, `StepGroups.group_of` in
+`policy/store.py`: the group of the tenant's own row of the step first,
+then the group of the built-in row, and no group without a row. The step
+gate and the step preview (through `classify_step`) and the carry-over
+dry run all use it. `load_step_groups` reads the groups of many steps in
+one query; the dry run calls it once. So a
 step and a direct call wait for the same people. So a tenant entry stored
 before this rule, or an install file that changed later, never widens
 anything: where a tenant entry is wider, its extra groups do not count.
@@ -588,8 +607,10 @@ it.
   the `limits` part of the install's file and the `agents` part of a
   tenant's file are read. A card planned with the switch off has only the
   keys it had before the switch existed, also in `meho_approvals_get` and
-  `meho_approvals_list`. A card without the field counts as planned with
-  the switch off; so does a card that waited during an upgrade. After the
+  `meho_approvals_list`. A request made under another release does not
+  run after an update of MEHO: the release check refuses it, with
+  `CUSTOM_POLICY` off or on. A card without the field counts as planned
+  with the switch off; so does a card that waited during an upgrade. After the
   approval, the run reads the switch again. When it is not the same as on
   the card, the run writes nothing and gives the same sentence.
 - The stored card of a tenant import planned with `CUSTOM_POLICY` on
@@ -710,6 +731,24 @@ of a tenant), `backend/tests/test_policy_carry_over_dry_run_access.py`
 (who may run it, every table the same, an override keeps waiting),
 `backend/tests/test_policy_carry_over_dry_run_step_warning.py` (a step
 warning exactly when the step check makes the step wait, in both scopes),
+`backend/tests/test_policy_carry_over_step_grid.py` (a grid of 396
+cases: the dry run names a multi-step operation exactly when the step
+gate makes the step wait; the three follow the shared group rule; one
+query for the groups of all steps),
+`backend/tests/test_policy_connector_without_version.py` (with
+`CUSTOM_POLICY` on, a connector with no version is named by its product in
+every answer; no reader builds the id itself),
+`backend/tests/test_policy_connector_product_form.py` (with `CUSTOM_POLICY`
+on, the product form can only add a wait or raise a level, in both scopes;
+the import check sees an install entry of either form, and its refusal
+names the operation with its product and suggests an entry for that
+product; explain names the entry that makes the call wait; the approval
+card's `classification_rule` is an entry whose value the card shows),
+`backend/tests/test_policy_connector_without_version_switch_off.py` (with
+`CUSTOM_POLICY` off, the overrides report names a connector with no
+version by its implementation id; a call, the preview and the approval
+card match it as `-`; the dry run names it by its product with every switch
+state),
 `backend/tests/test_api_v1_policy_install_limits.py` (the outer limit with
 `CUSTOM_POLICY` on: import, export and import again, who may ask and
 approve, the audit rows, a wrong part, a stored value MEHO cannot read,

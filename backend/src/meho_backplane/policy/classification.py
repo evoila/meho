@@ -43,6 +43,7 @@ goes back to the code's value.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ __all__ = [
     "DEFAULT_TAXONOMY",
     "LABEL_KEY_MAX",
     "LABEL_VALUE_MAX",
+    "MAX_CLASSIFICATIONS",
     "RISK_LEVELS",
     "Classification",
     "ClassificationConflictError",
@@ -88,6 +90,9 @@ _LABEL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 #: The longest label key and label value, in characters.
 LABEL_KEY_MAX: Final[int] = 63
 LABEL_VALUE_MAX: Final[int] = 255
+
+#: The most entries one policy file may have.
+MAX_CLASSIFICATIONS: Final[int] = 2000
 
 #: The rule reference of an operation that no entry matches.
 DEFAULT_RULE_REF: Final[str] = "taxonomy.default"
@@ -126,11 +131,39 @@ def _label_key_ok(key: str) -> bool:
 
 @dataclass(frozen=True)
 class OpCoordinates:
-    """What an entry can match on: the connector id, the group key, the op id."""
+    """What an entry can match on: the connector id, the group key, the op id.
+
+    ``dashed_connector_id`` is set only with ``CUSTOM_POLICY`` on, for a
+    connector with no version, whose id is then its product: it holds the
+    form ``<impl_id>-<version>`` (for example ``-``). Such an operation is
+    classified once per form (:meth:`forms`), and the stricter result
+    counts (:func:`classify`). Build coordinates with
+    :func:`~meho_backplane.policy.store.coordinates_of`. ``form_of`` is set
+    only on a form made by :meth:`forms`: the connector id of the operation
+    the form belongs to.
+    """
 
     connector_id: str
     group_key: str | None
     op_id: str
+    dashed_connector_id: str | None = None
+    form_of: str | None = None
+
+    def forms(self) -> tuple[OpCoordinates, ...]:
+        """Each form of the connector id alone: the form with the dash first."""
+        if self.dashed_connector_id is None:
+            return (self,)
+        return (
+            OpCoordinates(
+                self.dashed_connector_id, self.group_key, self.op_id, form_of=self.connector_id
+            ),
+            OpCoordinates(self.connector_id, self.group_key, self.op_id, form_of=self.connector_id),
+        )
+
+    @property
+    def owner_id(self) -> str:
+        """The connector id of the operation, also for one form of it."""
+        return self.form_of or self.connector_id
 
 
 class ClassificationConflictError(ValueError):
@@ -154,7 +187,14 @@ def _literal_prefix(pattern: str | None) -> int:
 
 @dataclass(frozen=True)
 class ClassificationEntry:
-    """One classification entry, with where it came from (``ref``)."""
+    """One classification entry, with where it came from (``ref``).
+
+    ``for_connector`` is set on the entries of an override row: the entry
+    then matches only the operations of that connector id
+    (:attr:`OpCoordinates.owner_id`), in each form of the id. So two
+    connectors with no version that share the form with the dash and an
+    op id each keep their own override.
+    """
 
     ref: str
     scope: Scope
@@ -165,6 +205,7 @@ class ClassificationEntry:
     risk: str | None = None
     always_wait: bool | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
+    for_connector: str | None = None
 
     @property
     def level(self) -> str:
@@ -187,7 +228,12 @@ class ClassificationEntry:
         )
 
     def matches(self, coords: OpCoordinates) -> bool:
-        """True when every pattern the entry gives matches *coords*."""
+        """True when every pattern the entry gives matches one form of *coords*."""
+        return any(self._matches_form(form) for form in coords.forms())
+
+    def _matches_form(self, coords: OpCoordinates) -> bool:
+        if self.for_connector is not None and coords.owner_id != self.for_connector:
+            return False
         if self.connector is not None and not fnmatchcase(coords.connector_id, self.connector):
             return False
         if self.group is not None and (
@@ -273,14 +319,19 @@ def _label_conflict(coords: OpCoordinates, matched: Sequence[ClassificationEntry
     return None
 
 
-def _shown_labels(matched: Sequence[ClassificationEntry]) -> dict[str, str]:
-    """Each key from the most specific entry whose label passes :func:`label_text_ok`."""
-    labels: dict[str, str] = {}
+def _label_sources(matched: Sequence[ClassificationEntry]) -> dict[str, ClassificationEntry]:
+    """Each label key MEHO shows, with the most specific entry that gives it."""
+    sources: dict[str, ClassificationEntry] = {}
     for entry in sorted(matched, key=lambda e: e.rank, reverse=True):
         for key, value in entry.labels.items():
-            if key not in labels and label_text_ok(key, value):
-                labels[key] = value
-    return labels
+            if key not in sources and label_text_ok(key, value):
+                sources[key] = entry
+    return sources
+
+
+def _shown_labels(matched: Sequence[ClassificationEntry]) -> dict[str, str]:
+    """Each key from the most specific entry whose label passes :func:`label_text_ok`."""
+    return {key: entry.labels[key] for key, entry in _label_sources(matched).items()}
 
 
 def _scope_top(
@@ -314,16 +365,20 @@ def install_wait_undone(
 
     Returns ``(op_id, install_ref)`` for the first operation in *coords*
     that *entry* sets to ``always_wait: false`` while an install entry in
-    *entries* makes it always wait. ``None`` when there is none.
+    *entries* makes it always wait. For an operation with two forms of its
+    connector id, *entry* may match one form and the install entry the
+    other: the install's entries make the operation wait when they make
+    either form wait. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.always_wait is not False:
         return None
     for one in coords:
         if not entry.matches(one):
             continue
-        install = _scope_wait([e for e in entries if e.matches(one)], "install")
-        if install is not None:
-            return one.op_id, install.ref
+        for form in one.forms():
+            install = _scope_wait([e for e in entries if e.matches(form)], "install")
+            if install is not None:
+                return one.op_id, install.ref
     return None
 
 
@@ -343,21 +398,22 @@ def install_wait_text(name: str, op_id: str, install_ref: str, *, single_edit: b
     return f"{head} Remove `always_wait: false` from the tenant entry; its other fields can stay."
 
 
-def _tenant_risk_decided_by(
-    entry: ClassificationEntry, matched: Sequence[ClassificationEntry]
-) -> str | None:
-    """The tenant's own risk level when *entry* is one that decides it, else ``None``.
+def _tenant_form_risk(
+    entry: ClassificationEntry, form: OpCoordinates, matched: Sequence[ClassificationEntry]
+) -> tuple[str | None, bool]:
+    """The tenant's own risk level in one *form*, and whether *entry* decides it.
 
-    *matched* are the entries that match one operation. A more specific
-    tenant entry that sets ``risk`` decides instead of *entry*.
+    *matched* are the entries that match *form*. *entry* counts when it
+    matches *form*. The level is ``None`` when no tenant entry sets one.
     """
-    tenant = [e for e in matched if e.scope == "tenant"]
-    if not any(e is entry for e in tenant):
+    tenant = [e for e in matched if e.scope == "tenant" and e is not entry]
+    if entry.matches(form):
         tenant.append(entry)
     top = _scope_top(tenant, "tenant", "risk")
-    if not any(e is entry for e in top):
-        return None
-    return max((e.risk or "safe" for e in top), key=RISK_LEVELS.index)
+    if not top:
+        return None, False
+    level = max((e.risk or "safe" for e in top), key=RISK_LEVELS.index)
+    return level, any(e is entry for e in top)
 
 
 def install_risk_lowered(
@@ -370,25 +426,48 @@ def install_risk_lowered(
     *entries* are the install's entries and the other entries of the
     tenant. Returns ``(coords, install_ref, install_level)`` for the first
     operation in *coords* that *entry* matches, where *entry* decides the
-    tenant's level and an install entry sets a higher one. A more specific
+    tenant's level and that level is below the install's. A more specific
     tenant entry that sets the install's level or higher decides that
-    operation instead, so it is not returned. ``None`` when there is none.
+    operation instead, so it is not returned.
+
+    For an operation with two forms of its connector id, each side's
+    level is the higher of its two forms, each form decided by that
+    side's own entries. *entry* is returned when it decides the tenant's
+    level in one form and the tenant's level is below the install's; the
+    returned coordinates are those of the operation, named by its
+    product. ``None`` when there is none.
     """
     if entry.scope != "tenant" or entry.risk is None:
         return None
     for one in coords:
-        if not entry.matches(one):
-            continue
-        matched = [e for e in entries if e.matches(one)]
-        install = _scope_risk(matched, "install")
-        if install is None:
-            continue
-        tenant_level = _tenant_risk_decided_by(entry, matched)
-        install_level = install.risk or "safe"
-        if tenant_level is not None and RISK_LEVELS.index(tenant_level) < RISK_LEVELS.index(
-            install_level
-        ):
-            return one, install.ref, install_level
+        found = _risk_lowered_at(entry, one, entries)
+        if found is not None:
+            return one, *found
+    return None
+
+
+def _risk_lowered_at(
+    entry: ClassificationEntry, one: OpCoordinates, entries: Sequence[ClassificationEntry]
+) -> tuple[str, str] | None:
+    """``(install_ref, install_level)`` when *entry* lowers the install's level of *one*."""
+    if not entry.matches(one):
+        return None
+    forms = one.forms()
+    matched = {form: [e for e in entries if e.matches(form)] for form in forms}
+    picked = [_scope_risk(matched[form], "install") for form in forms]
+    install = max(
+        (e for e in picked if e is not None),
+        key=lambda e: RISK_LEVELS.index(e.risk or "safe"),
+        default=None,
+    )
+    if install is None:
+        return None
+    install_level = install.risk or "safe"
+    tenant = [_tenant_form_risk(entry, form, matched[form]) for form in forms]
+    decided = any(by_entry for _, by_entry in tenant)
+    tenant_level = max((level for level, _ in tenant), key=_risk_index)
+    if decided and _risk_index(tenant_level) < RISK_LEVELS.index(install_level):
+        return install.ref, install_level
     return None
 
 
@@ -446,19 +525,300 @@ def install_floor_texts(
     if undone is not None:
         texts.append(install_wait_text(name, *undone))
     lowered = install_risk_lowered(entry, coords, entries)
-    if lowered is not None and entry.risk is not None:
-        found = lowered[0]
-        wide = any(
-            entry.matches(one)
-            and (one.connector_id, one.op_id) != (found.connector_id, found.op_id)
-            for one in coords
-        )
-        texts.append(
-            install_risk_text(
-                name, entry.risk, *lowered, wide=wide, with_group=entry.group is not None
-            )
-        )
+    if lowered is None or entry.risk is None:
+        return texts
+    product = _product_risk_text(name, entry, coords, entries)
+    if product is not None:
+        texts.append(product)
+        return texts
+    found = (lowered[0].connector_id, lowered[0].op_id)
+    wide = any(entry.matches(one) and (one.connector_id, one.op_id) != found for one in coords)
+    texts.append(
+        install_risk_text(name, entry.risk, *lowered, wide=wide, with_group=entry.group is not None)
+    )
     return texts
+
+
+#: How many operations the sentence of :func:`_product_risk_text` names at most.
+_MAX_NAMED_OPS = 5
+
+
+def _product_risk_text(
+    name: str,
+    entry: ClassificationEntry,
+    coords: Sequence[OpCoordinates],
+    entries: Sequence[ClassificationEntry],
+) -> str | None:
+    """The sentence of :func:`install_floor_texts` when *entry* lowers a product's operation.
+
+    It names each operation whose install level *entry* lowers, of every
+    connector, each with its connector: up to :data:`_MAX_NAMED_OPS` of
+    them, and how many more there are. It gives a fix for every one of
+    them (:func:`_fix_text`): ``risk`` on the tenant entry that already
+    matches exactly that operation (:func:`_exact_entry`), or a new
+    entry, each fix once. It suggests a change of *entry* only when
+    *entry* matches that one operation alone, because *entry* can also
+    match the operation of
+    another product that shares the form with the dash. ``None`` when
+    *entry* lowers the level of no operation named by its product.
+    """
+    risk = entry.risk or "safe"
+    with_group = entry.group is not None
+    found = [
+        (one, *at) for one in coords if (at := _risk_lowered_at(entry, one, entries)) is not None
+    ]
+    if not any(one.dashed_connector_id is not None for one, _, _ in found):
+        return None
+    lowered = _lowered_by_match(found, with_group=with_group)
+    shown = lowered[:_MAX_NAMED_OPS]
+    parts = [
+        f"`{ref}` sets `{one.op_id}` of `{one.connector_id}` to `{level}`"
+        for one, ref, level in shown
+    ]
+    if len(lowered) > len(shown):
+        parts.append(f"{len(lowered) - len(shown)} more operations")
+    them = f"`{shown[0][0].op_id}` of `{shown[0][0].connector_id}`" if len(lowered) == 1 else "them"
+    head = (
+        f"{name} sets `risk: {risk}`, but {' and '.join(parts)} for the whole install, "
+        f"so `risk: {risk}` does not count for {them}."
+    )
+    one, _, level = lowered[0]
+    key = _match_key(one, with_group=with_group)
+    alone = not any(
+        entry.matches(o) and _match_key(o, with_group=with_group) != key for o in coords
+    )
+    if len(lowered) == 1 and alone:
+        return f"{head} {_SET_RISK_HERE.format(level=level)}"
+    return f"{head} {_fix_text(entry, found, entries)}"
+
+
+#: The fix that raises the level of the refused entry itself.
+_SET_RISK_HERE = "Set `risk: {level}` or higher in this entry; its other fields can stay."
+
+
+def _match_key(one: OpCoordinates, *, with_group: bool) -> tuple[str, str, str | None]:
+    """The match of the entry that :func:`_entry_text` suggests for *one*."""
+    return one.connector_id, one.op_id, one.group_key if with_group else None
+
+
+def _lowered_by_match(
+    found: Sequence[tuple[OpCoordinates, str, str]], *, with_group: bool
+) -> list[tuple[OpCoordinates, str, str]]:
+    """*found* with one row per match, each at the highest level that match needs.
+
+    Two rows of one operation (a built-in row and the tenant's own) have
+    the same match, and the sentence names the operation once.
+    """
+    by_key: dict[tuple[str, str, str | None], tuple[OpCoordinates, str, str]] = {}
+    for one, ref, level in found:
+        key = _match_key(one, with_group=with_group)
+        kept = by_key.get(key)
+        if kept is None or RISK_LEVELS.index(level) > RISK_LEVELS.index(kept[2]):
+            by_key[key] = (kept[0] if kept else one, ref, level)
+    return list(by_key.values())
+
+
+def _higher(levels: dict[Any, str], key: Any, level: str) -> None:
+    """Keep the higher of *level* and the level already at *key*."""
+    if RISK_LEVELS.index(level) > _risk_index(levels.get(key)):
+        levels[key] = level
+
+
+def _fix_text(
+    entry: ClassificationEntry,
+    found: Sequence[tuple[OpCoordinates, str, str]],
+    entries: Sequence[ClassificationEntry],
+) -> str:
+    """The fix for each lowered row: ``risk`` on its exact entry, else a new entry.
+
+    Rows with the same fix get one fix, at the highest level they need:
+    the same exact entry, or the same match of a new entry. Two rows of
+    one operation in different groups can each have their own exact
+    entry. When the new entries do not fit into the file
+    (:data:`MAX_CLASSIFICATIONS`), the fix is one entry per connector
+    (:func:`_per_connector`). When even those do not fit, it says how
+    many new entries the fix needs and how many the file can take, and
+    names no entry to change.
+    """
+    with_group = entry.group is not None
+    on_entry: dict[str, str] = {}
+    new_level: dict[tuple[str, str, str | None], str] = {}
+    new_one: dict[tuple[str, str, str | None], OpCoordinates] = {}
+    for one, _, level in found:
+        exact = _exact_entry(entry, one, entries, with_group=with_group)
+        if exact is not None:
+            _higher(on_entry, exact.ref.removeprefix("tenant:"), level)
+            continue
+        key = _match_key(one, with_group=with_group)
+        new_one.setdefault(key, one)
+        _higher(new_level, key, level)
+    new = [
+        _entry_text(new_one[key], level, with_group=with_group) for key, level in new_level.items()
+    ]
+    what = "a tenant entry" if len(new) == 1 else "a tenant entry for each operation"
+    per_connector_text = ""
+    room = MAX_CLASSIFICATIONS - _file_size(entries)
+    if len(new) > room:
+        per_connector = _per_connector(entry, new_one, new_level, entries)
+        if per_connector is None or len(per_connector[1]) > room:
+            needed = len(new) if per_connector is None else len(per_connector[1])
+            entries_word = "entry" if needed == 1 else "entries"
+            return (
+                f"The fix needs {needed} new tenant {entries_word}, but the file can take only "
+                f"{max(room, 0)} more (at most {MAX_CLASSIFICATIONS:,} entries). Remove entries "
+                "the file does not need, then send it again."
+            )
+        more, new = per_connector
+        for ref, level in more.items():
+            _higher(on_entry, ref, level)
+        what, it = (
+            ("a tenant entry", "It") if len(new) == 1 else ("these tenant entries", "Each one")
+        )
+        per_connector_text = (
+            f" {it} raises every operation of its connector that this entry matches."
+        )
+    fixes = [
+        f"Set `risk: {level}` or higher on `{ref}`; its other fields can stay."
+        for ref, level in on_entry.items()
+    ]
+    if new:
+        listed = ", ".join(f"`{t}`" for t in new)
+        fixes.append(f"Add {what}, with this risk level or higher: {listed}.{per_connector_text}")
+    return " ".join(["This entry can stay.", *fixes])
+
+
+def _file_size(entries: Sequence[ClassificationEntry]) -> int:
+    """How many entries the tenant's file has."""
+    return len({e.ref for e in entries if e.ref.startswith("tenant:classifications[")})
+
+
+def _per_connector(
+    entry: ClassificationEntry,
+    new_one: Mapping[tuple[str, str, str | None], OpCoordinates],
+    new_level: Mapping[tuple[str, str, str | None], str],
+    entries: Sequence[ClassificationEntry],
+) -> tuple[dict[str, str], list[str]] | None:
+    """The new entries of :func:`_fix_text` as one entry per connector.
+
+    Each has the match of *entry* with the connector's own id, so it is
+    more specific than *entry*. Returns ``(set risk on these file
+    entries, new entries)``: a file entry with exactly that match gets
+    the level instead of a new entry. ``None`` when *entry* already names
+    one of these connectors exactly: the entry would repeat its match.
+    """
+    by_connector: dict[str, str] = {}
+    for key, level in new_level.items():
+        _higher(by_connector, new_one[key].connector_id, level)
+    if entry.connector in by_connector:
+        return None
+    on_entry: dict[str, str] = {}
+    new: list[str] = []
+    for connector, level in by_connector.items():
+        match = {"connector": connector, "group": entry.group, "op": entry.op}
+        same = [
+            e
+            for e in entries
+            if e is not entry
+            and e.ref.startswith("tenant:classifications[")
+            and (e.connector, e.group, e.op) == (connector, entry.group, entry.op)
+        ]
+        if same:
+            on_entry[same[0].ref.removeprefix("tenant:")] = level
+            continue
+        new.append(_match_text(match, level))
+    return on_entry, new
+
+
+def _exact_entry(
+    entry: ClassificationEntry,
+    one: OpCoordinates,
+    entries: Sequence[ClassificationEntry],
+    *,
+    with_group: bool,
+) -> ClassificationEntry | None:
+    """The tenant's own entry with the match that :func:`_entry_text` would suggest for *one*.
+
+    Its connector and op are exactly those of *one*, and so is its group
+    when it names one. When *with_group* is true, it must name the group:
+    a suggested entry then names it too. ``None`` when the tenant's file
+    has no such entry; the most specific one when it has more.
+    """
+    found = [
+        e
+        for e in entries
+        if e is not entry
+        and e.scope == "tenant"
+        and e.for_connector is None
+        and e.ref.startswith("tenant:classifications[")
+        and e.connector == one.connector_id
+        and e.op == one.op_id
+        and (e.group == one.group_key or (e.group is None and not with_group))
+    ]
+    return max(found, key=lambda e: e.rank) if found else None
+
+
+def _entry_text(coords: OpCoordinates, level: str, *, with_group: bool) -> str:
+    """A tenant entry for the one operation at *coords*, in the form of the policy file."""
+    group = coords.group_key if with_group else None
+    return _match_text(
+        {"connector": coords.connector_id, "group": group, "op": coords.op_id}, level
+    )
+
+
+def _match_text(match: Mapping[str, str | None], level: str) -> str:
+    """A tenant entry with *match* (its ``None`` values left out) and *level*.
+
+    Each value is quoted (as JSON text, which YAML reads), so an op id
+    with ``{``, ``}``, ``:`` or ``/`` parses as written.
+    """
+    fields = ", ".join(f"{k}: {_quoted(v)}" for k, v in match.items() if v)
+    return f"{{match: {{{fields}}}, risk: {_quoted(level)}}}"
+
+
+def _quoted(value: str) -> str:
+    """*value* as a double-quoted YAML text."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _risk_index(risk: str | None) -> int:
+    """The place of *risk* in :data:`RISK_LEVELS`; no level is below ``safe``."""
+    return RISK_LEVELS.index(risk) if risk in RISK_LEVELS else -1
+
+
+def _shown_ref(matched: Sequence[ClassificationEntry], shown: Classification) -> str:
+    """An entry that gave a value of *shown*: the category, else the most specific shown label.
+
+    A category cleared by a conflict names no entry. :data:`DEFAULT_RULE_REF`
+    when no entry gave a shown value: the category is the taxonomy's
+    default or cleared, and there are no labels.
+    """
+    top = _top(matched, "category") if shown.category is not None else []
+    if top:
+        return top[0].ref
+    labelled = [e for key, e in _label_sources(matched).items() if key in shown.labels]
+    return max(labelled, key=lambda e: e.rank).ref if labelled else DEFAULT_RULE_REF
+
+
+def _stricter(dashed: Classification, product: Classification, shown_ref: str) -> Classification:
+    """The two forms of one operation's connector id, field by field the stricter.
+
+    The wait and the risk level are the stricter of the two, and a
+    conflict of either form counts. The category and the labels are those
+    of the form with the dash, so the product form never changes who
+    approves. ``rule_ref`` is *shown_ref*: the entry of the form with the
+    dash that gave the shown category, or else a shown label (:func:`_shown_ref`).
+    The entry that makes the operation wait is the one ``meho policy
+    explain`` names.
+    """
+    return Classification(
+        category=dashed.category,
+        labels=dashed.labels,
+        risk=max((dashed.risk, product.risk), key=_risk_index),
+        always_wait=dashed.always_wait or product.always_wait,
+        rule_ref=shown_ref,
+        conflict=dashed.conflict or product.conflict,
+        install_category=dashed.install_category,
+    )
 
 
 def classify(
@@ -466,7 +826,26 @@ def classify(
     entries: Iterable[ClassificationEntry],
     taxonomy: Taxonomy,
 ) -> Classification:
-    """Return the classified values of the operation at *coords*."""
+    """Return the classified values of the operation at *coords*.
+
+    An operation with two forms of its connector id (:meth:`OpCoordinates.forms`)
+    is classified once per form; the result is the stricter of the two
+    (:func:`_stricter`). An entry that matches only the product form can
+    add a wait or raise the level, never take a wait away, lower the level
+    or change the category or the labels.
+    """
+    listed = list(entries)
+    forms = coords.forms()
+    first = _classify_form(forms[0], listed, taxonomy)
+    if len(forms) == 1:
+        return first
+    shown_ref = _shown_ref([e for e in listed if e.matches(forms[0])], first)
+    return _stricter(first, _classify_form(forms[1], listed, taxonomy), shown_ref)
+
+
+def _classify_form(
+    coords: OpCoordinates, entries: Sequence[ClassificationEntry], taxonomy: Taxonomy
+) -> Classification:
     matched = [e for e in entries if e.matches(coords)]
     picked = [_scope_risk(matched, scope) for scope in _SCOPES]
     risks = [e.risk for e in picked if e is not None and e.risk is not None]

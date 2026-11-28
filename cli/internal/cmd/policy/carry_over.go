@@ -30,14 +30,15 @@ func newCarryOverCmd() *cobra.Command {
 			"one it shows where it comes from, the operations it matches, and " +
 			"what changes for each setting if MEHO reads it as destructive: a " +
 			"step of a multi-step operation is refused, sandbox mode, and the " +
-			"preview a call needs first. It only reads and reads no switch. " +
+			"preview a call needs first. It only reads. Its list reads no " +
+			"switch; its first line says whether CUSTOM_POLICY is on. " +
 			"Nothing is changed.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !dryRun {
-				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(
+				return output.RenderError(cmd.ErrOrStderr(), output.Usage(
 					"carry-over only lists; add --dry-run"), opts.JSONOut)
 			}
 			return runCarryOver(cmd, opts)
@@ -88,6 +89,11 @@ func getCarryOver(ctx context.Context, backplaneURL, scope string) (*rawResponse
 }
 
 func printCarryOver(w io.Writer, answer api.CarryOverDryRun) {
+	if answer.CustomPolicyOn {
+		fmt.Fprintln(w, "`CUSTOM_POLICY` is on.")
+	} else {
+		fmt.Fprintln(w, "`CUSTOM_POLICY` is off: the list shows what waits once it is on.")
+	}
 	if answer.SandboxMode {
 		fmt.Fprintln(w, "This install is in sandbox mode.")
 	}

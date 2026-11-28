@@ -35,7 +35,7 @@ from meho_backplane.db.models import ApprovalRequest, AuditLog, TenantPolicy
 from meho_backplane.main import app
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.typed_register import register_typed_operation
-from meho_backplane.policy.classification import ClassificationEntry
+from meho_backplane.policy.classification import ClassificationEntry, OpCoordinates
 from meho_backplane.policy.explain import FILE_NEEDS_CLASSIFICATION, _entry_view, _wait_path
 from meho_backplane.policy.explain_asker import READ_ONLY_CANNOT_CALL
 from meho_backplane.settings import get_settings
@@ -346,10 +346,11 @@ def test_the_wait_names_the_rule_that_causes_it_not_an_overridden_one() -> None:
     tenant_connector = ClassificationEntry(
         ref="tenant:classifications[0]", scope="tenant", connector="explapi-1.x", always_wait=True
     )
+    coords = OpCoordinates("explapi-1.x", "vm", "explapi.vm.list")
     matched = [install_group, install_op, tenant_connector]
-    assert _wait_path(matched) == "tenant:classifications[0]"
-    assert _wait_path([install_group, install_op]) is None
-    assert _wait_path([install_group, tenant_connector]) == "install:classifications[0]"
+    assert _wait_path(matched, coords) == "tenant:classifications[0]"
+    assert _wait_path([install_group, install_op], coords) is None
+    assert _wait_path([install_group, tenant_connector], coords) == "install:classifications[0]"
 
 
 def test_an_entry_does_not_show_a_label_that_breaks_the_rule() -> None:

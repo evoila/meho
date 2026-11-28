@@ -4,12 +4,16 @@
 package policy
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/output"
 )
 
-const carryOverAnswer = `{"scope":"tenant","sandbox_mode":true,"message":"Dry run: nothing was changed.",
+const carryOverAnswer = `{"custom_policy_on":true,"scope":"tenant","sandbox_mode":true,"message":"Dry run: nothing was changed.",
 "settings":[
  {"source":"override","scope":"tenant","ref":"tenant:override",
   "match":{"connector":"cowapi-1.x","op":"cowapi.vm.update"},
@@ -32,7 +36,8 @@ func TestCarryOverDryRunListsEachSetting(t *testing.T) {
 	if got.query != "scope=tenant" {
 		t.Errorf("query: %q", got.query)
 	}
-	want := "This install is in sandbox mode.\n" +
+	want := "`CUSTOM_POLICY` is on.\n" +
+		"This install is in sandbox mode.\n" +
 		"override tenant:override (tenant): connector=cowapi-1.x op=cowapi.vm.update\n" +
 		"  operation cowapi-1.x cowapi.vm.update (a step of cowapi.composite.rebuild)\n" +
 		"  warning: step warning\n" +
@@ -61,34 +66,74 @@ func TestCarryOverDryRunJSONAndInstallScope(t *testing.T) {
 	if !strings.Contains(stdout, `"ref": "tenant:classifications[2]"`) {
 		t.Errorf("stdout: %s", stdout)
 	}
+	if !strings.Contains(stdout, `"custom_policy_on": true`) {
+		t.Errorf("stdout has no custom_policy_on field: %s", stdout)
+	}
+}
+
+func TestCarryOverDryRunSaysWhenCustomPolicyIsOff(t *testing.T) {
+	const off = `{"custom_policy_on":false,"scope":"tenant","sandbox_mode":false,"settings":[],"message":"Dry run: nothing was changed."}`
+	var got seen
+	srv := server(t, 200, off, &got)
+	stdout, _, err := run(t, "carry-over", "--dry-run", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("carry-over: %v", err)
+	}
+	first, _, _ := strings.Cut(stdout, "\n")
+	if first != "`CUSTOM_POLICY` is off: the list shows what waits once it is on." {
+		t.Errorf("first line: %q", first)
+	}
+	stdout, _, err = run(t, "carry-over", "--dry-run", "--json", "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("carry-over --json: %v", err)
+	}
+	if !strings.Contains(stdout, `"custom_policy_on": false`) {
+		t.Errorf("stdout has no custom_policy_on field: %s", stdout)
+	}
 }
 
 func TestCarryOverEmptyList(t *testing.T) {
 	var got seen
 	srv := server(t, 200,
-		`{"scope":"tenant","sandbox_mode":false,"settings":[],"message":"Dry run: nothing was changed."}`, &got)
+		`{"custom_policy_on":true,"scope":"tenant","sandbox_mode":false,"settings":[],"message":"Dry run: nothing was changed."}`, &got)
 	stdout, _, err := run(t, "carry-over", "--dry-run", "--backplane", srv.URL)
 	if err != nil {
 		t.Fatalf("carry-over: %v", err)
 	}
-	want := "No saved \"always wait\" setting in scope tenant.\nDry run: nothing was changed.\n"
+	want := "`CUSTOM_POLICY` is on.\nNo saved \"always wait\" setting in scope tenant.\nDry run: nothing was changed.\n"
 	if stdout != want {
 		t.Errorf("stdout: %q", stdout)
 	}
 }
 
 func TestCarryOverNeedsDryRun(t *testing.T) {
+	const sentence = "carry-over only lists; add --dry-run"
 	var got seen
 	srv := server(t, 200, carryOverAnswer, &got)
+
 	_, stderr, err := run(t, "carry-over", "--backplane", srv.URL)
-	if err == nil {
-		t.Fatal("expected an error without --dry-run")
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) || coded.ExitCode() != output.ExitUsage {
+		t.Fatalf("want a usage error (exit %d); got %v", output.ExitUsage, err)
+	}
+	if want := "meho: " + output.ErrCodeUsage + ": " + sentence + "\n"; stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+
+	_, stderr, _ = run(t, "carry-over", "--json", "--backplane", srv.URL)
+	var answer struct {
+		Error    string `json:"error"`
+		Detail   string `json:"detail"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(stderr), &answer); err != nil {
+		t.Fatalf("stderr is not one JSON document: %v\n%s", err, stderr)
+	}
+	if answer.Error != output.ErrCodeUsage || answer.Detail != sentence || answer.ExitCode != output.ExitUsage {
+		t.Errorf("JSON error = %+v", answer)
 	}
 	if got.path != "" {
-		t.Errorf("no call expected; got %s", got.path)
-	}
-	if !strings.Contains(stderr, "add --dry-run") {
-		t.Errorf("stderr: %s", stderr)
+		t.Errorf("no request expected; got %s", got.path)
 	}
 }
 

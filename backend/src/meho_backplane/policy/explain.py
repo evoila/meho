@@ -100,9 +100,10 @@ from meho_backplane.policy.store import (
     _documents,
     _group_keys,
     _override_entries,
+    _override_entries_at,
     _stored_entries,
     classification_enabled,
-    connector_id_of,
+    coordinates_of,
 )
 from meho_backplane.policy.who_approves import (
     RIGHTS_CHANGE_RULE,
@@ -227,7 +228,7 @@ async def _policy_view(
 
 async def _coords(session: AsyncSession, row: EndpointDescriptor) -> OpCoordinates:
     keys = await _group_keys(session, [row], {})
-    return OpCoordinates(connector_id_of(row), keys.get(row.id), row.op_id)
+    return coordinates_of(row, keys.get(row.id))
 
 
 async def _apply_file(
@@ -257,7 +258,9 @@ async def _apply_file(
         OpKey.of(stored), []
     )
     override_entries = _override_entries(overrides, coords.connector_id)
-    classified = classify(coords, [*view.entries, *override_entries], view.taxonomy)
+    classified = classify(
+        coords, [*view.entries, *_override_entries_at(overrides, coords)], view.taxonomy
+    )
     policy = policy_in_force(stored, overrides, classified)
     descriptor.safety_level = policy.safety_level
     descriptor.requires_approval = policy.requires_approval
@@ -297,15 +300,22 @@ def _classification_view(
     )
 
 
-def _wait_path(matched: Sequence[ClassificationEntry]) -> str | None:
+def _wait_path(matched: Sequence[ClassificationEntry], coords: OpCoordinates | None) -> str | None:
     """The entry that makes the operation always wait, as :func:`classify` decides it.
 
     Each scope finds its own value first, so an entry that a more specific
     entry of its scope overrode is never named. When both scopes wait, the
-    more specific of the two is named.
+    more specific of the two is named. An operation with two forms of its
+    connector id (:meth:`OpCoordinates.forms`) is decided once per form,
+    as :func:`classify` does: the entry of the first form that waits is
+    named, the form with the dash first.
     """
-    waits = [wait for scope in _SCOPES if (wait := _scope_wait(matched, scope)) is not None]
-    return max(waits, key=lambda entry: entry.rank).ref if waits else None
+    for form in coords.forms() if coords is not None else ():
+        in_form = [entry for entry in matched if entry.matches(form)]
+        waits = [wait for scope in _SCOPES if (wait := _scope_wait(in_form, scope)) is not None]
+        if waits:
+            return max(waits, key=lambda entry: entry.rank).ref
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +371,13 @@ async def _classify_for_explain(
     descriptor: EndpointDescriptor,
     file_document: Mapping[str, Any] | None,
     file_scope: Scope,
-) -> tuple[list[ClassificationEntry], list[RouteEntry] | None]:
-    """The matching classification entries and the routing; with a file, also its values."""
+) -> tuple[list[ClassificationEntry], list[RouteEntry] | None, OpCoordinates | None]:
+    """The matching classification entries, the routing and the coordinates.
+
+    With a file, it also sets the file's values on *descriptor*.
+    """
     if file_document is None and not classification_enabled():
-        return [], None
+        return [], None, None
     async with get_sessionmaker()() as session:
         view = await _policy_view(
             session, tenant_id=tenant_id, file_document=file_document, file_scope=file_scope
@@ -379,7 +392,7 @@ async def _classify_for_explain(
                 session, tenant_id, descriptor, coords.connector_id
             )
     matched = [entry for entry in [*view.entries, *overrides] if entry.matches(coords)]
-    return matched, view.routes
+    return matched, view.routes, coords
 
 
 async def _resolve(
@@ -472,7 +485,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
     if isinstance(resolved, PolicyExplainResponse):
         return resolved
     descriptor, connector_id, target = resolved
-    matched, routes = await _classify_for_explain(
+    matched, routes, coords = await _classify_for_explain(
         tenant_id=question.asker.tenant_id,
         descriptor=descriptor,
         file_document=question.file_document,
@@ -502,7 +515,7 @@ async def explain_call(question: CallQuestion) -> PolicyExplainResponse:
             approvers=found,
             routes=routes,
         )
-    wait_path = _wait_path(matched)
+    wait_path = _wait_path(matched, coords)
     return PolicyExplainResponse(
         status="ok",
         engine=_engine(),

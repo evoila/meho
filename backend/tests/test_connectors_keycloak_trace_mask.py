@@ -441,7 +441,7 @@ async def test_a_call_with_a_passed_realm_check_keeps_the_trace_link(
     recorded_keycloak: Operator,
     shared_store: ResultHandleStore,
 ) -> None:
-    """The managed realm answers the check: the trace stays shareable and the agent gets its link."""
+    """The managed realm answers the check: the trace is shareable and the agent gets its link."""
     operator = recorded_keycloak
     with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
         mock.post("/realms/master/protocol/openid-connect/token").respond(

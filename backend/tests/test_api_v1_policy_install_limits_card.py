@@ -8,10 +8,10 @@
   ``CUSTOM_POLICY`` switch as the run. With the switch off, the card has no
   ``limits`` section. After the click the stored policy holds what the card
   showed.
-* An install import planned with the switch on holds
-  ``planned_with_custom_policy: true``. Every other card has the keys it had
-  before the switch existed, also in ``meho_approvals_get`` and
-  ``meho_approvals_list``. A card without the field was planned with the
+* An import planned with the switch on (of the install's file or of a
+  tenant's file) holds ``planned_with_custom_policy: true``. A card planned
+  with the switch off has the keys it had before the switch existed, also in
+  ``meho_approvals_get`` and ``meho_approvals_list``. A card without the field was planned with the
   switch off. When the switch at the run is not the same as on the card, the
   run stores nothing and asks for a new preview.
 
@@ -209,10 +209,10 @@ _RELEASED_KEYS = {
         pytest.param("tenant", False, None, id="15-tenant-off"),
         pytest.param("install", False, None, id="16-install-off"),
         pytest.param("install", True, True, id="17-install-on"),
-        pytest.param("tenant", True, None, id="18-tenant-on"),
+        pytest.param("tenant", True, True, id="18-tenant-on"),
     ],
 )
-async def test_only_an_install_card_planned_with_the_switch_on_holds_the_field(
+async def test_only_a_card_planned_with_the_switch_on_holds_the_field(
     client: TestClient,
     embedding: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
@@ -228,6 +228,9 @@ async def test_only_an_install_card_planned_with_the_switch_on_holds_the_field(
         request_id, card = await _ask(client, key, FILE_P, scope=scope)
 
     expected = _RELEASED_KEYS if field is None else _RELEASED_KEYS | {"planned_with_custom_policy"}
+    stored_keys = expected
+    if field is not None and scope == "tenant":
+        stored_keys = expected | {"planned_with_install_limits"}
     reader = person("admin-b")
     got = (await _get_handler(reader, {"approval_request_id": str(request_id)}))["proposed_effect"][
         "preview"
@@ -238,9 +241,12 @@ async def test_only_an_install_card_planned_with_the_switch_on_holds_the_field(
         for item in listed["items"]
         if item["id"] == str(request_id)
     ]
+    assert set(card) == stored_keys
     for shown in (card, got, in_list):
-        assert set(shown) == expected
+        assert set(shown) - {"planned_with_install_limits"} == expected
         assert shown.get("planned_with_custom_policy") is field
+    for shown in (got, in_list):
+        assert "planned_with_install_limits" not in shown
 
 
 # ---------------------------------------------------------------------------

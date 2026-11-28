@@ -137,7 +137,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Row
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.auth.operator import Operator, TenantRole
     from meho_backplane.ui.auth.session_store import DecryptedSession
 
 __all__ = [
@@ -147,9 +147,14 @@ __all__ = [
     "UISessionMiddleware",
     "require_ui_admin",
     "require_ui_operator",
+    "require_ui_operator_for_call",
+    "require_ui_operator_read",
     "require_ui_session",
 ]
 
+
+#: HTTP methods that only read. A Reader on any other method asks for a change.
+_READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 #: Prefix every UI route lives under. Requests outside the prefix
 #: pass through untouched; requests inside are subject to the
@@ -219,6 +224,10 @@ class UISessionContext:
     #: The ``client`` block of the session's last token check
     #: (AUDIT_CLIENT_IDENTITY), or ``None``.
     client: dict[str, Any] | None = None
+    #: The person's name from the login token, or ``None`` when
+    #: the token had none. Pages show it for the signed-in person in
+    #: place of :attr:`operator_sub`.
+    display_name: str | None = None
 
 
 def _select_path(scope: Scope) -> str:
@@ -507,6 +516,7 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         tenant_chosen=revalidated.tenant_chosen,
         can_switch_tenant=revalidated.can_switch_tenant,
         client=session_client_block(revalidated.id),
+        display_name=revalidated.display_name,
     )
 
 
@@ -801,7 +811,12 @@ async def require_ui_operator(
     Every console route that runs or queues an operation, or starts,
     advances or aborts a runbook run, declares it: ``operator`` and
     ``tenant_admin`` pass, ``read_only`` gets ``403 operator_required``
-    before the handler body runs.
+    before the handler body runs. On a route that does not only read (any
+    method but ``GET`` / ``HEAD`` / ``OPTIONS``) a Reader asks for a
+    change, so the answer is ``403 insufficient_role`` with the plain
+    sentence of
+    :func:`~meho_backplane.operations.role_floors.reader_change_refusal`
+    in ``message``, the same as REST.
 
     Same load + verify + refresh chain as :func:`require_ui_admin` (the
     role comes from the stored access token, never from the session row),
@@ -816,7 +831,85 @@ async def require_ui_operator(
         minimum=TenantRole.OPERATOR,
         detail="operator_required",
         log_prefix="ui_operator_gate",
+        # A re-check inside a stream may pass a request without a method: a read.
+        is_change=str(request.scope.get("method", "GET")).upper() not in _READ_METHODS,
     )
+
+
+async def require_ui_operator_read(
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """:func:`require_ui_operator` for a ``POST`` route that only reads (a preview).
+
+    A Reader gets ``403 operator_required``, without the sentence about a
+    change.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.OPERATOR,
+        detail="operator_required",
+        log_prefix="ui_operator_gate",
+    )
+
+
+async def require_ui_operator_for_call(
+    request: Request,
+    session: UISessionContext = Depends(require_ui_session),
+) -> UISessionContext:
+    """:func:`require_ui_operator` for the console call form ``POST /ui/operations/call``.
+
+    A Reader's answer depends on the operation, so this check looks it up
+    from the form first, the same way the REST call route does
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    An operation that asks for a change gets ``403 insufficient_role`` with
+    the sentence in ``message``. A plain read, an operation that cannot be
+    found and a form that names no operation get ``403 operator_required``.
+    MEHO stores nothing and runs nothing.
+    """
+    from meho_backplane.auth.operator import TenantRole
+
+    return await _require_ui_role(
+        session,
+        minimum=TenantRole.OPERATOR,
+        detail="operator_required",
+        log_prefix="ui_operator_gate",
+        call_request=request,
+    )
+
+
+async def _reader_call_sentence(operator: Operator, request: Request) -> str | None:
+    """The Reader sentence when the call form of *request* asks for a change.
+
+    Only a Reader's form is read; every other role gets ``None`` at once.
+    FastAPI read the form before the dependencies run and the request keeps
+    it. ``params`` is the JSON text of the form; an empty field counts as no
+    params. Text that is not JSON, or JSON nested too deep for the parser,
+    is params this check cannot read: it passes ``None``, so only what does
+    not depend on the params decides
+    (:func:`~meho_backplane.operations.reader_call.reader_call_refusal`).
+    Never a server error.
+    """
+    import json
+
+    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.operations.reader_call import reader_call_refusal
+
+    if operator.tenant_role is not TenantRole.READ_ONLY:
+        return None
+    form = await request.form()
+    params: object
+    try:
+        params = json.loads(str(form.get("params") or "{}"))
+    except (ValueError, RecursionError):
+        params = None
+    arguments = {
+        "connector_id": form.get("connector_id"),
+        "op_id": form.get("op_id"),
+        "params": params,
+    }
+    return await reader_call_refusal(operator, arguments)
 
 
 async def _require_ui_role(
@@ -825,6 +918,8 @@ async def _require_ui_role(
     minimum: TenantRole,
     detail: str,
     log_prefix: str,
+    is_change: bool = False,
+    call_request: Request | None = None,
 ) -> UISessionContext:
     """Shared body of the role-gated console dependencies.
 
@@ -875,12 +970,21 @@ async def _require_ui_role(
         )
         raise
 
+    if call_request is not None:
+        sentence = await _reader_call_sentence(operator, call_request)
+        if sentence is not None:
+            from meho_backplane.auth.role_refusal import RoleRefusedError
+            from meho_backplane.operations.role_floors import READER_CHANGE_CODE
+
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence)
+
     _assert_min_role(
         operator.tenant_role,
         minimum=minimum,
         detail=detail,
         log_event=f"{log_prefix}_forbidden",
         session_id=session.session_id,
+        is_change=is_change,
     )
 
     # Bind operator identity into structlog contextvars so AuditMiddleware
@@ -901,8 +1005,12 @@ def _assert_min_role(
     detail: str,
     log_event: str,
     session_id: uuid.UUID,
+    is_change: bool = False,
 ) -> None:
     """Raise ``403 <detail>`` unless *tenant_role* ranks at least *minimum*.
+
+    A Reader whose call asks for a change (*is_change*) gets ``403
+    insufficient_role`` with the plain sentence in ``message`` instead.
 
     The rank order is the one :mod:`meho_backplane.auth.rbac` uses for the
     REST ``require_role`` floor: ``read_only`` < ``operator`` <
@@ -931,6 +1039,17 @@ def _assert_min_role(
             actual_role=tenant_role.value,
             required_role=minimum.value,
         )
+        from meho_backplane.auth.role_refusal import RoleRefusedError
+        from meho_backplane.operations.role_floors import (
+            READER_CHANGE_CODE,
+            reader_change_refusal,
+        )
+
+        sentence = reader_change_refusal(
+            tenant_role, is_change=is_change and minimum is TenantRole.OPERATOR
+        )
+        if sentence is not None:
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=detail,

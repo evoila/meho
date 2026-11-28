@@ -3876,6 +3876,14 @@ class WebSession(Base):
       ever surfacing what looks like an OAuth token in stable
       storage.
 
+    * ``display_name`` -- Fernet-encrypted bytes of the access token's
+      ``name`` claim at login (migration ``0192``), for the console's
+      user menu. Same key and envelope as the tokens: the name is
+      already inside ``access_token``, so the column shows nothing a
+      leaked row did not. ``NULL`` when the token had no name. A token
+      refresh keeps it; a renamed person sees the new name after the
+      next sign-in.
+
     * ``created_at`` / ``expires_at`` -- timestamptz. ``created_at``
       gets a PG ``now()`` server default + ORM
       ``datetime.now(UTC)`` for SQLite; ``expires_at`` is supplied
@@ -3954,6 +3962,10 @@ class WebSession(Base):
     # Fernet ciphertext of the console approval sign-in's access token
     # (#6282, migration 0176). NULL = no approval sign-in on this session.
     approval_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
+    # Fernet ciphertext of the token's ``name`` claim at login
+    # (migration 0192). NULL = the token had no name; the console then
+    # shows a neutral label, never the ``sub``.
+    display_name: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, default=None)
 
     __table_args__ = (
         Index(

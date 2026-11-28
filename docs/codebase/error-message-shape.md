@@ -367,10 +367,64 @@ generic `connector_error` envelope then sets `extras.http_status` and
 as the httpx path. First user: `k8s.apply`'s `ApplyRejectedError`, raised
 when the Kubernetes API server rejects a server-side apply.
 
+**A redirect answer (3xx): the error text names host names only.** A 3xx
+answer that MEHO does not follow reaches `result_connector_error` as an
+`httpx.HTTPStatusError`. The address of the request and the `Location`
+address can both be the vendor's choice (after a followed redirect on the
+same origin), so `extras.exception_message` holds only the status code
+and the host names, for example `Redirect response 302 from
+vc.example.com to other.example.com, not followed.` A 3xx without a
+`Location` header says `with no Location header.` A host name that cannot
+be read is the fixed mark `<unparseable-location>`. `extras.http_status`
+holds the status code. The text comes from `redirect_status_text` in
+`connectors/_shared/log_host.py`. The Proxmox fingerprint uses it too, so
+the error text of `proxmox.about` names only host names when the ticket
+login gets a redirect. When httpx cannot read the `Location` address, the
+HTTP client raises an error of the exact class httpx raised, whose text
+holds the fixed sentence `MEHO could not read the address in the Location
+header`. Tests: `tests/test_connectors_http_redirect_answer.py`,
+`tests/test_connectors_proxmox_redirect_answer.py`.
+
+**A redirect answer (3xx): the vendor's text is not passed on.** For a 3xx
+other than a 304 that MEHO does not follow, `extras.upstream_message` is one
+fixed sentence,
+`REDIRECT_TEXT_WITHHELD` in `connectors/_shared/log_host.py`: "MEHO does
+not pass on the text of a redirect answer it does not follow." The answer
+has no `extras.upstream_fault`. The stored trace holds the same sentence as
+the `response_body` of the `vendor_call` span
+(`flight_recorder/capture.py`), so the answer, the audit row and the trace
+agree. A `304 Not Modified` asks for no redirect, so the fixed sentence does
+not stand for it: its `upstream_message`, its `upstream_fault` and its span
+`response_body` hold what the vendor sent, as for any other status. The
+check is `redirect_text_withheld` in `connectors/_shared/log_host.py`.
+Tests: `tests/test_connectors_http_redirect_304_and_reason_phrase.py`.
+
+**An error answer after a followed redirect: host name only.** MEHO
+follows a redirect on the same origin, and the next answer is an error
+that reaches `result_connector_error` (404, 429, 5xx). The address of that
+next request is the vendor's choice. So `extras.exception_message` holds
+only the status and the host name, for example `Client error '404 Not
+Found' from vc.example.com, after a redirect on the same host.` The text
+comes from `followed_redirect_status_text`. Its reason phrase is the fixed
+phrase of the status number from Python's `http.HTTPStatus`, not the one in
+the vendor's status line. A number that `http.HTTPStatus` does not know
+gives the number only, for example `Server error '599' from
+vc.example.com, after a redirect on the same host.` MEHO knows the redirect
+was followed from the mark `meho_first_request_url` in
+`response.extensions`. `extras.upstream_message` keeps the vendor's own
+error text. `proxmox.about` gives the same host-only text in
+`extras.exception_message`, after the name of the error type, when its
+ticket login, its `GET /version` or its `GET /nodes` follows a redirect.
+Tests: `tests/test_connectors_http_redirect_status_text.py`,
+`tests/test_connectors_http_redirect_304_and_reason_phrase.py`,
+`tests/test_connectors_proxmox_redirect_answer.py`
+(`test_about_after_a_followed_redirect_names_only_the_host`).
+
 **Structured vim fault: `extras.upstream_fault` (#3567).** When the
 upstream error body is a vim fault, the builders that read an upstream
-response (`result_connector_error` for an `httpx.HTTPStatusError`, the
-403 / 422 builders, and `result_connector_auth_failed`) also set
+response (`result_connector_error` for an `httpx.HTTPStatusError` (not
+for a 3xx answer other than a 304), the 403 / 422 builders, and
+`result_connector_auth_failed`) also set
 `extras.upstream_fault = {"type": ..., "faultstring": ...}`. The fault
 reaches the builders in one of three ways:
 

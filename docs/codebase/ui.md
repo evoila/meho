@@ -111,7 +111,7 @@ Sanctioned exceptions:
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. `list_active_sessions(operator_sub)` returns the person's live sessions in every tenant (own `operator_sub`, `revoked_at IS NULL`, `expires_at > now()`, ordered `last_seen_at DESC`) as token-free `ActiveSessionRow` projections (the Fernet ciphertext columns are never read for a metadata listing) and `revoke_other_sessions(operator_sub, keep_session_id)` soft-deletes every active session of the person, in every tenant, except the current one -- both back the Account surface (G10.11-T1 #1892) and take `operator_sub` from the validated session context, never a form field. |
 | `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter; with `fresh_sign_in=True` also `prompt=login` and `max_age=0`, so Keycloak asks for the credentials again also in a remembered browser), mints a second per-flow `browser_binding` secret (login-CSRF defence, F10 #272), and registers the verifier + binding + `return_to` in a server-side `PKCEVerifierStore`; it returns `(url, state, browser_binding)`. `exchange_code_for_tokens` pops the pending flow, **rejects it (`browser_binding_mismatch`) when the callback's replayed binding is missing or does not match — before the token exchange** (constant-time `hmac.compare_digest`), then exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
 | `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `__Host-meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`, no `Domain`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
-| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session (an htmx request gets `204` + `HX-Redirect` instead, with `return_to` taken from `HX-Current-URL`, the page and not the fragment; when the browser still sent a session cookie the login URL also carries `reason=session_ended`, #5518). Skips `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. Two role gates sit on top and share one load, verify and refresh chain (`_require_ui_role`): `require_ui_operator` (the `operator` floor; `read_only` gets `403 operator_required`) and `require_ui_admin` (the `tenant_admin` floor). Both load + verify the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). `require_ui_read_operator` (`ui/routes/operator_read.py`) runs `require_ui_operator` and then returns a reader `Operator`. Most console pages, reads included, need the `operator` role, like their REST twins; a `read_only` session can open only the dashboard, account, tenant, memory, automation and approvals pages. After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, moving on to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 10 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
+| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session (an htmx request gets `204` + `HX-Redirect` instead, with `return_to` taken from `HX-Current-URL`, the page and not the fragment; when the browser still sent a session cookie the login URL also carries `reason=session_ended`, #5518). Skips `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. Two role gates sit on top and share one load, verify and refresh chain (`_require_ui_role`): `require_ui_operator` (the `operator` floor; `read_only` gets `403 operator_required` on a read page and `403 insufficient_role` with the plain sentence on a change) and `require_ui_admin` (the `tenant_admin` floor). Both load + verify the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). `require_ui_read_operator` (`ui/routes/operator_read.py`) runs `require_ui_operator` and then returns a reader `Operator`. Most console pages, reads included, need the `operator` role, like their REST twins; a `read_only` session can open only the dashboard, account, tenant, memory, automation and approvals pages. After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, moving on to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 10 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
 | `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin` and `require_ui_operator` (both through `_require_ui_role`), the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no role" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard tray is a recent-operations card that `recent-ops-refresh.js` reloads every 5 seconds. The broadcast stream `/ui/broadcast/stream` needs the `operator` role (`require_ui_operator`). |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts three recoverable shapes, for htmx requests and HTML navigations (`Accept: text/html`): (1) `401 session_expired` on `/ui/*` (G0.25 #1694) -> `302 /ui/auth/login?return_to=<path>&reason=session_ended` + `meho_session` cookie clear; an htmx request (`HX-Request: true`) gets the middleware's htmx answer instead, `204` + `HX-Redirect` to the same login URL with `return_to` from `HX-Current-URL` (#5518); (2) `400 authorization_state_expired` on `/ui/auth/callback` (G0.29 #2089, Leg 1) -> `303 /ui/auth/login` (no cookie touched -- pre-session; no `return_to` -- it died with the expired verifier); (3) `409 tenant_removed` on `/ui/*` (the token does not allow the session's tenant any more) -> `303 /ui/tenant?notice=removed`, or `204` + `HX-Redirect` for htmx. Non-HTML callers on either shape keep the structured JSON body (the `session_expired` case also clears the dead cookie). Every other HTTPException -- including the callback's genuine IdP `authorization_failed` and its token-endpoint `502` -- delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes and the non-recoverable callback errors are untouched. |
 
@@ -210,10 +210,39 @@ upcoming T4 login flow writes to:
   `created_at`, `expires_at`, `access_token` (bytea, Fernet
   ciphertext), `refresh_token` (bytea, Fernet ciphertext),
   `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted),
-  and since migration `0133` (#5240) `tenant_chosen` and
-  `can_switch_tenant` (see "Current tenant, picker and switch").
+  since migration `0133` (#5240) `tenant_chosen` and
+  `can_switch_tenant` (see "Current tenant, picker and switch"),
+  since migration `0176` (#6282) `approval_token` (bytea, Fernet
+  ciphertext, nullable), and since migration `0192`
+  `display_name` (see "Person's name on the session" below).
   Indexes on `operator_sub` and `expires_at` (future
   bulk-revoke / idle-sweep surfaces).
+- **Person's name on the session** — `display_name` holds
+  the `name` claim of the access token the login callback verified
+  (`Operator.name`), for the console's user menu. What is stored and
+  why:
+  - **Encrypted like the tokens.** Fernet ciphertext under
+    `UI_SESSION_ENCRYPTION_KEY`, the same key and envelope as
+    `access_token`. The name is already inside `access_token` on the
+    same row, so the column shows nothing a leaked row did not: with
+    the key, the token already gave the name; without it, both are
+    ciphertext. A plain-text column would have let a database dump
+    without the key show names, so it is not plain text.
+  - **Only the `name` claim.** No fallback to `preferred_username`
+    or `email`: those are login identifiers, not names. `NULL` when
+    the token had no `name` claim.
+  - **Written at login only.** A token refresh keeps the stored
+    name. A person renamed in Keycloak sees the new name after the
+    next sign-in. Sessions from before migration `0192` have no name
+    until the person signs in again.
+  - **Kept as long as the tokens.** Nothing deletes `web_session`
+    rows today (`revoked_at` is a soft delete; the `expires_at` index
+    is for a future sweep). The name lives and goes with the tokens
+    it came from; that sweep will remove both.
+  - **Never the `sub` in its place.** With no name, pages that name
+    the signed-in person show a neutral label (the user menu: a
+    person icon and "Your account"), never the `sub` or letters
+    taken from it.
 - **ORM model** — [`WebSession` in
   `db/models.py`](../../backend/src/meho_backplane/db/models.py).
   Mirrors the column shape; no helper methods (write-once /
@@ -590,13 +619,19 @@ The id also stays in the attributes that address the DOM —
 pins both halves: the name reaches the rendered text, and
 `data-meho-tenant` still carries the UUID.
 
-The processor also exposes `session_operator_sub` (the signed-in
-operator's Keycloak `sub`, or `None` outside a session). The sidebar
-account chip (`base.html`) used to be the hardcoded literal
-"OP / Operator"; it now renders the real `sub` (a two-char avatar +
-the truncated `sub`) with an Account menu item linking to
-`/ui/account`, and a comment slot for a future tenant selector
-(G10.11-T1 #1892). The chip deliberately does **not** show the role
+The processor also exposes `session_display_name` (the signed-in
+person's name from the login token, see "Person's name on the
+session") and `session_initials` (its avatar initials, from
+`person_initials` in `ui/templating.py`), both `None` when there is no
+name or no session. The sidebar account chip (`base.html`) shows the
+name and its initials, with an Account menu item linking to
+`/ui/account` (G10.11-T1 #1892). It used to show the Keycloak `sub`;
+with no name it now shows a person icon and
+"Your account". The processor deliberately exposes no `sub`: a page
+that names the signed-in person must not fall back to an identifier.
+The dashboard greeting and the "My recent activity" panel follow the
+same rule; the account page shows the name and, in its own row
+labelled "Subject ID", the `sub`. The chip deliberately does **not** show the role
 -- labelling it would cost a fresh JWT verify on every page render;
 the live role is shown on `/ui/account` instead, where the route pays
 that verify once.
@@ -1301,7 +1336,8 @@ assignee RBAC denial there renders an inline HTTP-**200** fragment, never a
 `403` (see [`runbooks/driver.py`](../../backend/src/meho_backplane/ui/routes/runbooks/driver.py)).
 So a `403` on a `/ui/*` write is a CSRF rejection (it carries the
 `x-csrf-rejection-reason` header) or a role refusal (`detail` is
-`operator_required` or `tenant_admin_required`), never an assignee check.
+`insufficient_role` for a Reader, with the plain sentence in `message`, or
+`tenant_admin_required`), never an assignee check.
 
 **Known-repro pointer (for consumer bug reports):** a browser driving the run
 through the driver page carries the cookie + header (both re-minted on every
@@ -1443,7 +1479,20 @@ body (`_require_ui_role`):
   `detail="tenant_admin_required"` below that. Upload routes, template
   authoring, runbook reassign and the other admin writes use it.
 - `require_ui_operator` — `operator` or `tenant_admin`; 403
-  `detail="operator_required"` for `read_only`. It is the console twin of
+  `detail="operator_required"` for `read_only` on a page that only reads
+  (`GET`). On a route that asks for a change (any other method) a
+  `read_only` session gets 403 `{"detail": "insufficient_role", "message":
+  "<the sentence>"}`, the same answer as REST
+  ([agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy)).
+  A `POST` form that only reads (the operation preview, the knowledge
+  search and the editor preview, the corpus search, a docs text read, the
+  retrieval pages) uses `require_ui_operator_read` and keeps
+  `operator_required`. The call form `POST /ui/operations/call` uses
+  `require_ui_operator_for_call`: it looks the operation up first, so a
+  `read_only` session gets the code and the sentence only for an
+  operation that asks for a change, and `operator_required` for a `safe`
+  read, an unknown operation or a form that names no operation. It is the
+  console twin of
   the REST `require_role(TenantRole.OPERATOR)` floor and the MCP
   `required_role=OPERATOR` on `call_operation`. Every console route that
   runs or queues an operation, or starts, advances or aborts a runbook
@@ -3630,8 +3679,10 @@ the router.
 ### RBAC gating (`require_ui_operator` vs `require_ui_admin`)
 
 The read routes and the run routes gate on `require_ui_operator`: the
-`operator` and `tenant_admin` roles pass, and a `read_only` session gets
-`403 operator_required`. This matches the REST runbook routes.
+`operator` and `tenant_admin` roles pass. A `read_only` session gets
+`403 operator_required` on a read route and `403 insufficient_role` with
+the plain sentence on a run route (start, next, abort). This matches the
+REST runbook routes.
 The write routes (author / edit / preview / publish / deprecate) chain
 `require_ui_admin`, which loads the session with `load_fresh_session`,
 checks the access token with `verify_access_token_with_refresh`, and raises HTTP 403

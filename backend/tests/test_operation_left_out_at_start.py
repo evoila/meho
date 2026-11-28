@@ -736,7 +736,7 @@ async def test_a_second_check_leaves_its_op_out_the_same_way(
     monkeypatch.setattr(
         typed_register,
         "_MARK_FIT_CHECKS",
-        (*typed_register._MARK_FIT_CHECKS, _test_only_check),
+        (_test_only_check, *typed_register._MARK_FIT_CHECKS),
     )
     with structlog.testing.capture_logs() as logs:
         await _start(_widgets("fixed", changes_rights=True), embedding=embedding)

@@ -56,6 +56,7 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.role_refusal import RoleRefusedError, role_refused_handler
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.secret.ops import register_secret_broker_operations
 from meho_backplane.connectors.vault import VaultConnector
@@ -69,6 +70,7 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -164,6 +166,7 @@ def _build_app() -> FastAPI:
     )
     app.include_router(build_ui_auth_router())
     app.include_router(build_ui_router())
+    app.add_exception_handler(RoleRefusedError, role_refused_handler)
     return app
 
 
@@ -730,7 +733,7 @@ def test_vault_write_posts_read_only_forbidden_403_no_dispatch(
     with mock:
         response = client.post(path, headers=_csrf_headers(csrf), data=form)
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "operator_required"}
+    assert response.json() == {"detail": "insufficient_role", "message": READER_CHANGE_SENTENCE}
     assert "x-csrf-rejection-reason" not in response.headers
     assert received == []
 

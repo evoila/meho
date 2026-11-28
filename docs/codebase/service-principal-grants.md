@@ -186,7 +186,13 @@ and no run approval covers it.
   only `k8s.delete`). In sandbox mode a live delete grant may still cover
   an op marked there, and only a delete grant: no standing grant, no
   agent grant, no run approval and no approval override does. The mark
-  refuses an op with a credential class. `_sandbox_delete_exception` in
+  refuses an op with a credential class. The exception opens only when
+  the op has a delete sign other than `hard_to_undo`: a delete name or
+  pattern, a vendor delete action name, the `destructive` level, the HTTP
+  verb `DELETE` or the `destructive` tag. `hard_to_undo` never opens it,
+  with the switch `CUSTOM_POLICY` on or off: such an op with only
+  `hard_to_undo` is covered by no grant, and a delete grant for it is
+  refused. `_sandbox_delete_exception` in
   `service_grants.py` holds the rule, for the grant lookup, for grant
   create, for a step of a multi-step operation and for the step list
   (`classify_subop_grantability`).
@@ -527,7 +533,9 @@ delete-shaped ops:
   and
 - **by descriptor** (best-effort when a descriptor resolves via
   `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
-  `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
+  `DELETE` verb, a hand-authored `destructive` tag on a typed op, or,
+  with the switch `CUSTOM_POLICY` on, `hard_to_undo` on the operation's
+  own definition.
 
 The first two signs need only the op id (`delete_shaped_refusal_reason`),
 so they also work for an op with no stored row. All three signs are one
@@ -649,7 +657,9 @@ instance holds only disposable test systems: systems built for one test
 and deleted after it. On such an instance a tenant admin may give a
 service principal a **delete grant**: a standing grant for an operation
 with a delete sign (the `destructive` level, the HTTP verb `DELETE`, the
-`destructive` tag, a delete name, or a vendor delete action name), or for
+`destructive` tag, a delete name, a vendor delete action name, or, with
+the switch `CUSTOM_POLICY` on, `hard_to_undo` on the operation's own
+definition), or for
 a delete step of a multi-step operation. So an automated test run can
 build, change and delete its own systems with no wait for a person. Every
 other instance keeps the rules above.

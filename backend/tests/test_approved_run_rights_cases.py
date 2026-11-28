@@ -41,6 +41,7 @@ from meho_backplane.operations.approval_queue import (
     approval_result_state,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from tests.test_agent_grant_required import _AGENT, _TENANT, _grant, _operator
 from tests.test_approved_run_rights import (
     _ADMIN_SUB,
@@ -459,10 +460,10 @@ async def test_rerun_with_a_read_only_token_writes_its_audit_row(
     )
 
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "insufficient_role"}
+    assert response.json() == {"detail": "insufficient_role", "message": READER_CHANGE_SENTENCE}
     (row,) = await _rerun_rows(request_id)
     assert row.payload["result_status"] == "refused"
     assert row.payload["refusal"] == "insufficient_role"
-    assert "operator role" in row.payload["reason"]
+    assert row.payload["reason"] == READER_CHANGE_SENTENCE
     assert len(_RUNS) == 1
     assert (await _request(request_id)).rerun_count == 0

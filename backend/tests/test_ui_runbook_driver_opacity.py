@@ -899,7 +899,8 @@ def test_next_and_abort_read_only_forbidden_403_run_unchanged(
         )
 
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": "operator_required"}
+    # A Reader who asks for a change gets the Reader code.
+    assert response.json()["detail"] == "insufficient_role"
     assert "x-csrf-rejection-reason" not in response.headers
     assert _run_row(run_id).state == "in_progress"
     assert _abort_audit_rows(_TENANT_A) == []

@@ -226,7 +226,10 @@ The inputs of `register_typed_operation`:
     still runs. When you fix the mark, the next start uses the operation
     again, with the settings an operator stored on it.
   - `changes_rights=True` when a call gives or takes rights, a login or
-    an access policy in the target system. The default is `False`.
+    an access policy in the target system. The default is `False`. MEHO
+    leaves an operation that sets `changes_rights` at the risk level
+    `safe` out at registration, and the log line names it. Every other
+    operation registers.
 
   MEHO stores both on the operation. Set them from what the call does,
   not from its name.

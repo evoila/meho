@@ -374,6 +374,111 @@ limits:
     person who runs MEHO to turn the setting on." A limit stored while the
     setting was on is then ignored, and the export leaves it out.
 
+## Rules for personal agents
+
+A tenant's policy file can hold rules for personal agents. A personal
+agent is your own login used by a tool: the command line, REST or MCP. A
+call from the web console is not a personal agent, and a hosted agent run
+is not one either.
+
+```yaml
+policy: v1
+agents:
+  - name: admins-assistant
+    caller: personal_agent
+    roles: [Admin]                  # Reader, Operator, Admin
+    up_to: dangerous                # safe, caution or dangerous
+    connectors: [vmware-rest-9.0]   # optional
+    rights_changes: allow           # optional, only with connectors
+```
+
+- `name` names the rule. Each rule has its own name. MEHO names the rule
+  as `tenant_rule:<name>`.
+- `caller` is `personal_agent`. `person` and `service_agent` are refused:
+  they are not in this version of MEHO. Service agents keep their
+  standing grants.
+- `roles` says whose personal agents the rule is for. A platform admin
+  counts as `Admin`.
+- `up_to` is the highest risk level the rule may let run at once. A
+  `destructive` operation always waits, so `destructive` is not a value.
+- `up_to` can never be above the outer limit of the install (see the
+  next part). Such a rule is refused, and the message names the rule.
+- A personal agent never gets more than its person. A Reader's agent
+  counts up to `safe`, an Operator's up to `caution`, an Admin's up to
+  `dangerous`. What counts is the lowest of the rule, the outer limit and
+  this limit by role.
+- A rule with `connectors` counts only for those connectors, and wins
+  over a rule without `connectors`. Between two rules that fit equally,
+  the stricter one wins.
+- An operation that gives or takes rights in a target system waits. It
+  runs at once only under a rule with `connectors` and
+  `rights_changes: allow`, and only for those connectors.
+- The part holds at most 200 rules. A file with more is refused.
+- The import plan (the preview and the approval card) shows, for each
+  role, the operations that would start to run at once (`runs_at_once`).
+  The list holds each operation that waits under the tenant's stored
+  policy and runs at once under the file. MEHO reads the stored rules with
+  the stored classifications, and the file's rules with the file's
+  classifications. So a file that drops an "always wait" lists the
+  operation, also when the rules stay the same. A file that changes
+  neither the rules nor what waits lists no operation.
+- The list uses the same values as a call by a login of the tenant: the
+  operations the tenant turned on or off for itself, an admin's edit of
+  one operation (its risk level, or approval for each call), and the
+  tenant's own copy of a connector in place of the built-in one.
+- Operations that always wait are never in the list: a `destructive`
+  operation, a delete, an operation that is hard to undo, a credential
+  call, a call to an address the caller gives, a change of rights in
+  MEHO, a change of the policy, an operation that must be approved call
+  by call, an operation that a classification sets to "always wait", a
+  root shell, and a multi-step operation. An operation that waits only
+  because its code asks for approval counts as `dangerous`: it is in the
+  list only under a rule that allows `dangerous`.
+- A person reads each role's whole list over REST, in the history and in
+  the web console. Every MCP answer (`meho_approvals_get`,
+  `meho_approvals_list` and `preview_operation` of `policy.apply`), also
+  for a person, gives for each role the count, the first 50 operations,
+  and "N more" when there are more. So does every answer to a caller that
+  is not a person: the REST approvals answers and `meho policy history`.
+- When a tenant's import waits for approval, its card records the
+  install's outer limit and classifications. At the run, MEHO compares
+  the recorded value with the install's stored policy and refuses the run
+  when they differ: "The install's policy changed since this request was
+  planned. Ask again." Nothing is stored.
+- Setting the rules is a change of the policy. In the web console, an
+  Admin who signed in again just before runs the import in the Run
+  window, and it runs at once. With a token it waits until an Admin
+  approves it in the web console. An agent, a service login or a hosted
+  agent run cannot ask for it.
+- `meho policy export` writes the `agents` part. For a tenant with stored
+  bindings, an exported file imports again with "No change.".
+- `meho policy diff` prints each rule the file adds, changes or removes,
+  by name, and for each role the operations that start to run at once.
+- The install's file never holds `agents`. When a platform admin lowers
+  the outer limit, the install's import plan lists each tenant with a rule
+  above the new limit (`agents_above_limit`). Only a platform admin who
+  reads as a person sees that list and its warnings; every other reader
+  gets the card without them. Such a tenant's file is then
+  refused on its next import, also when it did not change: lower the rule
+  first.
+- If MEHO cannot read the stored rules, no rule counts, and MEHO logs one
+  warning. Import the tenant's file again to fix it: the plan shows each
+  stored rule it cannot read as removed.
+- Every call gets the same answer with or without the rules. A personal
+  agent runs only `safe` operations at once.
+
+!!! note "Off by default"
+
+    The rules need the setting `CUSTOM_POLICY` (Helm
+    `config.policy.customPolicy`). While it is off, a file with `agents`
+    is refused: "`agents` needs CUSTOM_POLICY: personal agent rules count
+    only while the CUSTOM_POLICY setting is on. Remove the part, or ask the
+    person who runs MEHO to turn the setting on." The answer holds this
+    sentence also when the file has other mistakes. Rules stored while the
+    setting was on are then ignored, and the export leaves them out. An
+    approval card shows no rule part while the setting is off, and a click
+    on a request asked while it was on stores nothing.
+
 ## Rules that no file can loosen
 
 MEHO checks each file against these rules. A file that breaks one is

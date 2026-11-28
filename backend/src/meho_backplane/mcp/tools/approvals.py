@@ -145,9 +145,10 @@ def _effect_for(row: ApprovalRequest, reader: Operator | None) -> dict[str, Any]
     """The stored card of *row* as *reader* reads it.
 
     A card behind a switch reads as ``preview_operation`` gives it
-    (:func:`proposed_effect_for_agent`). The parts of a card that only a
-    platform admin reads stay out for every other reader, also when
-    *reader* is ``None``
+    (:func:`proposed_effect_for_agent`). The view of the op gives each
+    role's list in its short form, also to a person. The parts of a card
+    that only a platform admin reads stay out for every other reader, also
+    when *reader* is ``None``
     (:func:`~meho_backplane.operations.platform_admin_card.card_for_reader`).
     """
     effect = proposed_effect_for_agent(
@@ -157,7 +158,8 @@ def _effect_for(row: ApprovalRequest, reader: Operator | None) -> dict[str, Any]
         connector_id=row.connector_id,
         tenant=str(row.tenant_id),
     )
-    return None if effect is None else card_for_reader(row.op_id, effect, reader=reader)
+    shown: dict[str, Any] | None = card_for_reader(row.op_id, effect, reader=reader, whole=False)
+    return shown
 
 
 def _row_to_dict(row: ApprovalRequest, *, reader: Operator | None = None) -> dict[str, Any]:

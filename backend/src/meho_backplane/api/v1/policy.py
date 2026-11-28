@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.rbac import ensure_human_principal, require_approvals_access
 from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID, SWITCH_OFF_IMPORT
+from meho_backplane.connectors.policy.apply_card import diff_as_read
 from meho_backplane.db.engine import get_session
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import ApprovalNotFoundError
@@ -347,11 +348,20 @@ async def history(
     scope: Annotated[PolicyScope, Query()] = "tenant",
     limit: Annotated[int, Query(ge=1, le=KEEP_REVISIONS)] = KEEP_REVISIONS,
 ) -> list[PolicyRevisionView]:
-    """The imported policy files of *scope*, newest first (MEHO keeps the last 20)."""
+    """The imported policy files of *scope*, newest first (MEHO keeps the last 20).
+
+    Each entry's ``diff`` reads as an approval card's plan
+    (:func:`~meho_backplane.connectors.policy.apply_card.diff_as_read`): a
+    person gets each role's whole list, every other caller the short form.
+    """
     _bind_audit("policy.file.history", "read")
     _check_scope(operator, scope)
     rows = await list_history(session, scope=scope, tenant_id=operator.tenant_id, limit=limit)
-    return [PolicyRevisionView.model_validate(row) for row in rows]
+    whole = is_human_principal(operator)
+    return [
+        PolicyRevisionView.model_validate({**row, "diff": diff_as_read(row["diff"], whole=whole)})
+        for row in rows
+    ]
 
 
 @router.get("/carry-over/dry-run", response_model=CarryOverDryRun)

@@ -354,9 +354,20 @@ It reuses the same three foundations plus two probe-specific rules:
    it is followed**. A redirect to a non-allowlisted host (e.g. a
    cloud-metadata / credential host) halts the walk with
    `{"reachable": true, "reason": "blocked_redirect",
-   "blocked_redirect": "<host>"}` and is **never dialed** — the same
-   concern `_SameOriginRedirectClient` in `connectors/adapters/http.py`
-   handles for target-coupled dispatch. The redirect count is bounded
+   "blocked_redirect": "<host>"}` and is **never dialed**. The address of
+   a redirect hop is the vendor's choice, so `blocked_redirect` holds only
+   the host name httpx reads (or the fixed mark `<unparseable-location>`),
+   and `final_url` and each `redirect_chain[].url` hold only the origin
+   (`scheme://host[:port]`): no path, query or user part. `url` keeps the
+   address the caller asked for. A `Location` httpx cannot read gives one
+   fixed error text in `error_detail`. `_SameOriginRedirectClient` in
+   `connectors/adapters/http.py` handles the same concern for
+   target-coupled dispatch. In `headers`, the `location` and
+   `content-location` values hold only the host name of their address
+   (a relative address names the host of the request; an address httpx
+   cannot read gives `<unparseable-location>`). This holds for every
+   last answer, for example a `300`, a `201` or a `200`. The redirect
+   count is bounded
    (`_MAX_REDIRECTS`) and the whole walk runs under one
    `asyncio.wait_for(timeout)` ceiling. This mid-chain refusal stays a
    `status="ok"` observation — the #2784 carve-out; only the **initial**

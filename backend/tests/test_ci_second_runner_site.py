@@ -1081,18 +1081,16 @@ def test_pick_dependabot(tmp_path: Path) -> None:
 
 
 _SITE_CASES = [
-    pytest.param([_smoke_run(600)], id="recent-pass"),
-    pytest.param([_smoke_run(40 * 60)], id="pass-near-the-limit"),
-    pytest.param(
-        [_smoke_run(9000, run_id=1), _smoke_run(60, run_id=2, attempt=3)], id="newest-of-many"
-    ),
+    pytest.param([600], id="recent-pass"),
+    pytest.param([40 * 60], id="pass-near-the-limit"),
+    pytest.param([9000, 60], id="newest-of-many"),
 ]
 
 
-@pytest.mark.parametrize("runs", _SITE_CASES)
-def test_pick_coverage_label_keeps_the_usual_runners(
-    tmp_path: Path, runs: list[dict[str, Any]]
-) -> None:
+@pytest.mark.parametrize("ages", _SITE_CASES)
+def test_pick_coverage_label_keeps_the_usual_runners(tmp_path: Path, ages: list[int]) -> None:
+    # Made here, not at collection time: a slow run must not age a result past the limit.
+    runs = [_smoke_run(age, run_id=i, attempt=i) for i, age in enumerate(ages, start=1)]
     (tmp_path / "without").mkdir()
     (tmp_path / "with").mkdir()
     assert _pick(tmp_path / "without", runs=runs)[0] == "on"

@@ -2840,6 +2840,14 @@ workflow.
 
 **Tests.** `tests/test_ci_second_runner_site.py`.
 
+### Hosted runner trial (#7187)
+
+For one day, the job `python-unit-shard-hosted-trial` runs unit shard 6 of a
+full pull request run also on a GitHub-hosted runner (`ubuntu-latest`), beside
+the normal shard 6, with no secret and not as a required check, so the wait and
+the run time of the two can be compared. After the trial a small pull request
+removes the job.
+
 ### Runner-CPU rule
 
 **`pytest-xdist -n` must stay below the runner container's usable

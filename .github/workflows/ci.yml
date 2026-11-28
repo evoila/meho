@@ -1778,7 +1778,8 @@ jobs:
 
       - *unit-checkout
 
-      - name: Use the public test images
+      - &site2-public-images
+        name: Use the public test images
         # The same script and image lines as the step "Read the CI
         # repository secrets" of python-unit-shard, but with no secret name
         # and REQUIRE_SECRETS false. So it writes the public docker.io/
@@ -1796,7 +1797,8 @@ jobs:
 
       - *unit-memory-start
 
-      - name: Install uv
+      - &site2-uv
+        name: Install uv
         # The same as in python-unit-shard, but it never saves the uv cache.
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
@@ -1807,7 +1809,8 @@ jobs:
 
       - *unit-sync
 
-      - name: Restore the fastembed model from the cache
+      - &site2-fastembed-restore
+        name: Restore the fastembed model from the cache
         # The same cache as in python-unit-shard, restore only.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -1816,14 +1819,16 @@ jobs:
           restore-keys: |
             fastembed-model-${{ runner.os }}-
 
-      - name: Embedding-model drift guard (evoila/meho#574)
+      - &site2-drift-guard
+        name: Embedding-model drift guard (evoila/meho#574)
         # The same command as in python-unit-shard, with no HF_TOKEN: the
         # model download is anonymous here.
         env:
           MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
         run: *unit-warm-run
 
-      - name: Restore the spaCy model from the cache
+      - &site2-spacy-restore
+        name: Restore the spaCy model from the cache
         # The same cache as in python-unit-shard, restore only.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -1853,6 +1858,72 @@ jobs:
         run: python3 -I "${GITHUB_WORKSPACE}/scripts/ci/hide_proxy_name.py" pytest-unit-shard.xml
 
       - *unit-upload-times
+      - *unit-peak-memory
+
+  python-unit-shard-hosted-trial:
+    name: Hosted trial, unit shard 6/6 (not required)
+    # A one-day trial (#7187): unit shard 6 of a full pull request run also
+    # runs on a GitHub-hosted runner, beside the normal shard 6, so the wait
+    # and the run time can be compared. The job is removed after the trial.
+    #
+    # It is a copy of python-unit-shard-second-site, with these differences:
+    # - It runs on `ubuntu-latest` and only shard 6.
+    # - It has no step that checks the second site.
+    # - It has no step "Hide the proxy name in the test reports" and no
+    #   upload of the per-test times: the artifact name of the upload is the
+    #   same as the one of the normal shard 6, and the trial times must not
+    #   go into the shard split.
+    # - continue-on-error: a failed trial never fails the run.
+    #
+    # Rules: no job needs it, so no required check changes. The text of this
+    # job names no secret, so it gets none and does not use the image proxy.
+    # It runs only on a full pull request run from this repository, never in
+    # the merge queue or the nightly run. backend/tests/
+    # test_ci_hosted_unit_shard_trial.py checks this.
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.backend_python != 'false' &&
+      needs.changes.outputs.single_connector == '' &&
+      needs.changes.outputs.test_map != 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    cache-mode: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [6]
+    timeout-minutes: 35
+    env:
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - *unit-checkout
+      - *site2-public-images
+      - *unit-memory-start
+      - *site2-uv
+      - *unit-sync
+      - *site2-fastembed-restore
+      - *site2-drift-guard
+      - *site2-spacy-restore
+      - *unit-spacy
+      - *unit-helm
+      - *unit-node
+      - *unit-php-name
+      - *unit-php-restore
+      - *unit-php-install
+      - *unit-locale-name
+      - *unit-locale-restore
+      - *unit-locale-install
+      - *unit-download-picked
+      - *unit-pytest
+      - *unit-skip-check
       - *unit-peak-memory
 
   python-outside-backend:

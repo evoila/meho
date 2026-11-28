@@ -425,6 +425,61 @@ async def test_fingerprint_surfaces_realm_metadata_and_version() -> None:
     assert fp.extras["login_theme"] == "meho"
     assert fp.extras["admin_realm"] == "master"
     assert fp.extras["managed_realm"] == "example"
+    assert "realm_name_differs" not in fp.extras
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_on", [False, True])
+async def test_fingerprint_says_when_keycloak_answers_with_another_realm_name(
+    switch_on: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extras name a different realm only when the switch is on."""
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true" if switch_on else "false")
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
+        )
+        mock.get("/admin/realms/example").respond(200, json={"realm": "Example", "enabled": True})
+        mock.get("/admin/serverinfo").respond(404)
+        fp = await connector.fingerprint(_TARGET, operator=_make_operator())
+
+    assert fp.extras["realm"] == "Example"
+    assert fp.extras["managed_realm"] == "example"
+    if switch_on:
+        assert "not the managed realm" in fp.extras["realm_name_differs"]
+    else:
+        assert "realm_name_differs" not in fp.extras
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [{}, {"realm": ""}, {"realm": None}, {"realm": 7}],
+    ids=["no-realm-field", "empty", "null", "not-text"],
+)
+async def test_fingerprint_says_nothing_about_the_name_when_keycloak_gives_none(
+    answer: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the switch on, an answer with no realm name gets no realm-name line."""
+    monkeypatch.setenv("KEYCLOAK_ANSWER_REALM", "true")
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://keycloak-a.test.invalid") as mock:
+        mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60}
+        )
+        mock.get("/admin/realms/example").respond(200, json=answer)
+        mock.get("/admin/serverinfo").respond(404)
+        fp = await connector.fingerprint(_TARGET, operator=_make_operator())
+
+    assert fp.extras["managed_realm"] == "example"
+    assert "realm_name_differs" not in fp.extras
 
     await connector.aclose()
 

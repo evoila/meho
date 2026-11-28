@@ -161,6 +161,7 @@ from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import object_session
+from sqlalchemy.orm.attributes import flag_modified
 
 from meho_backplane.api.v1._wait_for_approval import (
     AWAITING_APPROVAL_RESPONSES,
@@ -205,6 +206,7 @@ from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.extras_changes import extras_change_keys, merge_extras_changes
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.required_extras import check_keycloak_managed_realm
 from meho_backplane.targets.resolver import (
@@ -589,6 +591,17 @@ def _bind_tls_audit(
     )
 
 
+def _bind_extras_changes_audit(changes: dict[str, Any]) -> None:
+    """Name the extras keys a change sets and removes on the audit row.
+
+    Only key names are recorded, never values. The ``audit_*`` prefix works as
+    in :func:`_bind_tls_audit`.
+    """
+    structlog.contextvars.bind_contextvars(
+        **{f"audit_{key}": names for key, names in extras_change_keys(changes).items()}
+    )
+
+
 def _ca_pin_digest(pem: str | None) -> str | None:
     """Return a short SHA-256 hex digest of *pem*, or ``None`` when unset.
 
@@ -950,14 +963,16 @@ def _validate_preferred_impl_id(preferred_impl_id: str | None, product: str) -> 
         )
 
 
-def _require_keycloak_managed_realm(product: str, extras: Any, name: str) -> None:
+def _require_keycloak_managed_realm(
+    product: str, extras: Any, name: str, *, quote_value: bool = True
+) -> None:
     """Reject a Keycloak target that names no managed realm, with a 422.
 
     Runs on create and on update, on the target as it will be after the
     write. See :mod:`meho_backplane.targets.required_extras`.
     """
     try:
-        check_keycloak_managed_realm(product, extras, name)
+        check_keycloak_managed_realm(product, extras, name, quote_value=quote_value)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -1895,13 +1910,27 @@ def _validate_update_body_fields(
       stored map (``null`` entry removes, ``null`` map clears) and
       ``updates`` is rewritten to the merged result; a merged map above
       the entry limit is a 422. See :func:`merge_secret_field_map`.
+    * **extras_changes** — the sent keys are merged into the stored
+      ``extras`` (``null`` removes a key) and ``updates`` is rewritten to the
+      merged ``extras``, so the three checks of ``extras`` below run on the
+      merged map. See :func:`~meho_backplane.targets.extras_changes.merge_extras_changes`.
     * **extras** — a sent ``extras`` that adds, changes or removes the
       Vault login role or auth mount (``vault_role`` / ``vault_mount``)
       is a 403 unless the operator is a platform admin. See
       :func:`~meho_backplane.targets.vault_login_extras.enforce_vault_login_extras_platform_admin`.
     """
+    # The refusal of an extras_changes call names the field and the reason,
+    # not the value: its error is stored with the audit row and the request.
+    sends_changes = "extras_changes" in updates
+    if sends_changes:
+        updates["extras"] = merge_extras_changes(t.extras, updates.pop("extras_changes"))
     effective_product = _apply_product_patch(updates, t.product)
-    _require_keycloak_managed_realm(effective_product, updates.get("extras", t.extras), t.name)
+    _require_keycloak_managed_realm(
+        effective_product,
+        updates.get("extras", t.extras),
+        t.name,
+        quote_value=not sends_changes,
+    )
     _screen_sent_destination(updates, t)
     _validate_preferred_impl_id(updates.get("preferred_impl_id"), effective_product)
     if updates.get("secret_ref") is not None:
@@ -1942,7 +1971,13 @@ async def update_target(
     id (:func:`resolve_route_target`). The change itself is
     :func:`apply_target_update`.
     """
-    t = await resolve_route_target(session, operator.tenant_id, name)
+    found = await resolve_route_target(session, operator.tenant_id, name)
+    # Lock the row and read it again, so a change of the same target that
+    # commits meanwhile is not overwritten: extras_changes merges into the
+    # extras stored when the lock is taken.
+    t = await resolve_target_by_id(session, operator.tenant_id, found.id, for_update=True)
+    if t is None:
+        raise TargetNotFoundError(name, [])
     return _with_warnings(await apply_target_update(t, body, operator, session))
 
 
@@ -1956,6 +1991,7 @@ async def apply_target_update(
     looked up by name here, so the change lands on the row the caller found.
     """
     updates = body.model_dump(exclude_unset=True)
+    extras_changes = updates.get("extras_changes")
     # T1 (#1780). Snapshot the pre-patch TLS-verification state *before*
     # the ``setattr`` loop below mutates the row, so the audit fold-in
     # can record the before/after transition. ``exclude_unset=True``
@@ -1984,8 +2020,14 @@ async def apply_target_update(
     # all raise before the ``setattr`` loop so a rejected PATCH mutates
     # nothing. See :func:`_validate_update_body_fields`.
     _validate_update_body_fields(updates, t, operator)
+    if extras_changes:
+        _bind_extras_changes_audit(extras_changes)
     for k, v in updates.items():
         setattr(t, k, v)
+    if "extras" in updates:
+        # Python counts 1 == True == 1.0, so without this a change of only
+        # the JSON type of a value (1 to true) would not be written.
+        flag_modified(t, "extras")
     # #2872: PATCH no longer re-homes an unset ``secret_ref``. The #1723
     # auto-home branch that used to derive ``tenants/<tenant_id>/<name>``
     # here — on any PATCH omitting ``secret_ref`` over a NULL row — was

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -309,5 +310,145 @@ func TestUpdateVPNRequiredSendsOnlyWhenGiven(t *testing.T) {
 					v, present, tc.want, tc.present, f.raw)
 			}
 		})
+	}
+}
+
+// TestUpdateSetAndUnsetExtraSendExtrasChanges pins the single-key form:
+// the body carries extras_changes with only the named keys, each value with
+// its JSON type, null for a removed key, and no whole-map extras.
+func TestUpdateSetAndUnsetExtraSendExtrasChanges(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakePatchServer
+	url := f.start(t, http.StatusOK, updatedTargetJSON)
+	_, stderr, err := runUpdateCmd(t, url, "demo-vault",
+		"--set-extra", "managed_realm=lab",
+		"--set-extra-json", "retries=3",
+		"--set-extra-json", "strict=true",
+		"--set-extra-json", `tags=["a","b"]`,
+		"--set-extra-json", `limits={"cpu":2}`,
+		"--unset-extra", "old_key")
+	if err != nil {
+		t.Fatalf("update: %v\nstderr=%s", err, stderr.String())
+	}
+	changes, ok := f.body["extras_changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("extras_changes missing: %v", f.body)
+	}
+	if v, present := changes["old_key"]; !present || v != nil {
+		t.Errorf("old_key should be a present null; got %#v", changes["old_key"])
+	}
+	if changes["managed_realm"] != "lab" || changes["retries"] != float64(3) || changes["strict"] != true {
+		t.Errorf("scalar values wrong: %v", changes)
+	}
+	if tags, ok := changes["tags"].([]any); !ok || len(tags) != 2 {
+		t.Errorf("tags should stay a list: %#v", changes["tags"])
+	}
+	if limits, ok := changes["limits"].(map[string]any); !ok || limits["cpu"] != float64(2) {
+		t.Errorf("limits should stay a map: %#v", changes["limits"])
+	}
+	if len(changes) != 6 || len(f.body) != 1 {
+		t.Errorf("only the named keys go out; got %v", f.body)
+	}
+}
+
+// TestUpdateExtraChangeFlagsLocalErrors pins the refusals before any
+// request: a mix with the whole-map flags, a key named twice, a value that
+// is not JSON, a JSON null, and a bad pair.
+func TestUpdateExtraChangeFlagsLocalErrors(t *testing.T) {
+	cases := map[string][]string{
+		"with --extra":       {"--set-extra", "a=1", "--extra", "b=2"},
+		"with --clear extra": {"--unset-extra", "a", "--clear", "extra"},
+		"key twice":          {"--set-extra", "a=1", "--unset-extra", "a"},
+		"not json":           {"--set-extra-json", "a=nope"},
+		"json null":          {"--set-extra-json", "a=null"},
+		"no equals":          {"--set-extra", "a"},
+		"empty key":          {"--unset-extra", ""},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			var f fakePatchServer
+			url := f.start(t, http.StatusOK, updatedTargetJSON)
+			_, _, err := runUpdateCmd(t, url, append([]string{"demo-vault"}, args...)...)
+			if err == nil {
+				t.Fatalf("want an error")
+			}
+			if f.method != "" {
+				t.Errorf("no request should be sent; got %s", f.method)
+			}
+		})
+	}
+}
+
+// TestUpdateSetExtraJSONKeepsEveryDigit pins that a JSON number goes out
+// with exactly the digits typed, also inside a list or a map. A float64
+// would round these numbers.
+func TestUpdateSetExtraJSONKeepsEveryDigit(t *testing.T) {
+	// No t.Parallel(): seedXDGAndToken calls t.Setenv.
+	var f fakePatchServer
+	url := f.start(t, http.StatusOK, updatedTargetJSON)
+	_, stderr, err := runUpdateCmd(t, url, "demo-vault",
+		"--set-extra-json", "big=12345678901234567890",
+		"--set-extra-json", "l=[9007199254740993]",
+		"--set-extra-json", `m={"n":9007199254740993,"f":1.50}`)
+	if err != nil {
+		t.Fatalf("update: %v\nstderr=%s", err, stderr.String())
+	}
+	for _, want := range []string{
+		`"big":12345678901234567890`,
+		`"l":[9007199254740993]`,
+		`"m":{"f":1.50,"n":9007199254740993}`,
+	} {
+		if !strings.Contains(f.raw, want) {
+			t.Errorf("raw body should hold %s; got %s", want, f.raw)
+		}
+	}
+}
+
+// TestUpdateExtraChangeErrorsShowNoValue pins that an error of
+// --set-extra or --set-extra-json shows no part of the value, with and
+// without --json: the value may be a password.
+func TestUpdateExtraChangeErrorsShowNoValue(t *testing.T) {
+	made := fmt.Sprintf("madeup%x", time.Now().UnixNano())
+	cases := map[string]struct {
+		args    []string
+		wantKey bool
+	}{
+		"not json":           {[]string{"--set-extra-json", "pw={\"a\":" + made}, true},
+		"not json bare text": {[]string{"--set-extra-json", "pw=" + made}, true},
+		"set no equals":      {[]string{"--set-extra", made}, false},
+		"json no equals":     {[]string{"--set-extra-json", made}, false},
+	}
+	for name, tc := range cases {
+		for _, jsonMode := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%v", name, jsonMode), func(t *testing.T) {
+				var f fakePatchServer
+				url := f.start(t, http.StatusOK, updatedTargetJSON)
+				args := append([]string{"demo-vault"}, tc.args...)
+				if jsonMode {
+					args = append(args, "--json")
+				}
+				stdout, stderr, err := runUpdateCmd(t, url, args...)
+				if err == nil {
+					t.Fatalf("want an error")
+				}
+				for where, text := range map[string]string{
+					"stdout": stdout.String(), "stderr": stderr.String(), "error": err.Error(),
+				} {
+					if strings.Contains(text, made) || strings.Contains(text, made[4:]) {
+						t.Errorf("%s shows the value: %s", where, text)
+					}
+				}
+				shown := stderr.String() + stdout.String() + err.Error()
+				if tc.wantKey && !strings.Contains(shown, "pw") {
+					t.Errorf("the error should name the key: %s", shown)
+				}
+				if tc.wantKey && !strings.Contains(shown, "not JSON") {
+					t.Errorf("the error should say the value is not JSON: %s", shown)
+				}
+				if f.method != "" {
+					t.Errorf("no request should be sent; got %s", f.method)
+				}
+			})
+		}
 	}
 }

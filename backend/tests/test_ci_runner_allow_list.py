@@ -40,6 +40,7 @@ ALLOWED_RUNS_ON = frozenset(
         "runs-on: ${{ github.event_name == 'merge_group' && 'meho-runners-ci-heavy-queue' || 'ubuntu-latest' }}",
         "runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || 'meho-runners-ci' }}",
         "runs-on: ${{ github.run_attempt == '1' && 'meho-runners-ci-heavy-site2' || 'meho-runners-ci-heavy' }}",
+        "runs-on: ${{ github.run_attempt == '1' && 'ubuntu-latest' || 'meho-runners-ci-heavy' }}",
         "runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}",
         "runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'meho-runners-ci' }}",
         _MATRIX_RUNS_ON,

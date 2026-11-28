@@ -2844,13 +2844,60 @@ workflow.
 
 **Tests.** `tests/test_ci_second_runner_site.py`.
 
-### Hosted runner trial (#7187)
+### GitHub-hosted unit shards
 
-For one day, the job `python-unit-shard-hosted-trial` runs unit shard 6 of a
-full pull request run also on a GitHub-hosted runner (`ubuntu-latest`), beside
-the normal shard 6, with no secret and not as a required check, so the wait and
-the run time of the two can be compared. After the trial a small pull request
-removes the job.
+**What it does.** With the repository variable `MEHO_CI_PR_HOSTED` set to
+exactly `on`, unit shards 1-3 of a pull request run on GitHub-hosted
+`ubuntu-latest` runners, in the job `python-unit-shard-hosted`. Then a pull
+request does not wait for our heavy runner pool, and that pool serves the
+merge queue and the nightly run. The check names stay `Python unit shard
+N/6`, and the required check `Python (ruff + mypy + pytest)` still needs all
+six shards to pass, wherever they ran.
+
+**When shards 1-3 go there.** The step "Pick the runners for unit shards
+1-3" in the `changes` job (`scripts/ci/pick_pr_hosted.sh`) writes
+`pr_hosted=on` only when all of these hold: the variable is exactly `on`,
+the event is `pull_request` from this repository (not a fork), it is the
+first attempt of the run, and all six shards really run (not docs-only, a
+backend change, not a one-connector run, not a test map run). Every doubt
+gives today's pool. Its notice says why.
+
+**Which shard runs where.**
+
+| Case | Shards 1-3 | Shards 4-6 |
+| --- | --- | --- |
+| switch off (or not set) | our heavy pool | our heavy pool, or the second site when it is on |
+| switch on, second site off | GitHub-hosted | our heavy pool |
+| switch on, second site on | GitHub-hosted | second site (`python-unit-shard` is skipped) |
+| merge queue | heavy queue pool | heavy queue pool |
+| nightly run | our heavy pool | our heavy pool |
+| fork pull request | skipped, as before | skipped, as before |
+| re-run (attempt 2 or later) | our heavy pool | our heavy pool |
+
+"Re-run all jobs" picks again and gets today's pool. "Re-run failed jobs"
+keeps the old split, and the job's `runs-on` sends the failed shards 1-3 to
+our heavy pool, so one click gets a run off a GitHub outage.
+
+**The job shape.** The same as `python-unit-shard-second-site`: its text
+names no secret, no `environment` and no `id-token`, its token is
+read-only, it uses the public `docker.io/` test images, and the spec-shelf
+tests skip. Its steps are YAML aliases of the steps of the second-site job,
+without the second-site check, the step "Hide the proxy name in the test
+reports" and the upload of the per-test times (times from other machines
+must not go into the shard split; refresh the split from a merge queue or
+nightly run). It uses only the free `ubuntu-latest` label.
+
+**Waits.** Standard GitHub-hosted runners are free for a public repository,
+but the organisation shares a limit of 20 GitHub-hosted jobs at the same
+time (GitHub Free plan). Above it, a job waits in the queue for a free slot;
+nothing fails.
+
+**Switch on.** Set the repository variable `MEHO_CI_PR_HOSTED` to `on`.
+
+**Switch off (the way back).** Set it to any other value, or delete it. The
+next run uses today's pool for all six shards. No code change is needed.
+
+**Tests.** `tests/test_ci_pr_hosted_unit_shards.py`.
 
 ### Runner-CPU rule
 

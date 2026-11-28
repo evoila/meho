@@ -996,8 +996,8 @@ def test_vault_ui_status_full_page_renders_chrome_and_panel(
         response = client.get("/ui/vault/status")
     assert response.status_code == 200, response.text
     body = response.text
-    # Full-page chrome (the navbar contract the base layout pins) is present.
-    assert "navbar" in body
+    # Full-page chrome (the shared top bar the base layout renders) is present.
+    assert "data-meho-topbar" in body
     # The status panel is server-rendered inline on first paint.
     assert 'data-vault-status-card="seal"' in body
     assert 'data-vault-seal="unsealed"' in body

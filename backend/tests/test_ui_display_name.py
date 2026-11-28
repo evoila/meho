@@ -13,8 +13,9 @@ This suite pins:
 
 * the name is stored encrypted and comes back on every way a session is
   loaded, including after a token refresh;
-* the user menu, the dashboard greeting, the account page and the "My
-  recent activity" panel show the name;
+* the user menu (in the shared top bar), the dashboard
+  greeting, the account page and the "My recent activity" panel show the
+  name;
 * **with no name** -- the path that regresses quietly -- those places show
   a neutral label, and the ``sub`` appears in none of them: not as the
   label, not as the ``title``, not as initials. The account page still
@@ -60,7 +61,6 @@ from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.templating import (
     get_jinja_env,
-    person_initials,
     reset_templating_for_testing,
 )
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
@@ -147,43 +147,23 @@ def _get(path: str, session_id: uuid.UUID) -> Any:
         return client.get(path)
 
 
-def _user_chip(body: str) -> tuple[str, str, str]:
-    """Return the user menu's ``(avatar inner HTML, label title, label text)``."""
-    avatar = re.search(r'data-field="user-avatar"[^>]*>(.*?)</span>', body, re.S)
-    label = re.search(r'data-field="user-label" title="([^"]*)">([^<]*)</span>', body)
+def _user_chip(body: str) -> tuple[str, str | None, str]:
+    """Return the top bar user menu's ``(avatar inner HTML, button title, label)``.
+
+    The menu is meho-ui's ``top_bar``. Its button carries a
+    ``title`` only when there is a name, so the title is ``None`` without
+    one.
+    """
+    button = re.search(
+        r'<button[^>]*popovertarget="meho-topbar-user"([^>]*)>(.*?)</button>', body, re.S
+    )
+    assert button is not None, "top bar user menu not rendered"
+    title = re.search(r'title="([^"]*)"', button.group(1))
+    avatar = re.search(r'class="meho-topbar__avatar"[^>]*>(.*?)</span>', button.group(2), re.S)
+    label = re.search(r'class="meho-topbar__user-name">([^<]*)</span>', button.group(2))
     assert avatar is not None, "user menu avatar not rendered"
     assert label is not None, "user menu label not rendered"
-    return avatar.group(1), label.group(1), label.group(2)
-
-
-# ---------------------------------------------------------------------------
-# Initials come from the name only
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("Ada King Lovelace", "AL"),
-        ("ada lovelace", "AL"),
-        ("Ada", "A"),
-        ("  Ada   Lovelace  ", "AL"),
-        ("(Ada) Lovelace", "AL"),
-        ("Ada -", "A"),
-        ("Đorđe Šimić", "ĐŠ"),
-        ("ßiggi Müller", "SM"),
-        ("ß", "S"),
-        ("Ada 2nd", "A2"),
-        ("² Ada", "A"),
-        ("½", None),
-        ("", None),
-        ("   ", None),
-        ("- --", None),
-        (None, None),
-    ],
-)
-def test_person_initials(name: str | None, expected: str | None) -> None:
-    assert person_initials(name) == expected
+    return avatar.group(1), title.group(1) if title else None, label.group(1)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +233,8 @@ def test_user_menu_and_dashboard_show_the_name() -> None:
     body = response.text
 
     avatar, title, label = _user_chip(body)
-    assert avatar.strip() == "AL"
+    # The bar's rule: the first letters of the first two words.
+    assert avatar.strip() == "AK"
     assert title == _NAME
     assert label == _NAME
     assert f'data-field="signed-in-name">{_NAME}<' in body
@@ -283,8 +264,8 @@ def test_no_name_user_menu_is_neutral_and_not_derived_from_the_sub() -> None:
     body = response.text
 
     avatar, title, label = _user_chip(body)
-    assert label == "Your account"
-    assert title == "Your account"
+    assert label == "Account"
+    assert title is None
     assert "<svg" in avatar
     assert _SUB_INITIALS not in avatar
     assert _SUB not in avatar
@@ -302,7 +283,7 @@ def test_no_name_account_page_shows_a_neutral_name_row() -> None:
 
     assert "No name on this session." in body
     avatar, title, label = _user_chip(body)
-    assert (title, label) == ("Your account", "Your account")
+    assert (title, label) == (None, "Account")
     assert _SUB_INITIALS not in avatar
     # The sub is on the page exactly where it is labelled as an ID.
     assert body.count(_SUB) == 2  # the ``title`` and the text of the Subject ID row
@@ -328,8 +309,9 @@ def test_my_recent_label_is_the_name_or_nothing(display_name: str | None, expect
     assert _SUB not in html
 
 
-def test_signed_out_user_menu_says_not_signed_in() -> None:
-    """No session at all: the chip says so instead of "Your account"."""
+def test_signed_out_user_menu_is_neutral() -> None:
+    """No session at all: the bar's neutral "Account" and a person glyph."""
     html = get_jinja_env().get_template("base.html").render(ready=True)
-    _, title, label = _user_chip(html)
-    assert (title, label) == ("Not signed in", "Not signed in")
+    avatar, title, label = _user_chip(html)
+    assert (title, label) == (None, "Account")
+    assert "<svg" in avatar

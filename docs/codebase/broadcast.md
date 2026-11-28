@@ -111,8 +111,9 @@ was closed as not planned).
   2 seconds (`agent/approval_wait.py`); it no longer touches Valkey.
 - *Approvals bell.* One timer in `approvals-bell.js` dispatches
   `meho:approval-badge-poll` every 5 seconds while the page is visible;
-  both badges re-fetch `GET /ui/approvals/badge`. A decision dispatches
-  `meho:approval-bump` (badges plus the open history list).
+  the badge in the top bar re-fetches `GET /ui/approvals/badge`. A
+  decision dispatches `meho:approval-bump` (the badge plus the open
+  history list).
 - *Recent operations.* The dashboard tray (`GET /ui/dashboard/recent-operations`,
   newest 50 via the audit reader) and the connector card
   (`GET /ui/connectors/{name}/recent-operations`, newest 10) render on

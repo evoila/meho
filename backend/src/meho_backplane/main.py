@@ -300,6 +300,7 @@ from meho_backplane.ui.paths import (
     brand_css_dir,
     brand_fonts_dir,
     ensure_static_dist_dir,
+    shell_css_dir,
     static_root_dir,
 )
 from meho_backplane.ui.routes import build_router as build_ui_router
@@ -1596,6 +1597,9 @@ app.include_router(mcp_router)
 #   ``/ui/static/fonts/<file>`` into its own ``@font-face`` rules, so the
 #   stylesheet it ships resolves against this mount with no rewriting.
 #
+#   The shell mount serves the shared top bar's precompiled stylesheet
+#   (``meho-topbar.css``) out of the same package.
+#
 #   Mounted BEFORE the two routers for the same reason as ``/ui/static``:
 #   the session middleware exempts the ``/ui/static/`` prefix, so an
 #   unauthenticated browser can still load the login page's styling.
@@ -1608,6 +1612,11 @@ app.mount(
     "/ui/static/fonts",
     RevalidateStaticFiles(directory=str(brand_fonts_dir()), check_dir=False),
     name="ui_brand_fonts",
+)
+app.mount(
+    "/ui/static/shell",
+    RevalidateStaticFiles(directory=str(shell_css_dir()), check_dir=False),
+    name="ui_shell",
 )
 app.mount(
     "/ui/static",

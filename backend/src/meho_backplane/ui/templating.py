@@ -189,39 +189,6 @@ def visible_marks(text: str) -> str:
     return "".join(out)
 
 
-#: ASCII digits only: ``str.isdigit`` also accepts signs such as "²".
-_DIGITS: Final = frozenset("0123456789")
-
-
-def person_initials(name: str | None) -> str | None:
-    """Return the avatar initials for a person's *name*, or ``None``.
-
-    The first letter or digit (0-9) of the first and the last word,
-    upper-cased ("Ada King Lovelace" -> "AL", "Ada" -> "A"). One character
-    per word, so at most two: a letter whose upper case is two characters
-    keeps the first ("ßiggi" -> "S"), and signs such as "²" or "½" do not
-    count. Words with no letter or digit are skipped. ``None`` when *name*
-    is ``None`` or has no letter or digit at all; the user menu then shows
-    a person icon.
-
-    Only ever called with a display name. The initials are never
-    taken from the Keycloak ``sub``: letters of an identifier are the
-    identifier.
-    """
-    if name is None:
-        return None
-    firsts: list[str] = []
-    for word in name.split():
-        first = next((ch for ch in word if ch.isalpha() or ch in _DIGITS), None)
-        if first is not None:
-            firsts.append(first.upper()[0])
-    if not firsts:
-        return None
-    if len(firsts) == 1:
-        return firsts[0]
-    return firsts[0] + firsts[-1]
-
-
 def _session_is_menu_admin(session_ctx: Any) -> bool:
     """Whether the last token check showed a person with ``tenant_admin`` here.
 
@@ -255,11 +222,11 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
       definition not signed in there). ``base.html``'s header chip
       conditionally renders the tenant name when this dict is present
       and falls back to a neutral "Sign in" link otherwise.
-    * ``session_display_name`` / ``session_initials`` -- the signed-in
-      person's name from the login token and its avatar initials
-      (:func:`person_initials`), or ``None``. There is no
-      ``sub`` variable: the pages that name the signed-in person show a
-      neutral label when the name is missing, never the identifier.
+    * ``session_display_name`` -- the signed-in person's name from the
+      login token, or ``None``. The shared top bar takes its avatar
+      initials from it. There is no ``sub`` variable: the pages
+      that name the signed-in person show a neutral label when the name
+      is missing, never the identifier.
     * ``ready`` -- the live backplane readiness verdict that colours
       ``base.html``'s sidebar-footer pill (green "ready" vs yellow
       "starting"). Every ``/ui/*`` surface used to hardcode
@@ -306,7 +273,6 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         return {
             "session_tenant": None,
             "session_display_name": None,
-            "session_initials": None,
             "session_is_tenant_admin": False,
             "ready": ready,
             "policy_menu": False,
@@ -330,7 +296,6 @@ def _ui_session_context_processor(request: Request) -> dict[str, Any]:
         # exposed here -- a page that names a person must not fall back
         # to an identifier.
         "session_display_name": session_ctx.display_name,
-        "session_initials": person_initials(session_ctx.display_name),
         # Whether the menu shows the entries only a tenant admin can open.
         "session_is_tenant_admin": _session_is_menu_admin(session_ctx),
         "ready": ready,

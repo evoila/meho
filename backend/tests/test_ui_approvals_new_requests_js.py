@@ -99,7 +99,7 @@ const out = input.steps.map((step) => {
     const count = /data-pending-count="([^"]*)"/.exec(step.badge)[1];
     const counter = { dataset: { pendingCount: count } };
     const target = {
-      id: "desktop-approvals-badge",
+      id: "topbar-approvals-badge",
       querySelector: (sel) => (sel === "[data-pending-count]" ? counter : null),
     };
     fire("htmx:afterSwap", { detail: { target } });

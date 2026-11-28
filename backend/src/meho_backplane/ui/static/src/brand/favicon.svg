@@ -4,10 +4,10 @@
     Copyright (c) 2026 evoila Group
 
     MEHO tab mark — the "Graphite & Signal" wordmark distilled to a
-    monogram: the lowercase "m" from the sidebar wordmark plus the
-    indigo signal caret that "types" the brand (see base.html brand
-    block + .meho-caret in static/src/styles.css). Colours are the
-    exact brand tokens converted from oklch to sRGB:
+    monogram: the lowercase "m" of the MEHO wordmark plus its slanted
+    signal caret (the wordmark is in the shared top bar, from meho-ui's
+    top_bar). Colours are the exact brand tokens converted from oklch
+    to sRGB:
       graphite tile  base-200 -> base-100  #080a0d -> #101316
       wordmark ink   base-content          #e6e8eb
       signal caret   primary               #6c7ae5

@@ -5,7 +5,7 @@
   Broadcast wall-monitor view (Initiative #338, Task #869, work item #5).
 
   A minimal, no-chrome full-screen layout for a team-room monitor:
-    * NO sidebar, NO top navbar, NO filter bar -- the only affordance
+    * NO sidebar, NO top bar, NO filter bar -- the only affordance
       is the feed itself, maximised to fill the viewport.
     * A thin header strip (tenant + live pill + a link back to the
       in-chrome console view) so an operator glancing at the wall can
@@ -20,8 +20,8 @@
 
   Why a standalone document (not ``{% extends "base.html" %}``)
   ------------------------------------------------------------
-  ``base.html`` is the DaisyUI ``drawer`` shell -- sidebar + navbar +
-  footer. The wall view's whole point is to drop that chrome, so it is
+  ``base.html`` is the shared top bar over the DaisyUI ``drawer``
+  shell -- top bar + sidebar + footer. The wall view's whole point is to drop that chrome, so it is
   a self-contained ``<!doctype html>`` that loads the same vendored
   CSS/JS the base layout does (the script order is load-bearing:
   ``sse.min.js`` calls ``htmx.defineExtension`` at load, so it must run

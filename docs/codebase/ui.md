@@ -166,7 +166,7 @@ Two artifacts ship in the backend image:
    the source tree to the build cwd (#3627). The Dockerfile step then
    asserts the compiled output clears a **60 KB size floor** (the #3647
    empty bundle was ~35 KB, a healthy one ~150 KB) **and** carries
-   several distinct console selectors (`.btn`, `.card`, `.navbar`,
+   several distinct console selectors (`.btn`, `.card`, `.drawer`,
    `bg-base`, `badge-error`) — the class checks, not the coarse floor,
    are the load-bearing guard, since a scan that reaches no templates
    emits zero of them (#3828). `grep`-ing a single class alone could not
@@ -241,7 +241,7 @@ upcoming T4 login flow writes to:
     it came from; that sweep will remove both.
   - **Never the `sub` in its place.** With no name, pages that name
     the signed-in person show a neutral label (the user menu: a
-    person icon and "Your account"), never the `sub` or letters
+    person icon and "Account"), never the `sub` or letters
     taken from it.
 - **ORM model** — [`WebSession` in
   `db/models.py`](../../backend/src/meho_backplane/db/models.py).
@@ -547,25 +547,79 @@ backplane Python base image already follows).
     <script src="/ui/static/src/app/work-ref-refused.js" defer>   <!-- swaps in a refused ticket id search -->
     <script src="/ui/static/src/vendor/sse.min.js" defer>
     <script src="/ui/static/src/vendor/alpine.min.js" defer>
+    <link href="/ui/static/shell/meho-topbar.css">  <!-- the top bar's own stylesheet, after the tokens -->
   </head>
   <body data-meho-tenant="…">
-    <div class="drawer lg:drawer-open" x-data="{...}">
+    {{ top_bar("Operator Console", start=<menu button, lg:hidden>,
+               notifications=approvals_bell("topbar"), user_name=…) }}
+    <div class="drawer meho-console-drawer lg:drawer-open" x-data="{...}">
       <input id="meho-drawer-toggle" class="drawer-toggle">
       <div class="drawer-content">
-        <header class="navbar lg:hidden">…menu button, theme toggle, approvals bell…</header>
         <main>{% block content %}{% endblock %}</main>
       </div>
       <aside class="drawer-side">
         <nav>…one link per entry of nav_surfaces…</nav>
-        …tenant chip, account, {{ app_version }} and the ready/starting pill…
+        …tenant chip, {{ app_version }} and the ready/starting pill…
       </aside>
     </div>
   </body>
 </html>
 ```
 
-The top bar shows only on small screens. On a desktop the sidebar holds
-the tenant chip, the account menu, the version and the readiness pill.
+### The top bar
+
+Every page that extends `base.html` starts with the MEHO family's shared
+top bar: the `top_bar` macro from `meho_ui.shell` (meho-ui 0.10.0, its
+`docs/components.md`, "The top bar"). It is the same bar automation and
+Knowledge use. It shows, at every screen width:
+
+- the MEHO logo and "Operator Console", linking to `/ui/`;
+- the **approvals bell** in the bar's notification slot (see below);
+- the **user menu**: the person's name and initials, with **Account**
+  (`/ui/account`) and **Sign out** (`/ui/auth/logout`, a GET as before).
+  With no name it shows "Account" and a person glyph, never the `sub`.
+  The bar computes the initials from the name itself: the first letters
+  of the first two words ("Ada King Lovelace" is AK).
+- below `lg` only, the **menu button** that opens the side menu, in the
+  bar's `start` slot. It is the same `<label for="meho-drawer-toggle">`
+  as before.
+
+The bar renders what `base.html` hands it and reads nothing itself. No
+app list is passed, so it shows no app switcher: how people move between
+the apps is decided later. Its menus are native popovers, so the
+bar adds no script.
+
+Its look is `meho-topbar.css`, plain CSS on the `--evoila-*` tokens,
+served out of the installed meho-ui by the `/ui/static/shell` mount
+(`ui.paths.shell_css_dir()`) and linked after `evoila-tokens.css`. Three
+rules in `styles.css` place it in the layout: `.meho-console-topbar`
+keeps the bar at the top of the window while the page scrolls; from `lg`
+up the empty `start` slot is hidden; and `.meho-console-drawer` puts the
+side menu under the bar (`top` and `height` from
+`--meho-topbar-height`). Below `lg` the side menu still opens over the
+whole page, bar included.
+
+The side menu keeps meho's own navigation: the surface links, the
+tenant chip, the version and the readiness pill. The logo, the user menu
+and the bell it used to carry are in the bar, so no control is on the
+page twice. The phone-only navbar is gone: every page has one top bar.
+
+The pages with their own `<html>` tag do not get the bar, as they never
+had the console chrome: the tenant picker and its "Tenant not changed"
+page (`tenant/choose.html`, `tenant/refused.html`, shown before a tenant
+is chosen), the "session ended" page, the broadcast wall
+(`broadcast/wall.html`) and the offline page of the installed app.
+
+**The approvals count is live.** The bell's badge span
+(`#topbar-approvals-badge`) `hx-get`s `/ui/approvals/badge` on `load`
+(the first paint), on `meho:approval-badge-poll` (dispatched on `<body>`
+every 5 seconds by the one `approvalsBell` timer in
+`approvals-bell.js`, while the page is visible) and on
+`meho:approval-bump` (after a decision). All three listen on `<body>`,
+so moving the bell into the bar changed no wiring. A badge with only
+`load` would paint once and then look exactly like "no new approvals";
+`tests/test_ui_templates.py` pins all three triggers inside the bar's
+slot.
 
 Surface templates extend it via `{% extends "base.html" %}` and
 override `{% block content %}` (and optionally `{% block page_title %}`).
@@ -621,17 +675,16 @@ pins both halves: the name reaches the rendered text, and
 
 The processor also exposes `session_display_name` (the signed-in
 person's name from the login token, see "Person's name on the
-session") and `session_initials` (its avatar initials, from
-`person_initials` in `ui/templating.py`), both `None` when there is no
-name or no session. The sidebar account chip (`base.html`) shows the
-name and its initials, with an Account menu item linking to
-`/ui/account` (G10.11-T1 #1892). It used to show the Keycloak `sub`;
-with no name it now shows a person icon and
-"Your account". The processor deliberately exposes no `sub`: a page
+session"), `None` when there is no name or no session. The top bar's
+user menu (`base.html`, see "The top bar") shows the name and its
+initials, with an Account menu item linking to `/ui/account`
+(G10.11-T1 #1892). It used to show the Keycloak `sub`; with no name it
+now shows a person icon and "Account". The processor deliberately
+exposes no `sub`: a page
 that names the signed-in person must not fall back to an identifier.
 The dashboard greeting and the "My recent activity" panel follow the
 same rule; the account page shows the name and, in its own row
-labelled "Subject ID", the `sub`. The chip deliberately does **not** show the role
+labelled "Subject ID", the `sub`. The user menu deliberately does **not** show the role
 -- labelling it would cost a fresh JWT verify on every page render;
 the live role is shown on `/ui/account` instead, where the route pays
 that verify once.
@@ -1684,7 +1737,7 @@ the colour policy stays one auditable map.
 | `broadcast/_filter_bar.html` | The principal / target controls. Both server filters `hx-get` to `/ui/broadcast/feed`. No operation filter since #3762. |
 | `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
 | `broadcast/_event_row.html` | Server-authored announcement row (time · agent · announcement text bound via `x-text` · phase · targets · claim details). No operation row and no drawer since #3762. |
-| `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
+| `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the top bar / sidebar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
 | `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the stored announcements the `/ui/broadcast/history` route read from the archive, so the rows render through `_event_row.html`. No kind switch since #3762. |
 | `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`; loaded from the head-level `component_scripts` block — before `alpine.min.js`, or the registration is lost, #1692). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, `visibleEvents` (announcements only), the timestamp / phase / targets / claim helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
@@ -1801,7 +1854,7 @@ audit-side).
 `GET /ui/broadcast?wall=1` selects `broadcast/wall.html` instead of
 `broadcast/feed.html`. The wall view is a **standalone document** (not
 `{% extends "base.html" %}`) so it drops the DaisyUI drawer shell —
-no sidebar, no top navbar, no filter bar — and maximises the feed for a
+no top bar, no sidebar, no filter bar — and maximises the feed for a
 full-screen team-room monitor. It is opened in a new tab from the
 in-chrome view's "Wall mode" button so the monitor can be cast
 independently of the operator's working session.

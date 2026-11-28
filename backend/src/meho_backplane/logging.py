@@ -20,8 +20,12 @@ timestamp, contextvar-merged ``request_id`` (when in a request
 context), and locals-stripped structured tracebacks. Nothing on the
 backplane emits plain-text log lines any more.
 
-:class:`_HttpxUrlFilter` cuts every URL in the per-call line of httpx down
-to its scheme and host before the bridge writes it.
+httpx logs one line per request at INFO with the full URL and the reason
+phrase of the status line. The URL can be a credential (a vCenter download
+URL, a pre-signed URL, a token in the query), and the reason phrase is free
+text of the vendor system. So :class:`_HttpxUrlFilter` cuts every URL in
+that line down to its scheme and host, and puts the standard phrase of the
+status code in place of the reason phrase, before the bridge writes it.
 
 MEHO holds the logger of each HTTP client library, and every child
 logger, at the level in :data:`_HTTP_STACK_LOGGERS`.
@@ -50,6 +54,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
+from http import HTTPStatus
 from typing import Any, TextIO
 
 import httpx
@@ -231,19 +236,42 @@ class _HttpStackLevelFilter(logging.Filter):
 class _HttpxUrlFilter(logging.Filter):
     """Keep only the scheme and the host of a URL in an httpx log record.
 
-    The per-call line has the form ``HTTP Request: GET <url> "HTTP/1.1 200 OK"``.
-    The filter cuts the :class:`httpx.URL` argument down to scheme and host.
-    The method, the host and the status stay, so the line is still useful for
-    triage.
+    httpx logs ``HTTP Request: GET <url> "HTTP/1.1 200 OK"`` at INFO with the
+    full :class:`httpx.URL` as an argument. The path and the query of that
+    URL can be a credential (CWE-532): a vCenter download URL holds the
+    download session, a pre-signed URL holds its signature. The method, the
+    host and the status code stay, so the line is still useful for triage.
+
+    The reason phrase in that line is the text the vendor system sent in its
+    status line. The filter puts the standard phrase of the status code from
+    :class:`http.HTTPStatus` in its place, or an empty text for a code that
+    has none.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple) and any(isinstance(a, httpx.URL) for a in record.args):
-            record.args = tuple(
+            args = [
                 f"{a.scheme}://{a.netloc.decode()}" if isinstance(a, httpx.URL) else a
                 for a in record.args
-            )
+            ]
+            if record.msg == _HTTPX_REQUEST_LINE and len(args) == 5:
+                args[4] = _standard_phrase(args[3])
+            record.args = tuple(args)
         return True
+
+
+#: The format of the request line httpx logs, with the reason phrase last.
+_HTTPX_REQUEST_LINE = 'HTTP Request: %s %s "%s %d %s"'
+
+
+def _standard_phrase(code: object) -> str:
+    """Return the standard phrase of an HTTP status code, or ``""`` for none."""
+    if not isinstance(code, int):
+        return ""
+    try:
+        return HTTPStatus(code).phrase
+    except ValueError:
+        return ""
 
 
 #: One instance, so a repeated :func:`configure_logging` call adds no second

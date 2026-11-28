@@ -74,6 +74,8 @@ def values() -> dict[str, str]:
         "cookie": f"c{secrets.token_hex(6)}",
         "header": f"h{secrets.token_hex(6)}",
         "prompt": f"m{secrets.token_hex(6)}",
+        "phrase_start": f"r{secrets.token_hex(6)}",
+        "phrase_end": f"s{secrets.token_hex(6)}",
     }
 
 
@@ -81,6 +83,14 @@ def values() -> dict[str, str]:
 def server(values: dict[str, str]) -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            phrase = f"{values['phrase_start']} {values['phrase_end']}".encode()
+            if self.path.startswith("/phrase"):
+                # A status line with a made-up reason phrase; the first hop redirects.
+                head = b"HTTP/1.1 404 " if self.path == "/phrase/end" else b"HTTP/1.1 307 "
+                self.wfile.write(
+                    head + phrase + b"\r\nLocation: /phrase/end\r\nContent-Length: 0\r\n\r\n"
+                )
+                return
             if self.path.startswith("/broken"):
                 # A header line without a colon, then a cookie header.
                 self.wfile.write(
@@ -330,3 +340,70 @@ def test_stack_logger_level_lowered_after_setup_is_still_held(
     assert values["path"] not in out
     assert values["query"] not in out
     assert values["header"] in out
+
+
+def _logger_tree(
+    capture: list[logging.Handler],
+) -> dict[str, tuple[int, bool, list[logging.Handler], bool]]:
+    """The level, on/off state, handlers and ``propagate`` of every logger and the root.
+
+    The root leaves out the ``capture`` handlers: pytest puts them on the root
+    for each test phase, and the database set-up of a first test can take them
+    off again.
+    """
+    loggers = {
+        n: lg for n, lg in logging.root.manager.loggerDict.items() if isinstance(lg, logging.Logger)
+    }
+    tree = {n: (lg.level, lg.disabled, lg.handlers[:], lg.propagate) for n, lg in loggers.items()}
+    root = logging.root
+    root_handlers = [h for h in root.handlers if h not in capture]
+    tree[""] = (root.level, root.disabled, root_handlers, root.propagate)
+    return tree
+
+
+@pytest.fixture
+def _logger_tree_unchanged(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Check that the test leaves every logger of the tree as it found it."""
+    plugin = request.config.pluginmanager.get_plugin("logging-plugin")
+    capture = [plugin.caplog_handler, plugin.report_handler] if plugin else []
+    before = _logger_tree(capture)
+    yield
+    after = _logger_tree(capture)
+    assert {n: after.get(n) for n in before} == before
+
+
+@pytest.mark.usefixtures("_logger_tree_unchanged")
+def test_request_line_logs_the_standard_phrase_not_the_vendor_phrase(
+    server: str, values: dict[str, str]
+) -> None:
+    # uvicorn's logging settings change every logger of the process, so the
+    # server's set-up runs in a child process.
+    script = textwrap.dedent(
+        """
+        import logging, logging.config, sys
+        import httpx
+        import uvicorn.config
+        from meho_backplane.logging import configure_logging
+        logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+        configure_logging(logging.INFO)
+        assert not logging.getLogger("httpx").disabled
+        with httpx.Client(follow_redirects=True) as client:
+            response = client.get(sys.argv[1] + "/phrase/start")
+        assert response.status_code == 404, response.status_code
+        """
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, server],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    out = done.stdout
+    _assert_clean(out + done.stderr, values)
+    events = [json.loads(line)["event"] for line in out.splitlines() if line.startswith("{")]
+    assert [e for e in events if e.startswith("HTTP Request:")] == [
+        f'HTTP Request: GET {server} "HTTP/1.1 307 Temporary Redirect"',
+        f'HTTP Request: GET {server} "HTTP/1.1 404 Not Found"',
+    ]

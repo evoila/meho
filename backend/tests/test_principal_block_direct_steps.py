@@ -37,12 +37,13 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.auth.principal_block import (
     PrincipalBlockedStepError,
     block_principal,
+    check_before_send,
     checking_logins_for_steps,
     reset_block_cache,
 )
 from meho_backplane.auth.principal_block_run import tracking_run
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.adapters.http import HttpConnector, _note_request_sent
+from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.github.composites._git import branch_commit_files_composite
 from meho_backplane.connectors.github.connector import GitHubRestConnector
 from meho_backplane.connectors.registry import clear_registry
@@ -344,7 +345,7 @@ def _github_connector() -> GitHubRestConnector:
         base_url="https://api.github.com",
         transport=httpx.MockTransport(_answer),
         # The hook every connector client carries.
-        event_hooks={"request": [_note_request_sent]},
+        event_hooks={"request": [check_before_send]},
     )
     connector._http_client = AsyncMock(return_value=client)  # type: ignore[method-assign]
     connector.auth_headers = AsyncMock(return_value={})  # type: ignore[method-assign]

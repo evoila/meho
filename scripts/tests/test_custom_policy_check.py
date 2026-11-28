@@ -1833,11 +1833,20 @@ def fixed_rule_table() -> set[str]:
     return set(re.findall(r"^\| `([a-z_]+)` \|", part, re.M))
 
 
-def floor_rule_ids() -> set[str]:
-    """The rule id of each FloorHit in policy/floors.py, a text or a name of fixed_rules.py."""
-    policy = ROOT / "backend/src/meho_backplane/policy"
+def row_rule_table() -> set[str]:
+    """The floor ids of the table "The rule ids on the audit row" of policy-evaluator.md."""
+    text = (ROOT / "docs/codebase/policy-evaluator.md").read_text()
+    part = re.split(r"\n#+ ", text.split("### The rule ids on the audit row", 1)[1], maxsplit=1)[0]
+    return set(re.findall(r"^\| `floor:([a-z_]+)` \|", part, re.M))
+
+
+POLICY = ROOT / "backend/src/meho_backplane/policy"
+
+
+def fixed_rule_names() -> dict[str, str]:
+    """Each string constant of policy/fixed_rules.py, by its name."""
     names: dict[str, str] = {}
-    for node in ast.walk(ast.parse((policy / "fixed_rules.py").read_text())):
+    for node in ast.walk(ast.parse((POLICY / "fixed_rules.py").read_text())):
         if (
             isinstance(node, ast.AnnAssign | ast.Assign)
             and isinstance(node.value, ast.Constant)
@@ -1847,8 +1856,28 @@ def floor_rule_ids() -> set[str]:
             for target in targets:
                 if isinstance(target, ast.Name):
                     names[target.id] = node.value.value
+    return names
+
+
+def fixed_rule_ids() -> set[str]:
+    """The ids of the fixed rules: the keys of FIXED_RULES in policy/fixed_rules.py."""
+    names = fixed_rule_names()
+    for node in ast.walk(ast.parse((POLICY / "fixed_rules.py").read_text())):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "FIXED_RULES"
+        ):
+            table = next(n for n in ast.walk(node) if isinstance(n, ast.Dict))
+            return {names[key.id] for key in table.keys if isinstance(key, ast.Name)}
+    raise AssertionError("no FIXED_RULES in policy/fixed_rules.py")
+
+
+def floor_rule_ids() -> set[str]:
+    """The rule id of each FloorHit in policy/floors.py, a text or a name of fixed_rules.py."""
+    names = fixed_rule_names()
     ids: set[str] = set()
-    for node in ast.walk(ast.parse((policy / "floors.py").read_text())):
+    for node in ast.walk(ast.parse((POLICY / "floors.py").read_text())):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "FloorHit"):
             continue
         rule = node.args[1]
@@ -1859,11 +1888,28 @@ def floor_rule_ids() -> set[str]:
     return ids
 
 
+def code_rule_ids() -> set[str]:
+    """The floor ids the code names: the fixed rules and the floors of floors.py."""
+    return fixed_rule_ids() | floor_rule_ids()
+
+
 class RuleIdTest(unittest.TestCase):
-    def test_each_expected_floor_rule_is_named_by_the_rule_table_or_floors_py(self) -> None:
+    def test_each_expected_floor_rule_is_named_by_the_code_and_by_the_docs(self) -> None:
         expected = expected_floor_rules()
         self.assertTrue(expected)
-        self.assertEqual(expected - (fixed_rule_table() | floor_rule_ids()), set())
+        self.assertEqual(expected - code_rule_ids(), set(), "not named by the code")
+        self.assertEqual(expected - row_rule_table(), set(), "not named by the docs")
+
+    def test_an_id_with_a_typo_is_named_by_neither(self) -> None:
+        self.assertNotIn("delete_wait", code_rule_ids())
+        self.assertNotIn("delete_wait", row_rule_table())
+
+    def test_the_docs_name_each_fixed_rule_and_floor_of_the_code(self) -> None:
+        # The table of the rule ids on the audit row lists every fixed rule
+        # and every floor of the code, so no expected id can pass the code
+        # check only.
+        self.assertEqual(fixed_rule_ids(), fixed_rule_table())
+        self.assertEqual((code_rule_ids() - {"role_floor"}) - row_rule_table(), set())
 
     def test_reads_the_ids_from_the_expect_lines_only(self) -> None:
         with mock.patch.object(Path, "read_text", return_value=(

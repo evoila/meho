@@ -323,8 +323,8 @@ them.
 | `floor:destructive_waits` | A `destructive` operation always waits for approval. |
 | `floor:delete_waits` | A delete waits for approval. |
 | `floor:caller_address_waits` | A call to an address that the caller gives always waits for approval. |
-| `floor:<id>` (#6958, second part) | A root command on a host always waits. |
-| `floor:<id>` (#6958, second part) | A change of rights in a target system waits. |
+| `floor:root_shell_waits` | A command that runs as root on a host always waits for approval. |
+| `floor:target_rights_waits` | With the switch `CUSTOM_POLICY` on, a change of rights in a target system waits for approval. |
 
 Today the evaluator names `credential_waits` and `destructive_waits` on a
 call row. The other fixed rules reach the row with the second part of

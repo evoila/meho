@@ -21,6 +21,9 @@ approval (``resume_dispatch_after_approval``). Then a child call
 * The permission check of a child call with a write on a second target
   names and checks the caller who started the run, and the child runs to
   the end after an Admin approves it.
+* The record of a person or a service login who started the run stays
+  under the internal key: the MCP and REST approval reads show no
+  permission check for a child call that has none of its own.
 * A run approved as a whole (its own request, not a step's) works the same
   way: a child call or a step of the step gate that waits belongs to the
   caller who started it.
@@ -478,3 +481,35 @@ async def test_child_permission_check_names_and_checks_the_caller_who_started_th
     assert ran.status == "ok", ran.error
     assert _REFUSALS == [None]
     assert c.ran == [h.STEP_A, step.op_id]
+
+
+@pytest.mark.parametrize("starter", ["person", "service"])
+@_BOTH_STATES
+async def test_child_record_of_a_person_or_service_starter_stays_internal(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    starter: str,
+    on: bool,
+) -> None:
+    """The starter's record stays under the internal key; the approval reads show no check."""
+    from meho_backplane.api.v1.approvals import _proposed_effect_for
+    from meho_backplane.mcp.tools.approvals import _effect_for
+
+    monkeypatch.setenv("AGENT_GRANT_REQUIRED", "observe")
+    caller, own = await _child_waits(
+        monkeypatch, session, stub_embedding_service, on=on, starter=starter
+    )
+
+    stored = own.proposed_effect
+    assert stored[_preview.REQUESTER_RECORD_KEY]["sub"] == caller.sub
+    assert _preview.AGENT_REQUESTER_RECORD_KEY not in stored
+    assert "permission_preflight" not in stored
+
+    admin = _person(_ADMIN_SUB, TenantRole.TENANT_ADMIN)
+    reads = (_effect_for(own, caller), _effect_for(own, None), _proposed_effect_for(admin, own))
+    for shown in reads:
+        assert shown is not None
+        assert "permission_preflight" not in shown
+        assert _preview.REQUESTER_RECORD_KEY not in shown
+        assert _preview.AGENT_REQUESTER_RECORD_KEY not in shown

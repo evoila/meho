@@ -104,7 +104,7 @@ from meho_backplane.auth.client_identity import (
 from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.display_name import principal_display_name
-from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole, is_human_principal
 from meho_backplane.auth.principal_block import checking_logins_for_steps
 from meho_backplane.auth.secret_read_as import current_secret_read_as
 from meho_backplane.auth.sign_in_use import SIGN_IN_LOCK_SCOPE, earlier_sign_in_uses
@@ -3898,7 +3898,8 @@ def _with_requester_record(
     While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
     under ``permission_preflight["requester"]``.
 
-    A person's or a service login's own request keeps its record only under
+    A person's or a service login's record, of its own request or of a run it
+    started, is kept only under
     :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`, which
     only a re-run of the approved call reads (:func:`requester_of`). So a call
     that waits during the re-run is checked as the caller who started the run.
@@ -3916,6 +3917,8 @@ def _with_requester_record(
         if requester is None:
             return {REQUESTER_RECORD_KEY: requester_subject(operator), **proposed_effect}
         return proposed_effect
+    if requester is not None and not _is_agent_record(record):
+        return {REQUESTER_RECORD_KEY: record, **proposed_effect}
     effect = {AGENT_REQUESTER_RECORD_KEY: record, **proposed_effect}
     if get_settings().agent_grant_required == "off":
         return effect
@@ -3923,6 +3926,12 @@ def _with_requester_record(
     preflight = dict(preflight) if isinstance(preflight, dict) else {}
     preflight.setdefault(_REQUESTER_KEY, record)
     return {**effect, _PERMISSION_PREFLIGHT_KEY: preflight}
+
+
+def _is_agent_record(record: dict[str, Any]) -> bool:
+    """True when *record* is of an agent: an agent login, or a hosted agent run."""
+    is_agent_login = record.get("principal_kind") == PrincipalKind.AGENT.value
+    return is_agent_login or record.get("act") is not None
 
 
 @contextmanager

@@ -6119,9 +6119,10 @@ Because the request names the caller who started the run:
   started the run. `requester_policy_preflight` rebuilds that caller from
   the run's requester record and checks their policy, not the policy of the
   login that runs the re-run. An agent's request keeps its record under
-  `agent_requester_record`; a person's or a service login's request keeps
-  it under `requester_record`, which only `requester_of` reads. Both keys
-  are internal: the REST and MCP approval tools leave them out.
+  `agent_requester_record`; a person's or a service login's request, and
+  the child request of a run they started, keep it only under
+  `requester_record`, which only `requester_of` reads. Both keys are
+  internal: the REST and MCP approval tools leave them out.
 
 **The risk, and the two checks that limit it.** With the guard relaxed, safety
 depends on the composite: its re-run must really skip every earlier write.

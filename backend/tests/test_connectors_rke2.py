@@ -35,13 +35,12 @@ Coverage matrix (per Task #2221 acceptance criteria):
   ``rke2.node.config.get``, the redacted config-content read #2854), three
   approval-gated write (``rke2.token.rotate`` T2 #2429,
   ``rke2.node.service.restart`` / ``rke2.node.config.update`` T3 #2430), and
-  two safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431,
-  ``rke2.etcd-snapshot.list`` #2853). Read ops are safe / read-only /
-  no-approval; ``rke2.about`` / ``rke2.posture.show`` /
+  two snapshot (``rke2.etcd-snapshot.save``, ``rke2.etcd-snapshot.list``).
+  Read ops are safe / read-only / no-approval; ``rke2.about`` / ``rke2.posture.show`` /
   ``rke2.node.service.status`` take no params while ``rke2.node.config.get``
   takes an optional path-bounded ``path``; write ops are dangerous /
-  approval-gated; ``.save`` is safe / no-approval but active (neither
-  read-only nor write) and takes an optional charset-bounded ``name``;
+  approval-gated; ``.save`` is caution / waits for approval and is active
+  (not read-only) and takes an optional charset-bounded ``name``;
   ``.list`` is safe / no-approval / read-only and takes no params. Every op
   has ``additionalProperties=False`` on its parameter schema, a non-empty
   SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
@@ -1066,13 +1065,13 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
     {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
 )
 
-#: The safe, non-gated snapshot tier: ``.save`` (T4 #2431) + ``.list``
-#: (#2853). Both are safe-tier / no-approval like the read ops.
+#: The snapshot tier: ``.save`` (caution, waits for approval) + ``.list``
+#: (safe, no approval, like the read ops).
 _SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save", "rke2.etcd-snapshot.list"})
 
-#: The *active* snapshot op: ``.save`` copies etcd to disk, so it carries
-#: NEITHER the read-only tag NOR the dangerous/write tier -- it belongs to
-#: neither sweep set. (``.list``, by contrast, is a genuine read.)
+#: The *active* snapshot op: ``.save`` copies etcd to disk as root, so it
+#: carries no read-only tag and waits for approval. (``.list``, by contrast,
+#: is a genuine read.)
 _SNAPSHOT_ACTIVE_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
 
 #: Every op that must carry the ``read-only`` tag: the identity/posture read
@@ -1085,8 +1084,8 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_I
 
 def test_rke2_ops_count_matches_expected() -> None:
     # Four read ops (#2221 posture/about + #2852 service.status + #2854
-    # config.get) + three approval-gated write ops (#2429 / #2430) + two safe
-    # non-gated snapshot ops (.save #2431, .list #2853) = nine.
+    # config.get) + three approval-gated write ops + two snapshot ops
+    # (.save, .list) = nine.
     assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -1123,20 +1122,19 @@ def test_rke2_read_ops_tagged_read_only() -> None:
         assert "read-only" not in by_id[op_id].tags, f"{op_id!r} must not be read-only"
 
 
-def test_rke2_snapshot_op_safe_active_not_gated() -> None:
-    """AC: the active snapshot op is safe-tier / no-approval, neither read nor write.
+def test_rke2_snapshot_save_is_caution_and_waits_for_approval() -> None:
+    """The active snapshot op is caution-tier and waits for approval.
 
-    ``rke2.etcd-snapshot.save`` copies etcd to disk -- it is active on the node
-    filesystem yet does not mutate running cluster state, so it is deliberately
-    safe-tier and non-gated. It must sit in NEITHER sweep set: not read-only
-    (no ``read-only`` tag) and not the dangerous/approval write tier. (``.list``
-    is a genuine read and IS read-only -- covered separately.)
+    ``rke2.etcd-snapshot.save`` runs as root and writes a new file on the
+    node that holds all cluster data, Secrets too. So a person approves each
+    call. It carries no ``read-only`` tag. (``.list`` is a genuine read and
+    IS read-only -- covered separately.)
     """
     by_id = {op.op_id: op for op in RKE2_OPS}
     for op_id in _SNAPSHOT_ACTIVE_OP_IDS:
         op = by_id[op_id]
-        assert op.safety_level == "safe", f"{op_id!r} is not safe-tier"
-        assert op.requires_approval is False, f"{op_id!r} requires approval"
+        assert op.safety_level == "caution", f"{op_id!r} is not caution-tier"
+        assert op.requires_approval is True, f"{op_id!r} does not wait for approval"
         assert "read-only" not in op.tags, f"{op_id!r} must not be read-only-tagged"
         assert op_id not in _READ_OP_IDS
         assert op_id not in _WRITE_OP_IDS

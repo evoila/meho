@@ -5,8 +5,8 @@
 
 Drives ``rke2.about``, ``rke2.posture.show``, the service-state read
 ``rke2.node.service.status`` (#2852), the redacted config-content read
-``rke2.node.config.get`` (#2854), and the safe, non-gated snapshot ops
-``rke2.etcd-snapshot.save`` (T4 #2431) + the read-only
+``rke2.node.config.get``, and the snapshot ops
+``rke2.etcd-snapshot.save`` (waits for approval) + the read-only
 ``rke2.etcd-snapshot.list`` (#2853) through the full ``call_operation``
 dispatch stack against an in-process asyncssh fake-shell server that
 replays plain-SSH command stubs -- no Docker dependency, no live RKE2
@@ -502,15 +502,14 @@ async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
 
 
 @pytest.mark.asyncio
-async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
+async def test_rke2_e2e_etcd_snapshot_save_waits_for_approval(
     rke2_e2e: _Rke2E2EBundle,
 ) -> None:
-    """rke2.etcd-snapshot.save (safe, non-gated) auto-executes -- no approval park.
+    """rke2.etcd-snapshot.save waits for approval on a person's token call.
 
-    A TENANT_ADMIN dispatch of the safe, non-approval snapshot op runs to
-    completion through the full ``call_operation`` stack: it does NOT park
-    at ``awaiting_approval`` (that gate is only for the sibling write ops),
-    and the result carries the parsed snapshot name + path with exit 0.
+    The snapshot runs as root and writes all cluster data to a file, so a
+    call through the full ``call_operation`` stack parks at
+    ``awaiting_approval`` and no command runs.
     """
     result = await call_operation(
         _OPERATOR,
@@ -521,8 +520,29 @@ async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
             "params": {"name": "pre-upgrade"},
         },
     )
-    # Non-gated: the dispatch executes rather than parking for approval.
-    assert result["status"] == "ok", f"rke2.etcd-snapshot.save did not auto-execute: {result}"
+    assert result["status"] == "awaiting_approval", result
+    assert result.get("extras", {}).get("approval_request_id")
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_etcd_snapshot_save_runs_once_approved(
+    rke2_e2e: _Rke2E2EBundle,
+) -> None:
+    """An approved rke2.etcd-snapshot.save runs and returns the snapshot name + path."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        resolved = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    result = (
+        await dispatch(
+            operator=_OPERATOR,
+            connector_id=_CONNECTOR_ID,
+            op_id="rke2.etcd-snapshot.save",
+            target=resolved,
+            params={"name": "pre-upgrade"},
+            _approved=True,
+        )
+    ).model_dump(mode="json")
+    assert result["status"] == "ok", f"rke2.etcd-snapshot.save did not run: {result}"
     payload = result["result"]
     assert payload["snapshot_name"] == "pre-upgrade-rke2-node-e2e-1754907117"
     assert payload["path"] == (

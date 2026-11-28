@@ -56,6 +56,7 @@ doc/kb lookup and broadcast classifier without an extra round-trip.
 """
 
 import asyncio
+import ssl
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -102,7 +103,7 @@ from meho_backplane.connectors.kubernetes.ops_core import (
     namespace_row,
     node_row,
 )
-from meho_backplane.connectors.kubernetes.wcp import build_wcp_api_configuration
+from meho_backplane.connectors.kubernetes.wcp import _wcp_tls, build_wcp_api_configuration
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -463,6 +464,27 @@ def _kubeconfig_dialing_target(
     return {**config_dict, "clusters": rewritten_clusters}
 
 
+def _probe_tls(target: KubernetesTargetLike) -> tuple[ssl.SSLContext | bool, dict[str, Any]]:
+    """The TLS check of :meth:`KubernetesConnector.probe`: ``(verify, request extensions)``.
+
+    A target with a pinned CA (``tls_ca_pin``) gets the Supervisor login's
+    rule (:func:`~meho_backplane.connectors.kubernetes.wcp._wcp_tls`): a TLS
+    context that trusts the pinned CA, and the certificate name
+    ``tls_server_name`` (else the host) as SNI. A target without one gets
+    ``False``, with no extensions.
+    """
+    ca_pem = getattr(target, "tls_ca_pin", None)
+    if not ca_pem:
+        return False, {}  # NOSONAR S4830 — no known CA before the kubeconfig; see probe()
+    tls = _wcp_tls(
+        host=target.host,
+        verify_tls=bool(getattr(target, "verify_tls", True)),
+        ca_pem=ca_pem,
+        tls_server_name=getattr(target, "tls_server_name", None),
+    )
+    return tls.verify, {"sni_hostname": tls.server_hostname}
+
+
 class KubernetesConnector(Connector):
     """Kubernetes connector -- reads kubeconfig per target, caches the client."""
 
@@ -601,14 +623,18 @@ class KubernetesConnector(Connector):
     async def probe(self, target: KubernetesTargetLike) -> ProbeResult:
         """Kubeconfig-free reachability check against ``/readyz`` (or ``/healthz``).
 
-        TLS verification is intentionally disabled (NOSONAR S4830): the
-        probe is a reachability signal, not an auth check, and runs
-        before any kubeconfig is loaded, so the CA bundle is not yet
-        known. A 401 response is treated as success — it means the API
-        server is up and speaking TLS; auth surfaces at :meth:`execute`
-        time. Real certificate validation happens via the kubeconfig's
-        ``certificate-authority-data`` once the operator's identity is
-        in play.
+        TLS: when the target pins a CA (``tls_ca_pin``), the probe checks
+        the server's certificate against it, by the same rule as the
+        Supervisor login (:func:`~meho_backplane.connectors.kubernetes.wcp._wcp_tls`):
+        the pinned CA, with the host name check against ``tls_server_name``
+        (else the dial host). A target without a pinned CA keeps the
+        unchecked probe (NOSONAR S4830): the probe runs before any
+        kubeconfig is loaded, so the cluster's own CA (often a private
+        one) is not known yet. The probe sends no token, no client
+        certificate and no cookie. A 401 response is treated as success —
+        it means the API server is up and speaking TLS; auth surfaces at
+        :meth:`execute` time, where the kubeconfig's
+        ``certificate-authority-data`` checks the certificate.
 
         Endpoint fallback: ``GET /readyz`` first; on HTTP 404 retry
         ``GET /healthz`` (legacy clusters that predate ``/readyz`` or
@@ -620,19 +646,17 @@ class KubernetesConnector(Connector):
         start = time.monotonic()
         probed_at = datetime.now(UTC)
         endpoint = "/readyz"
+        verify, extensions = _probe_tls(target)
         # The pinned transport checks the address and dials only the checked IP.
-        transport = build_pinned_async_transport(
-            screen_dial_addresses,
-            verify=False,  # NOSONAR S4830 — kubeconfig-free reachability probe; see docstring
-        )
+        transport = build_pinned_async_transport(screen_dial_addresses, verify=verify)
         try:
             async with httpx.AsyncClient(
                 transport=transport, timeout=_PROBE_TIMEOUT_SECONDS
             ) as http:
-                resp = await http.get(f"{base_url}{endpoint}")
+                resp = await http.get(f"{base_url}{endpoint}", extensions=extensions)
                 if resp.status_code == 404:
                     endpoint = "/healthz"
-                    resp = await http.get(f"{base_url}{endpoint}")
+                    resp = await http.get(f"{base_url}{endpoint}", extensions=extensions)
         except (httpx.HTTPError, OSError, TargetDestinationBlockedError) as exc:
             return ProbeResult(
                 ok=False,

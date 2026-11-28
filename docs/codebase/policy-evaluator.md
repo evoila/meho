@@ -245,9 +245,9 @@ compares it with the evaluator's verdict:
 - The same answer: the row names the evaluator's rule as the rule that
   decided (`decided: true`, no `(shadow)` mark).
 - Another answer: the row names `gate:<verdict>` (`run`, `wait` or
-  `deny`). The payload key `policy_rule_shadow` holds the evaluator's
-  rule with `(shadow)`, and the approval request keeps it under
-  `policy_rule.shadow`. The mismatch line is logged as before.
+  `deny`). The payload key `policy_rule_shadow` of the audit row holds
+  the evaluator's rule with `(shadow)`. The approval request stores the
+  `gate` rule. The mismatch line is logged as before.
 - The shadow failed: `gate:<verdict>`, never an empty rule.
 - An Admin's change of rights in the web console keeps
   `default:rights_change.admin_in_web_console`, as before.

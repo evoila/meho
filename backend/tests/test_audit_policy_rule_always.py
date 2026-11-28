@@ -271,7 +271,6 @@ def test_when_the_evaluator_disagrees_the_row_names_the_gate(
     stored = _request().policy_rule
     assert stored is not None
     assert (stored["source"], stored["rule_id"], stored["decided"]) == ("gate", "wait", True)
-    assert stored["shadow"]["rule_id"] == "person.token.caution"
 
 
 def test_when_the_shadow_fails_the_row_names_the_gate(

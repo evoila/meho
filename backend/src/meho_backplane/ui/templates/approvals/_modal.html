@@ -545,8 +545,8 @@
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
         </div>
       {% endif %}
-      {#- The policy rule that matched the call (#6044). Only while the policy
-          evaluator runs in shadow mode; then the rule did not decide. -#}
+      {#- The policy rule of the call (#6044). With CUSTOM_POLICY on it is the
+          rule that decided; with only shadow mode on, it did not decide. -#}
       {% if request.policy_rule %}
         {% set rule = request.policy_rule %}
         <div class="flex items-baseline justify-between gap-4" data-testid="approval-policy-rule">

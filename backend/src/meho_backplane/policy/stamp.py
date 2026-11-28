@@ -60,15 +60,12 @@ class RuleStamp:
 
     def as_json(self) -> dict[str, object]:
         """The value for ``approval_request.policy_rule``."""
-        value: dict[str, object] = {
+        return {
             "source": self.source,
             "rule_id": self.rule_id,
             "text": self.text,
             "decided": self.decided,
         }
-        if self.shadow is not None:
-            value["shadow"] = self.shadow.as_json()
-        return value
 
 
 def deciding_rule(kept: RuleStamp | None, verdict: str) -> RuleStamp:

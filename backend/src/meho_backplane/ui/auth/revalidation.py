@@ -103,6 +103,7 @@ __all__ = [
     "revalidate_read_session",
     "session_client_block",
     "session_is_tenant_admin",
+    "session_role_from_platform_admin",
 ]
 
 
@@ -135,17 +136,35 @@ _client_blocks: dict[uuid.UUID, dict[str, Any]] = {}
 #: the anchor.
 _tenant_admins: dict[uuid.UUID, tuple[uuid.UUID, bool]] = {}
 
+#: session id -> (tenant id, whether the last token check of the session in
+#: this process showed a platform admin who works in that tenant without a
+#: role group there). The console session dependency binds the audit role
+#: note from it (:func:`session_role_from_platform_admin`). Written and
+#: dropped together with :data:`_tenant_admins`, so a switch to another
+#: tenant gets a fresh token check before the next answer.
+_platform_admin_roles: dict[uuid.UUID, tuple[uuid.UUID, bool]] = {}
+
 
 def reset_read_revalidation_cache_for_testing() -> None:
     """Drop every revalidation anchor. Test-only."""
     _last_validated.clear()
     _client_blocks.clear()
     _tenant_admins.clear()
+    _platform_admin_roles.clear()
 
 
 def session_is_tenant_admin(session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
     """Whether the last token check showed ``tenant_admin`` in *tenant_id*; ``False`` if unknown."""
     known = _tenant_admins.get(session_id)
+    return known is not None and known[0] == tenant_id and known[1]
+
+
+def session_role_from_platform_admin(session_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+    """Whether the last token check showed the role in *tenant_id* from the platform admin group.
+
+    ``False`` when unknown, or when the check ran in another tenant.
+    """
+    known = _platform_admin_roles.get(session_id)
     return known is not None and known[0] == tenant_id and known[1]
 
 
@@ -177,10 +196,13 @@ def mark_session_validated(
     check. Read-path revalidation records its own successes itself.
     *tenant_admin* is the role the login token showed in *tenant_id*. Without them the menu
     hides the admin entries until the next token check.
+    A login never works in a tenant through the platform admin group (that
+    needs a tenant named in the request), so the role note starts off.
     """
     _mark_validated(session_id, time.monotonic())
     if tenant_admin is not None and tenant_id is not None:
         _tenant_admins[session_id] = (tenant_id, tenant_admin)
+        _platform_admin_roles[session_id] = (tenant_id, False)
 
 
 def _mark_validated(session_id: uuid.UUID, now_mono: float) -> None:
@@ -193,6 +215,7 @@ def _mark_validated(session_id: uuid.UUID, now_mono: float) -> None:
         del _last_validated[sid]
         _client_blocks.pop(sid, None)
         _tenant_admins.pop(sid, None)
+        _platform_admin_roles.pop(sid, None)
 
 
 def _forget(session_id: uuid.UUID) -> None:
@@ -200,6 +223,7 @@ def _forget(session_id: uuid.UUID) -> None:
     _last_validated.pop(session_id, None)
     _client_blocks.pop(session_id, None)
     _tenant_admins.pop(session_id, None)
+    _platform_admin_roles.pop(session_id, None)
 
 
 async def revalidate_read_session(
@@ -275,6 +299,7 @@ async def revalidate_read_session(
     # The tenant the check ran in: a refresh reads the row again, and
     # another tab may have switched its tenant in the meantime.
     _tenant_admins[decrypted.id] = (refreshed.tenant_id, is_menu_admin(operator))
+    _platform_admin_roles[decrypted.id] = (refreshed.tenant_id, operator.role_from_platform_admin)
     if keep_client:
         _client_blocks[decrypted.id] = build_client_block(operator)
     return refreshed

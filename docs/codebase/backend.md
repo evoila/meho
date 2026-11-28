@@ -109,7 +109,12 @@ this stage it exposes:
     and the console's bind step `_verify_session_token` in
     `ui/auth/refresh.py`) puts `tenant_role_source: platform_admin` into the
     payload of every audit row of such a request that the middleware or
-    the MCP dispatcher writes. The audit cutover listener
+    the MCP dispatcher writes. A console route that checks no role (the
+    account pages, the memory preview) gets the same note from
+    `require_ui_session` (`ui/auth/middleware.py`): it binds what the
+    session's last token check showed (`session_role_from_platform_admin`
+    in `ui/auth/revalidation.py`), without a new token check. After a
+    tenant switch that check runs again before the next answer. The audit cutover listener
     (`audit_cutover.py`) copies the same key onto every other audit row
     built during the request whose writer left it out (connector
     lifecycle actions, the runbook abort row, the dispatcher, ...), so

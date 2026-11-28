@@ -845,7 +845,9 @@ class _OtherTabSwitchesTenant:
             decrypted.id, tenant_id=_TENANT_B, tenant_chosen=True, can_switch=True
         )
         operator = SimpleNamespace(
-            tenant_role=TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.USER
+            tenant_role=TenantRole.TENANT_ADMIN,
+            principal_kind=PrincipalKind.USER,
+            role_from_platform_admin=False,
         )
         return dataclasses.replace(decrypted, tenant_id=_TENANT_B), operator
 
@@ -889,7 +891,9 @@ class _OtherTabChoosesTheSameTenant:
             decrypted.id, tenant_id=_TENANT_A, tenant_chosen=True, can_switch=True
         )
         operator = SimpleNamespace(
-            tenant_role=TenantRole.TENANT_ADMIN, principal_kind=PrincipalKind.USER
+            tenant_role=TenantRole.TENANT_ADMIN,
+            principal_kind=PrincipalKind.USER,
+            role_from_platform_admin=False,
         )
         return dataclasses.replace(decrypted, tenant_chosen=True), operator
 

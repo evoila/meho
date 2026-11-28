@@ -105,6 +105,7 @@ from sqlalchemy import select
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from meho_backplane.auth.client_identity import bind_request_client_block
+from meho_backplane.auth.current_tenant import bind_role_from_platform_admin
 from meho_backplane.auth.principal_block import (
     PRINCIPAL_BLOCKED_MESSAGE,
     PrincipalBlockUnavailableError,
@@ -118,7 +119,11 @@ from meho_backplane.sandbox_mode import (
     sandbox_mode_active,
 )
 from meho_backplane.ui.audit import bind_ui_view_audit
-from meho_backplane.ui.auth.revalidation import revalidate_read_session, session_client_block
+from meho_backplane.ui.auth.revalidation import (
+    revalidate_read_session,
+    session_client_block,
+    session_role_from_platform_admin,
+)
 from meho_backplane.ui.auth.routes import (
     login_location,
     page_from_htmx_current_url,
@@ -228,6 +233,10 @@ class UISessionContext:
     #: the token had none. Pages show it for the signed-in person in
     #: place of :attr:`operator_sub`.
     display_name: str | None = None
+    #: ``True`` when the session's last token check showed a platform admin
+    #: who works in :attr:`tenant_id` without a role group there. The audit
+    #: rows of the request then carry ``tenant_role_source: platform_admin``.
+    role_from_platform_admin: bool = False
 
 
 def _select_path(scope: Scope) -> str:
@@ -517,6 +526,9 @@ async def _load_session_context(cookie_value: str | None, *, path: str) -> UISes
         can_switch_tenant=revalidated.can_switch_tenant,
         client=session_client_block(revalidated.id),
         display_name=revalidated.display_name,
+        role_from_platform_admin=session_role_from_platform_admin(
+            revalidated.id, revalidated.tenant_id
+        ),
     )
 
 
@@ -753,6 +765,10 @@ async def require_ui_session(request: Request) -> UISessionContext:
     # The audit middleware reset the ``client`` block after the session
     # middleware's token check; bind it again (AUDIT_CLIENT_IDENTITY).
     bind_request_client_block(session_context.client)
+    # The role note for every console request, also for a route that checks
+    # no role. A route that checks the role checks the token again and binds
+    # the note from that check (``ui/auth/refresh.py``).
+    bind_role_from_platform_admin(session_context.role_from_platform_admin)
     return session_context
 
 

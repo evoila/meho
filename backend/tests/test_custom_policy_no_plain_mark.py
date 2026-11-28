@@ -130,18 +130,20 @@ async def test_each_plain_marked_safe_or_caution_op_counts_as_dangerous(
     relevelled = []
     for key, row in on.items():
         before = off[key]
+        # With the switch on, an operation marked changes_rights waits for approval.
+        rights = bool(row.changes_rights)
         if has_plain_mark(row) and before.safety_level in ("safe", "caution"):
             relevelled.append(key)
-            assert (row.safety_level, row.requires_approval) == ("dangerous", False), key
+            assert (row.safety_level, row.requires_approval) == ("dangerous", rights), key
             assert before.requires_approval, key
         elif has_plain_mark(row):
             # A dangerous or destructive operation keeps its level.
             assert row.safety_level == before.safety_level, key
-            assert row.requires_approval is (row.safety_level == "destructive"), key
+            assert row.requires_approval is (row.safety_level == "destructive" or rights), key
         else:
             assert (row.safety_level, row.requires_approval) == (
                 before.safety_level,
-                before.requires_approval,
+                before.requires_approval or rights,
             ), key
         # The code's own values never change.
         assert (row.code_safety_level, row.code_requires_approval) == (
@@ -296,13 +298,15 @@ async def test_no_call_waits_less_and_only_hard_to_undo_waits_more(
     on_rows = await _effective_rows(monkeypatch, on=True)
     on, evaluated = await _verdicts(on_rows, evaluator=True)
     hard_to_undo = {_key(r) for r in on_rows if r.hard_to_undo}
+    # With the switch on, an operation marked changes_rights waits for approval.
+    changes_rights = {_key(r) for r in on_rows if r.changes_rights}
 
     assert off.keys() == on.keys()
     looser = [k for k in off if _RANK[on[k]] < _RANK[off[k]]]
     stricter = [k for k in off if _RANK[on[k]] > _RANK[off[k]]]
     assert looser == [], f"{len(looser)} call(s) wait less with the switch on: {looser[:20]}"
-    other = [k for k in stricter if k[1:] not in hard_to_undo]
-    assert other == [], f"stricter without hard_to_undo: {other[:20]}"
+    other = [k for k in stricter if k[1:] not in hard_to_undo | changes_rights]
+    assert other == [], f"stricter without hard_to_undo or changes_rights: {other[:20]}"
     relevelled = {_key(r) for r in on_rows if r.safety_level == "dangerous"} - {
         _key(r) for r in off_rows if r.safety_level == "dangerous"
     }
@@ -310,7 +314,8 @@ async def test_no_call_waits_less_and_only_hard_to_undo_waits_more(
     # The evaluator gets the same rule: the switch adds no difference to the gate.
     differ_off = {k for k in off if _TO_EVALUATOR[off[k]] is not off_evaluated[k]}
     differ_on = {k for k in on if _TO_EVALUATOR[on[k]] is not evaluated[k]}
-    assert sorted(differ_on - differ_off) == []
+    # The rule for changes_rights is a different rule from this one.
+    assert sorted(k for k in differ_on - differ_off if k[1:] not in changes_rights) == []
 
 
 # ---------------------------------------------------------------------------

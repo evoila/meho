@@ -40,6 +40,7 @@ from meho_backplane.redaction.flight_recorder import (
 from meho_backplane.redaction.flight_recorder import bodies as fr_bodies
 from meho_backplane.redaction.flight_recorder.families import secret_tag_tokens
 from meho_backplane.settings import get_settings
+from tests._secret_class_standins import STANDIN_OPS, standin_ops  # noqa: F401
 
 # --- Synthetic, PLACEHOLDER-shaped secrets ---------------------------------
 # Each is crafted to match a credential *shape* the underlying Tier-1
@@ -613,6 +614,17 @@ def test_real_credential_ops_never_record_body_via_classify_op(op_id: str) -> No
     """The single most important regression guard: real secret ops excluded."""
     result = classify_body_exclusion(op_id)
     assert result.excluded is True, f"{op_id} MUST be excluded (secret body)"
+    assert result.family == "secret-bearing"
+    assert result.uncertain is False
+
+
+@pytest.mark.usefixtures("standin_ops")
+@pytest.mark.parametrize("op_class", sorted(STANDIN_OPS))
+def test_declared_secret_request_class_never_records_body(op_class: str) -> None:
+    """A declared credential write or use records no body, by its class alone."""
+    op_id = STANDIN_OPS[op_class]
+    result = classify_body_exclusion(op_id)
+    assert result.excluded is True
     assert result.family == "secret-bearing"
     assert result.uncertain is False
 

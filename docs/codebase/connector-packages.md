@@ -145,11 +145,17 @@ first two are always needed:
    `writes` module.
 4. **Declare the op classes**, if an operation needs an exact class for
    the broadcast feed, the approval queue and the flight recorder: a read
-   whose answer holds a secret (`credential_read`), a change that returns
-   a new secret (`credential_mint`), a change whose request carries or
-   sends a secret (`credential_write`), or a change whose op id does not
-   end in a write word (`write`). The package does this in its own
-   `op_classes.py`, imported from `__init__.py`:
+   whose answer holds a secret (`credential_read`), a change that makes
+   a new credential (`credential_mint`), a change that sets, changes or
+   stores a password, key, token or certificate (`credential_write`), a
+   call that carries or sends a secret but writes and makes no credential
+   (`credential_use`), or a change whose op id does not end in a write
+   word (`write`). A `credential_use` operation does not count as a
+   write for the announce gate, the announce reminder and the target
+   activity warning. An operation that changes the target keeps a class
+   that counts as a write (`write`, `credential_write` or
+   `credential_mint`) and is not declared `credential_use`. The package
+   does this in its own `op_classes.py`, imported from `__init__.py`:
 
    ```python
    # meho_backplane/connectors/example_widget/op_classes.py

@@ -418,7 +418,9 @@ Two kinds of rows carry a keyed hash of a call's params:
   call that changed any value, a password too, does not match.
   The request also keeps the params themselves, because MEHO runs the
   approved call with them:
-  - A credential write, and a `k8s.apply` whose manifest holds a Secret
+  - A call of class `credential_write` or `credential_use`, a waiting
+    plain step of a multi-step operation of one of these classes, and a
+    `k8s.apply` whose manifest holds a Secret
     or a secret-looking value (the param a connector declares with
     `declare_hidden_stored_param`),
     keep the params, and the params of a parent multi-step call, only in
@@ -941,17 +943,124 @@ gate asks this list before it reads a standing grant or a run approval.
 Each rule and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
+### Steps of an approved multi-step operation, with `CUSTOM_POLICY` on
+
+When a person approves a whole multi-step operation, its other steps go
+ahead under that one approval, unless a step keeps its own approval. The
+rule is `step_keeps_own_approval` in `operations/run_step_rules.py`. Two
+places ask it: the step gate (`composite._gate_subop`, through
+`_covered_by_approved_run`) and the dispatcher's rule for a child call.
+
+With the switch `CUSTOM_POLICY` off, a step keeps its own approval when it
+is `destructive`, marked `requires_approval`, "always wait" or a credential
+call. Nothing else is read.
+
+With the switch on, a step keeps its own approval when one of these holds:
+
+- It is `destructive`, "always wait" or a credential call.
+- It is marked `requires_approval` for another reason than the plain
+  "always ask" mark (`op_policy.has_plain_mark`): for example an override
+  or a param made it wait. An override row of the operation, install-wide
+  or of the caller's tenant, that sets the approval flag counts too. A step
+  whose operation has only the plain mark goes ahead under the run's
+  approval.
+- A fixed rule covers it (`fixed_rule_for`): a credential call, a change of
+  rights or of the policy, a call to an address the caller gives, a
+  `destructive` step and a delete. A step of a run is never a person's own
+  click in the web console. So a change of rights or of the policy keeps
+  its own approval whoever approved the run and wherever, also an Admin in
+  the web console after a fresh sign-in.
+- No run approval covers it (`never_covered_reason`, plus the root shell
+  mark).
+- The person who approved the run may not approve the step's level
+  (`run_approver_may_approve` in `operations/approved_run_rights.py`, read
+  off the decision of the run's approval). This holds for every step's
+  level: the code's own level, or a level an override row or a
+  classification entry set.
+
+The step gate asks these rules with the stored facts of the step's
+operation, when a row is stored (`step_rule_rows`): its parameter schema,
+HTTP verb, tags, class and risk level. A copy's risk level is the higher of
+the step's declared level and the stored one. So a stored `destructive`
+level makes the step keep its own approval. Such a step cannot wait without
+a preview hash, so it gets the refusal a `destructive` child call gets.
+The copies also carry the stored `hard_to_undo`. With the switch on it is
+a delete sign, so a step whose stored row has `hard_to_undo` keeps its own
+approval, as a child call of the same operation does.
+When both a built-in row and a row of the caller's tenant are stored, the
+rules are asked once for each row, so a fact counts when either row holds
+it. The facts go only into copies of the step's row. The gate uses the
+step's declared values. The step's own approval request carries the level
+the rules checked: the highest level of the step and its copies
+(`highest_level`). So only a person who may approve that level can approve
+it. With the switch off, no stored row is read.
+
+When a person approved a step's own request and the run goes on, the step
+is checked again before it runs. With the switch on, its level then is the
+higher of its declared level and the levels of the stored rows of its
+operation. The same risk check as for a child call of the same operation
+decides (`_risk_refusal` in `operations/approved_run_rights.py`):
+
+- A level of `destructive` above the level on the step's approval card
+  stops the step.
+- A level of `dangerous` above the card's level stops the step when the
+  person who approved may not approve that level.
+- A stopped step gets the refusal such a child call gets.
+- A higher level that the approval covers lets the step run, as it lets a
+  child call run.
+
+With the switch off, nothing more is read.
+
+In a run that goes on after a person's approval, these rules hold also
+when a step's policy answer lets it run at once
+(`step_wait_reason_after_approval`): the step or child call then waits for
+its own approval. A `deny` stays a deny. Outside such a run nothing
+changes. The reason MEHO stores for such a wait (the `wait_reason` of the
+step's `approval.request` audit row) names the rule:
+`run_step_keeps_own_approval: a step of a run after an approval keeps its
+own approval (floor:rights_change_waits)`. A fixed rule is named as
+`floor:<rule id>`; otherwise the reason ends in `(requires_approval)`,
+`(no_run_approval_covers_it)` or `(approver_may_not_approve_step_level)`.
+
+One exception: a credential read that the run sent at once before the
+wait, and that a resume sends again, is sent again with no new wait, so
+the run can finish. A re-sent read whose policy makes it wait is still
+refused with `composite_resume_read_not_sent`.
+
+Tests: `backend/tests/test_custom_policy_run_steps.py`,
+`backend/tests/test_custom_policy_run_steps_routes.py`,
+`backend/tests/test_custom_policy_run_steps_console_rights.py`,
+`backend/tests/test_custom_policy_run_steps_resend.py`,
+`backend/tests/test_custom_policy_run_steps_stored_level.py`,
+`backend/tests/test_custom_policy_run_steps_hard_to_undo.py`,
+`backend/tests/test_custom_policy_run_steps_raised_level.py` and
+`backend/tests/test_custom_policy_run_steps_own_recheck.py`. The switch-off
+answers in these tests are fixed values recorded from a run on main.
+
+## A Reader's change is refused, not stored
+
+A caller with the Reader role (`read_only`) who asks for a change gets one
+plain sentence next to the code `insufficient_role`. MEHO stores nothing and
+runs nothing. The same check covers a new call and a re-run by the
+requester (`POST /api/v1/approvals/{id}/rerun`), checked with the role in
+the caller's token at the re-run: a requester whose role is now Reader is
+refused, and the operation does not run. A preview is not a change. The rule, the sentence and the places MEHO checks it:
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
+
 ## A credential call always waits for a person
 
-A call that reads, writes or makes a credential (the classes
-`credential_read`, `credential_write` and `credential_mint`) always waits
-for a person. No standing grant, no agent grant and no run approval covers
-it. One rule says so: `service_grants.never_covered_reason`, with
+A call that reads, writes, makes or uses a credential (the classes
+`credential_read`, `credential_write`, `credential_mint` and
+`credential_use`) always waits for a person. No standing grant, no agent
+grant and no run approval covers it. A person's own call of a
+`credential_use` operation follows its risk level and approval mark. One
+rule says so: `service_grants.never_covered_reason`, with
 `credential_grant_reason` for these classes. Grant create, run approval
 create and agent grant create (an exact op id with `auto-execute`) refuse
 such an operation with the reason "A standing grant, an agent grant or a
 run approval never covers 'OP': it reads, writes or makes a credential, so
-a person approves each call. Leave it out." The call of an agent or a
+a person approves each call. Leave it out." For a `credential_use`
+operation the reason says "it uses a credential". The call of an agent or a
 service login waits also at level `safe`. The approval of a parent
 multi-step run does not cover such a step or child call: it waits for its
 own approval (`_covered_by_approved_run`). This holds also when the person
@@ -961,9 +1070,15 @@ the person approves the step, the multi-step run goes on with this step
 cleared; when the person rejects it, the run ends and the step never runs.
 A child call (`dispatch_child`) that waits is its own request. When a
 person approves it, only the child runs, and the multi-step run does not
-go on. An install or tenant override does not turn
-off the approval that the code turns on for an operation that writes or
-makes a credential. Details:
+go on. An operation that writes or makes a credential always has the
+approval flag: MEHO turns it on when the operation is looked up and when
+an API description is ingested, also when the connector registered it
+without the flag. A step of a multi-step operation whose operation writes
+or makes a credential gets the flag too, whatever flag the step declares
+(`apply_step_policy`): the step waits for a person, also at level `safe`
+and in the web console, and its risk level stays as it is. No install or tenant override turns it off. So a
+person's call waits too, with a token and in the web console, at every
+risk level. Details:
 [service-principal-grants.md](service-principal-grants.md#credential-calls),
 [run-approvals.md](run-approvals.md),
 [agent-permission-grants.md](agent-permission-grants.md).
@@ -1158,6 +1273,11 @@ request field, header or command-line flag can set it.
 | MEHO-Admins | yes, at every risk level, on purpose | yes | yes |
 | MEHO-Operators (also MEHO-SA-Operators, read as Operators) | only a `caution` change that waited because it came with a token, with a click in the web interface | yes | no |
 | MEHO-Readers (also MEHO-Approvers, read as Readers) | (they cannot run changes) | no | no |
+
+A Reader cannot ask for a change at all. MEHO refuses the call at once with
+`insufficient_role` and a plain sentence, and stores no approval request, so
+a Reader's change never waits for approval. See
+[agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
 
 MEHO reads the old group MEHO-SA-Operators as Operators and MEHO-Approvers as
 Readers. The default groups set no `approver` flag and no self-approval flag
@@ -2516,7 +2636,7 @@ There is no MCP tool for it; the agent working surface is unchanged.
 | A `destructive` request: a new server-side preview has the approved `preview_hash`. | same (`preview_changed`) |
 | A `destructive` request: the live card builds, and the object it names is still the one on the approval card, or is gone (`approval_object_check.py`, same check as every approved run). | same (`object_changed`) |
 | An operation whose card shows the object as it is now: that state is still the one on the approval card (`approval_state_pin.py`, same check as every approved run). | same (`object_changed`) |
-| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`) |
+| The caller's role is `operator` or higher, from the caller's token now. | 403 `insufficient_role` (`insufficient_role`); a Reader also gets the plain sentence in `message` |
 | A new call of the caller, made now, would not be refused: no `deny` grant, a grant when the grant switch is `on` (also for the steps of a multi-step operation), a role that meets the operation's floor, an agent login MEHO has not revoked (`approved_run_rights.py`, the same checks as every approved run). | 403 `approval_rerun_refused` (`rights_refused`) |
 | The risk level did not go up to `destructive`, and not to `dangerous` past what the person who approved may approve. | 409 `approval_rerun_needs_new_approval` (`risk_raised`) |
 
@@ -3411,7 +3531,8 @@ of these hold:
 - the body's `status` equals `error_code`, so the body is MEHO's own error
   answer, not a vendor answer;
 - neither the run's op nor the parked op is in a secret class
-  (`credential_read`, `credential_mint`, `credential_write`).
+  (`credential_read`, `credential_mint`, `credential_write`,
+  `credential_use`).
 
 So no param and no vendor text of an operation that sends or reads a secret
 reaches the summary (the rule of #4854). For other operations the text is
@@ -3550,7 +3671,10 @@ The per-op preview is opt-in via a builder registry in
   (`operations/platform_admin_card.py`, core only) names the parts of a
   card that only a platform admin who is a person reads, in a call of
   their own. Every view of a stored card passes it through
-  `card_for_reader`: the REST approvals API, the MCP tools
+  `card_for_reader`, which first runs the op's card view when it has one
+  (`register_card_view(op_id, view)`, in the same module: the view gets
+  the effect and whether the reader gets the whole card). The views are
+  the REST approvals API, the MCP tools
   `meho_approvals_get` and `meho_approvals_list`, and the console pages.
   Every other reader gets the card as the filter gives it back. So does
   a call that runs with an acting agent (`actor_delegation`, for example
@@ -3633,7 +3757,7 @@ Three invariants make the hook safe to wire on the park path:
    `classify_op` (the same single-sourced sensitivity classification used
    for broadcast/audit redaction, #1401) and **suppresses the generic
    params-echo default** for any credential class (`credential_read` /
-   `credential_mint` / `credential_write`) — the generic echo can only do
+   `credential_mint` / `credential_write` / `credential_use`) — the generic echo can only do
    generic key-name / value-shape redaction and is not trusted to scrub a
    connector-specific secret shape, so a credential-class op with no
    bespoke builder collapses to the identifier-only default. For an
@@ -3755,9 +3879,9 @@ for the old `v1` kinds), the kind, the namespace and the name, and:
   the cluster refuses or that fails gives `unknown` and a `state_note`; the
   card says "not known if it exists", never "new". MEHO reads the live
   object only when the login that asked has the role Operator or higher.
-  For any other login there is no read: `state` is `not_read`, the card
-  shows the badge "not read" and the line "The live object was not read:
-  the login that asked has a role below Operator."
+  A `k8s.apply` of a login with the Reader role is refused before an
+  approval card is made: the code `insufficient_role` and the Reader
+  sentence, and nothing is stored.
 - `other_writers`: the managers in the live object's `managedFields`,
   without `meho`. `null` when the live object was not read or could not be
   read.
@@ -5317,6 +5441,7 @@ a `role="alert"` warning banner when `write_capability_warning` is set
 rows carry it); an error banner when `preview_unavailable` is true, carrying
 `preview_error` (#1628); a reason-keyed notice when `preview_populated`
 is false (`credential_write_redacted` → elevated-risk redaction copy,
+`credential_use_redacted` → the same copy, which says the call uses a credential,
 `connector_did_not_populate` → a neutral "no preview" note, #2332); and a
 key-value table of the operation-specific fields (the bespoke `preview`,
 else the generic redaction-safe `params_echo`, #1856). The full envelope
@@ -5811,13 +5936,16 @@ the run, so its remaining internal steps go ahead under that approval
 while the dispatcher runs it with `_approved=True` (it binds
 `approved_run_var`) or while `composite_resume_scope_var` is set (the
 re-entry of an approved step). Then a step whose gate says
-`NEEDS_APPROVAL` goes ahead, unless the step is `destructive`, marked
-`requires_approval`, or reads, writes or makes a credential
-(`service_grants.credential_call_waits`). A `DENY` stays a deny. The same
-holds for a child operation the composite runs through `dispatch_child`:
-the child's own `dispatch()` reads `approved_run_var` right after its
-policy gate and goes ahead on `NEEDS_APPROVAL` under the same three
-exceptions. A credential step or child waits for its own approval, also
+`NEEDS_APPROVAL` goes ahead, unless it keeps its own approval: the step is
+`destructive`, "always wait", reads, writes or makes a credential
+(`service_grants.credential_call_waits`), or `step_keeps_own_approval`
+holds for it. With `CUSTOM_POLICY` off that is a step marked
+`requires_approval`; with it on, the rules in
+[Steps of an approved multi-step operation, with `CUSTOM_POLICY` on](#steps-of-an-approved-multi-step-operation-with-custom_policy-on).
+A `DENY` stays a deny. The same holds for a child operation the composite
+runs through `dispatch_child`: the child's own `dispatch()` reads
+`approved_run_var` right after its policy gate and goes ahead on
+`NEEDS_APPROVAL` under the same rules. A credential step or child waits for its own approval, also
 when the rights of the person who approved the run would let it run: the
 step's gate and the child's `dispatch()` turn an `AUTO_EXECUTE` into a wait
 (`credential_step_waits_after_approval`). This holds whoever runs the
@@ -5828,10 +5956,11 @@ again. So a multi-step composite (e.g. `vm.create` with
 `power_on_after_create=True`, which parks at create then powers on)
 completes in a **single** resume, each step running exactly once. The
 invariant is explicit: **every governed sub-op of a composite that must
-finish in one resume is not `destructive` and not `requires_approval`**.
+finish in one resume is a step that does not keep its own approval** (the
+rules above, with the switch off and with it on).
 
-A later step that is `destructive` or marked `requires_approval` waits for
-its own approval, also during a resume. The steps the run already did are
+A later step that keeps its own approval waits for it, also during a
+resume. The steps the run already did are
 stored with that new request, so its resume sends none of them again. See
 the next section. A child call that waits is its own request: its approval
 runs only the child, and the multi-step run does not go on.
@@ -5854,9 +5983,10 @@ of the steps each run went through (`operations/composite_steps.py`):
   - a step that only `enforce_subop_policy` checks: `started`. The seam
     does not see the handler's own call, so this step never has a stored
     end.
-  A result is kept only when the step's operation does not read, write or
-  make a credential (its class from `classify_op` is not
-  `credential_read`, `credential_mint` or `credential_write`, and its
+  A result is kept only when the step's operation does not read, write,
+  make or use a credential (its class from `classify_op` is not
+  `credential_read`, `credential_mint`, `credential_write` or
+  `credential_use`, and its
   answer does not hide its values, `hides_secret_values`), and the result
   is JSON and holds no secret-named value, also no number under a secret
   name (`scrub_secret_fields` with `hide_numbers=True`); otherwise the
@@ -5865,8 +5995,9 @@ of the steps each run went through (`operations/composite_steps.py`):
 - **Credential steps.** MEHO never stores the result of a credential step,
   and never a credential value. The entry holds only the connector, op id,
   target and the keyed params hash. The rule:
-  - A step that **writes or makes** a credential (`credential_write`,
-    `credential_mint`) and ended well becomes `done_no_result`. "Ended
+  - A step that **writes, makes or uses** a credential (`credential_write`,
+    `credential_mint`, `credential_use`) and ended well becomes
+    `done_no_result`. "Ended
     well": the `call` of `run_governed_subop` returned, or the
     `dispatch_child` result is `ok` and not `execution_outcome:
     "uncertain"`. The entry says only that the step is finished.
@@ -6144,7 +6275,8 @@ What the agent waiter does:
   the target's detected version no longer fits it. Covered by
   `test_agent_resume_runs_on_the_stored_sibling_catalog` and
   `test_agent_resume_is_refused_when_the_target_version_moved`.
-- **Credential-write sub-op.** The row stores only the parent `op_id`; the
+- **Sub-op of a `credential_write` or `credential_use` operation.** The row
+  stores only the parent `op_id`; the
   parent params live in the encrypted custody copy. For a composite sub-op
   the claim winner consumes that copy to get the parent params. For a direct
   request it still discards the copy.
@@ -6401,8 +6533,8 @@ repository, no operation made from an API file at run time.
   check.
 - **What fails.** An operation that gets a lower risk level (`destructive` >
   `dangerous` > `caution` > `safe`); loses "needs approval"; loses "no grant
-  can cover it"; moves from `credential_read`, `credential_write` or
-  `credential_mint` to another class; or is removed. A new row passes, and
+  can cover it"; moves from `credential_read`, `credential_write`,
+  `credential_mint` or `credential_use` to another class; or is removed. A new row passes, and
   so does a change to more approval or a higher level.
 - **List a wanted change.** Add one entry for each change, with a one-line
   reason, to `backend/tests/snapshots/approval_table_approved.yaml`:

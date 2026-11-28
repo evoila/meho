@@ -51,7 +51,8 @@ Design contract
   reuses the single-sourced sensitivity classification from
   :func:`~meho_backplane.broadcast.events.classify_op` (shipped by
   G11.7-T1 #1401): an op that classifies as a credential class
-  (``credential_read`` / ``credential_mint`` / ``credential_write``) gets
+  (``credential_read`` / ``credential_mint`` / ``credential_write`` /
+  ``credential_use``) gets
   **no generic params-echo default** -- the generic echo can only do
   key-name / value-shape redaction and is not trusted to scrub a
   connector-specific secret shape, so a credential-class op with no
@@ -90,6 +91,7 @@ from meho_backplane.broadcast.events import (
     is_snmp_community_key,
     resolve_op_class,
 )
+from meho_backplane.op_classes import CREDENTIAL_OP_CLASSES
 from meho_backplane.redaction import apply_connector_boundary_redaction, get_default_policy, redact
 from meho_backplane.settings import parse_bool_env
 
@@ -106,6 +108,7 @@ __all__ = [
     "PERSON_ONLY_EFFECT_KEYS",
     "PREVIEW_FAILURE_ECHO_KEYS",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
+    "PREVIEW_REASON_CREDENTIAL_USE_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "SWITCHED_EFFECT_KEYS",
     "PreviewContext",
@@ -141,9 +144,7 @@ _log = structlog.get_logger(__name__)
 #: Sensitivity classes whose preview must never be stored verbatim.
 #: Mirrors the aggregate-only set in
 #: :func:`~meho_backplane.broadcast.events.redact_payload`.
-_SENSITIVE_CLASSES: frozenset[str] = frozenset(
-    {"credential_read", "credential_mint", "credential_write"}
-)
+_SENSITIVE_CLASSES: frozenset[str] = CREDENTIAL_OP_CLASSES
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default *because the op is a
@@ -153,6 +154,11 @@ _SENSITIVE_CLASSES: frozenset[str] = frozenset(
 #: populated a preview" so the approval surface can style it as
 #: elevated-risk rather than merely incomplete.
 PREVIEW_REASON_CREDENTIAL_REDACTED = "credential_write_redacted"
+
+#: The reason code for the same collapsed envelope when the op is of class
+#: ``credential_use``: the call uses a credential, so the card says that in
+#: place of "credential-class write".
+PREVIEW_REASON_CREDENTIAL_USE_REDACTED = "credential_use_redacted"
 
 #: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
 #: collapsed to the op-identity-only default for a *non*-credential op —
@@ -992,6 +998,8 @@ def describe_preview_provenance(
       - :data:`PREVIEW_REASON_CREDENTIAL_REDACTED` when the op is a
         credential class (its preview is intentionally suppressed absent a
         bespoke builder).
+      - :data:`PREVIEW_REASON_CREDENTIAL_USE_REDACTED` in place of it when
+        that class is ``credential_use``.
       - :data:`PREVIEW_REASON_NOT_POPULATED` otherwise (no builder /
         nothing to echo).
 
@@ -1009,7 +1017,10 @@ def describe_preview_provenance(
     # Collapsed to the identifier-only default: name WHY so the approver
     # sees a deliberately-redacted credential write distinctly from a
     # connector that simply never populated a preview.
-    if resolve_op_class(op_id, stored_op_class) in _SENSITIVE_CLASSES:
+    op_class = resolve_op_class(op_id, stored_op_class)
+    if op_class == "credential_use":
+        return False, PREVIEW_REASON_CREDENTIAL_USE_REDACTED
+    if op_class in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
 

@@ -37,6 +37,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalResultState,
     approval_result_state,
 )
+from meho_backplane.operations.role_floors import READER_CHANGE_SENTENCE
 from tests.test_agent_grant_required import _AGENT, _grant
 from tests.test_approved_run_rights import (
     _CONNECTOR,
@@ -201,7 +202,10 @@ async def test_rerun_by_another_caller_writes_its_audit_row(
     response = await _rerun(client, request_id, _token(client[1], "person-2", role=role))
 
     assert response.status_code == 403, response.text
-    assert response.json() == {"detail": detail}
+    expected = {"detail": detail}
+    if role is TenantRole.READ_ONLY:
+        expected["message"] = READER_CHANGE_SENTENCE
+    assert response.json() == expected
     (row,) = await _rerun_rows(request_id)
     assert row.operator_sub == "person-2"
     assert row.status_code == 403

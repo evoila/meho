@@ -55,6 +55,7 @@ operator-only degrade).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from contextvars import ContextVar
@@ -64,6 +65,11 @@ from typing import Any, Final
 
 import structlog
 
+from meho_backplane.connectors._shared.log_host import (
+    FIRST_REQUEST_URL_EXTENSION,
+    REDIRECT_TEXT_WITHHELD,
+    redirect_text_withheld,
+)
 from meho_backplane.flight_recorder._capture_util import (
     approx_bytes,
     approx_span_bytes,
@@ -95,10 +101,6 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
-
-#: The key of :attr:`httpx.Response.extensions` and :attr:`httpx.Request.extensions`
-#: that holds the first request address when the HTTP client followed a redirect.
-FIRST_REQUEST_URL_EXTENSION = "meho_first_request_url"
 
 # --- F3 caps (fixed invariants, not tunable knobs) --------------------------
 #: Per-trace cap. Once a trace's accumulated span bytes would exceed this,
@@ -466,6 +468,12 @@ def _redact_vendor_call(
     response_content_type = header_value(response, "content-type")
     req_body, req_truncated = cap_body(request_body)
     raw_response_body = response_content(response) if response_body is None else response_body
+    if redirect_text_withheld(getattr(response, "status_code", None)):
+        # A 3xx other than a 304 in the trace is one MEHO did not follow: its
+        # text is not kept. A 304 asks for no redirect; its body stays as sent.
+        # The fixed sentence goes in as a JSON string, so the span records it.
+        raw_response_body = json.dumps(REDIRECT_TEXT_WITHHELD)
+        response_content_type = "application/json"
     resp_body, resp_truncated = cap_body(raw_response_body)
     redaction = redact_span(
         op_id=op.op_id if op else None,

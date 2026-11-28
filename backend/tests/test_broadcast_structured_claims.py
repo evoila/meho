@@ -218,6 +218,7 @@ def test_planned_op_class_enum_matches_classify_op_taxonomy() -> None:
         "credential_read",
         "credential_write",
         "credential_mint",
+        "credential_use",
         "audit_query",
         "approval",
         "other",

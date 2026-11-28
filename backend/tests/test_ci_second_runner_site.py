@@ -89,6 +89,10 @@ _SECOND_SITE_ONLY_STEPS = {
     "Hide the proxy name in the test reports",
 }
 _HIDE_STEP = "Hide the proxy name in the test reports"
+# The alias of the sync step is also in the hosted-trial job. With the line
+# after it, it is found only in the second-site job.
+_SYNC_ALIAS = "      - *unit-sync\n"
+_SYNC_IN_THE_SECOND_SITE_JOB = _SYNC_ALIAS + "\n      - &site2-fastembed-restore\n"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("jq") is None or shutil.which("bash") is None,
@@ -365,9 +369,10 @@ def test_smoke_job_has_no_cache_access() -> None:
 def test_a_secret_in_the_second_site_job_or_the_workflow_env_is_found() -> None:
     text = _CI.read_text()
     secret = "${{ secrets.SHARED_TOKEN }}"
-    marker = "      - *unit-sync\n"
+    marker = _SYNC_IN_THE_SECOND_SITE_JOB
     assert text.count(marker) == 1
-    in_step = text.replace(marker, marker + f"      - name: Extra\n        run: echo {secret}\n", 1)
+    extra = f"      - name: Extra\n        run: echo {secret}\n"
+    in_step = text.replace(marker, _SYNC_ALIAS + extra + marker.removeprefix(_SYNC_ALIAS), 1)
     job = yaml.safe_load(in_step)["jobs"][_NEW_JOB]
     with pytest.raises(AssertionError):
         _assert_no_secret_environment_or_id_token(yaml.safe_dump(job))
@@ -495,13 +500,13 @@ def test_smoke_pulls_one_of_the_unit_test_images() -> None:
     assert f"PROXY/{image.removeprefix('docker.io/')}" in script
 
 
-def test_only_the_watchdogs_may_cancel_a_run() -> None:
+def test_only_the_second_site_watchdog_may_cancel_a_run() -> None:
     writers = sorted(
         name
         for name, job in _ci_jobs().items()
         if (job.get("permissions") or {}).get("actions") == "write"
     )
-    assert writers == ["merge-queue-watchdog", "second-site-watchdog"]
+    assert writers == ["second-site-watchdog"]
 
 
 # --- The same test steps in both shard jobs --------------------------------------
@@ -548,7 +553,8 @@ def test_the_steps_that_differ_are_in_the_same_order() -> None:
     for name in ("Install uv", "Restore the spaCy model from the cache"):
         assert names[names.index(name) + 1] == normal[normal.index(name) + 1]
     for steps in (names, normal):
-        assert steps[steps.index(_HIDE_STEP) - 1] == "Pytest (unit shard ${{ matrix.shard }}/6)"
+        assert steps[steps.index(_HIDE_STEP) - 2] == "Pytest (unit shard ${{ matrix.shard }}/6)"
+        assert steps[steps.index(_HIDE_STEP) - 1] == "Check the skipped tests of this shard"
         assert steps[steps.index(_HIDE_STEP) + 1] == (
             "Upload per-test times (input for the shard split)"
         )
@@ -653,7 +659,13 @@ def _with_step_after(text: str, marker: str, step: str) -> str:
 
 
 def test_save_check_finds_a_save_step_in_the_job() -> None:
-    text = _with_step_after(_CI.read_text(), "      - *unit-sync\n", _SAVE_STEP)
+    text = _CI.read_text()
+    assert text.count(_SYNC_IN_THE_SECOND_SITE_JOB) == 1
+    text = text.replace(
+        _SYNC_IN_THE_SECOND_SITE_JOB,
+        _SYNC_ALIAS + _SAVE_STEP + _SYNC_IN_THE_SECOND_SITE_JOB.removeprefix(_SYNC_ALIAS),
+        1,
+    )
     assert _second_site_saving_steps(text) == ["Save something to the cache"]
 
 
@@ -831,6 +843,66 @@ def test_fan_in_needs_both_shard_jobs() -> None:
 # --- The decision: pick_second_site.sh -------------------------------------------
 
 
+# --- Artifacts of the second site never reach the usual runners --------------
+
+_ARTIFACT_RULE = "# No job on the usual runners runs anything from an artifact of this job."
+_TEMPLATE = re.compile(r"\$\{\{.*?\}\}")
+
+
+def _artifact_steps(job: dict[str, Any], action: str) -> list[dict[str, Any]]:
+    return [s for s in job.get("steps", []) if f"actions/{action}-artifact@" in s.get("uses", "")]
+
+
+def _uploaders(jobs: dict[str, Any], artifact: str) -> set[str]:
+    found = set()
+    for name, job in jobs.items():
+        for step in _artifact_steps(job, "upload"):
+            parts = _TEMPLATE.split(step["with"]["name"])
+            if re.fullmatch(".+".join(map(re.escape, parts)), artifact):
+                found.add(name)
+    return found
+
+
+def _coverage_download_problems(jobs: dict[str, Any]) -> list[str]:
+    problems = []
+    downloads = _artifact_steps(jobs["python-coverage-combine"], "download")
+    if not downloads:
+        problems.append("the coverage job downloads nothing")
+    for step in downloads:
+        artifact = step.get("with", {}).get("name")
+        if not artifact or _TEMPLATE.search(artifact) or "pattern" in step["with"]:
+            problems.append(f"not one fixed artifact name: {step.get('with')}")
+            continue
+        uploaders = _uploaders(jobs, artifact)
+        if not uploaders:
+            problems.append(f"{artifact}: no job uploads it")
+        for name in uploaders:
+            if name == _NEW_JOB or _SITE_LABEL in str(jobs[name].get("runs-on")):
+                problems.append(f"{artifact}: uploaded by {name}")
+    return problems
+
+
+def test_second_site_job_states_the_artifact_rule() -> None:
+    assert _ARTIFACT_RULE in _job_text(_NEW_JOB)
+
+
+def test_coverage_job_downloads_only_artifacts_of_the_usual_runners() -> None:
+    assert _coverage_download_problems(_ci_jobs()) == []
+
+
+def test_coverage_download_check_finds_an_artifact_of_the_second_site() -> None:
+    jobs = _ci_jobs()
+    step = _artifact_steps(jobs["python-coverage-combine"], "download")[0]
+    step["with"]["name"] = "python-unit-shard-junit-4"
+    assert _coverage_download_problems(jobs) == [
+        f"python-unit-shard-junit-4: uploaded by {_NEW_JOB}"
+    ]
+    step["with"] = {"pattern": "python-*"}
+    assert _coverage_download_problems(jobs) == [
+        "not one fixed artifact name: {'pattern': 'python-*'}"
+    ]
+
+
 def _iso(age_seconds: int) -> str:
     moment = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=age_seconds)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -892,6 +964,7 @@ def _pick(
         "EVENT_NAME": "pull_request",
         "HEAD_REPO": _REPO,
         "ACTOR": "someone",
+        "COVERAGE_LABEL": "false",
         "RUN_ATTEMPT": "1",
         "DOCS_ONLY": "false",
         "BACKEND_PYTHON": "true",
@@ -1019,6 +1092,35 @@ def test_pick_dependabot(tmp_path: Path) -> None:
     assert "Dependabot" in result.stdout
 
 
+_SITE_CASES = [
+    pytest.param([600], id="recent-pass"),
+    pytest.param([40 * 60], id="pass-near-the-limit"),
+    pytest.param([9000, 60], id="newest-of-many"),
+]
+
+
+@pytest.mark.parametrize("ages", _SITE_CASES)
+def test_pick_coverage_label_keeps_the_usual_runners(tmp_path: Path, ages: list[int]) -> None:
+    # Made here, not at collection time: a slow run must not age a result past the limit.
+    runs = [_smoke_run(age, run_id=i, attempt=i) for i, age in enumerate(ages, start=1)]
+    (tmp_path / "without").mkdir()
+    (tmp_path / "with").mkdir()
+    assert _pick(tmp_path / "without", runs=runs)[0] == "on"
+    value, result = _pick(tmp_path / "with", runs=runs, COVERAGE_LABEL="true")
+    assert value == ""
+    assert "ci-coverage-validate" in result.stdout
+    assert _gh_calls(tmp_path / "with") == []
+
+
+@pytest.mark.parametrize("label", ["", "False", None])
+def test_pick_unknown_coverage_label_keeps_the_usual_runners(
+    tmp_path: Path, label: str | None
+) -> None:
+    value, result = _pick(tmp_path, runs=[_smoke_run(60)], COVERAGE_LABEL=label)
+    assert value == ""
+    assert "ci-coverage-validate" in result.stdout
+
+
 @pytest.mark.parametrize("attempt", ["2", "3", "", None])
 def test_pick_attempt_2(tmp_path: Path, attempt: str | None) -> None:
     value, result = _pick(tmp_path, runs=[_smoke_run(60)], RUN_ATTEMPT=attempt)
@@ -1126,6 +1228,10 @@ def test_pick_step_can_never_break_the_changes_job() -> None:
     assert step["env"]["TEST_MAP"] == changes["outputs"]["test_map"]
     assert step["env"]["RUN_ATTEMPT"] == "${{ github.run_attempt }}"
     assert step["env"]["ACTOR"] == "${{ github.actor }}"
+    assert step["env"]["COVERAGE_LABEL"] == (
+        "${{ contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')"
+        " && 'true' || 'false' }}"
+    )
     # The token only needs to read the run history, which the job could already.
     assert changes["permissions"] == {"contents": "read", "actions": "read"}
     assert changes["outputs"]["second_site"] == "${{ steps.second-site.outputs.second_site }}"

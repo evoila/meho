@@ -146,3 +146,33 @@ def test_enabled_without_secret_name_fails_at_render() -> None:
     result = _helm_template(_CHART_DIR, "--set", "approvalHandoff.enabled=true")
     assert result.returncode != 0
     assert "approvalHandoff" in result.stderr
+
+
+def test_notes_escape_each_dot_of_the_metrics_token_key(tmp_path: Path) -> None:
+    """A key with a dot needs `\\.` in the jsonpath, or kubectl reads nothing."""
+    notes = _render_notes(tmp_path, "--set", "metricsAuth.secretKey=metrics.token")
+    assert "jsonpath='{.data.metrics\\.token}'" in notes
+    assert "(key metrics.token)" in notes
+
+
+def test_notes_keep_the_default_metrics_token_key_plain(tmp_path: Path) -> None:
+    notes = _render_notes(tmp_path)
+    assert "jsonpath='{.data.token}'" in notes
+
+
+def test_notes_give_the_vault_token_on_standard_input(tmp_path: Path) -> None:
+    """The Vault login check reads the token from standard input, not an argument."""
+    notes = _render_notes(
+        tmp_path,
+        "--set",
+        "checkRunner.enabled=true",
+        "--set",
+        "config.credentialBackend=vault",
+        "--set",
+        "checkRunner.clientId=stand-in-client",
+        "--set",
+        "checkRunner.clientSecret.secretName=stand-in-secret",
+    )
+    assert "vault write auth/jwt/login" in notes
+    assert 'jwt="$RUNNER_TOKEN"' not in notes
+    assert "jwt=-" in notes

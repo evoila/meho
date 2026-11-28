@@ -132,26 +132,31 @@ a sandbox delete grant.
 
 ### Credential calls
 
-One rule, in `service_grants.py`: a call that reads, writes or makes a
-credential always waits for a person. No standing grant, no agent grant
-and no run approval covers it.
+One rule, in `service_grants.py`: a call that reads, writes, makes or
+uses a credential always waits for a person. No standing grant, no agent
+grant and no run approval covers it.
 
-- The classes are `credential_read`, `credential_write` and
-  `credential_mint` (`CREDENTIAL_CLASSES`). The class comes from the class
+- The classes are `credential_read`, `credential_write`,
+  `credential_mint` and `credential_use` (`CREDENTIAL_CLASSES`, the same
+  set as `CREDENTIAL_OP_CLASSES` in `op_classes.py`). A person's own call
+  of a `credential_use` operation follows its risk level and approval
+  mark. The class comes from the class
   stored on the row of an ingested operation first, then from the op id
   (`resolve_op_class`: a connector's `declare_op_classes`, or the core
   lists in `broadcast/events.py`). A step of a multi-step operation has
   only its op id.
 - `credential_grant_reason` gives the reason: "A standing grant, an agent
   grant or a run approval never covers 'OP': it reads, writes or makes a
-  credential, so a person approves each call." `never_covered_reason`
+  credential, so a person approves each call." For a `credential_use`
+  operation that no connector marked credential capable it says "it uses
+  a credential" (`only_uses_credential`). `never_covered_reason`
   returns it with the kind `credential`.
 - Grant create refuses such an op by op id before the lookup, and by the
   stored class after it. The answer is the reason plus "Leave it out."
   (`credential_refusal`).
 - `credential_call_waits` says whether such a call waits: every
-  `credential_write` and `credential_mint` call, and a `credential_read`
-  call when its floor applies (a read marked in code as one that returns
+  `credential_write`, `credential_mint` and `credential_use` call, and a
+  `credential_read` call when its floor applies (a read marked in code as one that returns
   no secret value runs at once; `vault.kv.read` waits only with
   `reveal_secret`). The agent verdict and the run approval notes use it.
 - An install or tenant override that turns approval off does not turn it
@@ -255,7 +260,9 @@ and no run approval covers it.
   revision and `argocd.app.rollback`.
 - The approval request of a credential call has `credential_wait` in its
   proposed effect: one line that says why it waits
-  (`service_grants.CREDENTIAL_CARD_LINE`). The approval card shows it.
+  (`service_grants.CREDENTIAL_CARD_LINE`; for a `credential_use` call
+  `CREDENTIAL_USE_CARD_LINE`, which says "it uses a credential"). The
+  approval card shows it.
 - A grant row that names such an op stays stored, but it never runs the
   call. `meho service-principals grants list` shows it as before.
 - The child operation check (`governed_subops.classify_subop_grantability`)

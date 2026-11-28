@@ -173,6 +173,7 @@ from meho_backplane.auth.jwt import (
     AUDIENCE_NOT_CONFIGURED_REMEDIATION,
     keycloak_readiness_probe,
 )
+from meho_backplane.auth.role_refusal import RoleRefusedError, role_refused_handler
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
@@ -1138,6 +1139,8 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # ``fastapi.HTTPException`` raises from route dependencies too (the
 # FastAPI handling-errors override pattern).
 app.add_exception_handler(StarletteHTTPException, ui_session_expired_exception_handler)
+# A Reader who asks for a change gets the code and a plain sentence.
+app.add_exception_handler(RoleRefusedError, role_refused_handler)
 # A 422 for a bad request body that encodes even when the refused input
 # holds a lone surrogate (FastAPI's stock handler answers that with a 500).
 app.add_exception_handler(RequestValidationError, request_validation_exception_handler)

@@ -219,7 +219,7 @@ async def credential_write_answer_lost_composite(
         raise TimeoutError("no answer from the target")
 
     with contextlib.suppress(TimeoutError):
-        await _step(
+        written = await _step(
             operator,
             target,
             CREDENTIAL_WRITE_STEP,
@@ -227,6 +227,8 @@ async def credential_write_answer_lost_composite(
             waits=False,
             call=_send_then_time_out,
         )
+        if written.stopped is not None:
+            return written.stopped
     waited = await _step(operator, target, WAIT_STEP, {"id": "t-1"}, waits=True)
     return waited.stopped if waited.stopped is not None else {"done": True}
 

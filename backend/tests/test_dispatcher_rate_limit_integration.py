@@ -184,10 +184,19 @@ def _no_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("custom_policy", [False, True], ids=["switch-off", "switch-on"])
 async def test_unexpected_verdict_denial_returns_its_audit_id(
-    stub_dispatch_seams: dict[str, AsyncMock], monkeypatch: pytest.MonkeyPatch
+    stub_dispatch_seams: dict[str, AsyncMock],
+    monkeypatch: pytest.MonkeyPatch,
+    custom_policy: bool,
 ) -> None:
-    """The fail-closed deny for a verdict the gate should never return (#4669)."""
+    """The fail-closed deny for a verdict the gate should never return (#4669).
+
+    With ``CUSTOM_POLICY`` on too: the unknown verdict counts as ``deny``
+    for the row's rule, so the call still writes its row.
+    """
+    monkeypatch.setenv("CUSTOM_POLICY", "true" if custom_policy else "false")
+    get_settings.cache_clear()
     _no_limits(monkeypatch)
     stub_dispatch_seams["gate"].return_value = (SimpleNamespace(value="weird"), None)
 

@@ -223,9 +223,53 @@ func printDiff(w io.Writer, diff map[string]any) {
 			}
 		}
 	}
+	printAgents(w, diff)
 	if n, ok := diff["operations_changed"].(float64); ok {
 		fmt.Fprintf(w, "Operations whose values change: %d\n", int(n))
 	}
+}
+
+// ruleRoles is the order of the roles in the per-role list of the plan.
+var ruleRoles = []string{"Reader", "Operator", "Admin"}
+
+// printAgents prints the personal agent rules the file adds, changes and
+// removes, by name, and for each role the operations that start to run at
+// once. A file that changes no rule prints nothing.
+func printAgents(w io.Writer, diff map[string]any) {
+	parts, _ := diff["agents"].(map[string]any)
+	for _, kind := range []string{"added", "changed", "removed"} {
+		items, _ := parts[kind].([]any)
+		for _, item := range items {
+			fmt.Fprintf(w, "%s agents: %s\n", diffMark(kind), sanitize(ruleName(item)))
+		}
+	}
+	lists, _ := diff["runs_at_once"].(map[string]any)
+	for _, role := range ruleRoles {
+		items, _ := lists[role].([]any)
+		for _, item := range items {
+			op, _ := item.(map[string]any)
+			fmt.Fprintf(w, "runs at once for %s: %s %s (%s, %s)\n", role,
+				sanitize(compactJSON(op["connector_id"])), sanitize(compactJSON(op["op_id"])),
+				sanitize(compactJSON(op["risk"])), sanitize(compactJSON(op["rule"])))
+		}
+	}
+}
+
+// ruleName is the name of the rule of one agents diff item: the entry
+// of an added or removed rule, the new side of a changed one. A rule
+// without a readable name shows its whole text.
+func ruleName(item any) string {
+	m, _ := item.(map[string]any)
+	rule := m["entry"]
+	if after, ok := m["after"]; ok {
+		rule = after
+	}
+	if r, ok := rule.(map[string]any); ok {
+		if name, ok := r["name"].(string); ok && name != "" {
+			return name
+		}
+	}
+	return compactJSON(rule)
 }
 
 func diffMark(kind string) string {

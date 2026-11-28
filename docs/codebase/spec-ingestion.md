@@ -486,7 +486,7 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `response_schema` | `response_schema` | Success-response schema or `None`. The shared schemas it uses are bundled under `components.schemas`, like in `parameter_schema` |
 | `op_class` | `op_class` | `None` from the parser; set only by a connector floor, to `credential_read` or `write` (see "A floor sees the answer and sets the op class") |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor, then the catalog `safety_overlay`, then the op class floor (a `credential_read` is at least `caution`), then the caller-address floor (an op with a parameter marked `x-meho-caller-address: true` is at least `caution`) |
-| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read` op class, or a parameter marked `x-meho-caller-address: true` |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for every `DELETE`, destructive-action hints, a connector-owned minimum safety floor, a catalog `safety_overlay` rule, a `credential_read`, `credential_write` or `credential_mint` op class, or a parameter marked `x-meho-caller-address: true` |
 | `llm_instructions` | `llm_instructions` | `None` from the parser; set only by a connector-owned spec correction |
 
 Every `DELETE` lands `dangerous` with `requires_approval=True` (#3827). A
@@ -531,7 +531,11 @@ meho-automation floor (`connectors/meho_automation/ingest_safety.py`)
 pins its four write POSTs at `caution`. Connector packages register
 their own floors the same way. Floors
 are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
-an already stricter safety tier and an existing approval requirement. Existing
+an already stricter safety tier and an existing approval requirement.
+An ingested operation declared as a credential write or mint (class
+`credential_write` or `credential_mint`) counts as governed by a floor
+(`has_safety_floor`), so a re-ingest only raises its stored risk level and
+approval flag and never lowers them. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
 

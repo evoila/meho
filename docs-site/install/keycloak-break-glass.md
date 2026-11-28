@@ -60,10 +60,16 @@ kubectl -n "$NS" wait --for=delete pod "$KC-0" --timeout=120s
 Type the new password (it is not shown). Use a long random one.
 
 ```bash
-read -rs -p "Temporary admin password: " TEMP_PW; echo
-printf '%s' "$TEMP_PW" | kubectl -n "$NS" create secret generic keycloak-temp-admin \
-  --from-file=password=/dev/stdin
-unset TEMP_PW
+{
+  printf 'Temporary admin password: '; IFS= read -rs TEMP_PW; echo
+  if [ -n "$TEMP_PW" ]; then
+    printf '%s' "$TEMP_PW" | kubectl -n "$NS" create secret generic keycloak-temp-admin \
+      --from-file=password=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset TEMP_PW
+}
 ```
 
 Start a one-off pod. It copies the pod labels, the image, the database

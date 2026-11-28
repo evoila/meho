@@ -60,7 +60,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
-from sqlalchemy import or_, select, text
+from sqlalchemy import Select, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import Target as TargetORM
@@ -71,6 +71,7 @@ __all__ = [
     "TargetNotFoundError",
     "resolve_target",
     "resolve_target_by_id",
+    "target_by_id_stmt",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -290,9 +291,23 @@ async def resolve_target_by_id(
     invisible by the WHERE clause.
 
     ``for_update=True`` locks the row until the transaction ends
-    (``SELECT ... FOR UPDATE``), so a delete in another transaction waits
-    for the caller's change. A delete that commits first makes the
-    lookup return ``None``.
+    (``SELECT ... FOR UPDATE``), so a delete or a change in another
+    transaction waits for the caller's change. A delete that commits first
+    makes the lookup return ``None``. The locked read also loads the row
+    again when the session holds it already, so the caller works on the
+    values stored when the lock was taken.
+    """
+    result = await session.execute(target_by_id_stmt(tenant_id, target_id, for_update=for_update))
+    return result.scalar_one_or_none()
+
+
+def target_by_id_stmt(
+    tenant_id: UUID, target_id: UUID, *, for_update: bool = False
+) -> Select[tuple[TargetORM]]:
+    """The ``SELECT`` of :func:`resolve_target_by_id`.
+
+    With *for_update* it locks the row (``FOR UPDATE``) and loads it again
+    when the session holds it already (``populate_existing``).
     """
     stmt = select(TargetORM).where(
         TargetORM.id == target_id,
@@ -300,9 +315,8 @@ async def resolve_target_by_id(
         TargetORM.deleted_at.is_(None),
     )
     if for_update:
-        stmt = stmt.with_for_update()
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    return stmt
 
 
 async def _alias_match(

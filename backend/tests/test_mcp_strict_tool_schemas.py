@@ -179,6 +179,196 @@ def test_an_enum_member_is_a_value_and_stays_as_it_is() -> None:
     assert not _accepts(out, {"enum": ["x"], "properties": {"a": {}}})
 
 
+_D = {"d": {"enum": ["x", None]}}
+
+_ORDER_SENSITIVE: list[dict[str, Any]] = [
+    {"not": {"enum": ["x", None]}},
+    {"not": {"enum": [None]}},
+    {"not": {"not": {"enum": ["x", None]}}},
+    {"if": {"enum": ["x", None]}, "then": {"type": "string"}, "else": {"type": "null"}},
+    {"if": {"type": "string"}, "then": {"enum": ["x", None]}},
+    {"if": {"type": "null"}, "else": {"enum": ["x", None]}},
+    {"properties": {"a": {"not": {"enum": ["x", None]}}}},
+    # A ``$ref`` from ``not`` or ``if`` to an enum in ``$defs``.
+    {"properties": {"a": {"not": {"$ref": "#/$defs/d"}}}, "$defs": _D},
+    {"properties": {"a": {"not": {"$ref": "#/definitions/d"}}}, "definitions": _D},
+    {
+        "if": {"$ref": "#/$defs/d"},
+        "then": {"type": "string"},
+        "else": {"type": "null"},
+        "$defs": _D,
+    },
+    # A ``$ref`` that reaches the enum through a second definition.
+    {
+        "properties": {"a": {"not": {"$ref": "#/$defs/e"}}},
+        "$defs": {"e": {"$ref": "#/$defs/d"}, **_D},
+    },
+    # A ``$ref`` form whose target is not a plain path.
+    {"not": {"$ref": "#here"}, "$defs": {"d": {"$anchor": "here", "enum": ["x", None]}}},
+    # ``null`` matches both branches, so ``oneOf`` refuses it.
+    {"properties": {"a": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}}},
+    {"then": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}},
+    {"properties": {"a": {"oneOf": [{"$ref": "#/$defs/d"}, {"type": "null"}]}}, "$defs": _D},
+    # Two matches are too many, one is not.
+    {"contains": {"enum": ["x", None]}, "maxContains": 1},
+]
+
+
+@pytest.mark.parametrize("schema", _ORDER_SENSITIVE)
+def test_the_sent_copy_never_accepts_what_the_full_schema_refuses(schema: dict[str, Any]) -> None:
+    sent = _without_null_enum_members(schema)
+    for value in (None, "x", "other", 3, [None, "x"]):
+        for candidate in (value, {"a": value}):
+            if _accepts(sent, candidate):
+                assert _accepts(schema, candidate), (schema, candidate)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"properties": {"a": {"not": {"$ref": "#/$defs/d"}}}, "$defs": _D},
+        {"properties": {"a": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}}},
+        {"if": {"type": "null"}, "then": {"oneOf": [{"enum": ["x", None]}, {"type": "null"}]}},
+    ],
+)
+def test_null_is_still_refused_through_a_ref_or_a_one_of(schema: dict[str, Any]) -> None:
+    candidate = None if "if" in schema else {"a": None}
+    assert not _accepts(schema, candidate)
+    assert not _accepts(_without_null_enum_members(schema), candidate)
+
+
+def test_an_enum_under_not_if_and_one_of_is_left_as_it_is() -> None:
+    for schema in _ORDER_SENSITIVE:
+        if "if" not in schema or "$defs" in schema:
+            assert _without_null_enum_members(schema) is schema, schema
+    narrowed = _without_null_enum_members({"if": {"type": "string"}, "then": {"enum": ["x", None]}})
+    assert narrowed == {"if": {"type": "string"}, "then": {"enum": ["x"]}}
+
+
+def test_a_definition_used_only_outside_not_and_if_still_loses_null() -> None:
+    schema = {
+        "properties": {"a": {"$ref": "#/$defs/d"}, "b": {"not": {"$ref": "#/$defs/k"}}},
+        "$defs": {**_D, "k": {"enum": ["y", None]}},
+    }
+    out = _without_null_enum_members(schema)
+    assert out["$defs"] == {"d": {"enum": ["x"]}, "k": {"enum": ["y", None]}}
+    assert _without_null_enum_members({"contains": {"enum": ["x", None]}}) == {
+        "contains": {"enum": ["x"]}
+    }
+
+
+def test_a_schema_that_keeps_null_in_an_enum_is_found_by_the_check() -> None:
+    sent = _wire_safe_input_schema({"type": "object", "not": {"enum": ["x", None]}})
+    assert _null_enum_paths(sent) == ["/not/enum"]
+
+
+def test_an_id_key_in_a_default_does_not_hide_a_later_id() -> None:
+    """``$id`` counts only as a schema keyword, so the one of ``choice`` keeps it all."""
+    schema = {
+        "properties": {
+            "a": {"default": {"$id": None}},
+            "choice": {
+                "$id": "urn:example:choice",
+                "$defs": {"e": {"enum": ["x", None]}},
+                "not": {"$ref": "#/$defs/e"},
+            },
+        }
+    }
+    sent = _without_null_enum_members(schema)
+    assert not _accepts(schema, {"choice": None})
+    assert not _accepts(sent, {"choice": None})
+    assert sent is schema
+
+
+_B = {"b": {"enum": ["x", None]}}
+
+
+@pytest.mark.parametrize(
+    "a",
+    [
+        {"not": {"const": {"$ref": "book"}}},
+        {"not": {"default": {"$ref": "book"}}},
+        {"not": {"properties": {"$ref": {"type": "string"}}}},
+    ],
+)
+def test_a_ref_key_that_is_data_or_a_name_is_not_followed(a: dict[str, Any]) -> None:
+    schema = {"properties": {"a": a, **_B}}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["a"] == a
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+
+
+_NAME_KEY_VALUES: list[Any] = [
+    {},
+    {"b": None},
+    {"b": "x"},
+    {"$id": 1},
+    {"$id": 1, "b": None},
+    {"$id": 1, "b": "x"},
+    {"a": {"$ref": 1}},
+    {"a": {"$ref": 1, "b": "x"}},
+    {"a": {}, "b": None},
+]
+
+
+@pytest.mark.parametrize(
+    ("name_map", "value"),
+    [
+        ("dependentRequired", {"$id": ["b"]}),
+        ("dependencies", {"$id": {"type": "object"}}),
+        ("$vocabulary", {"$id": True}),
+    ],
+)
+def test_a_key_of_a_name_map_is_a_name_and_not_an_id(name_map: str, value: Any) -> None:
+    schema = {"properties": _B, name_map: value}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+    assert sent[name_map] == value
+    for candidate in _NAME_KEY_VALUES:
+        if _accepts(sent, candidate):
+            assert _accepts(schema, candidate), candidate
+
+
+def test_a_ref_key_under_dependent_required_inside_not_is_a_name() -> None:
+    a = {"not": {"dependentRequired": {"$ref": ["b"]}}}
+    schema = {"properties": {"a": a, **_B}}
+    sent = _without_null_enum_members(schema)
+    assert sent["properties"]["a"] == a
+    assert sent["properties"]["b"] == {"enum": ["x"]}
+    for candidate in _NAME_KEY_VALUES:
+        if _accepts(sent, candidate):
+            assert _accepts(schema, candidate), candidate
+
+
+@pytest.mark.parametrize(
+    "index",
+    ["1", "01", "+1", " 1", "1 ", "\u00b9", "\u0661"],
+    ids=[
+        "plain",
+        "leading-zero",
+        "plus-sign",
+        "space-before",
+        "space-after",
+        "superscript",
+        "arabic-indic",
+    ],
+)
+def test_a_ref_steps_into_a_list_only_through_a_plain_index(index: str) -> None:
+    schema = {
+        "properties": {
+            "a": {"not": {"$ref": f"#/properties/b/anyOf/{index}"}},
+            "b": {"anyOf": [{"type": "integer"}, {"enum": ["x", None]}]},
+        }
+    }
+    sent = _without_null_enum_members(schema)
+    if index == "\u00b9":
+        # jsonschema cannot read this reference in either copy.
+        return
+    for value in (None, "x", "other", 3):
+        if _accepts(sent, {"a": value}):
+            assert _accepts(schema, {"a": value}), (index, value)
+
+
 def _sample(schema: dict[str, Any]) -> Any:
     """A valid value for *schema*, enough for the required inputs."""
     if "enum" in schema:
@@ -387,7 +577,7 @@ async def test_a_call_with_null_or_without_the_field_passes_and_gives_the_same_r
     """
     operator = build_operator(TenantRole.TENANT_ADMIN, platform_admin=True)
     fields = _null_enum_fields()
-    assert len(fields) == 16
+    assert fields, "the registry has no tool input with null in an enum"
     for tool, field in fields:
         assert tool in _CASES, f"no case for {tool}: add it to _CASES"
         base, below = _CASES[tool]

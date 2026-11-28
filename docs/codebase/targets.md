@@ -53,6 +53,20 @@ console ([settings.md](settings.md)). The guard
 the target registry that makes or changes a target can be covered by a
 standing grant, a run approval or an agent grant.
 
+**A call the target model refuses is refused at once.** `targets.register`
+and `targets.update` each register a params check
+(`model_params_problem` in `connectors/targets/ops.py`). It runs
+`TargetCreate` or `TargetUpdate` on the params before the policy gate,
+so such a call gets `invalid_params` and no approval request is stored.
+The check skips only the destination check with the port, because that
+check can look up a name in DNS and a params check does no I/O
+(`NO_DESTINATION_SCREEN` in `targets/schemas.py`). The handler runs the
+model again with every check. Each refusal names the field, the message
+and the kind of error, never the sent input (`model_refusal`), because
+the text reaches the answer, the stored result and the audit row. The
+MCP tools add each `validation_errors` entry to the error message. Tests:
+`tests/test_targets_model_refusal_stores_no_value.py`.
+
 `vpn_required` (boolean, default `false`) records that a
 VPN must be up to reach the target. MEHO does not act on it; it is
 shown to the people and agents that read the target (#5075). Every
@@ -275,8 +289,9 @@ key with the value the request would store:
   its role.
 - A key is added, changed or removed, and the operator has no
   `platform_admin`: HTTP 403 `vault_login_role_requires_platform_admin`,
-  and the row is not changed. Values are compared as stored, so a blank
-  string is a change like any other.
+  and the row is not changed. Values are compared as stored, with their
+  JSON type, so a blank string is a change like any other, and so is a
+  change of only the type (`1` to `true` or `1.0`).
 
 `targets.register` calls `create_target`, so the same rule holds there:
 the operation answers with an invalid-parameters error that names the
@@ -702,6 +717,42 @@ with a token becomes a call of this op.
   approval request always holds `changes`. The agent's own
   `preview_operation` holds it only with the `PREVIEW_TYPED_WRITES`
   switch on (off by default).
+- **Change one extra.** `extras_changes` is the merge form of `extras`: a
+  map from a key to a value. A value sets or replaces that key and keeps
+  its JSON type (text, number, `true` or `false`, list, map). `null`
+  removes the key. A key that is not named keeps its value and its type.
+  `extras` replaces the whole map, and a body with both is refused
+  (`TargetUpdate`, and for `targets.update` a params check before the call
+  can wait for approval, so no approval request is stored). The merge (`targets/extras_changes.py`) runs when the
+  change runs, on the map stored then, so a key added while the call
+  waited stays. The merged map goes through the checks of a full `extras`:
+  the size limit, the platform-admin check of the Vault login keys and the
+  Keycloak realm check. The approval card shows, for each named key, its
+  stored and its new value. Values are hidden on the whole stored map and
+  the whole map after the change first, so the card hides what the card of
+  a full `extras` change hides. The audit row carries the key names that
+  were set and removed (`extras_keys_set`, `extras_keys_removed`), never
+  the values. The answer of the operation holds the same two lists, and no
+  value of `extras`, because it is also stored in the audit row and in the
+  approval request; read the target to see the values. A realm warning in
+  that answer names the key `managed_realm`, not the realm. When the
+  request runs, or ends without a run (rejected, withdrawn, expired),
+  MEHO replaces each value of `extras_changes` in the stored params with
+  the marker it uses for a secret value; the key names stay
+  (`declare_hidden_stored_map_values` in `op_classes.py`). A value can be
+  secret only next to a stored key, so every value goes. A run again
+  without params then needs the params. A change in the web
+  console runs at once and answers with the whole target. It locks the
+  target row (`SELECT ... FOR UPDATE`) and merges into the extras of that
+  locked read, so two changes of different keys at the same time both
+  stay. A change of only the JSON type of a value (`1` to `true`) is
+  stored. The Vault login keys (`vault_role`, `vault_mount`) are compared
+  with their JSON type too, so a change of only the type needs a platform
+  admin. CLI:
+  `meho targets update <target> --set-extra key=value` (text),
+  `--set-extra-json key=<json>` (typed) and `--unset-extra key`, each
+  repeatable. To correct the realm of a Keycloak target:
+  `meho targets update <target> --set-extra managed_realm=<realm>`.
 - **Fields.** Every field of `TargetUpdate` except `name`. Only the sent
   fields change; an explicit `null` clears a nullable field. A call with
   no field besides `target_id` is refused, and nothing changes.

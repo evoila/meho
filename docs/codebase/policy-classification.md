@@ -152,8 +152,13 @@ always waits.
 3. the floors: an operation that connects to an address the caller gives
    is at least `caution` and always waits. An operation that writes or
    makes a credential (class `credential_write` or `credential_mint`)
-   keeps the approval its code turns on, also when an install or tenant
-   override turns it off (`_with_floors`).
+   always waits: also when its connector registered it without the
+   approval flag, and also when an install or tenant override turns
+   approval off (`_with_floors`). A step of a multi-step operation whose
+   operation writes or makes a credential always waits the same way,
+   whatever flag the step declares (`apply_step_policy`). An operation a
+   connector marked as credential capable keeps the approval its code
+   turns on; each of its calls waits anyway (`raise_descriptor_for_params`).
 
 Dispatch (`lookup_descriptor`, which joins the group key), preview, search,
 the call contract and the console all read `effective_policy_map`, so they
@@ -343,6 +348,37 @@ connector kit (kit 1.7 or higher).
 |---|---|---|
 | `hard_to_undo` | `deletes`, `stops`, `overwrites`, or none (the default) | A call can delete, stop or overwrite something, and no later call of the same connector brings it back. |
 | `changes_rights` | yes or no (the default) | A call that changes who or what may reach or use something in the target system: a login, a group or role, an access list, a firewall rule. |
+
+The mark means the same thing in every built-in connector. Three rules say
+when a write gets `hard_to_undo: overwrites`:
+
+1. A write that replaces a stored access rule, role or identity entry as a
+   whole gets `hard_to_undo: overwrites`. No later call of the same
+   connector brings the replaced entry back. The mark also goes on a write
+   of data that neither the target nor the connector gives back, such as a
+   secret value or a set of keys: the old state cannot be read, so it
+   cannot be set back.
+2. A write of one single setting gets no mark when the target system lets
+   the old value be set back. The mark says something about the target,
+   not about MEHO's own input checks: a limit of a handler's input is not a
+   reason for the mark. Where a handler cannot write back a state that the
+   target allows, that is a gap of the handler, not a reason for the mark.
+3. A backup that writes over an older backup at the same path stays without
+   the mark. The operation's own text says that it overwrites the backup at
+   the same path. No mark depends on the parameters of a call.
+
+A delete of an object gets `hard_to_undo: deletes` when no later call of the
+same connector brings the object back as it was, also in one of MEHO's own
+stores, whose connector is the only way in (for example
+`topology.delete_node`: a node made again gets a new id, and the edges of
+the old node do not come back).
+
+`changes_rights` follows one sentence in every connector: a call changes
+rights when it changes who or what may reach or use something in the
+target system: a login, a group or role, an access list, or a firewall
+rule. This holds at every risk level above `safe`, also `destructive`. A
+create of a group or role counts, also when the new group is still empty.
+A create, enable or disable of a login counts too.
 
 - MEHO leaves an operation whose mark does not fit its risk level out at
   registration, and the log line names it. Every other operation

@@ -516,6 +516,7 @@ from meho_backplane.operations.composite_steps import (
 from meho_backplane.operations.credential_read import raise_descriptor_for_reveal
 from meho_backplane.operations.deny_reasons import (
     AGENT_REVEAL_REFUSED,
+    INSUFFICIENT_ROLE,
     POLICY_DENIED,
     ROLE_INSUFFICIENT,
 )
@@ -546,10 +547,14 @@ from meho_backplane.operations.rights_change_console import (
     CONSOLE_RUN_REASON,
     take_console_run_sign_in,
 )
-from meho_backplane.operations.role_floors import role_floor_denial
+from meho_backplane.operations.role_floors import reader_change_denial, role_floor_denial
+from meho_backplane.operations.run_step_rules import (
+    step_keeps_own_approval,
+    step_wait_reason_after_approval,
+)
 from meho_backplane.operations.secondary_target_policy import approved_requester_sub
 from meho_backplane.operations.service_grants import (
-    CREDENTIAL_CARD_LINE,
+    descriptor_credential_card_line,
     descriptor_credential_waits,
 )
 from meho_backplane.operations.shutdown_drain import (
@@ -564,7 +569,7 @@ from meho_backplane.operations.uncertain_outcome import (
     with_uncertain_outcome,
 )
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
-from meho_backplane.policy.stamp import take_rule
+from meho_backplane.policy.stamp import row_rule, take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3644,7 +3649,7 @@ async def _build_proposed_effect(
             base["waits_because"] = TOKEN_CALL_WAIT
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
-            base["credential_wait"] = CREDENTIAL_CARD_LINE
+            base["credential_wait"] = descriptor_credential_card_line(descriptor)
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -4656,14 +4661,17 @@ async def _dispatch_now(
                 params=params,
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
-            policy_rule_var.set(take_rule())
+            kept_rule = take_rule()
+            policy_rule_var.set(kept_rule)
             console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
             # ``composite.enforce_subop_policy``. Only a step that would wait:
-            # a ``deny`` stays a deny, and a ``destructive`` or
-            # ``requires_approval`` step, or one that reads, writes or makes
-            # a credential, keeps its own approval. A credential read that a
+            # a ``deny`` stays a deny, and a ``destructive`` step, a step
+            # that keeps its own approval (``step_keeps_own_approval``: with
+            # CUSTOM_POLICY off ``requires_approval``, with it on the rules of
+            # ``run_step_rules``), or one that reads, writes or makes a
+            # credential, keeps its own approval. A credential read that a
             # resume sends again is refused whenever it would wait, also when
             # it is destructive or needs its own approval: an approval request
             # for it alone cannot finish the waiting run.
@@ -4681,7 +4689,7 @@ async def _dispatch_now(
                     )
                 elif (
                     descriptor.safety_level != "destructive"
-                    and not descriptor.requires_approval
+                    and not await step_keeps_own_approval(descriptor, operator)
                     and not descriptor_credential_waits(descriptor)
                 ):
                     _log.info("composite_child_covered_by_approved_run", op_id=op_id)
@@ -4699,6 +4707,22 @@ async def _dispatch_now(
             ):
                 _log.info("composite_credential_child_waits_after_approval", op_id=op_id)
                 verdict = PermissionVerdict.NEEDS_APPROVAL
+            # With CUSTOM_POLICY on, a child call that keeps its own approval
+            # (``step_keeps_own_approval``) waits for it in a run that goes on
+            # after an approval, also when its policy answer lets it run at
+            # once (for example an Admin's change of rights in the web
+            # console). The stored reason of the wait names the rule. A read
+            # that this run sent at once before the wait is sent again with
+            # no new wait: an approval request for it alone cannot finish
+            # the run. With the switch off nothing more is asked.
+            if (
+                verdict is PermissionVerdict.AUTO_EXECUTE
+                and composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL
+                and not child_read_sent_again(op_id)
+                and (step_wait := await step_wait_reason_after_approval([descriptor], operator))
+            ):
+                _log.info("composite_child_keeps_own_approval_after_approval", op_id=op_id)
+                verdict, gate_reason = PermissionVerdict.NEEDS_APPROVAL, step_wait
             if verdict is PermissionVerdict.AUTO_EXECUTE and _reveal_waits_for_approval(
                 operator, reveal_secret
             ):
@@ -4714,6 +4738,8 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            # With CUSTOM_POLICY on, the rule that decided this verdict.
+            policy_rule_var.set(row_rule(kept_rule, verdict))
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
                 policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
                 structlog.contextvars.bind_contextvars(
@@ -4837,13 +4863,19 @@ async def _dispatch_now(
             # run, or a re-run of a failed call by the requester) gets the
             # checks of a new call of its own login in
             # ``approved_run_refusal`` below.
+            # A requester whose role is now Reader may not ask for the
+            # change again: its own run is refused with the Reader sentence.
             requester_runs = _requester_runs_approved_call(operator)
-            role_denial = None if requester_runs else role_floor_denial(op_id, operator.tenant_role)
+            role_denial, role_code = (
+                (reader_change_denial(operator, descriptor, params), INSUFFICIENT_ROLE)
+                if requester_runs
+                else (role_floor_denial(op_id, operator.tenant_role), ROLE_INSUFFICIENT)
+            )
             if role_denial is not None:
+                if requester_runs:
+                    policy_decision_var.set(PermissionVerdict.DENY.value)
                 duration_ms = _elapsed_ms(started)
-                denied = result_denied(
-                    op_id, role_denial, duration_ms, reason_code=ROLE_INSUFFICIENT
-                )
+                denied = result_denied(op_id, role_denial, duration_ms, reason_code=role_code)
                 receipt = await audit_safe(
                     audit_id=uuid.uuid4(),
                     event_class=AuditEventClass.POLICY_DECISION,

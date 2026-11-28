@@ -294,3 +294,95 @@ func TestHistoryLimitIsChecked(t *testing.T) {
 		t.Fatalf("err=%v stderr=%s", err, stderr)
 	}
 }
+
+func TestDiffPrintsTheRuleChangesAndWhatRunsAtOnceForEachRole(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
+		`"no_change":false,"file_sha256":"a","based_on":"b","diff":{`+
+		`"classifications":{"added":[],"changed":[],"removed":[]},`+
+		`"agents":{"added":[{"entry":{"name":"helper","caller":"personal_agent"}}],`+
+		`"changed":[{"before":{"name":"night"},"after":{"name":"night","up_to":"caution"}}],`+
+		`"removed":[{"entry":{"name":["x"]}}]},`+
+		`"runs_at_once":{"Reader":[],"Operator":[{"connector_id":"inslim-1.x",`+
+		`"op_id":"inslim.vm.restart","risk":"caution","rule":"tenant_rule:helper"}],`+
+		`"Admin":[{"connector_id":"inslim-1.x","op_id":"inslim.vm.restart","risk":"caution",`+
+		`"rule":"tenant_rule:helper"}]},"operations_changed":0}}`, &got)
+	stdout, stderr, err := run(t, "diff", writeFile(t), "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("diff: %v; stderr=%s", err, stderr)
+	}
+	for _, want := range []string{
+		"+ agents: helper\n",
+		"~ agents: night\n",
+		"- agents: {\"name\":[\"x\"]}\n",
+		"runs at once for Operator: inslim-1.x inslim.vm.restart (caution, tenant_rule:helper)\n",
+		"runs at once for Admin: inslim-1.x inslim.vm.restart (caution, tenant_rule:helper)\n",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "runs at once for Reader") {
+		t.Errorf("unexpected Reader line:\n%s", stdout)
+	}
+}
+
+func TestDiffOfAFileThatChangesNoRulePrintsNoRuleLine(t *testing.T) {
+	var got seen
+	srv := server(t, 200, `{"preview":true,"ok":true,"scope":"tenant","mistakes":[],"warnings":[],`+
+		`"no_change":false,"file_sha256":"a","based_on":"b","diff":{`+
+		`"description":{"added":[],"changed":[{"before":"a","after":"b"}],"removed":[]},`+
+		`"agents":{"added":[],"changed":[],"removed":[]},`+
+		`"runs_at_once":{"Reader":[],"Operator":[],"Admin":[]},"operations_changed":0}}`, &got)
+	stdout, stderr, err := run(t, "diff", writeFile(t), "--backplane", srv.URL)
+	if err != nil {
+		t.Fatalf("diff: %v; stderr=%s", err, stderr)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "agents:") || strings.HasPrefix(line, "runs at once") {
+			t.Errorf("unexpected rule line %q", line)
+		}
+	}
+}
+
+const riskLevelsFile = "policy: v1\nclassifications: []\nrisk_levels:\n" +
+	"- rule: override:3c1f6a2e-5b7d-4e9a-8f10-2b3c4d5e6f70\n" +
+	"  operation:\n    product: inslim\n    version: 1.x\n    impl_id: inslim\n    op_id: inslim.vm.restart\n" +
+	"  scope: tenant\n  level: dangerous\n  reason: Restarts drop users.\n" +
+	"  set_by: admin-a\n  set_at: '2026-11-28T10:00:00+00:00'\n"
+
+func TestExportKeepsTheRiskLevelsPartWithReasonWhoAndWhen(t *testing.T) {
+	var got seen
+	srv := server(t, 200, riskLevelsFile, &got)
+	out := filepath.Join(t.TempDir(), "out.yaml")
+	if _, stderr, err := run(t, "export", "-o", out, "--backplane", srv.URL); err != nil {
+		t.Fatalf("export: %v; stderr=%s", err, stderr)
+	}
+	data, _ := os.ReadFile(out)
+	if string(data) != riskLevelsFile {
+		t.Fatalf("file: %q", data)
+	}
+	for _, want := range []string{
+		"rule: override:3c1f6a2e-5b7d-4e9a-8f10-2b3c4d5e6f70",
+		"reason: Restarts drop users.",
+		"set_by: admin-a",
+		"set_at: '2026-11-28T10:00:00+00:00'",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("file misses %q", want)
+		}
+	}
+}
+
+func TestImportPrintsTheRiskLevelsRefusalWithItsLine(t *testing.T) {
+	var got seen
+	sentence := "Line 4: `risk_levels[0]` is not a stored risk-level edit. Changing risk-level " +
+		"edits with a policy file is not in this version of MEHO. Keep the part as " +
+		"`meho policy export` wrote it, or remove it."
+	srv := server(t, 422, `{"preview":false,"ok":false,"scope":"tenant","mistakes":["`+sentence+`"],`+
+		`"warnings":[],"no_change":false,"file_sha256":"a","based_on":"b","diff":null}`, &got)
+	stdout, _, err := run(t, "import", writeFile(t), "--backplane", srv.URL)
+	if err == nil || !strings.Contains(stdout, "mistake: "+sentence) {
+		t.Fatalf("err=%v stdout=%s", err, stdout)
+	}
+}

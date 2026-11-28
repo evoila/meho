@@ -306,11 +306,12 @@ def test_the_filter_leaves_every_other_card_as_it_is(card: dict[str, Any]) -> No
     assert card_without_tenant_parts(card) is card
 
 
+@pytest.mark.usefixtures("switches")
 def test_card_for_reader_shapes_only_the_cards_of_an_op_with_a_filter() -> None:
     effect = {"safety_level": "dangerous", "preview": _CARD}
-    assert card_for_reader("other.op", effect, reader=None) is effect
-    assert card_for_reader(POLICY_APPLY_OP_ID, effect, reader=PLATFORM_ADMIN) is effect
+    assert card_for_reader("other.op", effect, reader=None, whole=True) is effect
+    assert card_for_reader(POLICY_APPLY_OP_ID, effect, reader=PLATFORM_ADMIN, whole=True) is effect
     for who in (None, reader(TenantRole.TENANT_ADMIN)):
-        shown = card_for_reader(POLICY_APPLY_OP_ID, effect, reader=who)
+        shown = card_for_reader(POLICY_APPLY_OP_ID, effect, reader=who, whole=True)
         assert shown["safety_level"] == "dangerous"
         assert shown["preview"]["diff"]["routing_floor"] == []

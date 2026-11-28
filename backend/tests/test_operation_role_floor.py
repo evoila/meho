@@ -66,7 +66,11 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_queue import ApprovalRoleFloorError, approve_request
 from meho_backplane.operations.approval_rerun import rerun_failed_request
 from meho_backplane.operations.meta_tools import preview_operation
-from meho_backplane.operations.role_floors import role_floor_denial, role_floor_for
+from meho_backplane.operations.role_floors import (
+    READER_CHANGE_SENTENCE,
+    role_floor_denial,
+    role_floor_for,
+)
 from meho_backplane.operations.secondary_target_policy import bind_approved_requester
 from meho_backplane.settings import get_settings
 from tests._people_behind_helpers import give_known_person
@@ -262,7 +266,9 @@ async def test_a_person_below_the_floor_is_denied(_registered_ops: None, role: T
 
     assert result.status == "denied", result
     assert result.error is not None
-    assert "tenant_admin" in result.error
+    # A Reader who asks for a change is refused first, with the plain sentence.
+    expected = "tenant_admin" if role is TenantRole.OPERATOR else READER_CHANGE_SENTENCE
+    assert expected in result.error
     assert await _target_rows() == []
     assert await _approval_rows() == []
     (audit,) = await _audit_rows(TARGETS_REGISTER_OP_ID)

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""The ``limits`` part of the policy file, and the six other reserved keys.
+"""The ``limits`` part of the policy file, and the other reserved keys.
 
 * The parser: ``limits.personal_agent_up_to`` takes ``safe``, ``caution`` or
-  ``dangerous``; ``destructive`` and other keys are mistakes. ``agents``,
+  ``dangerous``; ``destructive`` and other keys are mistakes.
   ``approvers``, ``role_bindings``, ``risk_levels``, ``custom_roles`` and
-  ``baseline`` are refused with one sentence, whatever their value.
+  ``baseline`` are refused with one sentence, whatever their value; the
+  parser keeps ``agents`` for the checks (``test_policy_agent_rules.py``).
 * The checks: a tenant's file that holds the key ``limits`` is refused; the
   install's file that holds it is refused while the switch is off.
 * The import with the switch on: an install file with a limit is stored,
@@ -98,7 +99,7 @@ def test_a_wrong_limit_is_one_sentence_with_the_path(text: str, sentence: str) -
 
 
 @pytest.mark.parametrize(
-    "key", ["agents", "approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
+    "key", ["approvers", "role_bindings", "risk_levels", "custom_roles", "baseline"]
 )
 @pytest.mark.parametrize(
     "value", ["{example-name: example-value-7}", "[example-value-7]", "example-value-7", "null"]
@@ -106,6 +107,18 @@ def test_a_wrong_limit_is_one_sentence_with_the_path(text: str, sentence: str) -
 def test_a_reserved_key_is_refused_by_the_parser(key: str, value: str) -> None:
     mistakes = parse_policy_file(f"policy: v1\n{key}: {value}\n".encode()).mistakes
     assert mistakes == [_NOT_READ.format(key)]
+
+
+def test_the_import_with_the_switch_on_lets_risk_levels_through_and_keeps_it_out() -> None:
+    text = b"policy: v1\nrisk_levels: [example-value-7]\nbaseline: x\n"
+    parsed = parse_policy_file(text, read_risk_levels=True)
+    assert parsed.mistakes == [_NOT_READ.format("baseline")]
+    parsed = parse_policy_file(
+        b"policy: v1\nrisk_levels: [example-value-7]\n", read_risk_levels=True
+    )
+    assert parsed.mistakes == []
+    assert parsed.model is not None
+    assert "risk_levels" not in document_of(parsed.model)
 
 
 @pytest.mark.parametrize(

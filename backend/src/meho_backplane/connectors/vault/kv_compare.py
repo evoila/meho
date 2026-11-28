@@ -41,7 +41,6 @@ vendor body for it and the broadcast feed shows only the outcome.
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import json
 from dataclasses import dataclass
@@ -51,6 +50,7 @@ import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops import (
     _MOUNT_PROPERTY,
     _PATH_PROPERTY,
@@ -260,7 +260,7 @@ async def read_kv_copy(
     }
     try:
         enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
-        payload = await asyncio.to_thread(
+        payload = await to_thread_checked(
             client.secrets.kv.v2.read_secret_version,
             path=path,
             mount_point=mount,

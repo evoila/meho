@@ -90,7 +90,6 @@ any durable artifact.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from collections.abc import Mapping
@@ -102,6 +101,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.auth.vault import VaultClientError, vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
     WRAPPED_CREDENTIAL_SCHEME,
@@ -565,7 +565,8 @@ class VaultCredentialBackend:
         Applies the operator-context and API-path guards, opens
         :func:`~meho_backplane.auth.vault.vault_client_for_operator`
         (JWT/OIDC login forwarding ``operator.raw_jwt``), reads the secret
-        off the event loop (``asyncio.to_thread`` — hvac is synchronous),
+        off the event loop (``to_thread_checked`` — hvac is synchronous; the
+        block check of the running call runs right before the read),
         and structurally unwraps the nested ``data["data"]`` to the flat
         secret-field dict.
         """
@@ -599,7 +600,8 @@ class VaultCredentialBackend:
             _enforce_vault_tenant_scope(operator, mount=mount, path=secret_ref)
 
         async with vault_client_for_operator(operator) as client:
-            payload = await asyncio.to_thread(
+            # The block check of the running call runs right before the read.
+            payload = await to_thread_checked(
                 client.secrets.kv.v2.read_secret_version,
                 path=secret_ref,
                 mount_point=mount,
@@ -718,7 +720,7 @@ async def load_basic_credentials(
     Opens :func:`~meho_backplane.auth.vault.vault_client_for_operator`
     (JWT/OIDC login forwarding ``operator.raw_jwt``), reads
     ``target.secret_ref`` as a KV-v2 secret off the event loop
-    (``asyncio.to_thread`` — hvac is synchronous, matching
+    (``to_thread_checked`` — hvac is synchronous, matching
     ``vault/ops.py:295``), structurally unwraps the nested
     ``data["data"]``, and returns the requested *fields* as a flat
     ``{field: value}`` dict.

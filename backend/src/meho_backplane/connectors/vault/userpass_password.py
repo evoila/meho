@@ -18,12 +18,20 @@ A generated password is safe to run twice. When the login exists and the KV
 path already holds a password, nothing changes, unless ``rotate`` is true.
 The KV write comes first on purpose: a run that stops after it leaves the
 password in KV, never a login whose password nobody knows. The KV write uses
-``cas`` (the secret version), so a second writer cannot be overwritten.
+``cas`` (the secret version), so a second writer cannot be overwritten. Once
+the new password is stored for a login that exists, setting only that password
+on the login (on ``auth/<mount>/users/<name>``, the path of every set) runs
+with no block check, so the login gets the stored password also when an
+admin blocked the caller during the store. MEHO reads the login right before
+that set, and sets nothing when the login was removed during the store. Then
+the answer and the audit row say that the new password is stored and not set,
+and where it is stored. A change of the
+login's policies, and the create of a login that does not exist, keep the
+block check.
 """
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import string
 from dataclasses import dataclass
@@ -31,7 +39,10 @@ from typing import TYPE_CHECKING, Any
 
 import hvac.exceptions
 
+from meho_backplane.auth.principal_block_run import finish_without_block_check
 from meho_backplane.auth.secret_read_as import record_caller_secret_read
+from meho_backplane.auth.send_check import to_thread_checked
+from meho_backplane.connectors.base import ConnectorOwnMessage
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -42,6 +53,7 @@ __all__ = [
     "DEFAULT_SECRET_MOUNT",
     "PasswordPlan",
     "PasswordSecretError",
+    "PasswordStoredNotSetError",
     "apply_credential_source",
     "generate_password_value",
     "select_credential_source",
@@ -59,6 +71,31 @@ class PasswordSecretError(Exception):
 
     The message names the mount, path and field. It never holds a value.
     """
+
+
+class PasswordStoredNotSetError(PasswordSecretError, ConnectorOwnMessage):
+    """The new password is stored in KV, but the login was gone when MEHO went to set it.
+
+    A fixed MEHO sentence that names the login and the KV mount, path and
+    field, never the value. The answer and the audit row show it, and carry
+    the place as ``stored_mount``, ``stored_path`` and ``stored_field``.
+    """
+
+    message_in_summary = True
+
+    def __init__(self, *, username: str, mount: str, path: str, field: str) -> None:
+        super().__init__(
+            f"the new password was stored and not set: it is at KV {mount!r} path {path!r} "
+            f"field {field!r}, but the login {username!r} was removed before MEHO set it. "
+            "MEHO did not make the login again"
+        )
+        self.answer_facts: dict[str, Any] = {
+            "password_stored": True,
+            "password_set": False,
+            "stored_mount": mount,
+            "stored_path": path,
+            "stored_field": field,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,16 +294,39 @@ def _apply_sync(
             return {"changed": True, "credential_generated": False}
         return {"changed": False, "credential_generated": False}
 
-    generated = False
-    password = stored
-    if password is None or plan.rotate:
-        password = generate_password_value(plan.length)
-        _write_kv(client, plan, found, password)
-        generated = True
-    _set_user(
-        client, username=username, mount=mount, password=password, token_policies=token_policies
-    )
-    return {"changed": True, "credential_generated": generated}
+    if stored is not None and not plan.rotate:
+        _set_user(
+            client, username=username, mount=mount, password=stored, token_policies=token_policies
+        )
+        return {"changed": True, "credential_generated": False}
+
+    password = generate_password_value(plan.length)
+    _write_kv(client, plan, found, password)
+    if current_policies is None:
+        # A new login is a new change, so its create keeps the block check.
+        _set_user(
+            client, username=username, mount=mount, password=password, token_policies=token_policies
+        )
+        return {"changed": True, "credential_generated": True}
+    # The new password is stored for a login that exists, so setting only that
+    # password runs to its end with no block check: the login and the stored
+    # password stay in step. It uses the same path as every other set
+    # (``auth/<mount>/users/<name>``), with the password as the only field, so
+    # Vault keeps the login's policies and the role needs no other right. A
+    # change of the policies is its own request and keeps the check. Vault
+    # makes a login on that path when it is missing, so MEHO reads the login
+    # right before the set and sets nothing when an admin removed it.
+    with finish_without_block_check():
+        if _user_policies(client, username, mount) is None:
+            raise PasswordStoredNotSetError(
+                username=username, mount=plan.mount, path=plan.path, field=plan.field
+            )
+        _set_user(client, username=username, mount=mount, password=password, token_policies=None)
+    if token_policies is not None and sorted(token_policies) != sorted(current_policies):
+        _set_user(
+            client, username=username, mount=mount, password=None, token_policies=token_policies
+        )
+    return {"changed": True, "credential_generated": True}
 
 
 async def apply_credential_source(
@@ -280,7 +340,7 @@ async def apply_credential_source(
     inline_password: str | None,
 ) -> dict[str, Any]:
     """Write the login with the planned password source; return a value-free summary."""
-    return await asyncio.to_thread(
+    return await to_thread_checked(
         _apply_sync,
         client,
         plan,

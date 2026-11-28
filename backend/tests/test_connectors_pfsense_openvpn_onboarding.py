@@ -1004,7 +1004,9 @@ def target_paths(monkeypatch: pytest.MonkeyPatch) -> set[str]:
 
 
 _CREATE = {"name": "guest-1", "vault_path": _VAULT_PATH}
-_CREATED_OUT = f"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_PASSWORD={_PASSWORD}\n"
+_CREATED_OUT = (
+    f"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-1\nMEHO_VPN_PASSWORD={_PASSWORD}\n"
+)
 
 
 async def _create(fake: _Fake, params: dict[str, Any] | None = None, op: Any = "default") -> Any:
@@ -1196,7 +1198,7 @@ async def test_create_without_a_password_from_the_firewall_undoes_the_user(
 ) -> None:
     fake = _Fake(
         [_config(), _config(users=_user("guest-1", "2000"))],
-        playback_out="MEHO_VPN_CREATED_UID=2000\n",
+        playback_out="MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-1\n",
     )
     with pytest.raises(RuntimeError, match="did not return a password"):
         await _create(fake)
@@ -1205,6 +1207,25 @@ async def test_create_without_a_password_from_the_firewall_undoes_the_user(
     # The undo removes only the user with the uid this call made, and no override.
     undo = next(c for c in fake.staged if "meho_openvpn_user_undo" in c)
     assert "=== '2000'" in undo and "openvpn_delete_csc" not in undo
+
+
+@pytest.mark.parametrize(
+    "printed",
+    [
+        f"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_PASSWORD={_PASSWORD}\n",
+        f"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-2\nMEHO_VPN_PASSWORD={_PASSWORD}\n",
+    ],
+    ids=["no-name", "other-name"],
+)
+async def test_create_undoes_nothing_when_the_firewall_names_no_user_or_another_user(
+    vault: _FakeVault, printed: str
+) -> None:
+    """The undo takes the user name only from the firewall's answer."""
+    fake = _Fake([_config(), _config(users=_user("guest-1", "2000"))], playback_out=printed)
+    with pytest.raises(RuntimeError, match="did not name the user it made; nothing was undone"):
+        await _create(fake)
+    assert vault.writes == []
+    assert not any("meho_openvpn_user_undo" in c for c in fake.staged)
 
 
 async def test_create_does_not_touch_a_user_someone_else_made_meanwhile(
@@ -1344,7 +1365,9 @@ def test_create_fragment_run_in_php(tmp_path: Path) -> None:
         tmp_path, before, user_module.build_user_create_playback("guest-1", "A note")
     )
     found = re.fullmatch(
-        r"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_PASSWORD=([A-Za-z0-9]{24})\n", printed
+        r"MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-1\n"
+        r"MEHO_VPN_PASSWORD=([A-Za-z0-9]{24})\n",
+        printed,
     )
     assert found, printed
     users = out["config"]["system"]["user"]
@@ -1943,7 +1966,9 @@ async def test_an_undo_refused_for_a_system_name_says_so(vault: _FakeVault) -> N
                 return _proc("MEHO_VPN_SYSTEM_NAME\n")
             return await super()._run_command(target, cmd, operator=operator)
 
-    fake = _UndoRefused([_config()], playback_out="MEHO_VPN_CREATED_UID=2000\n")
+    fake = _UndoRefused(
+        [_config()], playback_out="MEHO_VPN_CREATED_UID=2000\nMEHO_VPN_CREATED_NAME=guest-1\n"
+    )
     with pytest.raises(RuntimeError, match=r"was not removed again \(system_name\)"):
         await _create(fake)
 

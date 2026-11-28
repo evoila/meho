@@ -56,7 +56,6 @@ The result and the approval card carry key paths only, never a secret value.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -64,6 +63,7 @@ from typing import Any
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.kv_tree import (
     DEFAULT_FOLDER_MAX_KEYS,
     folder_max_keys,
@@ -315,7 +315,7 @@ async def _live_versions(client: Any, *, mount: str, path: str, now: datetime) -
     A version whose deletion is scheduled for later is still live.
     """
     try:
-        payload = await asyncio.to_thread(
+        payload = await to_thread_checked(
             client.secrets.kv.v2.read_secret_metadata,
             path=path,
             mount_point=mount,
@@ -334,7 +334,7 @@ async def _delete_one(client: Any, *, mount: str, path: str, now: datetime) -> d
             return {"status": "not_found"}
         if not live:
             return {"status": "already_deleted"}
-        await asyncio.to_thread(
+        await to_thread_checked(
             client.secrets.kv.v2.delete_secret_versions,
             path=path,
             versions=live,

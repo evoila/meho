@@ -78,6 +78,8 @@ import structlog
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.principal_block_run import cleanup_without_block_check, note_not_removed
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault import ops as _kv_ops
 from meho_backplane.connectors.vault.ops_token_store_preview import (
     TOKEN_STORE_OP,
@@ -295,7 +297,13 @@ def _minted_from(payload: Any) -> _Minted:
 
 
 async def _revoke(minted: _Minted) -> bool:
-    """Revoke the new token with the token itself (``revoke-self``); never raises."""
+    """Revoke the new token with the token itself (``revoke-self``); never raises.
+
+    A clean-up: it runs with no block check, so the token is revoked also
+    when the caller was blocked while the operation ran. When the revoke
+    fails, the answer names the accessor of the token that stays, also when
+    the answer is the block refusal.
+    """
     from meho_backplane.settings import get_settings
 
     def _do() -> None:
@@ -303,13 +311,15 @@ async def _revoke(minted: _Minted) -> bool:
         client.auth.token.revoke_self()
 
     try:
-        await asyncio.to_thread(_do)
+        with cleanup_without_block_check():
+            await to_thread_checked(_do)
     except Exception as exc:
         _log.warning(
             "vault_token_store_revoke_failed",
             accessor=minted.accessor,
             error=type(exc).__name__,
         )
+        note_not_removed(f"the new Vault token with accessor {minted.accessor} was not revoked")
         return False
     return True
 
@@ -334,9 +344,9 @@ async def _create_token(client: Any, role_name: Any, kwargs: dict[str, Any]) -> 
     raised here.
     """
     if role_name:
-        work = asyncio.to_thread(client.auth.token.create, role_name=role_name, **kwargs)
+        work = to_thread_checked(client.auth.token.create, role_name=role_name, **kwargs)
     else:
-        work = asyncio.to_thread(client.auth.token.create_orphan, **kwargs)
+        work = to_thread_checked(client.auth.token.create_orphan, **kwargs)
     task = asyncio.ensure_future(work)
     cancelled = False
     while not task.done():

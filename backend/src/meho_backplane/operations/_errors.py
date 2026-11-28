@@ -1729,11 +1729,15 @@ def result_connector_error(
         "exception_class": type(exc).__name__,
         "exception_message": msg,
     }
+    summary = f"connector_error: {type(exc).__name__}"
     if isinstance(exc, ConnectorOwnMessage) and not isinstance(
         exc, (httpx.HTTPStatusError, ConnectorUpstreamError)
     ):
         # The text of these two holds the URL or the vendor's words, mark or not.
         extras[MESSAGE_SOURCE_KEY] = MESSAGE_SOURCE_MEHO
+        _add_own_facts(extras, exc)
+        if getattr(exc, "message_in_summary", False) is True:
+            summary = f"{summary}: {msg}"
     if isinstance(exc, httpx.HTTPStatusError):
         extras["http_status"] = exc.response.status_code
         extras["upstream_message"] = _http_upstream_message(exc.response)
@@ -1754,10 +1758,25 @@ def result_connector_error(
     return OperationResult(
         status="error",
         op_id=op_id,
-        error=f"connector_error: {type(exc).__name__}",
+        error=summary,
         duration_ms=duration_ms,
         extras=extras,
     )
+
+
+def _add_own_facts(extras: dict[str, Any], exc: BaseException) -> None:
+    """Copy the ``answer_facts`` of an own-message error into *extras*.
+
+    An error type with the :class:`ConnectorOwnMessage` mark may carry plain
+    facts that MEHO wrote itself (a flag, a KV path), never a value from the
+    vendor and never a secret. A key that the builder set already wins.
+    """
+    facts = getattr(exc, "answer_facts", None)
+    if not isinstance(facts, dict):
+        return
+    for key, value in facts.items():
+        if isinstance(key, str) and isinstance(value, (str, bool)):
+            extras.setdefault(key, value)
 
 
 def result_vault_credentials_read_error(

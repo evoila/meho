@@ -69,7 +69,10 @@ T2 (#2429) adds the **first approval-gated write op** (in the
   RKE2 version before any mutation. When the target's Vault secret has no
   `sudo_password` or `password`, the op fails with an error before any
   mutation. The error is `Rke2WriteOwnMessageError`, a fixed sentence of MEHO,
-  so the caller sees why it failed.
+  so the caller sees why it failed. The rotate cannot be undone, so once it
+  ran, the store of the new token (its Vault login and its write) runs to its
+  end with no block check (`finish_without_block_check`). A caller who is
+  blocked before the rotate gets the block refusal, and nothing is rotated.
 
 T3 (#2430) adds two more **approval-gated node-write ops**
 (`safety_level="dangerous"` / `requires_approval=true`), both in the shared

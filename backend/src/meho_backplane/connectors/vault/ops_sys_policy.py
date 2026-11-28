@@ -50,10 +50,10 @@ refused with ``write_capability_denied`` and no approval request is made.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops import vault_capability_preflight
 from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations._preview import PreviewContext, register_permission_preflight
@@ -345,7 +345,7 @@ async def vault_sys_policy_read(
     """
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
-        response = await asyncio.to_thread(client.sys.read_policy, name=name)
+        response = await to_thread_checked(client.sys.read_policy, name=name)
         return {"name": name, "rules": _extract_rules(response)}
 
 
@@ -367,7 +367,7 @@ async def vault_sys_policy_list(
     """
     _ = params  # schema-validated empty object; no inputs to extract.
     async with vault_client_for_target(operator, target) as client:
-        response = await asyncio.to_thread(client.sys.list_policies)
+        response = await to_thread_checked(client.sys.list_policies)
         return {"policies": _extract_policy_names(response)}
 
 
@@ -394,7 +394,7 @@ async def vault_sys_policy_write(
     name: str = str(params["name"]).strip()
     policy: str = params["policy"]
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(
+        await to_thread_checked(
             client.sys.create_or_update_policy,
             name=name,
             policy=policy,
@@ -421,7 +421,7 @@ async def vault_sys_policy_delete(
     """
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(client.sys.delete_policy, name=name)
+        await to_thread_checked(client.sys.delete_policy, name=name)
         return {"name": name, "deleted": True}
 
 

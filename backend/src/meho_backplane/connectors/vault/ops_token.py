@@ -52,10 +52,10 @@ core (always mounted); ``list_accessors`` normalises an empty-store
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_token_schemas import (
     VAULT_TOKEN_CREATE_LLM_INSTRUCTIONS,
@@ -135,7 +135,7 @@ async def vault_token_create(
         kwargs["period"] = params["ttl_period"]
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.auth.token.create, **kwargs)
+        payload = await to_thread_checked(client.auth.token.create, **kwargs)
 
     auth = dict(payload["auth"])
     result: dict[str, Any] = {"accessor": auth["accessor"]}
@@ -158,7 +158,7 @@ async def vault_token_revoke_accessor(
     accessor: str = str(params["accessor"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(client.auth.token.revoke_accessor, accessor=accessor)
+        await to_thread_checked(client.auth.token.revoke_accessor, accessor=accessor)
 
     return {"accessor": accessor, "revoked": True}
 
@@ -175,7 +175,7 @@ async def vault_token_list_accessors(
     """
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.auth.token.list_accessors)
+            payload = await to_thread_checked(client.auth.token.list_accessors)
         except _hvac_invalid_path():
             return {"keys": []}
 
@@ -204,7 +204,7 @@ async def vault_token_lookup_accessor(
     accessor: str = str(params["accessor"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.auth.token.lookup_accessor, accessor=accessor)
+        payload = await to_thread_checked(client.auth.token.lookup_accessor, accessor=accessor)
 
     return _extract_data(payload)
 

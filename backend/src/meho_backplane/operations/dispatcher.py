@@ -299,7 +299,7 @@ import ssl
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import httpx
 import hvac.exceptions
@@ -890,6 +890,13 @@ async def _run_source_kind_branch(
     return raw
 
 
+#: The handlers of the Vault connector note each request they send: every
+#: Vault request passes the block check and is noted on its own
+#: (:mod:`meho_backplane.auth.send_check`). So the dispatcher does not count
+#: such an operation as sent from its start.
+_HANDLERS_THAT_NOTE_EACH_SEND: Final[str] = "meho_backplane.connectors.vault."
+
+
 async def _run_source_kind_handler(
     *,
     descriptor: EndpointDescriptor,
@@ -916,9 +923,14 @@ async def _run_source_kind_handler(
     # a login blocked while the call waited for its policy gate or its
     # credentials gets no handler run (``auth.principal_block``).
     await raise_if_send_refused()
-    if descriptor.source_kind != "composite" and not hasattr(connector_instance, "_request_json"):
-        # Only the HTTP connector base notes each request it sends. Any other
-        # client (SSH, a vendor library) counts as sent from its start.
+    if (
+        descriptor.source_kind != "composite"
+        and not hasattr(connector_instance, "_request_json")
+        and not (descriptor.handler_ref or "").startswith(_HANDLERS_THAT_NOTE_EACH_SEND)
+    ):
+        # The HTTP connector base and the Vault operations note each request
+        # they send. Any other client (SSH, another vendor library) counts as
+        # sent from its start.
         mark_request_sent()
     if descriptor.source_kind == "ingested":
         assert connector_instance is not None  # resolver miss handled by caller
@@ -3861,8 +3873,12 @@ async def _audit_denied_and_return(
     params: dict[str, Any],
     params_hash: str,
     duration_ms: float,
+    result_status: str = "denied",
 ) -> OperationResult:
     """Write the ``denied`` audit row for a refused park, then return the result.
+
+    *result_status* is the status of the row. A refusal because MEHO cannot
+    read the block list passes ``error``, like a call that runs.
 
     The one audit path for every refusal that stops a park before an approval
     row exists: the destructive-tier binding checks (#3197, #4647), a
@@ -3894,11 +3910,25 @@ async def _audit_denied_and_return(
         descriptor=descriptor,
         target=target,
         params_hash=params_hash,
-        result_status="denied",
+        result_status=result_status,
         duration_ms=duration_ms,
         error_extras=_error_extras_for_audit(result),
     )
     return with_audit_receipt(result, receipt)
+
+
+async def _block_refusal_while_preparing(op_id: str, duration_ms: float) -> OperationResult | None:
+    """The block refusal while MEHO prepares an approval request, else ``None``.
+
+    Call it inside the record of the preparation (:func:`tracking_run`), so
+    the answer says ``uncertain`` when a request of the preparation was sent
+    and ``not_started`` when none was sent.
+    """
+    try:
+        await raise_if_send_refused()
+    except PrincipalBlockedStepError as exc:
+        return refusal_for_blocked_step(op_id, exc).model_copy(update={"duration_ms": duration_ms})
+    return None
 
 
 async def _handle_needs_approval(
@@ -3985,24 +4015,97 @@ async def _handle_needs_approval(
 
     run_id = current_agent_run_id_var.get()
 
-    # An op can turn on a check that runs before its call waits for
-    # approval (``_park_check.register_park_check``). It refuses a param
-    # that must not be stored in an approval request, for example a secret
-    # given as a plain value. It runs first, so nothing of the call is
-    # stored when it says no. The refusal is audited like the ones below.
-    refusal = await park_check_refusal(
+    # The op's own check, the preview and the permission check may send
+    # requests (for example a Vault login and a capabilities request), and so
+    # may the preview that a destructive call binds to. They run with the
+    # caller's block check, like the call itself. The block is checked once
+    # more right before the request is saved. A caller who is blocked
+    # gets the block refusal, and no approval request is made.
+    with tracking_run(
+        is_step=composite_depth_var.get() != COMPOSITE_DEPTH_TOP_LEVEL,
+        login=(operator.sub, operator.tenant_id),
         op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-        duration_ms=duration_ms,
-    )
-    if refusal is None and AfterGateCheck.INGESTED_OPS in checks_after_gate(
-        PermissionVerdict.NEEDS_APPROVAL
     ):
-        refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
+        # An op can turn on a check that runs before its call waits for
+        # approval (``_park_check.register_park_check``). It refuses a param
+        # that must not be stored in an approval request, for example a secret
+        # given as a plain value. It runs first, so nothing of the call is
+        # stored when it says no. The refusal is audited like the ones below.
+        refusal = await park_check_refusal(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+            duration_ms=duration_ms,
+        )
+        if refusal is None and AfterGateCheck.INGESTED_OPS in checks_after_gate(
+            PermissionVerdict.NEEDS_APPROVAL
+        ):
+            refusal = await _ingested_ops_refusal(descriptor, target, op_id, duration_ms)
+        blocked = await _block_refusal_while_preparing(op_id, duration_ms)
+        proposed_effect: dict[str, Any] = {}
+        if blocked is None and refusal is None:
+            # G11.7 follow-up (#1437): give an op that can compute a
+            # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a
+            # chance to populate ``proposed_effect`` so the reviewer sees the diff
+            # in the approval queue. Opt-in per op + fail-soft: ops without a
+            # registered builder (or whose builder declines) yield ``None`` and
+            # the queue stores the identifier-only default exactly as before. A
+            # builder that *raises* parks with the identifier fields plus an
+            # explicit ``preview_unavailable`` marker + reason (#1628), so the
+            # reviewer can tell "blast-radius unknown" from a small action.
+            #
+            # G0.20-T4 (#1504): the same hook also runs the op's park-time
+            # permission preflight (the Vault KV-write ops probe
+            # ``sys/capabilities-self``) and merges its capability-only,
+            # secret-free result under ``proposed_effect["permission_preflight"]``
+            # so a write Vault would deny surfaces a "this write will be denied"
+            # banner at park time instead of failing only after a four-eyes
+            # approval. Fail-soft too: a probe fault degrades to no banner. When the
+            # build raises, the request still stores the catalog risk level.
+            proposed_effect = await _build_park_effect(
+                op_id=op_id,
+                connector_id=connector_id,
+                descriptor=descriptor,
+                operator=operator,
+                target=target,
+                params=params,
+            )
+            blocked = await _block_refusal_while_preparing(op_id, duration_ms)
+        if blocked is None and refusal is None and descriptor.safety_level == "destructive":
+            # #3197: the destructive tier refuses to park (fail-closed, no
+            # approval row) unless the caller presented a matching
+            # preview_hash and the blast-radius statement is present.
+            # Non-destructive ops skip this entirely. #4647: the refused
+            # attempt is still audited as a denial, like a policy denial.
+            # Its preview belongs to the preparation, so the block is
+            # checked once more after it, right before the request is saved.
+            refusal = await _destructive_binding_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                operator=operator,
+                target=target,
+                params=params,
+                preview_hash=preview_hash,
+                proposed_effect=proposed_effect,
+                duration_ms=duration_ms,
+            )
+            blocked = await _block_refusal_while_preparing(op_id, duration_ms)
+    if blocked is not None:
+        # ``denied`` for a blocked caller, ``error`` when MEHO cannot read
+        # the block list: the same row as for a call that runs.
+        return await _audit_denied_and_return(
+            blocked,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+            result_status=blocked.status,
+        )
     if refusal is not None:
         return await _audit_denied_and_return(
             refusal,
@@ -4013,60 +4116,6 @@ async def _handle_needs_approval(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
-
-    # G11.7 follow-up (#1437): give an op that can compute a
-    # side-effect-free preview (notably ``k8s.apply``'s server-dry-run) a
-    # chance to populate ``proposed_effect`` so the reviewer sees the diff
-    # in the approval queue. Opt-in per op + fail-soft: ops without a
-    # registered builder (or whose builder declines) yield ``None`` and
-    # the queue stores the identifier-only default exactly as before. A
-    # builder that *raises* parks with the identifier fields plus an
-    # explicit ``preview_unavailable`` marker + reason (#1628), so the
-    # reviewer can tell "blast-radius unknown" from a small action.
-    #
-    # G0.20-T4 (#1504): the same hook also runs the op's park-time
-    # permission preflight (the Vault KV-write ops probe
-    # ``sys/capabilities-self``) and merges its capability-only,
-    # secret-free result under ``proposed_effect["permission_preflight"]``
-    # so a write Vault would deny surfaces a "this write will be denied"
-    # banner at park time instead of failing only after a four-eyes
-    # approval. Fail-soft too: a probe fault degrades to no banner. When the
-    # build raises, the request still stores the catalog risk level.
-    proposed_effect = await _build_park_effect(
-        op_id=op_id,
-        connector_id=connector_id,
-        descriptor=descriptor,
-        operator=operator,
-        target=target,
-        params=params,
-    )
-
-    # #3197: the destructive tier refuses to park (fail-closed, no approval
-    # row) unless the caller presented a matching preview_hash and the
-    # blast-radius statement is present. Non-destructive ops skip this
-    # entirely and park exactly as before. #4647: the refused attempt is
-    # still audited as a denial, like a policy denial.
-    if descriptor.safety_level == "destructive":
-        refusal = await _destructive_binding_refusal(
-            op_id=op_id,
-            connector_id=connector_id,
-            operator=operator,
-            target=target,
-            params=params,
-            preview_hash=preview_hash,
-            proposed_effect=proposed_effect,
-            duration_ms=duration_ms,
-        )
-        if refusal is not None:
-            return await _audit_denied_and_return(
-                refusal,
-                operator=operator,
-                descriptor=descriptor,
-                target=target,
-                params=params,
-                params_hash=params_hash,
-                duration_ms=duration_ms,
-            )
 
     # #3542: a preflight that says the write will be denied refuses the
     # park (no approval row written) instead of asking a person to approve

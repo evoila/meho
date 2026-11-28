@@ -133,6 +133,47 @@ reads the login that the dispatcher noted for the running call
 `checking_logins_for_steps`. It reads a copy of the list that is at most 5
 seconds old, so it reads the database at most once in 5 seconds per process.
 
+The requests of the Vault and secret operations, the Vault login and the
+shared credential reader pass this check right before each is sent. These calls run a blocking
+library in a worker thread, so they go through `to_thread_checked`
+(`auth/send_check.py`). The worker runs the check on the event loop when it
+starts the call, so a call that waited for a free worker is checked when it
+can run. The Vault client then runs the check again right before each of its
+requests. This holds only for a request sent in a worker that
+`to_thread_checked` started. So a call that reads and then writes stops
+before the write when the caller was blocked during the read. The HTTP client that reaches another
+instance's store does the same. Outside an operation the check does nothing.
+
+Clean-up calls run with no block check: the end of MEHO's own Vault login,
+the removal of an account, user or token that the same run just made on
+a target and could not store, and the removal of the script that a VPN user
+create staged on the firewall. When such a clean-up fails, the answer and the
+audit row name what stays. One helper marks a clean-up
+(`cleanup_without_block_check` in `auth/principal_block_run.py`), and a test
+pins the places that use it (`tests/test_principal_block_cleanup_guard.py`).
+The clean-up takes the id of what it removes only from the target's answer to
+the create.
+
+A run that has changed the target ends in step with the secret store. Where
+the operation has a clean-up that undoes its change, the clean-up runs. Where
+it cannot undo its change, the step that brings the target and the secret
+store in step runs to its end with no block check: the store of a token that
+the run rotated, and the setting of a password that the run stored for a
+login that exists. That request sets only the password. A change of the
+login's policies, and the create of a login that does not exist, keep the
+check. Every other request of the run keeps the check. A second helper marks
+such a step (`finish_without_block_check`), and the same test names each
+place with its rule (clean-up or finish).
+
+When a call needs approval, the op's own check before the wait, its preview,
+its permission check and, for a `destructive` call, the preview that the call
+binds to run with the same check. The block is checked once more right
+before the request is saved. A caller who is blocked before one of
+their Vault requests gets the block refusal, and no approval request is made.
+The answer says `uncertain` when a request of the preparation was sent, and
+`not_started` when none was sent. When the list cannot be read, the audit row
+has the status `error`, as for a call that runs.
+
 Once a check of a run refused, every later check of the same run refuses
 too, also when the list can be read again. The operation answers with the
 refusal, also when its handler catches the error of the step. An inventory
@@ -147,9 +188,11 @@ The answer says what was sent (`execution_outcome`):
 - `uncertain`: an earlier step or request of the same operation was sent,
   also in the run before an approval. The text says that a part of the
   operation may have run, and not to run it again before the target is
-  checked. A request counts as sent when the HTTP connector base sends it.
-  A step on another kind of connector (SSH, a vendor library) counts from
-  its start.
+  checked. A request counts as sent when the HTTP connector base or the
+  Vault client sends it. A step on another kind of connector (SSH, another
+  vendor library) counts from its start.
+- When a clean-up could not remove what the run made, the text names it and
+  says that it stays, and `not_removed` lists it.
 
 When a target session ends and the dispatcher sends a step again, a refusal
 before the second try is the same answer as on the first try.

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import hvac.exceptions
 import structlog
 
+from meho_backplane.auth.principal_block_run import cleanup_without_block_check, note_not_removed
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.secret.endpoints import SecretMaterial
@@ -238,11 +239,20 @@ async def _undo(
     project: str,
     robot_id: int,
 ) -> bool:
-    """Delete the new robot. Return whether that worked."""
+    """Delete the new robot. Return whether that worked.
+
+    A clean-up: the read of the robot and the delete run with no block
+    check, so the robot is deleted also when the caller was blocked while
+    the call ran. *robot_id* comes from Harbor's answer to the create. When
+    the delete fails, the answer names the robot id, also when the answer
+    is the block refusal.
+    """
     try:
-        await connector.robot_delete(operator, target, {"project": project, "id": robot_id})
+        with cleanup_without_block_check():
+            await connector.robot_delete(operator, target, {"project": project, "id": robot_id})
     except Exception as exc:
         _log.warning("harbor_robot_undo_failed", robot_id=robot_id, error=type(exc).__name__)
+        note_not_removed(f"the new Harbor robot with id {robot_id} was not deleted")
         return False
     _log.info("harbor_robot_undo_deleted", robot_id=robot_id)
     return True

@@ -71,13 +71,13 @@ because the local name would still point at the original object.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.kv_tree import folder_max_keys, list_kv_tree
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
@@ -399,7 +399,7 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     # test monkeypatches on vault_module._build_client propagate through
     # the call chain. It reads operator.raw_jwt for the JWT/OIDC login.
     async with vault_client_for_target(operator, target) as client:
-        secret_payload = await asyncio.to_thread(
+        secret_payload = await to_thread_checked(
             client.secrets.kv.v2.read_secret_version,
             path=path,
             mount_point=mount,
@@ -536,7 +536,7 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
             )
             return {"keys": tree}
         try:
-            list_payload = await asyncio.to_thread(
+            list_payload = await to_thread_checked(
                 client.secrets.kv.v2.list_secrets,
                 path=path,
                 mount_point=mount,
@@ -646,7 +646,7 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with vault_client_for_target(operator, target) as client:
-        write_payload = await asyncio.to_thread(
+        write_payload = await to_thread_checked(
             client.secrets.kv.v2.create_or_update_secret,
             path=path,
             secret=secret,
@@ -817,7 +817,7 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with vault_client_for_target(operator, target) as client:
-        patch_payload = await asyncio.to_thread(
+        patch_payload = await to_thread_checked(
             _patch_noting_read,
             operator,
             client.secrets.kv.v2,
@@ -921,7 +921,7 @@ async def vault_kv_versions(
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
     async with vault_client_for_target(operator, target) as client:
-        meta_payload = await asyncio.to_thread(
+        meta_payload = await to_thread_checked(
             client.secrets.kv.v2.read_secret_metadata,
             path=path,
             mount_point=mount,
@@ -1017,7 +1017,7 @@ async def vault_kv_delete(
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(
+        await to_thread_checked(
             client.secrets.kv.v2.delete_secret_versions,
             path=path,
             versions=versions,
@@ -1115,7 +1115,7 @@ async def _kv_metadata_exists(client: Any, *, mount: str, path: str) -> bool:
     to the dispatcher unchanged. The metadata itself is never returned.
     """
     try:
-        await asyncio.to_thread(
+        await to_thread_checked(
             client.secrets.kv.v2.read_secret_metadata,
             path=path,
             mount_point=mount,
@@ -1161,7 +1161,7 @@ async def vault_kv_metadata_delete(
                 "object": secret,
                 "guidance": "No secret exists at this path. Nothing was deleted.",
             }
-        await asyncio.to_thread(
+        await to_thread_checked(
             client.secrets.kv.v2.delete_metadata_and_all_versions,
             path=path,
             mount_point=mount,
@@ -1332,7 +1332,7 @@ async def vault_capabilities_preflight(
     paths = [auth_path for auth_path, _ in checks]
     try:
         async with vault_client_for_target(operator, target) as client:
-            response = await asyncio.to_thread(client.sys.get_capabilities, paths=paths)
+            response = await to_thread_checked(client.sys.get_capabilities, paths=paths)
     except Exception as exc:
         # Fail-soft: the park is the safety-relevant action; a probe that
         # cannot reach Vault (or whose role login transiently fails) must

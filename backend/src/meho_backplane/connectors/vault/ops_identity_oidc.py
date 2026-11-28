@@ -35,13 +35,13 @@ the target's role. When it does not, the call is refused with
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.base import ConnectorUpstreamError
 from meho_backplane.connectors.vault.ops import vault_capability_preflight
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
@@ -176,7 +176,7 @@ async def vault_identity_oidc_role_list(
     """
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.secrets.identity.list_roles)
+            payload = await to_thread_checked(client.secrets.identity.list_roles)
         except hvac.exceptions.InvalidPath:
             return {"keys": []}
     return {"keys": _extract_keys(payload)}
@@ -193,7 +193,7 @@ async def vault_identity_oidc_role_read(
     """
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.read_role, name=name)
+        payload = await to_thread_checked(client.secrets.identity.read_role, name=name)
     return _extract_data(payload)
 
 
@@ -208,7 +208,7 @@ async def vault_identity_oidc_role_delete(
     """
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(client.secrets.identity.delete_role, name=name)
+        await to_thread_checked(client.secrets.identity.delete_role, name=name)
     return {"name": name, "deleted": True}
 
 
@@ -223,7 +223,7 @@ async def vault_identity_oidc_key_list(
     """
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.secrets.identity.list_named_keys)
+            payload = await to_thread_checked(client.secrets.identity.list_named_keys)
         except hvac.exceptions.InvalidPath:
             return {"keys": []}
     return {"keys": _extract_keys(payload)}
@@ -240,7 +240,7 @@ async def vault_identity_oidc_key_read(
     """
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.read_named_key, name=name)
+        payload = await to_thread_checked(client.secrets.identity.read_named_key, name=name)
     return _extract_data(payload)
 
 
@@ -257,7 +257,7 @@ async def vault_identity_oidc_key_delete(
     name: str = str(params["name"]).strip()
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(client.secrets.identity.delete_named_key, name=name)
+            await to_thread_checked(client.secrets.identity.delete_named_key, name=name)
         except hvac.exceptions.InvalidRequest as exc:
             in_use = _key_in_use_error(name, exc)
             if in_use is None:

@@ -239,7 +239,9 @@ in `ops_robot_vault.py`:
   deletes the new robot, because its secret would be lost. It returns an
   error result with `error_code="robot_secret_not_stored"`, `robot_id` and
   `robot_deleted` (true or false). The caller's answer and the audit row both
-  hold these fields. The error names the exception class only, never the
+  hold these fields. When the caller is blocked while the call runs, the
+  answer is the block refusal. It names the robot id when the robot was not
+  deleted. The error names the exception class only, never the
   secret.
 - The approval request shows `secret_goes_to`: the Vault mount, path and
   field, and a note that an existing value in that field is replaced. Without

@@ -126,7 +126,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 import hvac.exceptions
 
+from meho_backplane.auth.principal_block_run import cleanup_without_block_check, note_not_removed
 from meho_backplane.auth.secret_read_as import record_caller_kv_read
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors.pfsense.openvpn_config import (
@@ -150,6 +152,7 @@ from meho_backplane.connectors.pfsense.ops_user_write import (
     _user_rows,
 )
 from meho_backplane.connectors.pfsense.ops_write import (
+    PlaybackCancelledAfterRunError,
     _apply_playback,
     _php_squote,
     _read_config_xml,
@@ -186,6 +189,8 @@ _PASSWORD_RE: Final = re.compile(
 )
 _CREATED_MARKER: Final = "MEHO_VPN_CREATED_UID="
 _CREATED_RE: Final = re.compile(rf"^{_CREATED_MARKER}([0-9]{{1,10}})\s*$", re.MULTILINE)
+_CREATED_NAME_MARKER: Final = "MEHO_VPN_CREATED_NAME="
+_CREATED_NAME_RE: Final = re.compile(rf"^{_CREATED_NAME_MARKER}(\S+)\s*$", re.MULTILINE)
 _EXISTS_MARKER: Final = "MEHO_VPN_EXISTS"
 _EXISTS_RE: Final = re.compile(rf"^{_EXISTS_MARKER}\s*$", re.MULTILINE)
 _UID_RE: Final = re.compile(r"^[0-9]{1,10}$")
@@ -321,7 +326,8 @@ def build_user_create_playback(name: str, descr: str) -> str:
     Adds a user only when no user has that name and the name is not a
     system account or group of the firewall. The password is made with
     ``random_int`` and printed once as ``MEHO_VPN_PASSWORD=<value>``, after
-    ``MEHO_VPN_CREATED_UID=<uid>``. When the name is taken, it prints
+    ``MEHO_VPN_CREATED_UID=<uid>`` and ``MEHO_VPN_CREATED_NAME=<name>``. When
+    the name is taken, it prints
     ``MEHO_VPN_EXISTS``; for a system name it prints
     ``MEHO_VPN_SYSTEM_NAME`` (or ``MEHO_VPN_SYSTEM_NAMES_UNREADABLE`` when it
     cannot read the files). In each of these cases it changes nothing.
@@ -375,6 +381,7 @@ def build_user_create_playback(name: str, descr: str) -> str:
         "  local_user_set($meho_user);",
         f"  write_config({_php_squote(f'meho: add VPN user {name}')});",
         f"  echo '{_CREATED_MARKER}' . $meho_user['uid'] . \"\\n\";",
+        f"  echo '{_CREATED_NAME_MARKER}' . $meho_user['name'] . \"\\n\";",
         f"  echo '{_PASSWORD_MARKER}' . $meho_pw . \"\\n\";",
         "} elseif ($meho_dot === 0 && $meho_found > 0) {",
         f"  echo '{_EXISTS_MARKER}' . \"\\n\";",
@@ -596,13 +603,13 @@ async def _vault_state(operator: Operator, mount: str, path: str) -> tuple[int, 
     """
     try:
         async with vault_client_for_operator(operator) as client:
-            mount_info = await asyncio.to_thread(
+            mount_info = await to_thread_checked(
                 client.adapter.get, f"/v1/sys/internal/ui/mounts/{mount}"
             )
             if not _mount_is_kv2(mount_info):
                 raise _not_kv2(mount, path)
             try:
-                answer = await asyncio.to_thread(
+                answer = await to_thread_checked(
                     client.secrets.kv.v2.read_secret_version,
                     path=path,
                     mount_point=mount,
@@ -646,7 +653,7 @@ async def _store_password(
     version, data = state
     try:
         async with vault_client_for_operator(operator) as client:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.secrets.kv.v2.create_or_update_secret,
                 path=path,
                 secret={**data, field: password},
@@ -746,7 +753,15 @@ async def _refuse_unchecked_release(
 async def _play_create(
     self: PfSenseConnector, target: Any, name: str, descr: str, operator: Operator
 ) -> str:
-    """Run the create fragment; on a failure or a cancel, say that the user may exist."""
+    """Run the create fragment; on a failure or a cancel, say that the user may exist.
+
+    The removal of the staged script is a clean-up with no block check. The
+    firewall's reply is kept also when that removal fails, so the handler can
+    store the password or remove the new user. A cancel during that removal
+    removes the user the reply names, then passes the cancel on. That cancel
+    holds only the name and the uid of the user: it is raised outside the
+    ``except`` block, so it has no cause or context that holds the reply.
+    """
     try:
         return await _apply_playback(
             self,
@@ -754,13 +769,33 @@ async def _play_create(
             script_name=f"meho_openvpn_user_create_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
             script_body=build_user_create_playback(name, descr),
             operator=operator,
+            script_removal_is_cleanup=True,
         )
+    except PlaybackCancelledAfterRunError as exc:
+        made = _made_user(exc.output, name) if exc.exit_status == 0 else None
     except asyncio.CancelledError as exc:
         raise asyncio.CancelledError(
             f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"openvpn.user.create: {exc}. {_may_exist(name)}") from exc
+    if made is None:
+        raise asyncio.CancelledError(
+            f"openvpn.user.create was cancelled while the firewall ran it. {_may_exist(name)}"
+        )
+    undone = await _undo_create(self, target, made[0], made[1], operator)
+    raise asyncio.CancelledError(
+        f"openvpn.user.create was cancelled after the firewall made the user; {undone}"
+    )
+
+
+def _made_user(played: str, name: str) -> tuple[str, str] | None:
+    """The name and uid of the user the create reply names, or ``None``."""
+    created = _CREATED_RE.search(played)
+    made_name = _CREATED_NAME_RE.search(played)
+    if created is None or made_name is None or made_name.group(1) != name:
+        return None
+    return made_name.group(1), created.group(1)
 
 
 @serialized_config_write
@@ -829,6 +864,14 @@ async def pfsense_openvpn_user_create(
             f"nothing was undone. {_may_exist(name)}"
         )
     uid = created.group(1)
+    made_name = _CREATED_NAME_RE.search(played)
+    if made_name is None or made_name.group(1) != name:
+        raise RuntimeError(
+            f"openvpn.user.create: the firewall did not name the user it made; "
+            f"nothing was undone. {_may_exist(name)}"
+        )
+    # The undo removes only the user the firewall named in its answer.
+    name = made_name.group(1)
     match = _PASSWORD_RE.search(played)
     if match is None:
         undone = await _undo_create(self, target, name, uid, operator)
@@ -892,27 +935,40 @@ async def _undo_create(
     uid: str,
     operator: Operator | None,
 ) -> str:
-    """Remove the user this call made (by name and uid); return what happened, for the error."""
+    """Remove the user this call made (by name and uid); return what happened, for the error.
+
+    A clean-up: each SSH command of the undo runs with no block check, so the
+    user is removed also when the caller was blocked while the call ran.
+    *name* and *uid* come from the firewall's answer to the create. When the
+    removal fails, the answer names the user, also when the answer is the
+    block refusal.
+    """
     lost = "Its password is not stored: delete the user or set a new password by hand."
+    stays = f"the new VPN user {name} (uid {uid}) was not removed"
     try:
-        played = await _apply_playback(
-            self,
-            target,
-            script_name=f"meho_openvpn_user_undo_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
-            script_body=build_user_undo_playback(name, uid),
-            operator=operator,
-        )
+        with cleanup_without_block_check():
+            played = await _apply_playback(
+                self,
+                target,
+                script_name=f"meho_openvpn_user_undo_{re.sub(r'[^A-Za-z0-9]', '_', name)}",
+                script_body=build_user_undo_playback(name, uid),
+                operator=operator,
+            )
     except asyncio.CancelledError as exc:
+        note_not_removed(stays)
         raise asyncio.CancelledError(
             f"openvpn.user.create was cancelled again while the new user was removed. "
             f"{_may_exist(name)}"
         ) from exc
     except Exception:
+        note_not_removed(stays)
         return f"the new user {name!r} could not be removed again. {lost}"
     refused = _system_refusal(_CREATE_OP_ID, name, played)
     if refused is not None:
+        note_not_removed(stays)
         return f"the new user {name!r} was not removed again ({refused.code}). {lost}"
     if _REMOVED_RE.search(played) is None:
+        note_not_removed(stays)
         return (
             f"the new user {name!r} was not removed again (the firewall did not confirm "
             f"the removal). {lost}"

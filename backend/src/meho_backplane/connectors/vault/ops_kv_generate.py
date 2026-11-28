@@ -31,13 +31,13 @@ hides values under such keys.
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 import string
 from dataclasses import dataclass
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops import (
     _DEFAULT_KV_MOUNT,
     _MOUNT_PROPERTY,
@@ -286,7 +286,7 @@ async def vault_kv_generate(
         rotate=rotate,
     )
     async with vault_client_for_target(operator, target) as client:
-        outcome = await asyncio.to_thread(_generate_sync, client, plan, rules, operator)
+        outcome = await to_thread_checked(_generate_sync, client, plan, rules, operator)
     return {
         "mount": mount,
         "path": plan.path,

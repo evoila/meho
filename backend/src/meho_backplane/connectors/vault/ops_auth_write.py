@@ -55,12 +55,12 @@ operator-actionable error class as the read ops.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
     _reclassify_not_found,
@@ -201,7 +201,7 @@ async def vault_auth_userpass_update_password(
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.auth.userpass.update_password_on_user,
                 username=username,
                 password=password,
@@ -230,7 +230,7 @@ async def vault_auth_userpass_delete(
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.auth.userpass.delete_user,
                 username=username,
                 mount_point=mount,
@@ -280,7 +280,7 @@ async def vault_auth_approle_write(
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(client.auth.approle.create_or_update_approle, **kwargs)
+            await to_thread_checked(client.auth.approle.create_or_update_approle, **kwargs)
         except hvac.exceptions.InvalidPath as exc:
             raise VaultAuthBackendNotMountedError(
                 f"approle auth backend not mounted at {mount!r}"
@@ -304,7 +304,7 @@ async def vault_auth_approle_delete(
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            await asyncio.to_thread(
+            await to_thread_checked(
                 client.auth.approle.delete_role,
                 role_name=role_name,
                 mount_point=mount,
@@ -348,7 +348,7 @@ async def vault_auth_approle_generate_secret_id(
 
     async with vault_client_for_target(operator, target) as client:
         try:
-            payload = await asyncio.to_thread(client.auth.approle.generate_secret_id, **kwargs)
+            payload = await to_thread_checked(client.auth.approle.generate_secret_id, **kwargs)
         except hvac.exceptions.InvalidPath as exc:
             await _reclassify_not_found(client, exc, mount=mount, backend="approle")
 

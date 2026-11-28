@@ -405,7 +405,21 @@ target registration) is documented in
     It is safe to run twice: when the login exists and the path holds a
     password, nothing changes (`written: false`), except a changed
     `token_policies`. `rotate: true` makes a new password. If a run stops
-    after the KV write, run it again with `rotate: true`.
+    after the KV write, run it again with `rotate: true`. For a login that
+    exists, MEHO sets the new password in its own request on the path
+    `auth/<mount>/users/<name>`, with the password as the only field, and
+    changes the policies in a second request. Vault keeps the login's
+    policies on that password request, and it needs no other Vault
+    capability than `create`, `update` and `read` on that path and the
+    rights on the KV path. MEHO reads the login right before that password
+    request. When an admin removed the login during the KV write, MEHO sets
+    nothing and does not make the login again. The answer is then an error
+    (`PasswordStoredNotSetError`): its `error` text and
+    `extras.exception_message` say that the new password was stored and not
+    set, and name the KV mount, path and field. `extras` also holds
+    `password_stored: true`, `password_set: false`, `stored_mount`,
+    `stored_path` and `stored_field`. The audit row holds the same fields.
+    Neither holds the password.
 
   The result never holds the password. It says `credential_source`
   (`request`, `kv_path` or `generated`), `credential_generated` and

@@ -37,10 +37,10 @@ upserts both this group and the token group under one lifespan registrar.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.send_check import to_thread_checked
 from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_identity_schemas import (
     VAULT_IDENTITY_ENTITY_ALIAS_WRITE_LLM_INSTRUCTIONS,
@@ -131,7 +131,7 @@ async def vault_identity_entity_write(
             kwargs[field] = params[field]
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.create_or_update_entity, **kwargs)
+        payload = await to_thread_checked(client.secrets.identity.create_or_update_entity, **kwargs)
 
     return {"name": name, "entity_id": _maybe_id(payload, "id"), "written": True}
 
@@ -158,7 +158,7 @@ async def vault_identity_entity_alias_write(
         kwargs["alias_id"] = str(params["alias_id"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(
+        payload = await to_thread_checked(
             client.secrets.identity.create_or_update_entity_alias, **kwargs
         )
 
@@ -201,7 +201,7 @@ async def vault_identity_group_write(
             kwargs[field] = params[field]
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.create_or_update_group, **kwargs)
+        payload = await to_thread_checked(client.secrets.identity.create_or_update_group, **kwargs)
 
     return {"name": name, "group_id": _maybe_id(payload, "id"), "written": True}
 
@@ -220,7 +220,7 @@ async def vault_identity_group_delete(
     name: str = str(params["name"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        await asyncio.to_thread(client.secrets.identity.delete_group_by_name, name=name)
+        await to_thread_checked(client.secrets.identity.delete_group_by_name, name=name)
 
     return {"name": name, "deleted": True}
 
@@ -242,7 +242,7 @@ async def vault_identity_entity_read(
     entity_id: str = str(params["entity_id"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.read_entity, entity_id=entity_id)
+        payload = await to_thread_checked(client.secrets.identity.read_entity, entity_id=entity_id)
 
     return _extract_data(payload)
 
@@ -261,7 +261,7 @@ async def vault_identity_group_read(
     name: str = str(params["name"]).strip()
 
     async with vault_client_for_target(operator, target) as client:
-        payload = await asyncio.to_thread(client.secrets.identity.read_group_by_name, name=name)
+        payload = await to_thread_checked(client.secrets.identity.read_group_by_name, name=name)
 
     return _extract_data(payload)
 
@@ -287,7 +287,7 @@ async def vault_identity_list(
             else client.secrets.identity.list_groups
         )
         try:
-            payload = await asyncio.to_thread(list_fn)
+            payload = await to_thread_checked(list_fn)
         except _hvac_invalid_path():
             # An identity store with zero entities/groups LISTs as a 404;
             # that is "empty", not an error.

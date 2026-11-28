@@ -312,7 +312,10 @@ def keycloak() -> Iterator[_Keycloak]:
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"Keycloak container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
     try:
 
         def logs() -> str:

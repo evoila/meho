@@ -120,7 +120,10 @@ def vault_dev_addr() -> Iterator[str]:
     try:
         container.start()
     except Exception as exc:
-        pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"vault dev container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         wait_for_log_message(container, "Vault server started!", timeout=60)

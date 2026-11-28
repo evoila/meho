@@ -97,14 +97,22 @@ def stub_embedding_service() -> AsyncMock:
 
 
 async def _run_step(
-    session: AsyncSession, stub: AsyncMock, step: Step, *, child: bool = False, **stored: Any
+    session: AsyncSession,
+    stub: AsyncMock,
+    step: Step,
+    *,
+    child: bool = False,
+    approver_role: TenantRole = TenantRole.OPERATOR,
+    **stored: Any,
 ) -> Any:
     """Register *step*, start the run, approve its first step, and let the run go on."""
     await c.register(session, stub, step, child=child, **stored)
     request_id = await c.start_run(c.run_op(child=child))
-    request = await h.approve(request_id, sub=c.APPROVER_SUB)
+    request = await h.approve(request_id, sub=c.APPROVER_SUB, role=approver_role)
     return await resume_dispatch_after_approval(
-        operator=c.token_approver(), request=request, params=None
+        operator=c.token_approver().model_copy(update={"tenant_role": approver_role}),
+        request=request,
+        params=None,
     )
 
 
@@ -128,7 +136,10 @@ async def test_on_a_step_with_only_the_plain_mark_goes_ahead_under_the_run_appro
     child: bool,
 ) -> None:
     c.switch(monkeypatch, on=True)
-    result = await _run_step(session, stub_embedding_service, _PLAIN, child=child)
+    # With the switch on, the step is dangerous: it goes ahead when an Admin approved the run.
+    result = await _run_step(
+        session, stub_embedding_service, _PLAIN, child=child, approver_role=TenantRole.TENANT_ADMIN
+    )
     await _went_ahead(result, _PLAIN, child=child)
 
 
@@ -349,7 +360,14 @@ async def test_on_a_plain_mark_step_with_a_tenant_override_flag(
 ) -> None:
     c.switch(monkeypatch, on=True)
     await _override(_PLAIN_CAUTION, tenant_id=tenant_id, requires_approval=True)
-    result = await _run_step(session, stub_embedding_service, _PLAIN_CAUTION, child=child)
+    # With the switch on, the step is dangerous: it goes ahead when an Admin approved the run.
+    result = await _run_step(
+        session,
+        stub_embedding_service,
+        _PLAIN_CAUTION,
+        child=child,
+        approver_role=TenantRole.TENANT_ADMIN,
+    )
     if waits:
         await _waits(result, _PLAIN_CAUTION, child=child)
     else:

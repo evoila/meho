@@ -105,7 +105,17 @@ async def _first_step(operator: Operator, target: Any, composite_op_id: str) -> 
     """The first step waits for a person; it records itself in :data:`ran` when it runs."""
     if composite_resume_state(composite_op_id) is not None:
         return None
-    gated = await h.gate(operator, target, h.STEP_A)
+    # A service login waits for this step in both switch states, and an Operator may
+    # approve it. With the plain approval mark it would be dangerous.
+    gated = await enforce_subop_policy(
+        operator=operator,
+        connector_id=h.STEP_CONNECTOR_ID,
+        op_id=h.STEP_A,
+        safety_level="caution",
+        requires_approval=False,
+        target=target,
+        params={"name": "vm-1"},
+    )
     if gated is None:
         ran.append(h.STEP_A)
     return gated

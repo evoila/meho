@@ -66,8 +66,8 @@ async def _first_step(operator: Operator, target: Any, run_op_id: str) -> Any:
         operator=operator,
         connector_id=REMOTE_CONNECTOR,
         op_id=h.STEP_A,
-        safety_level="safe",
-        requires_approval=True,
+        safety_level="caution",
+        requires_approval=False,
         target=target,
         params={"name": "vm-1"},
     )

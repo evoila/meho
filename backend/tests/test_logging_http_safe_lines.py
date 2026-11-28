@@ -206,6 +206,7 @@ def test_every_handler_gets_only_fixed_text(
     library.addHandler(lib_handler)
     library.setLevel(logging.DEBUG)
     library.debug("GET /%s?k=%s", values["path"], values["query"])
+    library.debug(f"GET /{values['path']}?k={values['addr']}")
     _send("urllib3.connection", "Failed to parse headers (url=%s): %s", values)
     with requests.Session() as session:
         session.mount("http://", HTTPAdapter(max_retries=1))

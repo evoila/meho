@@ -58,6 +58,12 @@ The rules:
   credential (class ``credential_write`` or ``credential_mint``) always
   waits for approval, also when its connector registered it without the
   approval flag. No override removes it.
+* **Fixed rules.** With the switch ``CUSTOM_POLICY`` on, approval cannot be
+  turned off for an operation that any fixed rule holds
+  (:func:`~meho_backplane.policy.fixed_rules.fixed_rule_of_operation`); the
+  error names the rule id. With the switch on, an operation whose own
+  definition says it changes rights in a target system (``changes_rights``)
+  waits for approval.
 
 * **Classification.** With the ``POLICY_CLASSIFICATION`` switch on, an
   operation also gets a category, labels and the rule that set them, and
@@ -98,6 +104,7 @@ from meho_backplane.operations.caller_address import (
     has_caller_address,
     raise_for_caller_address,
 )
+from meho_backplane.operations.change_reason import reason_refusal
 from meho_backplane.operations.credential_read import raise_for_credential_read
 from meho_backplane.operations.grant_approval import is_rights_change_op
 from meho_backplane.operations.switch_params import (
@@ -106,12 +113,21 @@ from meho_backplane.operations.switch_params import (
     visible_parameter_schema,
 )
 from meho_backplane.policy.classification import Classification
+from meho_backplane.policy.fixed_rules import (
+    CALLER_ADDRESS_WAITS,
+    DESTRUCTIVE_WAITS,
+    FIXED_RULES,
+    POLICY_CHANGE_WAITS,
+    RIGHTS_CHANGE_WAITS,
+    fixed_rule_of_operation,
+)
 from meho_backplane.policy.store import (
     InvalidStoredPolicyError,
     classification_enabled,
     classify_rows,
     classify_step,
 )
+from meho_backplane.policy.switches import custom_policy_on
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -191,8 +207,10 @@ PolicyEditErrorCode = Literal[
     "approval_off_destructive",
     "approval_off_caller_address",
     "approval_off_rights_change",
+    "approval_off_fixed_rule",
     "approval_off_needs_platform_admin",
     "approval_off_needs_reason",
+    "reason_looks_like_secret",
     "approval_off_needs_fresh_sign_in",
     "approval_required_for_install",
 ]
@@ -510,9 +528,14 @@ def _with_floors(row: EndpointDescriptor, policy: EffectivePolicy) -> EffectiveP
         safety_level=safety_level,
         requires_approval=requires_approval,
     )
-    if is_rights_change_op(row.op_id):
+    if is_rights_change_op(row.op_id) or _target_rights_waits(row):
         requires_approval = True
     return replace(policy, safety_level=safety_level, requires_approval=requires_approval)
+
+
+def _target_rights_waits(row: EndpointDescriptor) -> bool:
+    """True when the switch ``CUSTOM_POLICY`` is on and *row* changes rights in a target system."""
+    return bool(getattr(row, "changes_rights", None)) and custom_policy_on(get_settings())
 
 
 async def apply_effective_policy(
@@ -686,6 +709,8 @@ class _TenantScope:
     code_safety: str
     code_approval: bool
     own: list[OperationPolicyOverride]
+    #: The tenant's own copy of the operation; ``None`` when it has none.
+    copy_row: EndpointDescriptor | None = None
 
 
 def _key_clause(model: type[EndpointDescriptor] | type[OperationPolicyOverride], key: OpKey) -> Any:
@@ -736,6 +761,7 @@ async def _tenant_scopes(
                 code_safety=copy.safety_level if copy is not None else code_safety,
                 code_approval=copy.requires_approval if copy is not None else code_approval,
                 own=own.get(tenant_id, []),
+                copy_row=copy,
             )
         )
     return scopes
@@ -758,23 +784,32 @@ def _tenants_losing_approval(
 
 
 def _refuse_unless_may_end_approval(
+    row: EndpointDescriptor | None,
     op_id: str,
     *,
     old: EffectivePolicy,
     new: EffectivePolicy,
     lost: Sequence[UUID],
     who: _Requester,
+    tenants: Sequence[_TenantScope] = (),
 ) -> None:
     """Run the approval-off checks when approval ends in any scope the edit reaches.
 
     That is the edited scope itself (*old* to *new*) or a tenant in
     *lost*. A level of ``destructive`` always keeps approval, so when
-    approval ends anywhere, *new* is not destructive.
+    approval ends anywhere, *new* is not destructive. *row* is the
+    operation's row, or ``None`` when it is gone. The fixed rules are also
+    asked for the own copy of each tenant in *lost* (from *tenants*).
     """
     if not (old.requires_approval and not new.requires_approval) and not lost:
         return
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()
+    if row is not None:
+        _refuse_for_fixed_rule(row)
+    for scope in tenants:
+        if scope.tenant_id in lost and scope.copy_row is not None:
+            _refuse_for_fixed_rule(scope.copy_row)
     _check_may_turn_approval_off(op_id, new.safety_level, who)
 
 
@@ -858,6 +893,7 @@ def _new_approval_field(
         return None if row.requires_approval and not turned_off and not needed_by_a_tenant else True
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()
+    _refuse_for_fixed_rule(row)
     if has_caller_address(row.parameter_schema):
         raise OpPolicyEditError(
             "approval_off_caller_address",
@@ -882,6 +918,35 @@ def _new_approval_field(
         )
     _check_may_turn_approval_off(row.op_id, new_safety, who)
     return False
+
+
+#: The error code of an approval-off refusal for each fixed rule that had
+#: its own code before the fixed rules were named. Every other rule gets
+#: ``approval_off_fixed_rule``.
+_FIXED_RULE_CODES: Final[Mapping[str, PolicyEditErrorCode]] = {
+    DESTRUCTIVE_WAITS: "approval_off_destructive",
+    CALLER_ADDRESS_WAITS: "approval_off_caller_address",
+    RIGHTS_CHANGE_WAITS: "approval_off_rights_change",
+    POLICY_CHANGE_WAITS: "approval_off_rights_change",
+}
+
+
+def _refuse_for_fixed_rule(row: EndpointDescriptor) -> None:
+    """With the switch ``CUSTOM_POLICY`` on, refuse "approval off" when a fixed rule holds *row*.
+
+    The error names the rule id. With the switch off this refuses nothing;
+    the checks of today decide.
+    """
+    if not custom_policy_on(get_settings()):
+        return
+    rule = fixed_rule_of_operation(row)
+    if rule is None:
+        return
+    raise OpPolicyEditError(
+        _FIXED_RULE_CODES.get(rule, "approval_off_fixed_rule"),
+        f"approval cannot be turned off for {row.op_id!r}: the fixed rule {rule} holds. "
+        f"{FIXED_RULES[rule]} No policy and no admin can lower a fixed rule.",
+    )
 
 
 def _check_may_turn_approval_off(op_id: str, new_safety: str, who: _Requester) -> None:
@@ -935,6 +1000,8 @@ async def apply_policy_edit(
     operation run one at a time (:func:`_lock_operation`), so the checks
     see the edit before them.
     """
+    if (refusal := reason_refusal(reason)) is not None:
+        raise OpPolicyEditError("reason_looks_like_secret", refusal)
     key = OpKey.of(row)
     await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
@@ -971,7 +1038,9 @@ async def apply_policy_edit(
     # only removes an override or lowers a raised risk level, and one that
     # ends approval for a tenant's own copy of a built-in operation.
     lost = _tenants_losing_approval(tenants, before=mine, after=candidate)
-    _refuse_unless_may_end_approval(row.op_id, old=old, new=new, lost=lost, who=who)
+    _refuse_unless_may_end_approval(
+        row, row.op_id, old=old, new=new, lost=lost, who=who, tenants=tenants
+    )
     await _store(
         session,
         key=key,
@@ -1032,12 +1101,15 @@ async def remove_override(
     operation run one at a time (:func:`_lock_operation`), also across
     scopes, so two removals cannot both pass on each other's row.
     """
+    if (refusal := reason_refusal(reason)) is not None:
+        raise OpPolicyEditError("reason_looks_like_secret", refusal)
     await _lock_operation(session, key)
     overrides = (await load_overrides(session, tenant_id=scope_tenant_id, keys=[key])).get(key, [])
     mine, others = _split(overrides, scope_tenant_id)
     if mine is None:
         raise OverrideNotFoundError(key.op_id, scope_tenant_id)
-    code_safety, code_approval = await _classification(session, key, scope_tenant_id)
+    descriptor = await _scope_descriptor(session, key, scope_tenant_id)
+    code_safety, code_approval = _classification_of(descriptor)
     old = effective_policy(code_safety, code_approval, overrides)
     new = effective_policy(code_safety, code_approval, others)
     tenants: list[_TenantScope] = []
@@ -1047,7 +1119,9 @@ async def remove_override(
         )
     lost = _tenants_losing_approval(tenants, before=mine, after=None)
     who = _Requester(operator, reason, person_present, False, max_age_seconds)
-    _refuse_unless_may_end_approval(key.op_id, old=old, new=new, lost=lost, who=who)
+    _refuse_unless_may_end_approval(
+        descriptor, key.op_id, old=old, new=new, lost=lost, who=who, tenants=tenants
+    )
     await session.delete(mine)
     await session.flush()
     return PolicyEditResult(
@@ -1170,15 +1244,12 @@ async def _scope_policy(session: AsyncSession, row: OperationPolicyOverride) -> 
     return policies[key]
 
 
-async def _classification(
-    session: AsyncSession, key: OpKey, tenant_id: UUID | None
-) -> tuple[str, bool]:
-    """Return the classification of *key* as seen from *tenant_id*'s scope.
+def _classification_of(descriptor: EndpointDescriptor | None) -> tuple[str, bool]:
+    """Return the classification of *descriptor*, the row of one scope.
 
     With no descriptor (the operation is gone) the lowest values apply, so
     only the overrides count.
     """
-    descriptor = await _scope_descriptor(session, key, tenant_id)
     if descriptor is None:
         return "safe", False
     return descriptor.safety_level, descriptor.requires_approval

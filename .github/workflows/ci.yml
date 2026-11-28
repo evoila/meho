@@ -2041,7 +2041,9 @@ jobs:
     name: Secret hiding compared with the base branch
     # Builds, for the base branch and for this pull request, the list of
     # hidden and shown parts of each fixed input on each secret-hiding step,
-    # each side from its own code and input set, and judges the two lists.
+    # and judges the two lists. The base is built from its own code and
+    # input set. The pull request is built from its own backend/src and the
+    # base's backend/tests.
     # A change to a file under backend/tests/redaction_compare/, or to
     # backend/tests/__init__.py, is a difference too and needs its own
     # approved entry.
@@ -2055,24 +2057,29 @@ jobs:
     # are built here, stay under RUNNER_TEMP, and are never uploaded.
     # See docs/codebase/redaction.md, "Compare with main".
     #
-    # The rule script comes from the base commit (`git show`), so a pull
-    # request cannot weaken the check that judges it. The judge runs with
-    # `python3 -I` and uses only the standard library. The rule script, the
-    # base's approved file and the pull request's committed approved file
-    # are read from git before any code of the pull request runs.
+    # The rule script and the base's approved file come from the base commit
+    # (`git show`). The judge runs with `python3 -I` and uses only the
+    # standard library. The rule script, the base's approved file and the
+    # pull request's committed approved file are read from git before any
+    # code of the pull request runs. Each file of the compare package that
+    # the pull request changes needs its own reviewed entry.
     #
-    # The pull request's code runs in a container with no mounted folder:
-    # its files go in on stdin and its records come out on stdout. So it can
-    # write only its own records, and never the rule script, the base
+    # The pull request's code runs only in a container with no mounted
+    # folder: its files go in on stdin and its records come out on stdout.
+    # The files of backend/tests/ in that input come from the base commit,
+    # and every other file of backend/ from the pull request. The container
+    # can write only its own records, and never the rule script, the base
     # records or the approved files that the judge reads.
     #
-    # The job log is public, so the container's error output goes to a file
-    # that is never printed (a failed record build prints one fixed line), and
-    # the judge runs with --summary-only: on
-    # purpose the log shows no input, no step, no part and no number, only
-    # one closing line (and any stale approved entry, which is committed
-    # already). To see the differences, run the steps locally (see
-    # docs/codebase/redaction.md, "Compare with main").
+    # The job log is public, so the error output of both record builds goes
+    # to a file that is never printed (a failed record build prints one fixed
+    # line). The judge prints only its summary by default and refuses
+    # --full-list here. The job also passes --summary-only, because it runs
+    # the judge of the base commit. On purpose the log shows no input, no
+    # step, no part and no number, only one closing line (and any stale
+    # approved entry, which is committed already). To see the differences,
+    # run the steps locally (see docs/codebase/redaction.md, "Compare with
+    # main").
     #
     # It passes with "no compare on the base branch yet" only when a git
     # lookup of the base tree succeeds and finds no rule script. Otherwise
@@ -2181,10 +2188,17 @@ jobs:
           committed_approved "${head}" "${dir}/head-approved.yaml"
           # The base: its own code and input set, on the runner.
           git worktree add --detach "${dir}/base" "${base}"
-          (cd "${dir}/base/backend" && uv sync --frozen \
-            && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl")
-          # The pull request: its own code and input set, with the base's
-          # rule script, in a container with no mounts and no runner files.
+          # Its error output goes to a file that is never printed: the job
+          # log is public.
+          if ! (cd "${dir}/base/backend" && uv sync --frozen \
+            && uv run python "${dir}/redaction_compare.py" --records "${dir}/base.jsonl") \
+            > /dev/null 2> "${dir}/base.err"; then
+            echo "The records of the base could not be built. Run the compare locally to see why (docs/codebase/redaction.md, \"Compare with main\")."
+            exit 1
+          fi
+          # The pull request: its own backend/src, the base's backend/tests
+          # and the base's rule script, in a container with no mounts and no
+          # runner files.
           # The files of the compare package, and backend/tests/__init__.py
           # (it runs when the package is imported), that the pull request
           # changes are listed from git here. Each listed file is a difference
@@ -2200,6 +2214,15 @@ jobs:
           stage="${dir}/head-input"
           mkdir "${stage}"
           git archive "${head}" backend | tar -x -C "${stage}"
+          # backend/tests/ comes from the base commit; the rest of backend/
+          # comes from the pull request. Both paths must be real folders, so
+          # the rm below stays inside the staged tree.
+          if [ -L "${stage}/backend" ] || [ ! -d "${stage}/backend" ] || [ -L "${stage}/backend/tests" ]; then
+            echo "backend or backend/tests of the pull request is a link, not a folder: the compare stops"
+            exit 1
+          fi
+          rm -rf "${stage}/backend/tests"
+          git archive "${base}" backend/tests | tar -x -C "${stage}"
           cp "${dir}/redaction_compare.py" "$(command -v uv)" "${stage}/"
           # The container's error output goes to a file that is never
           # printed: the job log is public.

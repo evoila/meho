@@ -124,9 +124,9 @@ async def step_wait_reason_after_approval(
     ``floor:rights_change_waits``. ``None``: no such wait. With the switch
     off, or outside such a run, the answer is ``None`` and nothing is read.
     """
-    from meho_backplane.operations.composite import _runs_after_approval
+    from meho_backplane.operations.composite import runs_after_approval
 
-    if not custom_policy_on(get_settings()) or not _runs_after_approval():
+    if not custom_policy_on(get_settings()) or not runs_after_approval():
         return None
     for row in rows:
         why = await _own_approval_reason(row, caller)
@@ -215,9 +215,11 @@ def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> 
         tags=stored.tags,
         op_class=stored.op_class,
         hard_to_undo=stored.hard_to_undo,
+        changes_rights=stored.changes_rights,
     )
     row.policy_always_wait = step.policy_always_wait
     row.credential_call = step.credential_call
+    row.delete_call_reason = step.delete_call_reason
     row.code_safety_level = step.code_safety_level
     row.code_requires_approval = step.code_requires_approval
     row.code_parameter_schema = stored.parameter_schema

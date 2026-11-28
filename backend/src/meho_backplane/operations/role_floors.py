@@ -29,7 +29,11 @@ all (:func:`reader_change_denial`). This holds for every kind of login in
 a new call, and in a re-run of an approved request by the requester
 (``POST /api/v1/approvals/{id}/rerun``), checked with the role in the
 caller's token at the re-run. The REST, MCP and console doors give the
-same code and sentence (:func:`reader_change_refusal`).
+same code and sentence (:func:`reader_change_refusal`). A multi-step
+operation that registers a step list is a change, so an agent of a Reader
+is refused before the call waits for approval or anything is stored. In
+a run after an approval, a step that asks for a change is refused when
+the Reader's agent asked for the run (:func:`requester_change_denial`).
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a
@@ -68,6 +72,7 @@ __all__ = [
     "reader_change_refusal",
     "register_requester_check",
     "register_role_floor",
+    "requester_change_denial",
     "requester_check_denial",
     "role_floor_denial",
     "role_floor_for",
@@ -158,7 +163,10 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     That is a call at any risk level above ``safe`` (a write, a delete, a
     multi-step operation that changes something), an operation that always
     waits for approval, a write (class ``write``, or marked by its connector
-    as a safe write), a credential write or mint, and a change of rights.
+    as a safe write), a credential write or mint, a change of rights, and a
+    multi-step operation that registers a step list
+    (:func:`~meho_backplane.operations.governed_subops.register_governed_subops`).
+    A multi-step operation with no step list counts by its own class.
 
     A ``safe`` read is not a change. A credential read is raised to at least
     ``caution`` when the operation is looked up, so it counts as a change,
@@ -167,6 +175,7 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     """
     from meho_backplane.broadcast.events import resolve_op_class
     from meho_backplane.op_classes import is_credential_capable, is_safe_write
+    from meho_backplane.operations.governed_subops import governed_subops_for
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
 
@@ -178,7 +187,9 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     op_class = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
     if op_class in _CHANGE_CLASSES or is_safe_write(op_id) or is_credential_capable(op_id):
         return True
-    return is_rights_change_op(op_id) or params_write_credential(op_id, params)
+    if is_rights_change_op(op_id) or params_write_credential(op_id, params):
+        return True
+    return descriptor.source_kind == "composite" and governed_subops_for(op_id) is not None
 
 
 def reader_change_denial(
@@ -195,6 +206,29 @@ def reader_change_denial(
         operator.tenant_role, is_change=asks_for_change(descriptor, params)
     )
     return None if sentence is None else f"{READER_CHANGE_CODE}: {sentence}"
+
+
+def requester_change_denial(
+    descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """The deny reason for a step that the Reader who asked may not run, or ``None``.
+
+    Inside a run after a person's approval, a step is checked with the
+    rights of the person who runs it. When an agent asked for the run (an
+    agent login, or a hosted agent run) and the one who asked has the
+    Reader role, a step that asks for a change is refused too. This holds
+    for a multi-step operation whose steps MEHO could not read before the
+    run started.
+    """
+    from meho_backplane.operations.composite import runs_after_approval
+    from meho_backplane.operations.secondary_target_policy import approved_agent_requester
+
+    if not runs_after_approval():
+        return None
+    requester = approved_agent_requester()
+    if requester is None or requester[0] is None:
+        return None
+    return reader_change_denial(requester[0], descriptor, params)
 
 
 #: The op classes that change something (a read is not one).

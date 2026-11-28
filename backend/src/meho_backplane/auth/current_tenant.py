@@ -127,13 +127,16 @@ def bind_tenant_role_source(operator: Operator) -> None:
     contextvar. The audit cutover listener
     (:mod:`meho_backplane.audit_cutover`) copies the key onto every other
     row built while it is bound (:func:`tenant_role_source_from_context`),
-    so a writer that composes its own payload needs no change. Nothing is
-    bound otherwise. Called by the REST and MCP bind steps.
+    so a writer that composes its own payload needs no change. Otherwise
+    the key is cleared, so a tenant switch does not keep the note of the
+    tenant left. Called by the REST, MCP and console bind steps.
     """
     if operator.role_from_platform_admin:
         structlog.contextvars.bind_contextvars(
             **{_TENANT_ROLE_SOURCE_CONTEXTVAR: _PLATFORM_ADMIN_SOURCE}
         )
+    else:
+        structlog.contextvars.unbind_contextvars(_TENANT_ROLE_SOURCE_CONTEXTVAR)
 
 
 def tenant_role_source_payload(operator: Operator) -> dict[str, str]:

@@ -27,7 +27,7 @@ import pytest
 import requests
 from requests.adapters import HTTPAdapter
 
-from meho_backplane.logging import _HTTP_STACK_LOGGERS, configure_logging
+from meho_backplane.logging import _HTTP_STACK_LOGGERS, _SAFE_LINES, configure_logging
 
 _CHILD_LOGGERS = (
     "httpcore.http11",
@@ -35,6 +35,8 @@ _CHILD_LOGGERS = (
     "urllib3.connectionpool",
     "urllib3.connection",
     "botocore.endpoint",
+    "botocore.credentials",
+    "botocore.tokens",
     "google.auth.transport.requests",
     "httpcore2.http11",
     "httpcore2.connection",
@@ -313,7 +315,10 @@ def test_stack_logger_line_below_held_level_is_dropped(
     configure_logging(root_level)
     logger = logging.getLogger(name)
     held = _held_for(name)
-    assert logger.getEffectiveLevel() == held
+    # A logger of a fixed line (a warning MEHO writes as its own line) makes its
+    # WARNING records, so the handler filter can judge them.
+    safe = any(name == n or name.startswith(f"{n}.") for n, _ in _SAFE_LINES)
+    assert logger.getEffectiveLevel() == (min(held, logging.WARNING) if safe else held)
     for level in range(logging.DEBUG, held, 10):
         logger.log(level, "GET /%s?k=%s", values["path"], values["query"])
     _assert_clean(capfd.readouterr().out, values)

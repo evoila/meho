@@ -49,6 +49,7 @@ from meho_backplane.op_classes import (
 from meho_backplane.operations import op_policy as op_policy_module
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.grant_approval import _RIGHTS_CHANGE_OPS
+from meho_backplane.operations.ingest import service as ingest_service
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.policy.fixed_rules import FIXED_RULES, fixed_rule_of_operation
 from meho_backplane.settings import get_settings
@@ -199,6 +200,24 @@ def _lower_to_dangerous(monkeypatch: pytest.MonkeyPatch, op_id: str) -> None:
     monkeypatch.setattr(op_policy_module, "effective_policy_map", lowered)
 
 
+def _edit_a_lowered_row(monkeypatch: pytest.MonkeyPatch, op_id: str) -> None:
+    """Give the edit check the row of *op_id* as a lowering leaves it.
+
+    The level on the row is ``dangerous``; the code's own level stays
+    ``destructive``. The stored row is not changed.
+    """
+    real = ingest_service.apply_policy_edit
+
+    async def lowered(session: Any, *, row: EndpointDescriptor, **kwargs: Any) -> Any:
+        if row.op_id == op_id:
+            session.expunge(row)
+            row.safety_level = "dangerous"
+            row.code_safety_level = "destructive"
+        return await real(session, row=row, **kwargs)
+
+    monkeypatch.setattr(ingest_service, "apply_policy_edit", lowered)
+
+
 async def _add_tenant_copy(op_id: str, **facts: Any) -> None:
     """Store a tenant's own copy of the built-in row of *op_id*, with *facts* changed."""
     async with get_sessionmaker()() as session, session.begin():
@@ -263,7 +282,7 @@ async def test_with_the_switch_on_approval_off_is_refused_with_the_rule_id(
     _switch(monkeypatch, on=True)
     await _register(op_id, **extra)
     if case in _LOWERED:
-        _lower_to_dangerous(monkeypatch, op_id)
+        _edit_a_lowered_row(monkeypatch, op_id)
 
     response = _turn_off(op_id)
 

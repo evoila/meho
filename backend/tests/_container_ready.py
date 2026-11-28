@@ -21,8 +21,12 @@ fleet's loop) can tell a set-up failure from a failing test.
 container gives no answer in time, it stops it and starts a fresh one
 once, with a longer wait. A second start shows as one
 ``ContainerStartRetryWarning`` line in the pytest warnings summary, so
-we can count how often it happens. When the second start fails too, the
-error names both tries and the last log lines of the container.
+we can count how often it happens. A ``TimeoutError`` raised by ``start``
+itself (testcontainers waits for a log line inside ``start()``) counts as
+"no answer in time" too; every other start error leaves at once. When
+the second start fails too, the error names both tries with the wait
+time and the kind of error only. It holds no container log line and no
+error message: the CI logs of this repository are public.
 
 Usage::
 
@@ -52,8 +56,6 @@ class ContainerStartRetryWarning(UserWarning):
 
 class StartedContainer(Protocol):
     """The parts of a started testcontainers container that the helper uses."""
-
-    def get_logs(self) -> tuple[bytes, bytes]: ...
 
     def stop(self) -> None: ...
 
@@ -97,71 +99,65 @@ def start_until_ready[C: StartedContainer](
     timeout: float = 60.0,
     second_timeout: float = 120.0,
     interval: float = 0.5,
-    log_lines: int = 20,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> C:
     """Start a container and wait until ``probe`` works; on a timeout start a fresh one once.
 
     The first container is stopped before the second start. A container
-    that is not returned is always stopped.
+    that is not returned is always stopped. ``start`` must stop its own
+    container when its ``start()`` raises.
     """
-    first = start()
+    first = _try_start(start, probe, what, timeout, interval, clock, sleep)
+    if not isinstance(first, Exception):
+        return first
+
+    warnings.warn(
+        f"container not ready: {what} gave no answer in {timeout:g} s "
+        f"({type(first).__name__}), started a fresh container once more",
+        ContainerStartRetryWarning,
+        stacklevel=2,
+    )
+    second = _try_start(start, probe, what, second_timeout, interval, clock, sleep)
+    if not isinstance(second, Exception):
+        return second
+    raise ContainerNotReadyError(
+        f"container not ready: {what} failed on both tries\n"
+        f"  try 1: no answer in {timeout:g} s ({type(first).__name__})\n"
+        f"  try 2: no answer in {second_timeout:g} s ({type(second).__name__})"
+    )
+
+
+def _try_start[C: StartedContainer](
+    start: Callable[[], C],
+    probe: Callable[[C], object],
+    what: str,
+    timeout: float,
+    interval: float,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> C | ContainerNotReadyError | TimeoutError:
+    """One try: the ready container, or the timeout error of this try."""
+    try:
+        container = start()
+    except TimeoutError as exc:
+        return exc
     try:
         wait_until_ready(
-            lambda: probe(first),
+            lambda: probe(container),
             what=what,
             timeout=timeout,
             interval=interval,
             clock=clock,
             sleep=sleep,
         )
-        return first
     except ContainerNotReadyError as exc:
-        first_error = exc
-        _stop_quietly(first)
+        _stop_quietly(container)
+        return exc
     except BaseException:
-        _stop_quietly(first)
+        _stop_quietly(container)
         raise
-
-    warnings.warn(
-        f"container not ready: {what} gave no answer in {timeout:g} s, "
-        "started a fresh container once more",
-        ContainerStartRetryWarning,
-        stacklevel=2,
-    )
-    second = start()
-    try:
-        wait_until_ready(
-            lambda: probe(second),
-            what=what,
-            timeout=second_timeout,
-            interval=interval,
-            clock=clock,
-            sleep=sleep,
-        )
-        return second
-    except ContainerNotReadyError as exc:
-        tail = _log_tail(second, log_lines)
-        _stop_quietly(second)
-        raise ContainerNotReadyError(
-            f"container not ready: {what} failed on both tries\n"
-            f"  try 1: {first_error}\n"
-            f"  try 2: {exc}\n"
-            f"  last {log_lines} log lines of try 2:\n{tail}"
-        ) from exc
-    except BaseException:
-        _stop_quietly(second)
-        raise
-
-
-def _log_tail(container: StartedContainer, lines: int) -> str:
-    try:
-        stdout, stderr = container.get_logs()
-    except Exception as exc:  # the logs only help the message; never hide the real error
-        return f"    (no logs: {type(exc).__name__}: {exc})"
-    text = (stdout + stderr).decode("utf-8", errors="replace")
-    return "\n".join(f"    {line}" for line in text.splitlines()[-lines:])
+    return container
 
 
 def _stop_quietly(container: StartedContainer) -> None:

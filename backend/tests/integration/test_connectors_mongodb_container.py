@@ -30,6 +30,7 @@ meaningful.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -126,7 +127,13 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
 
     def start() -> MongoDbContainer:
         container = MongoDbContainer(image)
-        container.start()
+        try:
+            container.start()
+        except BaseException:
+            # A start that times out leaves a running container behind.
+            with contextlib.suppress(Exception):
+                container.stop()
+            raise
         return container
 
     def ping(container: MongoDbContainer) -> None:
@@ -138,7 +145,7 @@ def mongo_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
         )
 
     try:
-        mongo = start_until_ready(start, ping, what=f"mongodb ({run.label})")
+        mongo = start_until_ready(start, ping, what=f"mongodb ({run.label}, image {image})")
     except _DockerAPIError as exc:
         msg = str(exc).lower()
         if "rate limit" in msg or "too many requests" in msg or "429" in msg:

@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 import warnings
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import bson
 import pytest
@@ -84,6 +88,11 @@ def test_fails_with_a_clear_message_when_the_probe_never_works() -> None:
     assert fake.now <= 11.0
 
 
+# A made-up text in the container's log and in its errors. It must never
+# reach the test output: the CI logs of this repository are public.
+_MARKER = "zz-marker-7f3a"
+
+
 class _StandInContainer:
     """A started container that answers or not, and records whether it was stopped."""
 
@@ -93,18 +102,25 @@ class _StandInContainer:
         self.stopped = False
 
     def get_logs(self) -> tuple[bytes, bytes]:
-        lines = "".join(f"{self.name} log line {n}\n" for n in range(1, 31))
-        return lines.encode(), b"stderr: still starting\n"
+        return f"{_MARKER} stdout\n".encode(), f"{_MARKER} stderr\n".encode()
 
     def stop(self) -> None:
         self.stopped = True
 
 
-def _starter(*ready: bool) -> tuple[list[_StandInContainer], Callable[[], _StandInContainer]]:
+def _starter(
+    *tries: bool | BaseException,
+) -> tuple[list[_StandInContainer], Callable[[], _StandInContainer]]:
+    """Each try is ``True`` (ready), ``False`` (no answer) or an error that ``start()`` raises."""
     started: list[_StandInContainer] = []
+    calls: list[int] = []
 
     def start() -> _StandInContainer:
-        container = _StandInContainer(f"try{len(started) + 1}", ready=ready[len(started)])
+        outcome = tries[len(calls)]
+        calls.append(1)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        container = _StandInContainer(f"try{len(calls)}", ready=outcome)
         started.append(container)
         return container
 
@@ -113,7 +129,7 @@ def _starter(*ready: bool) -> tuple[list[_StandInContainer], Callable[[], _Stand
 
 def _probe(container: _StandInContainer) -> None:
     if not container.ready:
-        raise ConnectionRefusedError("connection refused")
+        raise ConnectionRefusedError(f"connection refused {_MARKER}")
 
 
 def test_start_until_ready_starts_once_when_the_first_container_answers() -> None:
@@ -139,7 +155,7 @@ def test_start_until_ready_starts_a_fresh_container_when_the_first_gives_no_answ
         container = start_until_ready(
             start,
             _probe,
-            what="mongodb (mongo-7)",
+            what="mongodb (mongo-7, image mongo:7)",
             timeout=60,
             second_timeout=120,
             interval=1,
@@ -152,14 +168,56 @@ def test_start_until_ready_starts_a_fresh_container_when_the_first_gives_no_answ
     assert not container.stopped
     assert len(record) == 1
     assert str(record[0].message) == (
-        "container not ready: mongodb (mongo-7) gave no answer in 60 s, "
-        "started a fresh container once more"
+        "container not ready: mongodb (mongo-7, image mongo:7) gave no answer in 60 s "
+        "(ContainerNotReadyError), started a fresh container once more"
     )
 
 
-def test_start_until_ready_names_both_tries_when_the_second_start_fails_too() -> None:
+def test_start_until_ready_starts_again_when_start_itself_times_out() -> None:
     fake = _FakeClock()
-    started, start = _starter(False, False)
+    started, start = _starter(TimeoutError(_MARKER), True)
+
+    with pytest.warns(ContainerStartRetryWarning) as record:
+        container = start_until_ready(
+            start, _probe, what="mongodb", interval=1, clock=fake.clock, sleep=fake.sleep
+        )
+
+    assert started == [container]
+    assert not container.stopped
+    assert len(record) == 1
+    assert "(TimeoutError), started a fresh container once more" in str(record[0].message)
+    assert _MARKER not in str(record[0].message)
+
+
+def test_start_until_ready_lets_another_start_error_leave_at_once() -> None:
+    fake = _FakeClock()
+    calls: list[int] = []
+
+    def start() -> _StandInContainer:
+        calls.append(1)
+        raise OSError("image pull failed")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ContainerStartRetryWarning)
+        with pytest.raises(OSError, match="image pull failed"):
+            start_until_ready(start, _probe, what="x", clock=fake.clock, sleep=fake.sleep)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("tries", "kinds"),
+    [
+        ((False, False), ("ContainerNotReadyError", "ContainerNotReadyError")),
+        ((False, TimeoutError(_MARKER)), ("ContainerNotReadyError", "TimeoutError")),
+        ((TimeoutError(_MARKER), False), ("TimeoutError", "ContainerNotReadyError")),
+    ],
+)
+def test_start_until_ready_names_both_tries_when_the_second_start_fails_too(
+    tries: tuple[bool | BaseException, ...], kinds: tuple[str, str]
+) -> None:
+    fake = _FakeClock()
+    started, start = _starter(*tries)
 
     with (
         pytest.warns(ContainerStartRetryWarning),
@@ -168,25 +226,22 @@ def test_start_until_ready_names_both_tries_when_the_second_start_fails_too() ->
         start_until_ready(
             start,
             _probe,
-            what="mongodb (mongo-7)",
+            what="mongodb (mongo-7, image mongo:7)",
             timeout=60,
             second_timeout=120,
             interval=1,
-            log_lines=5,
             clock=fake.clock,
             sleep=fake.sleep,
         )
 
-    message = str(excinfo.value)
-    assert message.startswith("container not ready: mongodb (mongo-7) failed on both tries")
-    assert "try 1: container not ready: mongodb (mongo-7) gave no answer in 60 s" in message
-    assert "try 2: container not ready: mongodb (mongo-7) gave no answer in 120 s" in message
-    assert "ConnectionRefusedError" in message
-    assert "stderr: still starting" in message
-    assert "try2 log line 27" in message
-    assert "try2 log line 26" not in message
+    assert str(excinfo.value) == (
+        "container not ready: mongodb (mongo-7, image mongo:7) failed on both tries\n"
+        f"  try 1: no answer in 60 s ({kinds[0]})\n"
+        f"  try 2: no answer in 120 s ({kinds[1]})"
+    )
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
     assert all(container.stopped for container in started)
-    assert len(started) == 2
 
 
 def test_start_until_ready_stops_the_container_on_an_unexpected_error() -> None:
@@ -200,6 +255,57 @@ def test_start_until_ready_stops_the_container_on_an_unexpected_error() -> None:
         start_until_ready(start, probe, what="x", clock=fake.clock, sleep=fake.sleep)
 
     assert started[0].stopped
+
+
+_INNER_TEST = """
+import pytest
+
+from tests._container_ready import start_until_ready
+from tests.test_container_ready import _FakeClock, _MARKER, _probe, _starter
+
+
+def test_uses_a_container_that_never_answers():
+    fake = _FakeClock()
+    _, start = _starter(False, TimeoutError(_MARKER))
+    start_until_ready(start, _probe, what="mongodb", clock=fake.clock, sleep=fake.sleep)
+"""
+
+
+def test_failure_output_holds_no_container_log_or_error_text(tmp_path: Path) -> None:
+    """The marker in the container's log and errors is in no output line and no junit file."""
+    (tmp_path / "test_inner.py").write_text(_INNER_TEST)
+    junit = tmp_path / "junit.xml"
+    backend = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-c",
+            os.devnull,
+            "--rootdir",
+            str(tmp_path),
+            "-rA",
+            f"--junitxml={junit}",
+            str(tmp_path / "test_inner.py"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(backend)},
+        timeout=120,
+        check=False,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "failed on both tries" in output
+    assert "try 1: no answer in 60 s (ContainerNotReadyError)" in output
+    assert "try 2: no answer in 120 s (TimeoutError)" in output
+    assert _MARKER not in output
+    assert _MARKER not in junit.read_text()
 
 
 def test_real_port_that_opens_late_is_waited_for() -> None:

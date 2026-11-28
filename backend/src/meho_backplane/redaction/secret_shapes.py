@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Say whether a free text holds something that looks like a secret.
+"""Say whether a free text holds something that is surely a secret.
 
 MEHO keeps one list of secret shapes: the named patterns in
 :mod:`.patterns`, in the order of the default redaction policy
-(``policies/default.yaml``). The value hiding on approval cards and in
-stored results runs that policy. :func:`secret_shape` runs the same rules
-over a free text, so a shape added to the list is caught in every place.
+(``policies/default.yaml``). Each shape has two answers:
 
-Two more rules sit here, because a regex cannot do them. They decode the
-text first:
+* hidden: the value hiding on approval cards and in stored results runs
+  the whole policy, so every shape of the list is hidden;
+* refused: :func:`secret_shape` refuses only the shapes that are surely a
+  secret (:data:`REFUSED_PATTERNS`). Every other shape of the list needs a
+  label or a key name to be a secret, so it is hidden only, and normal
+  text that looks like it (a manifest, a link with a user) is not refused.
 
+The free-text check has three more sure rules, because a regex cannot do
+them or the engine's form is too wide:
+
+* a full key block: a begin line and a later end line;
 * a signed token (JWT) whose first part decodes to JSON with an ``alg``
   field, also when its parts are shorter than the ``jwt`` pattern needs;
 * a base64 text that decodes to a key: a raw key of a usual size, a DER
-  private key, or a text that holds a secret of the list.
+  private key, or a text that holds a full key block or a signed token.
 
 Each check reads the text a fixed number of times, so its time grows in
 step with the length of the text.
@@ -33,7 +39,7 @@ from typing import Final
 from meho_backplane.redaction.patterns import get_pattern, secret_spans
 from meho_backplane.redaction.resolver import get_default_policy
 
-__all__ = ["SHAPE_WORDS", "secret_shape"]
+__all__ = ["REFUSED_PATTERNS", "SHAPE_WORDS", "secret_shape"]
 
 #: How a sentence names each pattern of the default policy.
 SHAPE_WORDS: Final[dict[str, str]] = {
@@ -50,6 +56,12 @@ SHAPE_WORDS: Final[dict[str, str]] = {
     "ceph_key": "a Ceph key",
 }
 
+#: The patterns of the list that the free-text check refuses. A ``url_secret``
+#: span is refused only when it is the password of a link (``user:password@``).
+REFUSED_PATTERNS: Final[frozenset[str]] = frozenset({"vendor_token", "url_secret"})
+
+_PEM_BEGIN_RE: Final = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+_PEM_END_RE: Final = re.compile(r"-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 _B64URL_RUN_RE: Final = re.compile(r"[A-Za-z0-9_-]+")
 #: The shortest JWT header or payload part: ``eyJ`` and eight more characters.
 _JWT_PART_MIN: Final = 11
@@ -59,7 +71,9 @@ _BINARY_KEY_LENGTHS: Final[frozenset[int]] = frozenset({16, 24, 32, 48, 64})
 
 
 def secret_shape(text: str) -> str | None:
-    """Name what *text* holds that looks like a secret ("a JWT", ...), or ``None``."""
+    """Name the sure secret that *text* holds ("a JWT", ...), or ``None``."""
+    if _has_pem_private_key(text):
+        return "a private key"
     if _jwt_shaped(text):
         return "a JWT"
     kind = _listed_shape(text)
@@ -70,9 +84,27 @@ def secret_shape(text: str) -> str | None:
 
 def _listed_shape(text: str) -> str | None:
     for rule in get_default_policy().rules:
-        if secret_spans(get_pattern(rule.pattern), text):
+        if rule.pattern not in REFUSED_PATTERNS:
+            continue
+        spans = secret_spans(get_pattern(rule.pattern), text)
+        if rule.pattern == "url_secret":
+            spans = [span for span in spans if _is_link_password(text, *span)]
+        if spans:
             return SHAPE_WORDS.get(rule.pattern, "a secret")
     return None
+
+
+def _is_link_password(text: str, start: int, end: int) -> bool:
+    # The user part of a link is followed by ``@``; a password is the text
+    # after its first ``:``.
+    colon = text.find(":", start, end)
+    return text[end : end + 1] == "@" and colon != -1 and colon < end - 1
+
+
+def _has_pem_private_key(text: str) -> bool:
+    # The first BEGIN line ends first, so one END line after it is enough.
+    begin = _PEM_BEGIN_RE.search(text)
+    return begin is not None and _PEM_END_RE.search(text, begin.end() + 1) is not None
 
 
 def _decoded_shape(text: str) -> str | None:
@@ -81,10 +113,11 @@ def _decoded_shape(text: str) -> str | None:
         return None
     if not _is_binary(decoded):
         inner = decoded.decode("utf-8")
-        kind = "a JWT" if _jwt_shaped(inner) else _listed_shape(inner)
-        if kind is None:
-            return None
-        return "a base64-encoded " + kind.split(" ", 1)[1]
+        if _has_pem_private_key(inner):
+            return "a base64-encoded private key"
+        if _jwt_shaped(inner):
+            return "a base64-encoded JWT"
+        return None
     if _looks_like_der_private_key(decoded):
         return "a base64-encoded private key"
     compact = _compact(text)

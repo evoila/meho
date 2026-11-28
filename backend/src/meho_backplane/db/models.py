@@ -703,11 +703,13 @@ class AuditLog(Base):
     # The policy rule that matched the call, and the version of the policy
     # file (#6044). The writers read both from
     # :data:`meho_backplane.operations._audit.policy_rule_var`, which the
-    # dispatcher binds next to ``policy_decision_var``. Today only the
-    # policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) sets it,
-    # so the text ends with ``(shadow)``: the evaluator matched this rule,
-    # but today's checks decided. NULL with the switch off, on rows where no
-    # gate ran, and on every row from before migration ``0168``.
+    # dispatcher binds next to ``policy_decision_var``. With ``CUSTOM_POLICY``
+    # on it names the rule that decided (``gate:<verdict>`` when the policy
+    # evaluator gave another answer). With it off, only the evaluator in
+    # shadow mode (``POLICY_ENGINE_SHADOW``) sets it, and the text ends with
+    # ``(shadow)``: the evaluator matched this rule, but today's checks
+    # decided. NULL with both switches off, on rows where no gate ran, and on
+    # every row from before migration ``0168``.
     policy_rule: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     policy_version: Mapped[int | None] = mapped_column(sa.Integer(), nullable=True, default=None)
     # The kind of caller of the row: one of
@@ -2099,6 +2101,12 @@ class EndpointDescriptor(Base):
     #: call waits for a person, and no standing grant, no agent grant and no
     #: run approval covers it.
     credential_call = False
+    #: Not a column. With the switch ``CUSTOM_POLICY`` on, the sentence of a
+    #: delete check (:func:`~meho_backplane.op_classes.declare_delete_check`)
+    #: on the row of one call whose params delete something. Then the call
+    #: has a delete sign: it waits for a person, and no standing grant and no
+    #: run approval covers it. ``None`` otherwise.
+    delete_call_reason = cast("str | None", None)
     #: Not columns. With the ``POLICY_CLASSIFICATION`` switch on, the
     #: category, the labels and the classification entry that set them
     #: (``rule_ref``) on a row that ``apply_effective_policy`` or

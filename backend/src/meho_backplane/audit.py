@@ -171,7 +171,12 @@ from meho_backplane.operations._audit import (
 from meho_backplane.request_usage.collector import open_request_usage
 from meho_backplane.work_ref import WorkRefError
 
-__all__ = ["AuditMiddleware", "bind_preallocated_audit_id", "commit_with_request_audit_row"]
+__all__ = [
+    "AuditMiddleware",
+    "bind_preallocated_audit_id",
+    "commit_with_request_audit_row",
+    "unbind_preallocated_audit_id",
+]
 
 #: Body returned when the audit insert fails (fail-closed 500). Pinned
 #: as a module constant so the contract is greppable from tests.
@@ -365,6 +370,15 @@ def bind_preallocated_audit_id(audit_id: uuid.UUID) -> None:
     structlog.contextvars.bind_contextvars(
         **{_PREALLOCATED_AUDIT_ID_KEY: str(audit_id)},
     )
+
+
+def unbind_preallocated_audit_id() -> None:
+    """Drop the id bound by :func:`bind_preallocated_audit_id`.
+
+    The middleware then allocates its own id, so it writes no second row
+    with the id of a row that was already committed.
+    """
+    structlog.contextvars.unbind_contextvars(_PREALLOCATED_AUDIT_ID_KEY)
 
 
 def _resolve_preallocated_audit_id() -> uuid.UUID | None:

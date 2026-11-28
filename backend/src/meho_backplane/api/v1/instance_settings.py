@@ -54,6 +54,7 @@ from meho_backplane.auth.operator import Operator, TenantRole, is_human_principa
 from meho_backplane.auth.rbac import authorize_tenant_scope, ensure_human_principal
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
+from meho_backplane.instance_settings.attempt_audit import bind_attempt, drop_saved_change_keys
 from meho_backplane.instance_settings.conventions_drift import check_conventions_drift
 from meho_backplane.instance_settings.schema import MAX_FILE_BYTES
 from meho_backplane.instance_settings.service import (
@@ -237,6 +238,7 @@ async def import_settings(
     ``announce_gate_enabled``.
     """
     content = await _read_file(request)
+    keys_before = set(structlog.contextvars.get_contextvars())
     try:
         if preview:
             structlog.contextvars.bind_contextvars(
@@ -247,9 +249,16 @@ async def import_settings(
         # "read" until the service is about to write (it re-binds "write"), so
         # a refused or unchanged file leaves no write in the audit log.
         structlog.contextvars.bind_contextvars(audit_op_id=_OP_ID_IMPORT, audit_op_class="read")
+        bind_attempt(content)
         result = await apply_import(session, operator, content)
+        await session.commit()
     except SettingsForbiddenError as exc:
+        drop_saved_change_keys(keys_before)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except BaseException:
+        # The session rolls back; the failure row names the attempt only.
+        drop_saved_change_keys(keys_before)
+        raise
 
     if result.plan.mistakes:
         body = _plan_response(result.plan, preview=False)

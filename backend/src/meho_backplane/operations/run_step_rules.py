@@ -34,6 +34,11 @@ With the switch on:
   through ``_never_covered`` of
   :mod:`~meho_backplane.operations.run_approval_gate`, which adds the root
   shell mark). ``fixed_rule_for`` alone has no root-shell rule.
+* A step goes ahead under the run's approval only when the person who
+  approved the run may approve the step's level
+  (:func:`_level_past_the_approver`). This holds for every step's level:
+  the code's own level, or a level an override row or a classification
+  entry set. Otherwise the step waits for its own approval.
 * The step gate asks these rules with the stored facts of the step's
   operation (:func:`step_rule_rows`): its parameter schema, HTTP verb, tags,
   class and risk level. The risk level of such a copy is the higher of the
@@ -78,6 +83,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "WAIT_REASON_PREFIX",
+    "highest_level",
     "step_keeps_own_approval",
     "step_rule_rows",
     "step_wait_reason_after_approval",
@@ -133,7 +139,8 @@ async def _own_approval_reason(descriptor: EndpointDescriptor, caller: Operator)
     """The rule by which *descriptor* keeps its own approval, with the switch on; else ``None``.
 
     A fixed rule is named first (``floor:<rule id>``), then the approval
-    flag, then a rule no run approval covers.
+    flag, then a rule no run approval covers, then a level the run's
+    approver may not approve.
     """
     # Imported here: these modules import the dispatcher, which imports this module.
     from meho_backplane.operations.run_approval_gate import _never_covered
@@ -147,7 +154,26 @@ async def _own_approval_reason(descriptor: EndpointDescriptor, caller: Operator)
         return "requires_approval"
     if _never_covered(descriptor):
         return "no_run_approval_covers_it"
+    if await _level_past_the_approver(descriptor):
+        return "approver_may_not_approve_step_level"
     return None
+
+
+async def _level_past_the_approver(descriptor: EndpointDescriptor) -> bool:
+    """True when the run's approver may not approve *descriptor*'s level.
+
+    The check holds for every step's level, whatever set it: the code, an
+    override row or a classification entry. The person who approved the run
+    is read off the decision of the approval that the run goes on under
+    (:func:`~meho_backplane.operations.approved_run_rights.run_approver_may_approve`).
+    """
+    from meho_backplane.operations.approved_run_rights import run_approver_may_approve
+
+    level = descriptor.safety_level
+    if await run_approver_may_approve(level):
+        return False
+    _log.info("run_step_waits_for_step_level", op_id=descriptor.op_id, level=level)
+    return True
 
 
 async def step_rule_rows(
@@ -189,13 +215,20 @@ def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> 
         tags=stored.tags,
         op_class=stored.op_class,
         hard_to_undo=stored.hard_to_undo,
+        changes_rights=stored.changes_rights,
     )
     row.policy_always_wait = step.policy_always_wait
     row.credential_call = step.credential_call
+    row.delete_call_reason = step.delete_call_reason
     row.code_safety_level = step.code_safety_level
     row.code_requires_approval = step.code_requires_approval
     row.code_parameter_schema = stored.parameter_schema
     return row
+
+
+def highest_level(rows: Sequence[EndpointDescriptor]) -> str:
+    """The highest risk level of *rows*: the level the step rule checks."""
+    return max((row.safety_level for row in rows), key=_level_rank)
 
 
 def _level_rank(level: str) -> int:

@@ -201,7 +201,8 @@ class AuditEntry(BaseModel):
     # The policy rule that matched the call and the policy file version
     # (#6044), from ``audit_log.policy_rule`` / ``policy_version``. A rule
     # that ends with ``(shadow)`` did not decide: the policy evaluator ran
-    # in shadow mode. ``None`` when the switch was off or no gate ran.
+    # in shadow mode. Without the mark it decided (``CUSTOM_POLICY`` on).
+    # ``None`` when the switches were off or no gate ran.
     policy_rule: str | None = None
     policy_version: int | None = None
     # What kind of accountable event the row records (#3733), from the real

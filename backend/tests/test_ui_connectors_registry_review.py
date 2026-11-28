@@ -65,11 +65,13 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
+    AuditLog,
     EndpointDescriptor,
     OperationGroup,
     Tenant,
     TenantOperationSetting,
 )
+from meho_backplane.operations.change_reason import REASON_HOLDS_SECRET
 from meho_backplane.operations.ingest import ensure_connector_class_registered
 from meho_backplane.operations.op_policy import OpKey, effective_policy_map
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
@@ -94,6 +96,7 @@ from tests._oidc_jwt_helpers import mint_token as _mint_token
 from tests._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from tests._oidc_jwt_helpers import public_jwks as _public_jwks
 from tests._route_tree_helpers import iter_routes
+from tests._secret_reason import assert_no_trace, made_up_key
 
 _BACKPLANE_URL = "https://meho.test"
 
@@ -680,6 +683,57 @@ def test_op_edit_platform_admin_turns_approval_off_with_reason() -> None:
     assert "reason" in without_reason.text
     assert with_reason.status_code == 200, with_reason.text
     assert _read_op_governance() == ("caution", False, False)
+
+    async def _last_edit_reason() -> Any:
+        async with get_sessionmaker()() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AuditLog).where(AuditLog.path == "meho_connector_edit_op")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return sorted(rows, key=lambda r: r.occurred_at)[-1].payload["reason"]
+
+    assert asyncio.run(_last_edit_reason()) == "read-only in practice"
+
+
+def test_op_edit_refuses_a_reason_that_looks_like_a_secret(
+    caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A reason that looks like a secret is refused and nothing is stored."""
+    key = made_up_key()
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, safety_level="caution", requires_approval=True)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    url = f"/ui/connectors/registry/{_CONNECTOR_ID}/operations/{_OP_ID}"
+    try:
+        with caplog.at_level("DEBUG"):
+            refused = client.patch(
+                url,
+                data={"requires_approval": "false", "reason": key},
+                headers=_edit_headers(csrf),
+            )
+    finally:
+        mock.stop()
+
+    assert refused.status_code == 400, refused.text
+    assert REASON_HOLDS_SECRET in refused.text
+    assert _read_op_governance() == ("caution", True, False)
+
+    async def _stored() -> list[Any]:
+        async with get_sessionmaker()() as session:
+            rows = (await session.execute(select(AuditLog))).scalars().all()
+            return [r.payload for r in rows]
+
+    assert_no_trace(key, refused.text, asyncio.run(_stored()), caplog.text, capfd.readouterr().out)
 
 
 @pytest.mark.parametrize(

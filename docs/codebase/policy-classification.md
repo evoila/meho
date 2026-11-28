@@ -367,6 +367,12 @@ when a write gets `hard_to_undo: overwrites`:
    the mark. The operation's own text says that it overwrites the backup at
    the same path. No mark depends on the parameters of a call.
 
+A delete of an object gets `hard_to_undo: deletes` when no later call of the
+same connector brings the object back as it was, also in one of MEHO's own
+stores, whose connector is the only way in (for example
+`topology.delete_node`: a node made again gets a new id, and the edges of
+the old node do not come back).
+
 `changes_rights` follows one sentence in every connector: a call changes
 rights when it changes who or what may reach or use something in the
 target system: a login, a group or role, an access list, or a firewall
@@ -415,8 +421,12 @@ A create, enable or disable of a login counts too.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
   (a CHECK allows only the three words) and
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
-  Each start writes the values from the code again. Operations from an
-  imported API spec leave both NULL.
+  Each start writes the values from the code again. An import of an API
+  spec writes both as NULL on each row it writes: on a fresh import, on a
+  re-import (a value stored on the row before goes away) and on an import
+  into one tenant. An import never changes a built-in typed row.
+  `backend/tests/test_imported_operation_marks.py` checks this through the
+  real import.
 - `backend/tests/test_operation_marks_stored.py` checks that each start
   stores the values of the code for every built-in operation, also on an
   upgraded database. It reads the values from the definitions in code, so
@@ -436,6 +446,29 @@ A create, enable or disable of a login counts too.
   runs a workload) carries no `hard_to_undo` on the whole operation. Its
   `changes_rights` stays as it is. `tests/test_delivery_calls_marks.py`
   names these calls and checks their stored rows.
+- With the switch `CUSTOM_POLICY` on, such a call can have a delete sign
+  of its own, read from its params. A connector registers a delete check
+  with `declare_delete_check` (`op_classes.py`). The check gets the params
+  of one call and returns one plain sentence that says what the call
+  deletes, or `None`. A check that fails counts as a call that deletes.
+  `raise_descriptor_for_params` (`operations/wait_when_set.py`) asks the
+  check only with the switch on. It sets `requires_approval` and
+  `delete_call_reason` on the row of that one call; the stored row does
+  not change. The dispatcher and the preview both run it before the
+  policy gate, so the preview shows the same wait as the call.
+  `_delete_shaped_reason_by_descriptor` reads `delete_call_reason` as a
+  delete sign: a standing grant and a run approval do not cover the call,
+  and the fixed rule `floor:delete_waits` names it. The approval card
+  shows the sentence (`proposed_effect.delete_wait`).
+  - `argocd.app.sync` and `argocd.app.rollback`: a call with `prune`
+    `true` waits for a person. A call with `prune` `false` or without
+    `prune` keeps the rules of its operation.
+  - `argocd.app.refresh` has no check: none of its params deletes.
+  - `argocd.app.set`, `k8s.apply`, `k8s.job.create` and `k8s.exec` have no
+    check: each of their calls waits for a person already, with the switch
+    on or off.
+  - `tests/test_delivery_call_delete_sign.py` sends each call through
+    `call_operation` and `preview_operation`, with the switch on and off.
 
 ## Known limits
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.integration._image_tags import major_of_image
+from tests.integration._image_tags import image_without_registry, major_of_image
 
 
 @pytest.mark.parametrize(
@@ -26,3 +26,15 @@ from tests.integration._image_tags import major_of_image
 )
 def test_major_of_image(image: str, major: str | None) -> None:
     assert major_of_image(image) == major
+
+
+@pytest.mark.parametrize(
+    ("image", "name"),
+    [
+        ("registry.example:5000/library/mongo:7", "mongo:7"),
+        ("mongo:7", "mongo:7"),
+        ("registry.example:5000/mongo@sha256:0123abcd", "mongo@sha256:0123abcd"),
+    ],
+)
+def test_image_without_registry(image: str, name: str) -> None:
+    assert image_without_registry(image) == name

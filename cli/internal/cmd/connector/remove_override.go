@@ -46,6 +46,8 @@ func newRemoveOverrideCmd() *cobra.Command {
 			"When the removal ends approval in that scope, it needs platform_admin,\n" +
 			"a --reason, and a fresh sign-in: run `meho login` and retry within five\n" +
 			"minutes. That is the same rule as turning approval off.\n\n" +
+			"A reason never holds a secret. MEHO refuses a --reason that looks\n" +
+			"like a secret and writes nothing.\n\n" +
 			"When the backplane runs with CUSTOM_POLICY on, the removal does not\n" +
 			"run at once. It waits until an admin approves it in the web console;\n" +
 			"a platform admin approves a removal that ends approval. The command\n" +

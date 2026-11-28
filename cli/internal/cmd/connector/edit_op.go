@@ -102,6 +102,8 @@ func newEditOpCmd() *cobra.Command {
 			"fresh sign-in: run `meho login` and retry within five minutes. It is\n" +
 			"never allowed for a destructive operation. List these operations\n" +
 			"with `meho connector overrides --reduced-approval`.\n\n" +
+			"A reason never holds a secret. MEHO refuses a --reason that looks\n" +
+			"like a secret and writes nothing.\n\n" +
 			"When the backplane runs with CUSTOM_POLICY on, a change of --safety or\n" +
 			"approval does not run at once. It waits until an admin approves it in\n" +
 			"the web console; a platform admin approves turning approval off. The\n" +

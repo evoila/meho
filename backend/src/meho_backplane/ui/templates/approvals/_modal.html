@@ -545,8 +545,8 @@
           <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ request.release_id }}</dd>
         </div>
       {% endif %}
-      {#- The policy rule that matched the call (#6044). Only while the policy
-          evaluator runs in shadow mode; then the rule did not decide. -#}
+      {#- The policy rule of the call (#6044). With CUSTOM_POLICY on it is the
+          rule that decided; with only shadow mode on, it did not decide. -#}
       {% if request.policy_rule %}
         {% set rule = request.policy_rule %}
         <div class="flex items-baseline justify-between gap-4" data-testid="approval-policy-rule">
@@ -626,6 +626,11 @@
       {#- Why a call that reads, writes or makes a credential waits. -#}
       {% if effect.get("credential_wait") %}
         <p class="mt-2 text-xs" data-testid="approval-credential-wait">{{ effect.get("credential_wait") }}</p>
+      {% endif %}
+
+      {#- Why a call whose params delete something waits (CUSTOM_POLICY on). -#}
+      {% if effect.get("delete_wait") %}
+        <p class="mt-2 text-xs" data-testid="approval-delete-wait">{{ effect.get("delete_wait") }}</p>
       {% endif %}
 
       {% if effect.get("write_capability_warning") %}

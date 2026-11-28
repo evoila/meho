@@ -185,8 +185,107 @@ func TestUnblockWithoutAReasonExplainsTheFlag(t *testing.T) {
 	if *calls != 0 {
 		t.Errorf("fresh sign-ins = %d, want 0", *calls)
 	}
-	if !strings.Contains(errOut, "Removing a block on your own login needs a reason: add --reason <text>.") {
+	if !strings.Contains(errOut, "needs a reason") {
 		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+func TestUnblockPrintsTheSentenceTheServerSends(t *testing.T) {
+	cases := map[string]string{
+		"own": "Removing a block on your own login needs a reason: 1 to 500 characters, " +
+			"with at least one character that is not a blank. Add --reason <text>.",
+		"other": "A reason has 1 to 500 characters, with at least one character " +
+			"that is not a blank. Leave out --reason, or fix the text.",
+	}
+	for name, sentence := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				body, _ := json.Marshal(map[string]string{"detail": "unblock_reason_required: " + sentence})
+				_, _ = w.Write(body)
+			}))
+			defer srv.Close()
+			stubFreshSignIn(t, func(context.Context, *api.AuthedClient) (oauth2.TokenSource, error) {
+				return nil, errors.New("must not sign in")
+			})
+
+			why := "x"
+			_, errOut, err := runTestUnblock(t, srv, &why)
+
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !strings.Contains(errOut, sentence) {
+				t.Errorf("stderr = %q, want the sentence %q", errOut, sentence)
+			}
+			if strings.Contains(errOut, "unblock_reason_required") {
+				t.Errorf("stderr holds the code: %q", errOut)
+			}
+		})
+	}
+}
+
+func TestUnblockSignsInWhenTheAnswerAfterARenewalIsTheChallenge(t *testing.T) {
+	var bearers []string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			_, _ = w.Write([]byte(`{"issuer":"` + srv.URL + `","token_endpoint":"` + srv.URL + `/token","device_authorization_endpoint":"` + srv.URL + `/device"}`))
+			return
+		case "/token":
+			_, _ = w.Write([]byte(`{"access_token":"renewed-token","token_type":"Bearer","expires_in":3600}`))
+			return
+		}
+		bearer := r.Header.Get("Authorization")
+		bearers = append(bearers, bearer)
+		switch bearer {
+		case "Bearer login-token":
+			w.WriteHeader(statusTokenRejected)
+			_, _ = w.Write([]byte(`{"detail":"token expired"}`))
+		case "Bearer fresh-token":
+			_, _ = w.Write([]byte(`{"sub":"me","removed":1}`))
+		default:
+			challenge(w)
+		}
+	}))
+	defer srv.Close()
+	calls := stubFreshSignIn(t, func(context.Context, *api.AuthedClient) (oauth2.TokenSource, error) {
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fresh-token"}), nil
+	})
+	store := &memStore{}
+	service, user := auth.KeyForBackplane(srv.URL)
+	_ = store.Save(service, user, auth.StoredToken{
+		BackplaneURL: srv.URL, Issuer: srv.URL, ClientID: "meho-cli",
+		AccessToken: "login-token", RefreshToken: "refresh-token", Expiry: time.Now().Add(-time.Minute),
+	})
+	client, err := api.NewAuthedClient(context.Background(), srv.URL,
+		api.AuthedClientOptions{Store: store, HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("NewAuthedClient: %v", err)
+	}
+
+	why := "the block was a mistake"
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	err = runUnblock(cmd, client, srv.URL, "me", &why, false)
+
+	if err != nil {
+		t.Fatalf("unblock failed: %v %s (bearers %v)", err, stderr.String(), bearers)
+	}
+	if *calls != 1 {
+		t.Errorf("fresh sign-ins = %d, want 1", *calls)
+	}
+	if n := len(bearers); n < 3 || bearers[n-2] != "Bearer renewed-token" || bearers[n-1] != "Bearer fresh-token" {
+		t.Errorf("bearers = %v, want the renewed token and then the fresh one last", bearers)
+	}
+	if !strings.Contains(stdout.String(), "unblocked me") {
+		t.Errorf("stdout = %q", stdout.String())
 	}
 }
 

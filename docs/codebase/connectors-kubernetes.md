@@ -904,12 +904,15 @@ last-applied annotation. All of this is done at any depth: a Secret nested
 in a custom resource and a pod template's copy of the annotation are hidden
 too. Hiding a value in an `env` or `httpHeaders` entry does not stop the
 walk: the entry's other fields are checked as well. Then the shared
-params redaction of the generic echo runs over the documents. The size
-limit comes last, after all redaction, because a redaction marker can be
-longer than the value it replaces: the echo keeps at most 16 KB in total
-as stored, counting every entry. A document that does not fit whole
-keeps only its identity; when not even that fits, one closing entry
-counts the documents left out.
+params redaction of the generic echo runs over the documents. It also
+reads each `key: value` pair of a map entry with a text value as one
+text, the way it reads that line in the manifest text, so a shape known
+by the key and the value together (`Authorization: Basic ...`) is hidden.
+The size limit comes last, after all redaction, because a redaction
+marker can be longer than the value it replaces: the echo keeps at most
+16 KB in total as stored, counting every entry. A document that does not
+fit whole keeps only its identity; when not even that fits, one closing
+entry counts the documents left out.
 
 **`k8s.apply` and `force_conflicts`.** Kubernetes records which tool owns
 each field of an object. `k8s.apply` applies under the owner `meho`. When

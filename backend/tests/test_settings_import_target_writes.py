@@ -122,6 +122,7 @@ async def test_token_import_that_changes_a_target_is_refused(client: TestClient)
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == TARGET_WRITES_NEED_CONSOLE
+    assert "/ui/settings" in resp.json()["detail"]
     (row,) = await _rows(Target)
     assert (row.host, row.verify_tls) == ("10.0.0.10", True)
     assert await _rows(ApprovalRequest) == []

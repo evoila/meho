@@ -112,6 +112,15 @@ routing:
   value, in a tenant's file and in the install's file, with one sentence:
   "This version of MEHO does not read `approvers` in a policy file; remove
   it."
+- `risk_levels` (`policy/risk_levels.py`) is the one exception, and only
+  with the switch `CUSTOM_POLICY` on. The export writes the risk-level
+  edits of its scope (`OperationPolicyOverride` rows that set
+  `safety_level` or `requires_approval`): a tenant's own rows, or the
+  install-wide rows. Each item has the rule id `override:<row id>`, the
+  operation, the scope, the level or the approval flag, the reason, who
+  set it and when. The import reads the part only to compare it: the same
+  edits (in any order) change nothing, and any other part is refused with
+  the line named. The stored document never holds the part.
 - `limits` (the install's file only) is the outer limit of the tenants'
   policies: `limits.personal_agent_up_to` is the highest risk level
   (`safe`, `caution` or `dangerous`) that a tenant's rule for personal

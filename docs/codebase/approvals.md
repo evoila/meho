@@ -938,9 +938,12 @@ genuine handler fault still records `500`.
 Some approval rules are fixed: no policy and no admin can lower them. They
 are in one list, `policy/fixed_rules.py` (`credential_waits`,
 `rights_change_waits`, `policy_change_waits`, `agent_never_approves`,
-`destructive_waits`, `delete_waits`, `caller_address_waits`). The call
-gate asks this list before it reads a standing grant or a run approval.
-Each rule and its sentence:
+`destructive_waits`, `delete_waits`, `caller_address_waits`,
+`root_shell_waits`, `target_rights_waits`). The call gate asks this list
+before it reads a standing grant or a run approval. When an agent, a
+service login or a runner tries to approve, the refusal names the rule
+`floor:agent_never_approves`, on REST and in the service layer. Each rule
+and its sentence:
 [policy-evaluator.md](policy-evaluator.md#the-fixed-rules).
 
 ### Steps of an approved multi-step operation, with `CUSTOM_POLICY` on
@@ -972,6 +975,11 @@ With the switch on, a step keeps its own approval when one of these holds:
   the web console after a fresh sign-in.
 - No run approval covers it (`never_covered_reason`, plus the root shell
   mark).
+- The person who approved the run may not approve the step's level
+  (`run_approver_may_approve` in `operations/approved_run_rights.py`, read
+  off the decision of the run's approval). This holds for every step's
+  level: the code's own level, or a level an override row or a
+  classification entry set.
 
 The step gate asks these rules with the stored facts of the step's
 operation, when a row is stored (`step_rule_rows`): its parameter schema,
@@ -984,9 +992,11 @@ a delete sign, so a step whose stored row has `hard_to_undo` keeps its own
 approval, as a child call of the same operation does.
 When both a built-in row and a row of the caller's tenant are stored, the
 rules are asked once for each row, so a fact counts when either row holds
-it. The facts go only into copies of the step's row. The gate, the card and
-the approval request use the step's declared values. With the switch off,
-no stored row is read.
+it. The facts go only into copies of the step's row. The gate uses the
+step's declared values. The step's own approval request carries the level
+the rules checked: the highest level of the step and its copies
+(`highest_level`). So only a person who may approve that level can approve
+it. With the switch off, no stored row is read.
 
 When a person approved a step's own request and the run goes on, the step
 is checked again before it runs. With the switch on, its level then is the
@@ -1012,8 +1022,8 @@ changes. The reason MEHO stores for such a wait (the `wait_reason` of the
 step's `approval.request` audit row) names the rule:
 `run_step_keeps_own_approval: a step of a run after an approval keeps its
 own approval (floor:rights_change_waits)`. A fixed rule is named as
-`floor:<rule id>`; otherwise the reason ends in `(requires_approval)` or
-`(no_run_approval_covers_it)`.
+`floor:<rule id>`; otherwise the reason ends in `(requires_approval)`,
+`(no_run_approval_covers_it)` or `(approver_may_not_approve_step_level)`.
 
 One exception: a credential read that the run sent at once before the
 wait, and that a resume sends again, is sent again with no new wait, so
@@ -1025,7 +1035,8 @@ Tests: `backend/tests/test_custom_policy_run_steps.py`,
 `backend/tests/test_custom_policy_run_steps_console_rights.py`,
 `backend/tests/test_custom_policy_run_steps_resend.py`,
 `backend/tests/test_custom_policy_run_steps_stored_level.py`,
-`backend/tests/test_custom_policy_run_steps_hard_to_undo.py` and
+`backend/tests/test_custom_policy_run_steps_hard_to_undo.py`,
+`backend/tests/test_custom_policy_run_steps_raised_level.py` and
 `backend/tests/test_custom_policy_run_steps_own_recheck.py`. The switch-off
 answers in these tests are fixed values recorded from a run on main.
 
@@ -3000,7 +3011,8 @@ for approval.
 - **First call.** The new `approval_request` row stores the key
   (`idempotency_key` column, migration `0105`).
 - **Retry of the identical call.** If the same principal in the same tenant
-  has a `pending` or `approved` request with this key,
+  has a `pending` or `approved` request with this key, and that request was
+  asked the same way as this call (see "Asked the same way" below),
   `create_pending_request` returns that request. The reply is the normal
   `awaiting_approval` envelope (HTTP 200) with the **same**
   `extras.approval_request_id` and `extras.approval_request_reused: true`.
@@ -3021,8 +3033,13 @@ for approval.
   asked the same way as this call (`_Asker` in `approval_queue.py`): the
   same kind of login (`principal_kind`), the same people behind the login
   (`people_behind`, compared by the set of `sub` values, casefolded: the
-  compare of the self-approval rule, `behind_subs`) and the same
-  `reveal_secret` choice. A request asked another way is not returned, and
+  compare of the self-approval rule, `behind_subs`), the same
+  `reveal_secret` choice, the same acting agent (`principal_act`, empty for
+  a direct call) and the same agent run (`run_id`, empty outside a run).
+  A call that the same person sends directly and a call that an agent
+  sends for that person are asked differently, and so are the calls of two
+  agent runs. Both the compare and the stored row read the same values.
+  A request asked another way is not returned, and
   the call gets its own request, which waits for a person. The first
   request stays as it is. The new request cannot keep the key in its own
   column while the first one holds it there (the unique index below), so
@@ -3072,8 +3089,9 @@ for approval.
   new one.
 - **Who can match.** The key is scoped to `(tenant_id, principal_sub)` and
   to the way the call was asked (see "Asked the same way"). Two requesters,
-  two logins with one `principal_sub` but other people behind them, or two
-  runs with different `work_ref` values, never share one request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
+  two logins with one `principal_sub` but other people behind them, two
+  acting agents, two agent runs, or two runs with different `work_ref`
+  values, never share one request. With the switch `APPROVAL_SAME_CALL_REUSE` off (the default),
   a call with no key makes a new request every time. With it on, see
   "The same call without the same key" below.
 

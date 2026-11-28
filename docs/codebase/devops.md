@@ -2812,11 +2812,15 @@ the exit code of each address, never the address. The smoke job sets
 `cache-mode: none`, so GitHub gives it no cache access.
 
 **When the site dies.** The job `second-site-watchdog` runs on a
-GitHub-hosted runner when the site was picked. After 30 minutes, if a
-shard of the second-site job still has no runner, it reads the jobs again.
-It cancels the run only when that fresh read shows at least one shard with a
-waiting status (queued, waiting, requested or pending). A failed read, or a
-shard with no status, never leads to a cancel. Only this job
+GitHub-hosted runner when the site was picked. It stops the run only when a
+shard of the second-site job waited 30 minutes for a runner and the site
+started no job at all in those 30 minutes, in any run of the workflows that
+use it, or when it cannot read the jobs of those runs. When the site did
+start a job, it is busy, not down: the watchdog keeps waiting, at most 35
+minutes more (the time limit of a shard). Each cancel comes right after a
+fresh read that shows at least one shard with a waiting status (queued,
+waiting, requested or pending). A failed read of the run itself, or a shard
+with no status, never leads to a cancel. Only this job
 has `actions: write` in `ci.yml`.
 
 **Switch on.** Start "Second runner site smoke" by hand on `main` and check
@@ -2839,6 +2843,14 @@ contributors" must stay on, because a fork can edit its own copy of a
 workflow.
 
 **Tests.** `tests/test_ci_second_runner_site.py`.
+
+### Hosted runner trial (#7187)
+
+For one day, the job `python-unit-shard-hosted-trial` runs unit shard 6 of a
+full pull request run also on a GitHub-hosted runner (`ubuntu-latest`), beside
+the normal shard 6, with no secret and not as a required check, so the wait and
+the run time of the two can be compared. After the trial a small pull request
+removes the job.
 
 ### Runner-CPU rule
 
@@ -3011,9 +3023,15 @@ The rule:
   name (`MEHO_TEST_POSTGRES_IMAGE`) runs one image by hand. Each version run
   has a fixed test id (`postgres-16`, `mongo-8`). A step before each upload
   of a test report replaces the proxy name in it.
-- The k3s node inside a test container does not pull its busybox image from
-  the proxy. The seven tests of `test_connectors_k8s_k3d.py` that need it
-  skip.
+- The k3s node inside a test container has its own image store and does not
+  pull through the proxy. So the fixture of `test_connectors_k8s_k3d.py`
+  has the Docker daemon of the tests pull the images its pods need: busybox
+  (`MEHO_TEST_BUSYBOX_IMAGE`) and the pause image that every pod needs
+  before its containers start (`MEHO_TEST_K3S_PAUSE_IMAGE`). It copies both
+  into the node (`tests/integration/_k3s_node_images.py`) and starts k3s
+  with `--pause-image`. The node then pulls nothing for these pods. When a
+  copy fails, the test run gives a warning, and a pod test that cannot
+  start skips with the pod's warning events.
 - Packages that a Dockerfile installs at build time (the bind9 test images
   run `apt-get`) come from the Debian package servers. They are a package
   download, not an image pull, and stay outside the proxy.
@@ -3318,6 +3336,17 @@ of CI. Two actions are unique to `ci.yml`:
 
 ### Tools that CI downloads
 
+**Rule: no step of a merge queue run takes a file from an outside server
+without our proxy or cache.** A merge queue run must not fail for a
+reason outside its pull request. A file from an outside server (a tool,
+a package, a schema, an image) comes from the runner image, our image
+proxy, or a cache (`actions/cache`) that the runs on `main` fill. A
+download is only the last way, when the cache does not have the file
+yet. Then a retry is allowed around that one network step: three tries
+at most, and the log says each new try. Never retry a whole job, and
+never skip a test or mark it as expected to fail to hide a download
+problem.
+
 A job must not fail because a download failed once. The rules:
 
 - `scripts/ci/install_tool.sh` puts a pinned tool on the PATH. It uses the
@@ -3333,6 +3362,21 @@ A job must not fail because a download failed once. The rules:
   last.
 - `scripts/ci/retry.sh` runs any download command (the language model
   warm-up) with the same three tries.
+- `scripts/ci/pull_test_images.sh` pulls the test images in the step
+  "Pull the test images", before pytest, in every job that starts test
+  containers. It pulls each `MEHO_TEST_*_IMAGE` and `RYUK_CONTAINER_IMAGE`
+  value the job sets (and the k3s image with each tag of
+  `MEHO_TEST_K3S_TAGS`). It looks on the runner first: an image that is
+  there is used, with no pull. Only a missing image is pulled: at most 3
+  tries, 10 s apart, each with the time limit `PULL_TIME_LIMIT` that the
+  step sets (50 s, and 150 s in the integration shards), so 3 tries and
+  2 pauses fit into the step's limit. Docker's own output is thrown away,
+  because the logs are public; the step prints only the image name, the
+  exit code and a line for each new try. When an image is still missing
+  after 3 tries, the step fails with a clear text. Under CI
+  (`GITHUB_ACTIONS` set) a container test whose container does not start
+  fails instead of skipping. `tests/test_ci_pull_test_images.py` checks
+  the step, the script and the fixtures.
 - `.github/actions/setup-kind` installs kind this way and starts the
   cluster. It replaces `helm/kind-action`, which downloaded kind on every
   run. It also installs kubectl (`azure/setup-kubectl`), yq (pinned in

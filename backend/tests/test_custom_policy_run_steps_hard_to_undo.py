@@ -18,7 +18,7 @@ step waits for a person, who approves it with a token, and the run goes on.
 With ``CUSTOM_POLICY`` on, ``hard_to_undo`` is a delete sign (the fixed
 rule ``floor:delete_waits``), so each waits for its own approval: its
 handler is not called and its own ``approval.request`` audit row exists.
-Without ``hard_to_undo``, each goes ahead. With the switch off, each goes
+Without ``hard_to_undo``, each goes ahead after an Admin's approval. With the switch off, each goes
 ahead under the run's approval, as on main.
 
 All names and values are made up.
@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from tests import _composite_wait_audit_helpers as h
 from tests import _custom_policy_remote_steps_helpers as r
@@ -101,8 +102,17 @@ async def test_on_without_hard_to_undo_the_step_goes_ahead(
     step: Step,
     child: bool,
 ) -> None:
+    """An Admin approves the run: an Admin may approve the step's ``dangerous`` level."""
     c.switch(monkeypatch, on=True)
-    result = await r.run_remote(session, stub_embedding_service, step, _NO_MARK, None, child=child)
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        step,
+        _NO_MARK,
+        None,
+        child=child,
+        approver_role=TenantRole.TENANT_ADMIN,
+    )
     assert result.status == "ok", result.error
     await c.assert_went_ahead(step, child=child, run_op_id=_run_op(child))
 

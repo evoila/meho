@@ -85,7 +85,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, Literal, NamedTuple, cast
+from typing import Any, ClassVar, Final, Literal, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, text, update
@@ -135,6 +135,7 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     policy_rule_columns,
+    policy_rule_payload,
     policy_rule_var,
     resolve_audit_session_id,
     run_id_var,
@@ -209,6 +210,7 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.fixed_rules import AGENT_NEVER_APPROVES
 from meho_backplane.policy.routing import (
     ROUTING_INVALID_RULE,
     group_names,
@@ -699,6 +701,9 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
     same human-only policy.
     """
 
+    #: The fixed rule of this refusal, as ``source:rule_id``.
+    rule: ClassVar[str] = f"floor:{AGENT_NEVER_APPROVES}"
+
     def __init__(self, *, operator_sub: str, principal_kind: str) -> None:
         self.operator_sub = operator_sub
         self.principal_kind = principal_kind
@@ -712,7 +717,7 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
             self,
             f"principal {operator_sub!r} of kind {principal_kind!r} may not "
             "decide an approval request — approval is a human decision "
-            "(v0.1-spec §7)",
+            f"(v0.1-spec §7; rule {self.rule})",
         )
 
 
@@ -1157,20 +1162,26 @@ class _Asker:
 
     *kind* is the kind of login, *people* the casefolded subs of the people
     behind it (:func:`behind_subs`, the compare of the self-approval rule),
-    *reveal_secret* the choice to reveal secret values. A waiting request
-    is given back to a call only when all three are the same.
+    *reveal_secret* the choice to reveal secret values, *act* the acting
+    agent (``principal_act``, ``None`` for a call with none) and *run_id*
+    the agent run (``None`` for a call outside a run). A waiting request is
+    given back to a call only when all five are the same.
     """
 
     kind: str | None
     people: frozenset[str]
     reveal_secret: bool
+    act: str | None
+    run_id: uuid.UUID | None
 
     def asked(self, request: ApprovalRequest) -> bool:
-        """True when *request* was asked by the same kind of login, people and choice."""
+        """True when *request* was asked by the same login, people, choice, agent and run."""
         return (
             request.principal_kind == self.kind
             and bool(request.reveal_secret) == self.reveal_secret
             and behind_subs(request.people_behind) == self.people
+            and request.principal_act == self.act
+            and request.run_id == self.run_id
         )
 
 
@@ -1231,9 +1242,10 @@ async def _find_idempotent_request(
     """Return the live request that holds *idempotency_key* for this caller.
 
     A request of :func:`_key_holders` counts only when *asker* asked it: the
-    same kind of login, the same people behind the login and the same
-    choice to reveal secret values. A request asked otherwise is not
-    returned, so the call gets its own request.
+    same kind of login, the same people behind the login, the same choice
+    to reveal secret values, the same acting agent and the same agent run
+    (:meth:`_Asker.asked`). A request asked otherwise is not returned, so
+    the call gets its own request.
     """
     holders = await _key_holders(
         session,
@@ -1971,6 +1983,7 @@ async def _write_audit_row(
     # row while the retry's own rule is bound.
     if path in _CALLER_PATHS:
         policy_kwargs.update(_request_row_columns())
+        payload.update(policy_rule_payload())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*
@@ -2142,9 +2155,14 @@ async def create_pending_request(
             ``None`` for a direct-op park (the generic re-dispatch of
             ``op_id`` is used).
         idempotency_key: Optional client-chosen retry key (#3486). When the
-            same principal in the same tenant already has a ``pending`` or
-            ``approved`` request with this key, that request is returned
-            instead of a new one, with no new request row. When
+            same login in the same tenant already has a ``pending`` or
+            ``approved`` request with this key, and that request was asked
+            the same way as this call (:class:`_Asker`: the kind of login,
+            the people behind it, the ``reveal_secret`` choice, the acting
+            agent and the agent run), that request is returned instead of
+            a new one, with no new request row. Otherwise the call gets its
+            own request, and the key is kept for it in
+            ``approval_request_key``. When
             ``APPROVAL_RETRY_OWN_AUDIT_ROW`` is off, the retry writes no
             audit row. When it is on, the retry writes one
             ``approval.reuse`` audit row and the request carries its id as
@@ -2227,7 +2245,12 @@ async def create_pending_request(
     else:
         principal_kind = operator.principal_kind.value
         people_behind = await _own_people_behind(session, operator)
-    asker = _Asker(principal_kind, behind_subs(people_behind), reveal_secret)
+    # The acting agent the new row stores (set below): the key path compares
+    # the same value, so the compare and the stored row never differ.
+    principal_act: str | None = resolve_actor_sub()
+    if requester is not None:
+        principal_act = requester.act
+    asker = _Asker(principal_kind, behind_subs(people_behind), reveal_secret, principal_act, run_id)
 
     if idempotency_key is not None:
         await _take_idempotency_key_lock(
@@ -2304,10 +2327,8 @@ async def create_pending_request(
     # human / autonomous-agent call (no delegation bound) resolves to
     # ``None``. The prior ``getattr(operator, "identity_act", None)`` was
     # dead code — ``Operator`` has no such field, so it was always ``None``.
-    principal_act: str | None = resolve_actor_sub()
     if requester is not None:
         principal_sub = requester.sub
-        principal_act = requester.act
         principal_name = requester.name
     else:
         principal_sub = operator.sub

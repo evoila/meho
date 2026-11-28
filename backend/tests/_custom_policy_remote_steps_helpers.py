@@ -23,7 +23,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
@@ -44,6 +44,8 @@ REMOTE_CHILD_RUN = "probe.composite.remote_child"
 REMOTE_CONNECTOR = "probehub-1.x"
 STEP_CONNECTOR = "probe-1.x"
 _PLAIN_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"url": {"type": "string"}}}
+#: The params of the step under test; set by :func:`run_remote`.
+_step_params: dict[str, Any] = {}
 
 
 class _ProbeHubConnector(h.NoOpVaultConnector):
@@ -89,7 +91,7 @@ async def remote_steps(operator: Any, target: Any, params: dict[str, Any]) -> An
         safety_level=step.safety_level,
         requires_approval=step.requires_approval,
         target=target,
-        params={},
+        params=dict(_step_params),
         resume_state={"at": "remote"},
         after_main_effect=True,
     )
@@ -107,7 +109,9 @@ async def remote_child(
     if gated is not None:
         return gated
     [step] = c.current
-    return await dispatch_child(connector_id=STEP_CONNECTOR, op_id=step.op_id, params={})
+    return await dispatch_child(
+        connector_id=STEP_CONNECTOR, op_id=step.op_id, params=dict(_step_params)
+    )
 
 
 async def probe_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -120,8 +124,8 @@ def probe_row(step: Step, tenant_id: UUID | None, facts: dict[str, Any]) -> Endp
     """A stored row of the step's operation under ``probe-1.x``.
 
     *facts* may hold ``schema``, ``tags``, ``level`` (the stored risk
-    level; by default the step's declared level), ``hard_to_undo`` and
-    ``typed`` (a typed row whose handler is :func:`probe_handler`, so a
+    level; by default the step's declared level), ``hard_to_undo``,
+    ``changes_rights`` and ``typed`` (a typed row whose handler is :func:`probe_handler`, so a
     child call needs no target; by default an ingested row). An op id
     without a verb (``probe.things.wipe_old``) stores no verb and no path.
     """
@@ -144,6 +148,7 @@ def probe_row(step: Step, tenant_id: UUID | None, facts: dict[str, Any]) -> Endp
         safety_level=facts.get("level", step.safety_level),
         requires_approval=step.requires_approval,
         hard_to_undo=facts.get("hard_to_undo"),
+        changes_rights=facts.get("changes_rights"),
         is_enabled=True,
         embedding=h.EMBEDDING,
     )
@@ -177,12 +182,18 @@ async def run_remote(
     tenant_row: dict[str, Any] | None,
     *,
     child: bool = False,
+    params: dict[str, Any] | None = None,
+    approver_role: TenantRole = TenantRole.OPERATOR,
 ) -> Any:
     """Store the rows, start the run as a service login, approve with a token, go on.
 
     With *child* the step under test runs as a child call
     (:data:`REMOTE_CHILD_RUN`), else through the step gate (:data:`REMOTE_RUN`).
+    *params* are the params of the step under test (by default none).
+    *approver_role* is the role of the person who approves the run.
     """
+    _step_params.clear()
+    _step_params.update(params or {})
     await h.register_child(stub)
     register_connector_v2(
         product="probehub", version="1.x", impl_id="probehub", cls=_ProbeHubConnector
@@ -203,7 +214,8 @@ async def run_remote(
         operator=service, connector_id=REMOTE_CONNECTOR, op_id=run_op_id, target=None, params={}
     )
     assert first.status == "awaiting_approval", first.error
-    request = await h.approve(UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB)
-    return await resume_dispatch_after_approval(
-        operator=c.token_approver(), request=request, params=None
+    request = await h.approve(
+        UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB, role=approver_role
     )
+    approver = c.token_approver().model_copy(update={"tenant_role": approver_role})
+    return await resume_dispatch_after_approval(operator=approver, request=request, params=None)

@@ -569,7 +569,7 @@ from meho_backplane.operations.uncertain_outcome import (
     with_uncertain_outcome,
 )
 from meho_backplane.operations.wait_when_set import raise_descriptor_for_params
-from meho_backplane.policy.stamp import take_rule
+from meho_backplane.policy.stamp import row_rule, take_rule
 from meho_backplane.redaction import (
     RedactionMiddlewareResult,
     apply_connector_boundary_redaction,
@@ -3650,6 +3650,10 @@ async def _build_proposed_effect(
         # The approval card says in one line why a credential call waits.
         if descriptor_credential_waits(descriptor):
             base["credential_wait"] = descriptor_credential_card_line(descriptor)
+        # With CUSTOM_POLICY on: why a call whose params delete something waits.
+        delete_reason = getattr(descriptor, "delete_call_reason", None)
+        if delete_reason is not None:
+            base["delete_wait"] = delete_reason
         # #3197: promote a destructive op's blast-radius block (object
         # identity, enumerated child objects, irreversibility class) from the
         # builder's ``preview`` sub-dict to the top level of the envelope, so
@@ -3962,7 +3966,9 @@ async def _handle_needs_approval(
     with the pending row's id in ``extras["approval_request_id"]``.
 
     With an ``idempotency_key`` (#3486), a retry of the same call by the
-    same principal returns the existing live row's id (and
+    same caller, asked the same way (``_Asker`` in ``approval_queue``: the
+    kind of login, the people behind it, the ``reveal_secret`` choice, the
+    acting agent and the agent run), returns the existing live row's id (and
     ``extras["approval_request_reused"] = True``) instead of a new row; no
     second ``approval.pending`` event is published. The gates above still
     run first, unchanged. A key held by a different call is refused with
@@ -4661,7 +4667,8 @@ async def _dispatch_now(
                 params=params,
             )
             # Only while POLICY_ENGINE_SHADOW is on; marked as not deciding.
-            policy_rule_var.set(take_rule())
+            kept_rule = take_rule()
+            policy_rule_var.set(kept_rule)
             console_run_sign_in = take_console_run_sign_in()
             # #3980: a child step of an approved multi-step run goes ahead
             # under that approval, the same as a step checked by
@@ -4737,6 +4744,8 @@ async def _dispatch_now(
                 if step_refusal is not None:
                     verdict, gate_reason = PermissionVerdict.DENY, step_refusal
             policy_decision_var.set(verdict.value)
+            # With CUSTOM_POLICY on, the rule that decided this verdict.
+            policy_rule_var.set(row_rule(kept_rule, verdict))
             if verdict is PermissionVerdict.AUTO_EXECUTE and gate_reason == CONSOLE_RUN_REASON:
                 policy_rule_var.set(CONSOLE_RUN_POLICY_RULE)
                 structlog.contextvars.bind_contextvars(

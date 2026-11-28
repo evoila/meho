@@ -23,9 +23,9 @@ once, with a longer wait. A second start shows as one
 ``ContainerStartRetryWarning`` line in the pytest warnings summary, so
 we can count how often it happens. A ``TimeoutError`` raised by ``start``
 itself (testcontainers waits for a log line inside ``start()``) counts as
-"no answer in time" too; every other start error leaves at once. When
-the second start fails too, the error names both tries with the wait
-time and the kind of error only. It holds no container log line and no
+"no answer in time" too; every other error of the first start leaves at
+once. When the second start fails too, for any reason, the error names
+both tries with the wait time and the kind of error only. It holds no container log line and no
 error message: the CI logs of this repository are public.
 
 Usage::
@@ -108,7 +108,7 @@ def start_until_ready[C: StartedContainer](
     that is not returned is always stopped. ``start`` must stop its own
     container when its ``start()`` raises.
     """
-    first = _try_start(start, probe, what, timeout, interval, clock, sleep)
+    first = _try_start(start, probe, what, timeout, interval, clock, sleep, TimeoutError)
     if not isinstance(first, Exception):
         return first
 
@@ -118,13 +118,17 @@ def start_until_ready[C: StartedContainer](
         ContainerStartRetryWarning,
         stacklevel=2,
     )
-    second = _try_start(start, probe, what, second_timeout, interval, clock, sleep)
+    second = _try_start(start, probe, what, second_timeout, interval, clock, sleep, Exception)
     if not isinstance(second, Exception):
         return second
+    if isinstance(second, ContainerNotReadyError | TimeoutError):
+        try_2 = f"no answer in {second_timeout:g} s"
+    else:
+        try_2 = "start failed"
     raise ContainerNotReadyError(
         f"container not ready: {what} failed on both tries\n"
         f"  try 1: no answer in {timeout:g} s ({type(first).__name__})\n"
-        f"  try 2: no answer in {second_timeout:g} s ({type(second).__name__})"
+        f"  try 2: {try_2} ({type(second).__name__})"
     )
 
 
@@ -136,11 +140,15 @@ def _try_start[C: StartedContainer](
     interval: float,
     clock: Callable[[], float],
     sleep: Callable[[float], None],
-) -> C | ContainerNotReadyError | TimeoutError:
-    """One try: the ready container, or the timeout error of this try."""
+    start_errors: type[Exception],
+) -> C | Exception:
+    """One try: the ready container, or the error of this try.
+
+    An error of ``start`` that is a ``start_errors`` is returned; any other leaves.
+    """
     try:
         container = start()
-    except TimeoutError as exc:
+    except start_errors as exc:
         return exc
     try:
         wait_until_ready(

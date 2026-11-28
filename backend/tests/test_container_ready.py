@@ -206,15 +206,25 @@ def test_start_until_ready_lets_another_start_error_leave_at_once() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tries", "kinds"),
+    ("tries", "lines"),
     [
-        ((False, False), ("ContainerNotReadyError", "ContainerNotReadyError")),
-        ((False, TimeoutError(_MARKER)), ("ContainerNotReadyError", "TimeoutError")),
-        ((TimeoutError(_MARKER), False), ("TimeoutError", "ContainerNotReadyError")),
+        (
+            (False, False),
+            ("ContainerNotReadyError", "no answer in 120 s (ContainerNotReadyError)"),
+        ),
+        (
+            (False, TimeoutError(_MARKER)),
+            ("ContainerNotReadyError", "no answer in 120 s (TimeoutError)"),
+        ),
+        (
+            (TimeoutError(_MARKER), False),
+            ("TimeoutError", "no answer in 120 s (ContainerNotReadyError)"),
+        ),
+        ((False, RuntimeError(_MARKER)), ("ContainerNotReadyError", "start failed (RuntimeError)")),
     ],
 )
 def test_start_until_ready_names_both_tries_when_the_second_start_fails_too(
-    tries: tuple[bool | BaseException, ...], kinds: tuple[str, str]
+    tries: tuple[bool | BaseException, ...], lines: tuple[str, str]
 ) -> None:
     fake = _FakeClock()
     started, start = _starter(*tries)
@@ -236,8 +246,8 @@ def test_start_until_ready_names_both_tries_when_the_second_start_fails_too(
 
     assert str(excinfo.value) == (
         "container not ready: mongodb (mongo-7, image mongo:7) failed on both tries\n"
-        f"  try 1: no answer in 60 s ({kinds[0]})\n"
-        f"  try 2: no answer in 120 s ({kinds[1]})"
+        f"  try 1: no answer in 60 s ({lines[0]})\n"
+        f"  try 2: {lines[1]}"
     )
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
@@ -267,6 +277,12 @@ from tests.test_container_ready import _FakeClock, _MARKER, _probe, _starter
 def test_uses_a_container_that_never_answers():
     fake = _FakeClock()
     _, start = _starter(False, TimeoutError(_MARKER))
+    start_until_ready(start, _probe, what="mongodb", clock=fake.clock, sleep=fake.sleep)
+
+
+def test_second_start_raises_another_error():
+    fake = _FakeClock()
+    _, start = _starter(False, RuntimeError(_MARKER))
     start_until_ready(start, _probe, what="mongodb", clock=fake.clock, sleep=fake.sleep)
 """
 
@@ -301,9 +317,11 @@ def test_failure_output_holds_no_container_log_or_error_text(tmp_path: Path) -> 
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "failed on both tries" in output
+    assert "2 failed" in output
+    assert output.count("failed on both tries") >= 2
     assert "try 1: no answer in 60 s (ContainerNotReadyError)" in output
     assert "try 2: no answer in 120 s (TimeoutError)" in output
+    assert "try 2: start failed (RuntimeError)" in output
     assert _MARKER not in output
     assert _MARKER not in junit.read_text()
 

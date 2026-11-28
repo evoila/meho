@@ -153,6 +153,7 @@ __all__ = [
     "AffectedSensor",
     "DroppedOp",
     "IngestionResult",
+    "RefusedOp",
     "SafetyChange",
     "register_ingested_operations",
 ]
@@ -191,6 +192,26 @@ class SafetyChange:
     old_safety_level: str
     new_safety_level: str
     affected_sensors: tuple[AffectedSensor, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RefusedOp:
+    """An imported operation that was not written, because a typed row has its id.
+
+    The natural key ``(product, version, impl_id, op_id)`` already belongs
+    to a row that no import made (a typed or composite operation). The
+    import writes nothing for this operation and leaves that row as it is.
+    """
+
+    op_id: str
+    reason: str
+
+
+def _refusal_reason(op_id: str) -> str:
+    return (
+        f"The operation {op_id} was not imported: a typed operation of this "
+        "connector already has this id."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +260,11 @@ class IngestionResult:
         What happened to the login setup of an ingest with a login type
         (a :data:`~meho_backplane.operations.ingest.login_setup.LoginSetupOutcome`
         value). ``None`` for an ingest without a login type.
+    refused_ops:
+        The operations that were not written because a typed row already
+        has their id, each with a sentence that names the id. The other
+        operations of the spec are imported as usual. Empty in the common
+        case.
     """
 
     inserted_count: int
@@ -250,6 +276,7 @@ class IngestionResult:
     dropped_count: int = 0
     dropped_ops: tuple[DroppedOp, ...] = ()
     login_setup: LoginSetupOutcome | None = None
+    refused_ops: tuple[RefusedOp, ...] = ()
 
 
 def _detect_op_id_collisions(
@@ -315,6 +342,7 @@ def _build_ingestion_result(
     connector_registered: bool,
     safety_changes: tuple[SafetyChange, ...],
     dropped: tuple[DroppedOp, ...] = (),
+    refused: tuple[RefusedOp, ...] = (),
 ) -> IngestionResult:
     """Project batch counters into the public registration result."""
     return IngestionResult(
@@ -326,6 +354,7 @@ def _build_ingestion_result(
         safety_changes=safety_changes,
         dropped_count=len(dropped),
         dropped_ops=dropped,
+        refused_ops=refused,
     )
 
 
@@ -351,7 +380,7 @@ async def _run_upsert_loop(
     coords: _BatchCoordinates,
     operations: Sequence[EndpointDescriptorProto],
     embedding_service: EmbeddingService | None,
-) -> tuple[dict[str, int], tuple[SafetyChange, ...]]:
+) -> tuple[dict[str, int], tuple[SafetyChange, ...], tuple[RefusedOp, ...]]:
     """Dispatch to :func:`_register_in_session` with the right session ownership.
 
     When *session* is provided, run the loop against it and defer
@@ -483,7 +512,7 @@ async def register_ingested_operations(
         impl_id=impl_id,
         spec_source=spec_source,
     )
-    counts, safety_changes = await _run_upsert_loop(
+    counts, safety_changes, refused = await _run_upsert_loop(
         session=session,
         coords=coords,
         operations=floored_operations,
@@ -494,6 +523,7 @@ async def register_ingested_operations(
         connector_registered=connector_registered,
         safety_changes=safety_changes,
         dropped=allowlist_result.dropped,
+        refused=refused,
     )
 
 
@@ -627,12 +657,13 @@ async def _register_in_session(
     operations: Sequence[EndpointDescriptorProto],
     embedding_service: EmbeddingService | None,
     commit: bool,
-) -> tuple[dict[str, int], tuple[SafetyChange, ...]]:
+) -> tuple[dict[str, int], tuple[SafetyChange, ...], tuple[RefusedOp, ...]]:
     """Upsert every op in *operations* against *session*.
 
-    Returns ``(action_counts, safety_changes)``: the per-action tally
-    plus the sensor-enriched ``safety_level`` diffs the batch produced
-    (#2702). Split out from :func:`register_ingested_operations` so the
+    Returns ``(action_counts, safety_changes, refused)``: the per-action
+    tally, the sensor-enriched ``safety_level`` diffs the batch produced
+    (#2702), and the operations not written because a typed row has
+    their id. Split out from :func:`register_ingested_operations` so the
     public function can branch on caller-owned-vs-helper-owned session
     without duplicating the loop body. ``commit=True`` commits **once
     after the whole batch**, so a mid-batch crash rolls the session
@@ -643,6 +674,7 @@ async def _register_in_session(
     now = datetime.now(UTC)
     counts: dict[str, int] = {"inserted": 0, "updated": 0, "skipped": 0}
     shifts: list[SafetyLevelChange] = []
+    refused: list[RefusedOp] = []
 
     for proto in operations:
         ctx = build_upsert_context(
@@ -659,6 +691,17 @@ async def _register_in_session(
             ctx,
             embedding_service=embedding_service,
         )
+        if action == "refused":
+            refused.append(RefusedOp(op_id=proto.op_id, reason=_refusal_reason(proto.op_id)))
+            log.warning(
+                "ingested_operation_refused_typed_row",
+                product=coords.product,
+                version=coords.version,
+                impl_id=coords.impl_id,
+                op_id=proto.op_id,
+                spec_source=coords.spec_source,
+            )
+            continue
         counts[action] += 1
         if safety_shift is not None:
             shifts.append(safety_shift)
@@ -694,9 +737,10 @@ async def _register_in_session(
         impl_id=coords.impl_id,
         spec_source=coords.spec_source,
         safety_change_count=len(safety_changes),
+        refused_count=len(refused),
         **counts,
     )
-    return counts, safety_changes
+    return counts, safety_changes, tuple(refused)
 
 
 # Public surface intentionally limited to register_ingested_operations

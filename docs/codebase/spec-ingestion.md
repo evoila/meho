@@ -33,6 +33,13 @@ The pipeline is broken into work items per Initiative #389:
   embed pass runs inside that transaction, and the process-local
   auto-shim (not part of the DB transaction) survives the rollback as
   an idempotent zero-op stub.
+  An import never writes over a row that no import made. When an
+  imported operation has the same key as a typed or composite row (for
+  example a typed operation with an id of the form `GET:/path`), the
+  import writes nothing for that operation. Its answer lists it in
+  `refused_ops`, with a sentence that names the id. The other
+  operations of the spec are imported as usual
+  (`ingest/_upsert.py`, `upsert_one_operation`).
 * **T3 — LLM-summarised grouping** (`ingest/llm_groups.py` +
   `ingest/_llm_grouping_internals.py` + `ingest/prompts/`). Two-pass
   LLM run: (1) propose 8–15 groups from the full op list, (2) assign
@@ -251,7 +258,7 @@ not ship in the wheel, and a fresh start registers no connector for it.
 1. **Pass 1 (group derivation)** — when the connector triple has no
    `operation_group` row that can take ingested ops (none at all, or
    only typed groups). Sends every unassigned
-   op's `(op_id, summary, tags)` to the LLM and asks for an array of
+   imported op's `(op_id, summary, tags)` to the LLM and asks for an array of
    `{group_key, name, when_to_use}` proposals. Output is validated
    against `GroupProposal` (snake_case key, non-empty fields, bounded
    lengths, no duplicate keys) and persisted as
@@ -292,6 +299,10 @@ full count. Partial failure
 `LlmOutputInvalid`, rolls back the transaction, and leaves the
 connector in whatever state preceded the call — operator retries via
 the CLI verb T5 will ship.
+
+The "unassigned ops" are the rows of the connector with no group that
+an import made (`source_kind='ingested'`, `load_unassigned_ops`). The
+grouping step never sets the group of a typed or composite row.
 
 Idempotency:
 

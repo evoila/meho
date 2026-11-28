@@ -557,7 +557,10 @@ async def load_unassigned_ops(
     impl_id: str,
     tenant_id: UUID | None,
 ) -> list[EndpointDescriptor]:
-    """Return every :class:`EndpointDescriptor` for the connector with no ``group_id``.
+    """Return every imported :class:`EndpointDescriptor` of the connector with no ``group_id``.
+
+    Only rows an import made (``source_kind='ingested'``) are returned, so
+    the grouping step never sets the group of a typed or composite row.
 
     Sort by ``op_id`` so re-runs see deterministic batch boundaries --
     helpful for prompt-cache hit rates and for diff-friendly test
@@ -569,6 +572,7 @@ async def load_unassigned_ops(
             EndpointDescriptor.product == product,
             EndpointDescriptor.version == version,
             EndpointDescriptor.impl_id == impl_id,
+            EndpointDescriptor.source_kind == "ingested",
             EndpointDescriptor.group_id.is_(None),
         )
         .order_by(EndpointDescriptor.op_id)

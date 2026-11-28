@@ -213,7 +213,12 @@ async def _lookup_existing_descriptor(
     session: AsyncSession,
     ctx: UpsertContext,
 ) -> EndpointDescriptor | None:
-    """Find an existing row matching the natural key + tenant partial index."""
+    """Find an existing row matching the natural key + tenant partial index.
+
+    The natural key is unique across every ``source_kind``, so this returns
+    a typed or composite row too. :func:`upsert_one_operation` updates only
+    a row an import made and refuses the operation otherwise.
+    """
     stmt = select(EndpointDescriptor).where(
         EndpointDescriptor.product == ctx.product,
         EndpointDescriptor.version == ctx.version,
@@ -403,7 +408,7 @@ async def upsert_one_operation(
     """Upsert one :class:`EndpointDescriptor` row from a parser proto.
 
     Returns ``(action, safety_change)``: *action* is one of
-    ``"inserted"`` / ``"updated"`` / ``"skipped"`` so the caller can
+    ``"inserted"`` / ``"updated"`` / ``"skipped"`` / ``"refused"`` so the caller can
     tally the counts for :class:`IngestionResult`; *safety_change* is a
     :class:`SafetyLevelChange` when an existing row's ``safety_level``
     was overwritten with a different value (#2702), ``None`` otherwise
@@ -411,8 +416,15 @@ async def upsert_one_operation(
     three branches (skip-re-embed / re-embed / first-register) live
     in dedicated helpers; this function is the orchestrator that
     chooses between them.
+
+    ``"refused"`` means a row that no import made (a typed or composite
+    operation) already has this natural key. Nothing is written for the
+    operation: an import never changes the row of a hand-written operation.
     """
     existing = await _lookup_existing_descriptor(session, ctx)
+
+    if existing is not None and existing.source_kind != "ingested":
+        return "refused", None
 
     if existing is not None:
         # Same-spec re-ingest falls through to the skip-re-embed /

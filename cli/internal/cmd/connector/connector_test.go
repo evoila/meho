@@ -3273,7 +3273,7 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	safety := api.EditOpBodySafetyLevelDangerous
-	resp, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety})
+	resp, _, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety})
 	if err != nil {
 		t.Fatalf("patchOp: %v", err)
 	}
@@ -3307,7 +3307,7 @@ func TestPatchOpSurfacesEnableTimeWarnings(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	enabled := true
-	resp, err := patchOp(context.Background(), srv.URL, "acme-rest-1.2", "GET:/api/v1/group-0/0", api.EditOpBody{IsEnabled: &enabled})
+	resp, _, err := patchOp(context.Background(), srv.URL, "acme-rest-1.2", "GET:/api/v1/group-0/0", api.EditOpBody{IsEnabled: &enabled})
 	if err != nil {
 		t.Fatalf("patchOp: %v", err)
 	}

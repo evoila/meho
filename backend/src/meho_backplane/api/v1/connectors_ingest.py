@@ -208,9 +208,23 @@ from meho_backplane.api.v1.policy_classification import (
     classification_patch,
     classification_request_response,
 )
+from meho_backplane.api.v1.policy_op_edit import (
+    OP_PATCH_RESPONSES,
+    POLICY_EDIT_RESPONSES,
+    edit_waits,
+    op_edit_params,
+    policy_edit_answer,
+    remove_override_params,
+)
 from meho_backplane.auth.fresh_sign_in import fresh_sign_in_challenge, has_fresh_sign_in
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors.policy.op_edit import (
+    POLICY_OP_EDIT_OP_ID,
+    POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+    PolicyEditAskRefused,
+    request_policy_edit,
+)
 from meho_backplane.operations._ingested_owner import (
     IngestedOperationsNotAccepted,
     build_ingested_ops_not_accepted_detail,
@@ -289,6 +303,8 @@ from meho_backplane.operations.ingest.list_connectors import (
 )
 from meho_backplane.operations.meta_tools import ConnectorNotIngestedError
 from meho_backplane.operations.op_policy import OpPolicyEditError, OverrideNotFoundError
+from meho_backplane.policy.switches import custom_policy_on
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "apply_op_edit",
@@ -1521,7 +1537,7 @@ async def edit_group_endpoint(
 @router.patch(
     "/{connector_id}/operations/{op_id:path}",
     response_model=EditOpResponse,
-    responses=CLASSIFICATION_PATCH_RESPONSES,
+    responses=OP_PATCH_RESPONSES,
 )
 async def edit_op_endpoint(
     connector_id: str,
@@ -1563,6 +1579,12 @@ async def edit_op_endpoint(
     ``category`` / ``labels`` (#6038) are a change of rights: sent alone,
     they ask for the change and answer ``202`` with the approval request
     id; a tenant admin must approve it in the web console. Sent with other fields: 400.
+
+    With ``CUSTOM_POLICY`` on, a PATCH that sets ``safety_level`` or
+    ``requires_approval`` waits as a whole, also its ``custom_description``
+    and ``is_enabled``: ``202`` with the approval request id, after the same
+    checks as above (the fresh sign-in is the approve click). A caller who
+    is not a person gets ``403``.
     """
     classification = classification_patch(
         {"connector": connector_id, "op": op_id},
@@ -1577,6 +1599,9 @@ async def edit_op_endpoint(
     )
     if classification is not None:
         return await classification_request_response(operator, classification)
+    if edit_waits(body):
+        params = op_edit_params(connector_id, op_id, body, operator)
+        return await _ask_policy_edit(operator, POLICY_OP_EDIT_OP_ID, params)
     return await apply_op_edit(
         connector_id,
         op_id,
@@ -1584,6 +1609,29 @@ async def edit_op_endpoint(
         operator,
         person_present=has_fresh_sign_in(operator),
     )
+
+
+async def _ask_policy_edit(operator: Operator, op_id: str, params: dict[str, Any]) -> JSONResponse:
+    """Ask for a risk level / approval edit or removal that waits (``CUSTOM_POLICY``).
+
+    The checks of the edit run first and map to the same HTTP errors as
+    an edit that runs at once. A caller who is not a person gets ``403``.
+    """
+    try:
+        result, card = await request_policy_edit(operator, op_id, params)
+    except PolicyEditAskRefused as exc:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except BuiltinConnectorWriteForbiddenError as exc:
+        raise HTTPException(status_code=http_status.HTTP_403_FORBIDDEN, detail=exc.detail) from exc
+    except LegacyTenantConnectorCopyError as exc:
+        raise _legacy_tenant_copy_409(exc) from exc
+    except (ConnectorNotFoundError, OverrideNotFoundError) as exc:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except OpPolicyEditError as exc:
+        raise _policy_edit_http_error(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return policy_edit_answer(result, card)
 
 
 async def apply_op_edit(
@@ -1679,6 +1727,7 @@ _override_reason_query = Query(
     "/{connector_id}/operation-overrides/{op_id:path}",
     status_code=http_status.HTTP_204_NO_CONTENT,
     response_class=Response,
+    responses=POLICY_EDIT_RESPONSES,
 )
 async def remove_op_override_endpoint(
     connector_id: str,
@@ -1698,7 +1747,15 @@ async def remove_op_override_endpoint(
     (``400``) and a fresh sign-in (``401``), like turning approval off.
     ``404`` when there is no such override. Writes one
     ``meho_connector_edit_op`` audit row. Returns 204 on success.
+
+    With ``CUSTOM_POLICY`` on, the removal waits: ``202`` with the approval
+    request id, after the same checks. An admin approves it in the web
+    console; only a platform admin approves one that ends approval or
+    removes the install-wide override.
     """
+    if custom_policy_on(get_settings()):
+        params = remove_override_params(connector_id, op_id, tenant_id, reason)
+        return await _ask_policy_edit(operator, POLICY_OP_REMOVE_OVERRIDE_OP_ID, params)
     service = ReviewService(operator)
     try:
         await service.remove_op_override(

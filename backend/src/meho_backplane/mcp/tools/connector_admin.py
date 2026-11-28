@@ -126,6 +126,7 @@ from meho_backplane.mcp.tools._connector_classification import (
     drop_classification_fields,
     request_from_tool,
 )
+from meho_backplane.mcp.tools._connector_policy_edit import request_policy_edit_from_tool
 from meho_backplane.mcp.tools._connector_product_filter import (
     LISTED_PRODUCTS_KEY,
     PRODUCT_FILTER_KEY,
@@ -696,6 +697,11 @@ async def _edit_op_handler(
     on the clean path; never blocks the write (``ok`` stays
     ``True``). Surfacing it here keeps MCP↔REST parity, the same
     discipline the ingest error envelopes follow (#1534 / #1610).
+
+    With ``CUSTOM_POLICY`` on, a call that sets ``safety_level`` or
+    ``requires_approval`` waits for an admin's click in the web console
+    (:func:`~meho_backplane.mcp.tools._connector_policy_edit.request_policy_edit_from_tool`);
+    it still refuses a looser edit before anything waits.
     """
     connector_id: str = arguments["connector_id"]
     op_id: str = arguments["op_id"]
@@ -708,6 +714,9 @@ async def _edit_op_handler(
     )
     if requested is not None:
         return requested
+    waiting = await request_policy_edit_from_tool(operator, arguments, _EDIT_OP_FIELDS)
+    if waiting is not None:
+        return waiting
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     patch: dict[str, Any] = {key: arguments[key] for key in _EDIT_OP_FIELDS if key in arguments}
     service = ReviewService(operator)

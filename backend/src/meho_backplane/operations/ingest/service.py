@@ -1037,15 +1037,14 @@ class ReviewService:
         reason: str | None = None,
         person_present: bool = False,
         tighten_only: bool = False,
+        policy_scope_tenant_id: UUID | _UnsetType | None = _UNSET,
     ) -> list[EditOpWarning]:
         """Update operator-controlled overrides on one :class:`EndpointDescriptor`.
 
         ``safety_level`` / ``requires_approval`` are stored as an override,
-        not on the row (#4711); *reason*, *person_present* and
-        *tighten_only* feed its rules. See :meth:`_apply_policy_edit`.
-
-        Passing none of the five fields raises :class:`ValueError`.
-        Out-of-enum ``safety_level`` raises :class:`ValueError`.
+        not on the row (#4711); *reason*, *person_present*, *tighten_only*
+        and *policy_scope_tenant_id* feed its rules. See :meth:`_apply_policy_edit`.
+        No editable field, or a bad ``safety_level``, raises :class:`ValueError`.
 
         ``custom_description`` also honours a clear (#2488): the
         :data:`_UNSET` default leaves it untouched, an explicit ``None``
@@ -1116,6 +1115,7 @@ class ReviewService:
             reason=reason,
             person_present=person_present,
             tighten_only=tighten_only,
+            policy_scope_tenant_id=policy_scope_tenant_id,
         )
         # Probe only after the write landed: a 404/400 path above must
         # never emit an advisory for an edit that didn't happen.
@@ -1137,6 +1137,7 @@ class ReviewService:
         reason: str | None,
         person_present: bool,
         tighten_only: bool,
+        policy_scope_tenant_id: UUID | _UnsetType | None,
     ) -> ConnectorScope:
         """Apply one :meth:`edit_op` and its audit row in one transaction; return the scope."""
         row_edit = custom_description is not _UNSET or is_enabled is not None
@@ -1160,6 +1161,7 @@ class ReviewService:
                 reason=reason,
                 person_present=person_present,
                 tighten_only=tighten_only,
+                scope_tenant_id=policy_scope_tenant_id,
             )
             changes = dict(policy.changes)
             if is_enabled is not None:
@@ -1206,6 +1208,7 @@ class ReviewService:
         reason: str | None,
         person_present: bool,
         tighten_only: bool,
+        scope_tenant_id: UUID | _UnsetType | None = _UNSET,
     ) -> PolicyEditResult:
         """Store a risk level / approval edit as an override; return what changed.
 
@@ -1218,14 +1221,14 @@ class ReviewService:
         ``platform_admin``, a reason and *person_present* (a fresh sign-in on
         REST, the web session in the console) and is never allowed for a
         destructive operation; *tighten_only* (the MCP tool) refuses every
-        loosening.
+        loosening. *scope_tenant_id*, when given, replaces that choice of
+        scope: the approved run of ``policy.op_edit`` stores the override in
+        the scope its approval card names, not in the approver's scope.
         """
         if safety_level is None and requires_approval is None:
             return PolicyEditResult(changes={}, scope=_scope_name(scope.tenant_id))
-        if scope.tenant_id is not None:
-            scope_tenant_id: UUID | None = scope.tenant_id
-        else:
-            scope_tenant_id = None if self._operator.platform_admin else self._operator.tenant_id
+        if isinstance(scope_tenant_id, _UnsetType):
+            scope_tenant_id = self._policy_scope_tenant_id(scope)
         return await apply_policy_edit(
             session,
             row=op_row,
@@ -1238,6 +1241,100 @@ class ReviewService:
             tighten_only=tighten_only,
             max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
         )
+
+    def _policy_scope_tenant_id(self, scope: ConnectorScope) -> UUID | None:
+        """Where a risk level / approval override of a row in *scope* is stored.
+
+        The row's own tenant for a tenant row. For a built-in row: the whole
+        install (``None``) for a platform admin, the operator's tenant otherwise.
+        """
+        if scope.tenant_id is not None:
+            return scope.tenant_id
+        return None if self._operator.platform_admin else self._operator.tenant_id
+
+    async def check_op_edit(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        tenant_id: UUID | None,
+        safety_level: str | None,
+        requires_approval: bool | None,
+        reason: str | None,
+        row_edit: bool,
+        tighten_only: bool,
+    ) -> tuple[PolicyEditResult, UUID | None]:
+        """Run the checks of one :meth:`edit_op` and write nothing.
+
+        For an edit that waits for an admin's click in the web console
+        (``policy.op_edit``). The checks run as for a person with a fresh
+        sign-in, because the approved run is that click. *row_edit* says
+        whether the edit also sets ``custom_description`` or ``is_enabled``.
+        Returns what would change and where the override would be stored (a
+        tenant UUID, or ``None`` for the whole install). Raises the errors of
+        :meth:`edit_op`.
+        """
+        async with self._sessionmaker()() as session:
+            scope = await self._resolve_writable_scope(
+                connector_id,
+                tenant_id,
+                session,
+                probe=scope_has_rows,
+                builtin_needs_platform_admin=row_edit,
+            )
+            op_row = await load_op(session, scope, connector_id, op_id)
+            scope_tenant_id = self._policy_scope_tenant_id(scope)
+            result = await self._apply_policy_edit(
+                session,
+                op_row,
+                scope,
+                safety_level=safety_level,
+                requires_approval=requires_approval,
+                reason=reason,
+                person_present=True,
+                tighten_only=tighten_only,
+                scope_tenant_id=scope_tenant_id,
+            )
+            await session.rollback()
+        return result, scope_tenant_id
+
+    def _override_key(
+        self, connector_id: str, op_id: str, override_tenant_id: UUID | None
+    ) -> OpKey:
+        """The key of the override that *override_tenant_id* names; checks who may act on it."""
+        scope = self._resolve_scope(
+            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
+        )
+        self._require_platform_admin_for_builtin(connector_id, scope)
+        return OpKey(scope.product, scope.version, scope.impl_id, op_id)
+
+    async def check_override_removal(
+        self,
+        connector_id: str,
+        op_id: str,
+        *,
+        override_tenant_id: UUID | None,
+        reason: str | None,
+    ) -> PolicyEditResult:
+        """Run the checks of one :meth:`remove_op_override` and write nothing.
+
+        Like :meth:`check_op_edit`: the checks run as for a person with a
+        fresh sign-in. Returns what would change. Raises the errors of
+        :meth:`remove_op_override`.
+        """
+        key = self._override_key(connector_id, op_id, override_tenant_id)
+        async with self._sessionmaker()() as session:
+            result = await remove_override(
+                session,
+                key=key,
+                scope_tenant_id=override_tenant_id,
+                operator=self._operator,
+                reason=reason,
+                person_present=True,
+                max_age_seconds=get_settings().per_action_sign_in_max_age_seconds,
+            )
+            await session.rollback()
+        return result
 
     async def remove_op_override(
         self,
@@ -1268,11 +1365,7 @@ class ReviewService:
         ``override_removed=True``, ``override_tenant_id`` and
         ``approval_ended_for_tenants``.
         """
-        scope = self._resolve_scope(
-            connector_id, override_tenant_id, allow_platform_admin_cross_tenant=True
-        )
-        self._require_platform_admin_for_builtin(connector_id, scope)
-        key = OpKey(scope.product, scope.version, scope.impl_id, op_id)
+        key = self._override_key(connector_id, op_id, override_tenant_id)
         async with self._sessionmaker()() as session:
             result = await remove_override(
                 session,

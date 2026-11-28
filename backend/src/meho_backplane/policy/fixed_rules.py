@@ -114,7 +114,9 @@ FIXED_RULES: Final[Mapping[FixedRuleId, str]] = MappingProxyType(
 )
 
 #: The operations that change the policy. They are changes of rights too.
-POLICY_CHANGE_OPS: Final[frozenset[str]] = frozenset({"policy.apply", "policy.classify"})
+POLICY_CHANGE_OPS: Final[frozenset[str]] = frozenset(
+    {"policy.apply", "policy.classify", "policy.op_edit", "policy.op_remove_override"}
+)
 
 
 def _own_console_click(caller: Operator) -> bool:

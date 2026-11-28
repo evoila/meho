@@ -633,6 +633,43 @@ it.
 - The install's policy (`scope: install`) can only be imported by a
   platform admin, and runs only when a platform admin approves it.
 
+## Risk level and approval edits with `CUSTOM_POLICY` on
+
+With `CUSTOM_POLICY` on, an edit of an operation's risk level or approval
+with a token waits for an Admin's click in the web console. The removal of
+such an edit (an override) waits too, because removing a raise lowers the
+level. With the switch off, all of this is off and the routes work as
+before.
+
+- The edit is the operation `policy.op_edit`, the removal is
+  `policy.op_remove_override`, on `policy-registry-1.x`
+  (`connectors/policy/op_edit.py`). They follow the rules of
+  `policy.classify`: role `tenant_admin`, a change of rights, a person
+  approves each call. Both are in `POLICY_CHANGE_OPS`, so a waiting request
+  gets the fixed rule `policy_change_waits`.
+- `PATCH /api/v1/connectors/{id}/operations/{op_id}` with `safety_level` or
+  `requires_approval` waits as a whole, with its `custom_description` and
+  `is_enabled`. A PATCH with only `custom_description` or `is_enabled`
+  runs as before. `DELETE /api/v1/connectors/{id}/operation-overrides/{op_id}`
+  waits. Both answer `202` with `status`, `approval_request_id` and
+  `message`. The MCP tool `meho_connector_edit_op` waits too and still
+  refuses a looser edit first. `meho connector edit-op` and
+  `remove-override` print the request id and who approves it.
+- Every check of the edit runs before the request waits, as for a person
+  with a fresh sign-in (`ReviewService.check_op_edit`,
+  `check_override_removal`): a refused edit makes no request. A login that
+  is not a person (an agent, a service login, a hosted agent run) gets
+  `403`.
+- An Admin approves with a click in the web console. Only a platform admin
+  approves an edit that ends approval (`ends_approval: true` on the card)
+  or changes the whole install.
+- The approved run checks the card's record of who asked again and runs
+  `apply_policy_edit` or `remove_override` again with the values of that
+  moment, with the person who clicked as the operator. The override goes
+  to the scope on the card. With the switch off at the click, it writes
+  nothing and says to send the edit again.
+- The web console keeps its own path in this part.
+
 ## Versions: `policy_revision`
 
 Migration `0163`. One row per imported file: the tenant (`NULL` for the

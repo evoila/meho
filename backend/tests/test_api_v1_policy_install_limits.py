@@ -46,6 +46,10 @@ from meho_backplane.connectors.policy.apply import (
     INSTALL_NEEDS_PLATFORM_ADMIN,
     POLICY_APPLY_OP_ID,
 )
+from meho_backplane.connectors.policy.op_edit import (
+    POLICY_OP_EDIT_OP_ID,
+    POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PolicyRevision, TenantPolicy
 from meho_backplane.operations.dispatcher import dispatch
@@ -447,4 +451,7 @@ async def test_with_no_limits_part_the_limit_is_safe_and_the_table_is_the_same(
     for row in expected:
         if (row["op_id"], row["connector_id"]) in hard_to_undo and row["never_covered"] is None:
             row["never_covered"] = "delete_shaped"
-    assert rows == expected
+    # The risk level / approval edit operations exist only with the switch on.
+    only_with_switch = {POLICY_OP_EDIT_OP_ID, POLICY_OP_REMOVE_OVERRIDE_OP_ID}
+    assert {row["op_id"] for row in rows} >= only_with_switch
+    assert [row for row in rows if row["op_id"] not in only_with_switch] == expected

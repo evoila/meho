@@ -135,7 +135,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -196,6 +196,7 @@ __all__ = [
     "register_typed_op_registrar",
     "register_typed_operation",
     "remove_built_in_connector_rows",
+    "remove_built_in_operation_rows",
     "run_typed_op_registrars",
     "validate_composite_handler_signature",
 ]
@@ -662,6 +663,29 @@ async def remove_built_in_connector_rows(*, product: str, version: str, impl_id:
                 model.impl_id == impl_id,
             )
         )
+
+
+async def remove_built_in_operation_rows(
+    *, product: str, version: str, impl_id: str, op_ids: Iterable[str]
+) -> None:
+    """Delete the built-in rows of some operations of one typed connector.
+
+    Like :func:`remove_built_in_connector_rows`, for a registrar whose
+    operations have a switch of their own while the rest of the connector
+    stays. The group rows stay: the connector's other operations use them.
+    """
+    session = _CATALOG_SESSION.get()
+    if session is None:
+        return
+    await session.execute(
+        delete(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id.is_(None),
+            EndpointDescriptor.product == product,
+            EndpointDescriptor.version == version,
+            EndpointDescriptor.impl_id == impl_id,
+            EndpointDescriptor.op_id.in_(list(op_ids)),
+        )
+    )
 
 
 async def _run_typed_op_registrars(

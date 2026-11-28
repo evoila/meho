@@ -432,8 +432,17 @@ async def test_in_sandbox_mode_a_delete_grant_may_still_cover_a_delete(
 def test_the_policy_change_ops_are_the_policy_operations() -> None:
     from meho_backplane.connectors.policy.apply import POLICY_APPLY_OP_ID
     from meho_backplane.connectors.policy.classify import POLICY_CLASSIFY_OP_ID
+    from meho_backplane.connectors.policy.op_edit import (
+        POLICY_OP_EDIT_OP_ID,
+        POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+    )
 
-    assert {POLICY_APPLY_OP_ID, POLICY_CLASSIFY_OP_ID} == fixed_rules.POLICY_CHANGE_OPS
+    assert {
+        POLICY_APPLY_OP_ID,
+        POLICY_CLASSIFY_OP_ID,
+        POLICY_OP_EDIT_OP_ID,
+        POLICY_OP_REMOVE_OVERRIDE_OP_ID,
+    } == fixed_rules.POLICY_CHANGE_OPS
 
 
 # ---------------------------------------------------------------------------

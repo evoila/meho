@@ -9209,6 +9209,13 @@ type PersonBehindView struct {
 	WhyText string  `json:"why_text"`
 }
 
+// PolicyEditRequestResponse The answer when an edit of a risk level or approval waits for an admin's click.
+type PolicyEditRequestResponse struct {
+	ApprovalRequestId *string `json:"approval_request_id"`
+	Message           string  `json:"message"`
+	Status            string  `json:"status"`
+}
+
 // PolicyExplainBody The question of “POST /api/v1/policy/explain“.
 //
 // Ask about one call (“connector_id“ and “op_id“) for yourself
@@ -60254,6 +60261,7 @@ func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) 
 type RemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOpIdDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON202      *PolicyEditRequestResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -78132,6 +78140,13 @@ func ParseRemoveOpOverrideEndpointApiV1ConnectorsConnectorIdOperationOverridesOp
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest PolicyEditRequestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

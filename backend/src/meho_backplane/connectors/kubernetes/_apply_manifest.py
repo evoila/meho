@@ -16,13 +16,16 @@ the fixed mark :data:`NOT_SHOWN`. A document that is not valid YAML or
 JSON is named with the line and the column where the YAML reader stopped,
 and one fixed phrase for the kind of problem (:func:`_yaml_problem`).
 
-A document is measured before YAML builds it (:func:`_written_out_size`):
-one that is larger than :data:`WRITTEN_OUT_LIMIT` with each alias and
-merge key written out is refused, and is never built.
+Each document is measured before YAML builds it (:func:`_written_out_size`).
+When the sum of the sizes of the documents of one text, with each alias
+and merge key written out, is larger than :data:`WRITTEN_OUT_LIMIT`, the
+text is refused, and the document that goes over the limit is never built.
 """
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
 from contextvars import ContextVar
 from typing import Any
@@ -31,12 +34,18 @@ import yaml
 
 __all__ = ["NOT_SHOWN", "WRITTEN_OUT_LIMIT", "ApplyManifestError", "manifest_size_problem"]
 
-#: The largest size of one document, in characters, with each YAML alias
-#: and merge key written out. The Kubernetes API server refuses a request
-#: body larger than 3 MiB by default (``MaxRequestBodyBytes``).
+#: The largest size of all documents of one manifest text, in characters,
+#: as JSON with each YAML alias and merge key written out. The Kubernetes
+#: API server refuses a request body larger than 3 MiB by default
+#: (``MaxRequestBodyBytes``).
 WRITTEN_OUT_LIMIT = 3 * 1024 * 1024
 
-_TOO_LARGE = f"is larger than {WRITTEN_OUT_LIMIT} characters when its YAML aliases are written out"
+_TOO_LARGE = (
+    f"takes the manifest over {WRITTEN_OUT_LIMIT} characters when its YAML aliases are written out"
+)
+
+_STR_TAG = "tag:yaml.org,2002:str"
+_SCALARS = yaml.constructor.SafeConstructor()
 
 #: The last manifest text parsed in this task and its documents, so the
 #: check before the wait and the preview copy share one parse.
@@ -203,17 +212,44 @@ def _yaml_problem(exc: BaseException) -> tuple[str, str | None]:
     return phrase, None
 
 
-def _written_out_size(root: yaml.Node) -> int:
-    """The size of *root* with each alias and merge key written out, capped above the limit.
+def _scalar_size(node: yaml.ScalarNode, *, key: bool = False) -> int:
+    """The length of *node* in the JSON that the cluster client writes.
 
-    Each scalar counts its length plus one, each list and mapping counts
-    one. A node that aliases name many times is measured once and its size
-    is reused, so the cost follows the number of nodes in the text, not
-    the written-out size. A merge list counts each mapping it names, as
-    often as it names it. A node that holds itself has no end, so it
-    counts as over the limit. Returns at most ``WRITTEN_OUT_LIMIT + 1``.
+    A text counts its quotes and escapes. Any other value (null, a yes/no
+    value, a number, a date) counts the JSON text of the value YAML builds
+    from this one scalar; a key that is not a text counts two quotes more,
+    as JSON writes each key as a text. A scalar YAML cannot build counts
+    as a text (the parse refuses it later).
     """
-    over = WRITTEN_OUT_LIMIT + 1
+    if node.tag == _STR_TAG:
+        return len(json.dumps(node.value))
+    construct = yaml.SafeLoader.yaml_constructors.get(node.tag)
+    try:
+        value = construct(_SCALARS, node) if construct is not None else node.value
+        if isinstance(value, (datetime.date, datetime.datetime)):
+            value = value.isoformat()
+        text = json.dumps(value)
+    except Exception:
+        return len(json.dumps(node.value))
+    if key and not isinstance(value, str):
+        return len(text) + 2
+    return len(text)
+
+
+def _written_out_size(root: yaml.Node, limit: int = WRITTEN_OUT_LIMIT) -> int:
+    """The JSON size of *root* with each alias and merge key written out, capped above *limit*.
+
+    Each node counts at least its length in the JSON that the cluster
+    client writes: a list or a mapping its two brackets and the ``", "``
+    before each entry after the first, a key its own size and the ``": "``
+    after it, and a scalar its size from :func:`_scalar_size`. A node that
+    aliases name many times is measured once and its size is reused, so
+    the cost follows the number of nodes in the text, not the written-out
+    size. A merge list counts each mapping it names, as often as it names
+    it. A node that holds itself has no end, so it counts as over the
+    limit. Returns at most ``limit + 1``.
+    """
+    over = limit + 1
     sizes: dict[int, int] = {}
     open_nodes: set[int] = set()
 
@@ -224,45 +260,56 @@ def _written_out_size(root: yaml.Node) -> int:
         if key in open_nodes:
             return over
         if isinstance(node, yaml.ScalarNode):
-            total = len(node.value) + 1
+            total = _scalar_size(node)
         else:
             open_nodes.add(key)
-            total = 1
-            children = (
-                node.value
+            total = 2 + 2 * max(len(node.value) - 1, 0)
+            pairs = (
+                [(None, child) for child in node.value]
                 if isinstance(node, yaml.SequenceNode)
-                else [part for pair in node.value for part in pair]
+                else node.value
             )
-            for child in children:
+            for name, child in pairs:
+                if name is not None:
+                    total += 2
+                    total += (
+                        _scalar_size(name, key=True)
+                        if isinstance(name, yaml.ScalarNode)
+                        else size(name)
+                    )
                 total += size(child)
                 if total >= over:
                     total = over
                     break
             open_nodes.discard(key)
-        sizes[key] = total
-        return total
+        sizes[key] = min(total, over)
+        return sizes[key]
 
     return size(root)
 
 
-def _check_size(number: int, node: yaml.Node) -> None:
-    if _written_out_size(node) > WRITTEN_OUT_LIMIT:
+def _check_size(number: int, node: yaml.Node, used: int) -> int:
+    """The size of the text up to and with document *number*; refuse it over the limit."""
+    total = used + _written_out_size(node, WRITTEN_OUT_LIMIT - used)
+    if total > WRITTEN_OUT_LIMIT:
         raise ApplyManifestError(_TOO_LARGE, number=number)
+    return total
 
 
 def manifest_size_problem(manifest: str) -> ApplyManifestError | None:
-    """The refusal of the first document of *manifest* over :data:`WRITTEN_OUT_LIMIT`.
+    """The refusal of the document at which *manifest* goes over :data:`WRITTEN_OUT_LIMIT`.
 
-    Reads the YAML structure only: no document is built, so no alias or
-    merge key is written out. Returns ``None`` when every document fits,
-    and also at a YAML error, which :func:`_parse_manifest` names.
+    Adds up the sizes of all documents of the text. Reads the YAML
+    structure only: no document is built, so no alias or merge key is
+    written out. Returns ``None`` when the whole text fits, and also at a
+    YAML error, which :func:`_parse_manifest` names.
     """
     try:
         loader = yaml.SafeLoader(manifest)
     except yaml.reader.ReaderError:
         return None
     try:
-        number = 0
+        number = used = 0
         while True:
             number += 1
             try:
@@ -272,7 +319,7 @@ def manifest_size_problem(manifest: str) -> ApplyManifestError | None:
             except Exception:
                 return None
             try:
-                _check_size(number, node)
+                used = _check_size(number, node, used)
             except ApplyManifestError as exc:
                 return exc
     finally:
@@ -309,10 +356,11 @@ def _parse_manifest(manifest: str, *, shared: bool = True) -> list[dict[str, Any
     has a character that YAML does not allow, for example a control
     character", with no document number.
 
-    A document larger than :data:`WRITTEN_OUT_LIMIT` characters with its
-    YAML aliases and merge keys written out is refused with "document N
-    is larger than ... characters when its YAML aliases are written out",
-    before YAML builds it (:func:`_written_out_size`).
+    A text whose documents together are larger than
+    :data:`WRITTEN_OUT_LIMIT` characters as JSON, with their YAML aliases
+    and merge keys written out, is refused with "document N takes the
+    manifest over ... characters when its YAML aliases are written out",
+    before YAML builds document N (:func:`_written_out_size`).
 
     The documents of the last text parsed in this task are kept, so a
     second call with the same text does not parse it again. The caller
@@ -343,14 +391,14 @@ def _parse_documents(manifest: str) -> list[dict[str, Any]]:
         ) from None
     try:
         parsed: list[dict[str, Any]] = []
-        number = 0
+        number = used = 0
         while True:
             number += 1
             try:
                 if not loader.check_node():
                     break
                 node = loader.get_node()
-                _check_size(number, node)
+                used = _check_size(number, node, used)
                 doc = loader.construct_document(node)
             except ApplyManifestError:
                 raise

@@ -11,6 +11,8 @@ What these tests prove, through the real dispatch over a stand-in cluster
   wait and on a call that runs at once; the answer comes fast and with
   little memory, nothing goes to the cluster and no approval request is
   stored;
+* the measure of a document is never smaller than its JSON form, and the
+  limit holds for the sum of all documents of one manifest text;
 * a manifest with aliases under the limit parses as YAML reads it;
 * the preview parses the manifest once;
 * the hiding of the approval card reads a shared mapping once.
@@ -18,6 +20,7 @@ What these tests prove, through the real dispatch over a stand-in cluster
 
 from __future__ import annotations
 
+import json
 import time
 import tracemalloc
 from collections.abc import Iterator
@@ -37,6 +40,7 @@ from meho_backplane.connectors.kubernetes._apply_manifest import (
     WRITTEN_OUT_LIMIT,
     ApplyManifestError,
     _parse_manifest,
+    _written_out_size,
     manifest_size_problem,
 )
 from meho_backplane.connectors.registry import (
@@ -58,7 +62,9 @@ _TENANT_ID = UUID("00000000-0000-0000-0000-000000001949")
 _TARGET = _StubTarget(tenant_id=_TENANT_ID)
 
 _HEAD = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: web}\ndata:\n"
-_TOO_LARGE = f"is larger than {WRITTEN_OUT_LIMIT} characters when its YAML aliases are written out"
+_TOO_LARGE = (
+    f"takes the manifest over {WRITTEN_OUT_LIMIT} characters when its YAML aliases are written out"
+)
 
 
 def _nested_aliases(levels: int) -> str:
@@ -166,10 +172,57 @@ async def _fast_and_small(answer: Any) -> Any:
     return result
 
 
-def _assert_refused(errors: list[dict[str, Any]]) -> None:
+def _assert_refused(errors: list[dict[str, Any]], number: int = 1) -> None:
     assert [e["path"] for e in errors] == ["manifest"]
     assert errors[0]["validator"] == "params_check"
-    assert errors[0]["remediation"] == f"The manifest cannot be applied: document 1 {_TOO_LARGE}"
+    assert errors[0]["remediation"] == (
+        f"The manifest cannot be applied: document {number} {_TOO_LARGE}"
+    )
+
+
+def _by_levels(base: str, levels: int, top: int = 0) -> str:
+    """Level 0 is *base*; each next level is a list that names the level below ten times.
+
+    *top* adds a list that names the level below the highest *top* times.
+    """
+    lines = [f"  a0: &a0 {base}"]
+    lines += [f"  a{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 10)}]" for i in range(1, levels)]
+    if top:
+        lines.append(f"  top: [{', '.join([f'*a{levels - 2}'] * top)}]")
+    return _HEAD + "\n".join(lines) + "\n"
+
+
+def _json_size(manifest: str) -> int:
+    return sum(len(json.dumps(doc)) for doc in yaml.safe_load_all(manifest))
+
+
+def _measure(manifest: str) -> int:
+    return _written_out_size(yaml.compose(manifest, Loader=yaml.SafeLoader), 10**12)
+
+
+#: Bases whose JSON form is much longer than their YAML text.
+_BASES: dict[str, str] = {
+    "empty-maps": "[" + ", ".join(["{}"] * 100) + "]",
+    "empty-lists": "[" + ", ".join(["[]"] * 100) + "]",
+    "nulls": "[" + ", ".join(["!!null ''"] * 100) + "]",
+    "characters-above-u-ffff": '"' + "\\U0001F600" * 100 + '"',
+    "plain-text": "[" + ", ".join(["q"] * 100) + "]",
+}
+
+
+def _plain_document(json_size: int) -> str:
+    """One document with no aliases whose JSON form is *json_size* characters long."""
+    empty = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "web"}}
+    fill = json_size - len(json.dumps({**empty, "data": {"big": ""}}))
+    return _HEAD + "  big: " + "x" * fill + "\n"
+
+
+def _half_limit_document() -> str:
+    """One small document whose JSON form is just under half the limit."""
+    top = 30
+    while _measure(_by_levels(_BASES["plain-text"], 4, top)) > WRITTEN_OUT_LIMIT // 2:
+        top -= 1
+    return _by_levels(_BASES["plain-text"], 4, top)
 
 
 @pytest.mark.parametrize("name", list(_LARGE))
@@ -291,3 +344,50 @@ def test_the_run_gets_its_own_documents() -> None:
     assert own == shown
     assert own[0] is not shown[0]
     assert _parse_manifest(manifest)[0] is shown[0]
+
+
+@pytest.mark.parametrize("name", list(_BASES))
+def test_the_measure_is_never_smaller_than_the_json_form(name: str) -> None:
+    manifest = _by_levels(_BASES[name], 3)
+
+    assert _measure(manifest) >= _json_size(manifest)
+
+
+@pytest.mark.parametrize("name", list(_BASES))
+async def test_a_document_over_the_limit_as_json_is_refused_and_stores_nothing(
+    name: str, cluster: AsyncMock
+) -> None:
+    manifest = _by_levels(_BASES[name], 5)
+    assert _json_size(manifest) > WRITTEN_OUT_LIMIT
+
+    result = await _call({"manifest": manifest})
+
+    assert result.extras["error_code"] == "invalid_params", result
+    _assert_refused(result.extras["validation_errors"])
+    assert await _approval_requests() == 0
+    cluster.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("over", "refused"), [(-1, False), (0, False), (1, True)])
+def test_a_plain_document_is_measured_by_its_json_form(over: int, refused: bool) -> None:
+    manifest = _plain_document(WRITTEN_OUT_LIMIT + over)
+
+    assert (manifest_size_problem(manifest) is not None) is refused
+
+
+async def test_the_limit_holds_for_the_sum_of_all_documents(cluster: AsyncMock) -> None:
+    manifest = "---\n".join([_half_limit_document()] * 4)
+
+    result = await _call({"manifest": manifest})
+
+    assert result.extras["error_code"] == "invalid_params", result
+    _assert_refused(result.extras["validation_errors"], number=3)
+    assert await _approval_requests() == 0
+    cluster.assert_not_awaited()
+
+
+def test_twenty_normal_documents_pass() -> None:
+    manifest = "---\n".join(_HEAD + f"  key: value-{i}\n" for i in range(20))
+
+    assert manifest_size_problem(manifest) is None
+    assert len(_parse_manifest(manifest)) == 20

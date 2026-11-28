@@ -876,7 +876,7 @@ async def _apply_park_check(ctx: PreviewContext) -> str | None:
 
 
 def _apply_size_check(params: dict[str, Any]) -> dict[str, Any] | None:
-    """Params check of ``k8s.apply``: refuse a document over the written-out size limit.
+    """Params check of ``k8s.apply``: refuse a manifest over the written-out size limit.
 
     Runs on every call and every preview, before the policy gate, so the
     call never waits and nothing is sent or stored. Reads only the YAML
@@ -893,7 +893,8 @@ def _apply_size_check(params: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return params_problem(
         "manifest",
-        f"each document at most {WRITTEN_OUT_LIMIT} characters with its YAML aliases written out",
+        f"all documents together at most {WRITTEN_OUT_LIMIT} characters as JSON "
+        "with their YAML aliases written out",
         problem.text(),
     )
 

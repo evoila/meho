@@ -49,6 +49,7 @@ from typing import cast
 
 import structlog
 
+from meho_backplane.connectors._shared.log_host import origin_for_log
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.logging import configure_logging
 from meho_backplane.runner import wire
@@ -347,7 +348,7 @@ async def _run_loop(settings: RunnerSettings) -> None:
     _log().info(
         "runner_started",
         runner_id=settings.runner_id,
-        central_url=settings.central_url,
+        central_url=origin_for_log(settings.central_url),
         tick_interval_seconds=settings.tick_interval_seconds,
         spool_dir=settings.spool_dir,
     )

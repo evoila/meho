@@ -340,6 +340,17 @@ text from the error result, in one shared place.
   the target's secret) is the first use. The RKE2 connector marks the
   same case with `Rke2WriteOwnMessageError` (write operations) and
   `Rke2SnapshotNoSudoError` (snapshot operations).
+- **Own sentence of a 403.** `result_connector_http_403` also reads the
+  mark. When the raised `httpx.HTTPStatusError` has it and its class names
+  a fixed sentence in the class attribute `OWN_TEXT`, the `error` text is
+  `connector_http_403: ` plus that sentence, in place of the general 403
+  text, and the vendor's text follows after ` Upstream said: `. So the
+  sentence stays when the rule hides the vendor's text. The text of the
+  error itself is never used, because an HTTP error's text can hold the
+  request URL. A marked error without `OWN_TEXT` gets the general 403 text.
+  The `extras` and `error_code` are the same as for every 403. The Keycloak
+  connector uses it for a refused read of the managed realm
+  (`ManagedRealmReadRefusedError`).
 - **Retries are unchanged.** The rule works on the built result, not on
   the raised error. So the new login and one retry after HTTP 401, and
   the 403 and 429 results, work as before.

@@ -145,7 +145,6 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "examples": [
         {
-            "realm": "master",
             "username": "admin",
             "password_secret_ref": "keycloak/master/admin-old",
         }
@@ -211,10 +210,7 @@ LOGIN_CHECK_OPS: tuple[KeycloakOp, ...] = (
             ),
             "parameter_hints": {
                 "username": "The user to test, for example 'admin'.",
-                "realm": (
-                    "Realm of the user, for example 'master'. Default: managed realm. "
-                    "Another realm is refused."
-                ),
+                "realm": ("Realm of the user. Default: managed realm. Another realm is refused."),
                 "password_secret_ref": "Vault KV-v2 path to the password. Never inline.",
             },
             "output_shape": (

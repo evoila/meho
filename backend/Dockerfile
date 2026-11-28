@@ -523,4 +523,13 @@ EXPOSE 8000
 # at ``docs/cross-repo/reverse-proxy-contract.md``); operators pin
 # the value to their Ingress controller's own address for production
 # deploys.
-CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+#
+# ``--timeout-keep-alive 75`` keeps an idle kept-open connection for 75
+# seconds. uvicorn's default is 5 seconds, which is the same as the idle
+# limit of common HTTP clients (httpx drops a connection after 5 seconds
+# idle). When the server closes a connection at the moment a client sends
+# a new call on it, the client sees "Connection closed" with no answer.
+# A longer time than the client and proxy limits (for example a 60 second
+# proxy idle limit) means the client closes first. The test
+# ``tests/test_mcp_parallel_first_calls.py`` reads this value.
+CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--timeout-keep-alive", "75"]

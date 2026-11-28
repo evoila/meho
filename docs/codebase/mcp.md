@@ -2650,6 +2650,56 @@ tools (`op_class == "read"`) just before the `inputSchema` check:
 * The audit row's `params_hash` is still computed over the arguments
   the client sent.
 
+## Calls sent at the same moment at the start of a session (#6829)
+
+An agent client can send several `tools/call` requests at the same moment
+as the first calls of a new session. Each one is a plain HTTP request:
+MEHO keeps no state per session, so the calls do not wait for each other.
+Each call must get an answer or a JSON-RPC error. It must never end with a
+closed connection and no answer.
+
+Two tests keep this true. They start the app under uvicorn on `127.0.0.1`,
+with the test login override, so a closed connection can really show up:
+
+* `backend/tests/test_mcp_parallel_first_calls.py` sends 1, 2, 5 and 20
+  calls at once as the first calls of a session. It tries a new connection
+  for each call and a pool of kept-open connections, and three pauses before
+  the first calls (none, a short random one, and one just around the idle
+  limit of a kept-open connection). It counts answers, JSON-RPC errors, HTTP
+  errors and closed connections. Only a JSON-RPC response with the id of the
+  request counts as an answer or an error. CI runs a small size. The big run is
+  `MEHO_MCP_PARALLEL_FULL=1 uv run pytest -s tests/test_mcp_parallel_first_calls.py`.
+* `backend/tests/test_mcp_parallel_first_calls_cases.py` checks the odd
+  cases: a call refused by policy, a call that waits for approval, a call
+  that returns a result handle, and a client that closes during one call
+  while another call still runs.
+
+The test found one cause. uvicorn closes an idle kept-open connection
+after 5 seconds, and a client that keeps connections for 5 seconds idle
+(httpx does) can send a new call just as the server closes it. The client
+then sees "Connection closed". The image now starts uvicorn with
+`--timeout-keep-alive 75`, so the client closes first. The test reads that
+value from the start command (`CMD`) in `backend/Dockerfile`.
+
+When the server stops a call before it sent the answer, it writes one log
+line, `mcp_call_ended_without_answer`. It holds the session id cut to its
+first 8 characters (also in the `mcp_session_id` field, which holds the full
+id on other lines), the JSON-RPC method, the tool name (for `tools/call`),
+and the reason: `cancelled`, or `caller_gone` when the client had already
+left. A cancel is raised again after the line. The line is written by
+`_watch_call` in `mcp/server.py`. It watches from the moment the JSON-RPC
+request is parsed until the answer is sent. So it also covers the refusals
+before the handler (protocol version, session id, no tenant chosen) and the
+steps after it (for example the audit row of a new session). Right before the
+answer is sent, the route gives the event loop up to five turns
+(`let_watcher_see_disconnect` in `operations/caller_gone.py`). A disconnect
+that the server noticed just before the send then reaches the watcher. This
+matters because the server writes nothing to a client that has gone, and after
+the send it reports a disconnect for every answer. The session id is read
+from the header before the watcher starts. So the older
+`caller_gone_during_request` line still carries the full `mcp_session_id`,
+as before; on `/mcp` it now covers the same time.
+
 ## Request-size bounds
 
 The `/mcp` transport bounds every request body at

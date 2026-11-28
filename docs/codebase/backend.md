@@ -1025,7 +1025,7 @@ At the default level (INFO), an operator does not see these lines of the librari
 ## Control flow
 
 1. The container's `CMD` invokes
-   `uvicorn meho_backplane.main:app --host 0.0.0.0 --port 8000 --proxy-headers`.
+   `uvicorn meho_backplane.main:app --host 0.0.0.0 --port 8000 --proxy-headers --timeout-keep-alive 75`.
    `--proxy-headers` installs uvicorn's `ProxyHeadersMiddleware` at the
    ASGI server layer so `X-Forwarded-Proto` / `X-Forwarded-For` from
    the cluster's TLS-terminating Ingress survive into the ASGI

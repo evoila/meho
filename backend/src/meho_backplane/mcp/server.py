@@ -75,9 +75,11 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -128,7 +130,11 @@ from meho_backplane.mcp.structured_results import (
 )
 from meho_backplane.mcp.tenant_gate import allowed_without_tenant
 from meho_backplane.no_store import answer_scope, set_no_store
-from meho_backplane.operations.caller_gone import watch_caller
+from meho_backplane.operations.caller_gone import (
+    caller_gone_at,
+    let_watcher_see_disconnect,
+    watch_caller,
+)
 from meho_backplane.request_usage.collector import (
     note_request_fallback_status,
     note_request_route,
@@ -1360,10 +1366,20 @@ def _note_request_usage_outcome(response: Response) -> None:
     note_request_fallback_status(_JSONRPC_ERROR_STATUS.get(code, 500))
 
 
+async def _until_answer_sent() -> AsyncIterator[AsyncExitStack[bool | None]]:
+    """Give the route a stack of blocks that stay open until the answer is sent.
+
+    FastAPI ends a ``scope="request"`` dependency after it sent the response.
+    """
+    async with AsyncExitStack() as stack:
+        yield stack
+
+
 @router.post("")
 async def mcp_dispatch(
     request: Request,
     operator: Operator = Depends(verify_mcp_jwt_and_bind),
+    until_sent: AsyncExitStack[bool | None] = Depends(_until_answer_sent, scope="request"),
 ) -> Response:
     """Dispatch a single JSON-RPC 2.0 request or notification.
 
@@ -1409,7 +1425,7 @@ async def mcp_dispatch(
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
-    response = await _dispatch_mcp_request(request, operator)
+    response = await _dispatch_mcp_request(request, operator, until_sent)
     _note_request_usage_outcome(response)
     return response
 
@@ -1459,7 +1475,9 @@ def _apply_url_options(request: Request, operator: Operator) -> Operator | JSONR
     return operator.model_copy(update=update) if update else operator
 
 
-async def _dispatch_mcp_request(request: Request, operator: Operator) -> Response:
+async def _dispatch_mcp_request(
+    request: Request, operator: Operator, until_sent: AsyncExitStack[bool | None]
+) -> Response:
     """Run the dispatch pipeline described on :func:`mcp_dispatch`."""
     # ``operator`` flows through to handlers — T3 registry handlers
     # use it for RBAC filtering on tools/list / resources/templates/list
@@ -1488,19 +1506,34 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
         )
 
     protocol_error = _validate_protocol_version_header(request, jrpc.method, payload)
-    if protocol_error is not None:
-        return protocol_error
-
     # Capture the Mcp-Session-Id header (G8.2-T2 #1010 + G0.14-T6 #1147
     # decouple) so the audit writer can correlate every row of this
     # call to one agent session. Capture-if-present is unconditional;
     # MCP_REQUIRE_SESSION_ID only gates the missing-header reject
     # (-32600 before any dispatch). Bound for both requests and
     # notifications — notifications still write audit rows downstream.
-    session_error = _bind_mcp_session_id(request, payload)
-    if session_error is not None:
-        return session_error
+    # Bound before the watcher starts: its task copies the log context
+    # then, so its log line carries the session id.
+    session_error = _bind_mcp_session_id(request, payload) if protocol_error is None else None
 
+    # #3696: the body is fully read here, so the watcher can notice a
+    # caller that disconnects. It watches until the answer is sent, also
+    # when the answer is one of the refusals.
+    await until_sent.enter_async_context(_watch_call(request, jrpc))
+    refusal = protocol_error or session_error
+    response: Response = (
+        refusal if refusal is not None else await _dispatch_parsed(request, jrpc, payload, operator)
+    )
+    # After the send the server reports a disconnect for every answer, so
+    # the watcher must see a disconnect from before the send now.
+    await let_watcher_see_disconnect()
+    return response
+
+
+async def _dispatch_parsed(
+    request: Request, jrpc: JsonRpcRequest, payload: dict[str, Any], operator: Operator
+) -> Response:
+    """Run the handler of a checked request and return the answer."""
     # Notification detection: JSON-RPC §4.1.2 says a notification is a
     # request without an ``id`` member. Pydantic-side, ``jrpc.id``
     # collapses absent and explicit-null to ``None`` (spec discourages
@@ -1521,12 +1554,55 @@ async def _dispatch_mcp_request(request: Request, operator: Operator) -> Respons
     # resource template once the handler has matched one. An unregistered
     # method is not in the route catalog, so it is stored as unmatched.
     note_request_route(f"method:{jrpc.method}")
-    # #3696: the body is fully read here, so the watcher can notice a
-    # caller that disconnects while a long tool call runs.
-    async with watch_caller(request.receive):
-        response = await _dispatch_no_store(jrpc, is_notification, operator)
+    response = await _dispatch_no_store(jrpc, is_notification, operator)
     issued = _maybe_issue_initialize_session_id(request, jrpc.method, is_notification, response)
     return await _audit_session_open(request, jrpc, operator, response, issued=issued)
+
+
+@asynccontextmanager
+async def _watch_call(request: Request, jrpc: JsonRpcRequest) -> AsyncIterator[None]:
+    """Watch the caller while the block runs; log a call that gets no answer.
+
+    The block covers the handler, the steps after it and the sending of the
+    answer. The log line ``mcp_call_ended_without_answer`` is written once
+    when the call is cancelled, or when it ends after the caller has already
+    gone. A cancel is raised again after the log line.
+    """
+    async with watch_caller(request.receive):
+        cancelled = False
+        try:
+            yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            # No await between the end of the send and this check: the
+            # server also reports a disconnect once the answer is complete.
+            if caller_gone_at() is not None:
+                _log_call_without_answer(request, jrpc, "caller_gone")
+            elif cancelled:
+                _log_call_without_answer(request, jrpc, "cancelled")
+
+
+def _log_call_without_answer(request: Request, jrpc: JsonRpcRequest, reason: str) -> None:
+    """Write the one log line for an MCP call that ended with no answer sent."""
+    params = jrpc.params or {}
+    tool = params.get("name") if jrpc.method == "tools/call" else None
+    # ``initialize`` carries no id yet; the id it was given is in the log context.
+    session_id = request.headers.get(
+        _MCP_SESSION_HEADER
+    ) or structlog.contextvars.get_contextvars().get("mcp_session_id")
+    short_id = session_id[:8] if session_id else None
+    # The logger is resolved per call, so a test can capture the line.
+    structlog.get_logger().warning(
+        "mcp_call_ended_without_answer",
+        session=short_id,
+        # Wins over the full id that the log context would add to this line.
+        mcp_session_id=short_id,
+        method=jrpc.method,
+        tool=tool if isinstance(tool, str) else None,
+        reason=reason,
+    )
 
 
 async def _audit_session_open(

@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 import structlog
 from starlette.types import Receive
 
-__all__ = ["caller_gone_at", "watch_caller"]
+__all__ = ["caller_gone_at", "let_watcher_see_disconnect", "watch_caller"]
 
 _log = structlog.get_logger(__name__)
 
@@ -67,6 +67,30 @@ async def _wait_for_disconnect(receive: Receive, state: _CallerState) -> None:
     if message.get("type") == "http.disconnect":
         state.gone_at = datetime.now(UTC)
         _log.warning("caller_gone_during_request", caller_gone_at=state.gone_at.isoformat())
+
+
+#: Loop turns that a disconnect the server already noted needs to reach the
+#: watcher. With uvicorn the longest path is: the socket reports the close,
+#: the transport schedules ``connection_lost``, that wakes ``receive``, and
+#: the watcher task runs. One more turn is a margin.
+_TURNS_TO_SEE_DISCONNECT = 5
+
+
+async def let_watcher_see_disconnect() -> None:
+    """Let a disconnect that the server already noted reach the watcher.
+
+    Call it right before the answer is sent. A server writes nothing to a
+    caller that has gone and, once the answer is complete, reports a
+    disconnect for every request. So a disconnect from before the send is
+    only seen if the watcher gets it before the send. Returns at once when
+    the caller is known to be gone, or when no watcher runs.
+    """
+    if _caller_state_var.get() is None:
+        return
+    for _ in range(_TURNS_TO_SEE_DISCONNECT):
+        if caller_gone_at() is not None:
+            return
+        await asyncio.sleep(0)
 
 
 @asynccontextmanager

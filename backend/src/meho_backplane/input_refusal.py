@@ -96,8 +96,13 @@ def _cut(text: str, cap: int) -> str:
 
 
 def cut_key(part: object) -> str:
-    """One part of a field path, cut to :data:`PATH_PART_CAP` characters."""
-    return _cut(str(part), PATH_PART_CAP)
+    """One part of a field path, cut to :data:`PATH_PART_CAP` characters.
+
+    A character that cannot be encoded as UTF-8 (a lone surrogate from a
+    JSON escape) is written as a backslash escape, so the answer can be sent.
+    """
+    text = str(part).encode("utf-8", "backslashreplace").decode("utf-8")
+    return _cut(text, PATH_PART_CAP)
 
 
 def refusal_path(parts: Iterable[object], *, empty: str = "params") -> str:

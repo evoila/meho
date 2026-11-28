@@ -249,6 +249,38 @@ async def test_the_mcp_input_check_names_field_and_kind_never_the_value(
     assert made not in await _stored_text()
 
 
+async def test_a_path_key_that_cannot_be_encoded_gets_invalid_params(
+    _target: TargetORM,  # noqa: F811
+    _mcp_client: TestClient,  # noqa: F811
+) -> None:
+    key = "\ud800" + _made()
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "meho_targets_register",
+            "arguments": {
+                "name": "new-01",
+                "product": "ssh",
+                "host": "93.184.216.34",
+                "secret_field_map": {key: 7},
+            },
+        },
+    }
+    response = _mcp_client.post(
+        "/mcp",
+        content=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200, response.text
+    error = response.json()["error"]
+    assert error["code"] == INVALID_PARAMS, error
+    assert "secret_field_map" in error["message"]
+    assert "(type)" in error["message"]
+
+
 # ------------------------------------------- call_operation: a long map key
 
 

@@ -1847,6 +1847,7 @@ jobs:
       - *site2-spacy-restore
       - *unit-spacy
       - *unit-helm
+      - *unit-node
       - *unit-php-name
       - *unit-php-restore
       - *unit-php-install
@@ -1855,6 +1856,7 @@ jobs:
       - *unit-locale-install
       - *unit-download-picked
       - *unit-pytest
+      - *unit-skip-check
       - *unit-peak-memory
 
   python-outside-backend:

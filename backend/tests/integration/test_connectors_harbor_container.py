@@ -232,7 +232,10 @@ def harbor_core_addr() -> Iterator[str]:
         db_container.stop()
         redis_container.stop()
         network.remove()
-        pytest.skip(f"harbor-db/redis containers failed to start ({type(exc).__name__}): {exc}")
+        reason = f"harbor-db/redis containers failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         # Give DB time to reach ready state before starting core.
@@ -248,7 +251,10 @@ def harbor_core_addr() -> Iterator[str]:
         db_container.stop()
         redis_container.stop()
         network.remove()
-        pytest.skip(f"harbor-core container failed to start ({type(exc).__name__}): {exc}")
+        reason = f"harbor-core container failed to start ({type(exc).__name__}): {exc}"
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail(reason)
+        pytest.skip(reason)
 
     try:
         try:

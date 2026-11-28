@@ -65,6 +65,7 @@ from meho_backplane.policy.document import (
     parse_policy_file,
 )
 from meho_backplane.policy.limits import limits_diff
+from meho_backplane.policy.risk_levels import risk_levels_mistakes, stored_risk_levels
 from meho_backplane.policy.routing import category_routing_warnings
 from meho_backplane.policy.routing_floor import (
     floor_warnings,
@@ -412,7 +413,10 @@ async def build_plan(
     section, a file that equals the stored policy apart from those parts
     is "No change.", and the planned document keeps the stored parts as
     they are. With it on, the diff also shows the personal agent rules
-    (:func:`~meho_backplane.policy.agent_rules_plan.agents_plan`).
+    (:func:`~meho_backplane.policy.agent_rules_plan.agents_plan`), and a
+    ``risk_levels`` part that is not exactly the stored risk-level edits is
+    a mistake (:func:`~meho_backplane.policy.risk_levels.risk_levels_mistakes`).
+    The planned document never holds that part: the import changes no edit.
     """
     before = await _stored_document(session, scope, tenant_id)
     plan = PolicyPlan(
@@ -421,7 +425,7 @@ async def build_plan(
         file_sha256=file_sha256(content),
         based_on=canonical_sha256(before),
     )
-    parsed = parse_policy_file(content, custom_policy=custom_policy)
+    parsed = parse_policy_file(content, custom_policy=custom_policy, read_risk_levels=custom_policy)
     if parsed.model is None:
         plan.mistakes = parsed.mistakes
         return plan
@@ -445,6 +449,10 @@ async def build_plan(
         )
     except ValueError as exc:
         plan.mistakes = [f"The install's stored policy is not valid: {exc} Import it again first."]
+    if custom_policy:
+        plan.mistakes.extend(
+            await risk_levels_mistakes(session, content=content, scope=scope, tenant_id=tenant_id)
+        )
     if plan.mistakes:
         return plan
     if scope == "tenant":
@@ -658,9 +666,12 @@ async def export_policy(
 ) -> str:
     """The stored policy of *scope* as a ``policy: v1`` file (see :func:`_stored_document`).
 
-    The file holds the stored ``limits`` and ``agents`` parts only when
-    *custom_policy* says the ``CUSTOM_POLICY`` switch is on; with it off,
-    the exported file imports again.
+    The file holds the stored ``limits`` and ``agents`` parts, and the
+    ``risk_levels`` part with the risk-level edits of *scope*
+    (:func:`~meho_backplane.policy.risk_levels.stored_risk_levels`), only
+    when *custom_policy* says the ``CUSTOM_POLICY`` switch is on; with it
+    off, the exported file imports again. The file has no ``risk_levels``
+    part when *scope* has no risk-level edit. The export only reads.
 
     In a tenant's file, each part of an entry that tries to set back an
     "always wait" or a risk level of the install's policy gets a
@@ -687,6 +698,11 @@ async def export_policy(
         end["bindings"] = shipped_binding_documents(get_settings())
     if custom_policy and document.get("agents"):
         end["agents"] = document["agents"]
+    edits = (
+        await stored_risk_levels(session, scope=scope, tenant_id=tenant_id) if custom_policy else []
+    )
+    if edits:
+        end["risk_levels"] = edits
     entries = list(document.get("classifications") or [])
     route_notes = (
         tenant_wider_notes(document, await _stored_document(session, "install", None))

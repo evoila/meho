@@ -36,7 +36,9 @@ The file reserves seven top-level keys: ``limits``, ``agents`` and five
 refused keys, ``approvers``, ``role_bindings``, ``risk_levels``,
 ``custom_roles`` and ``baseline``. A file that holds one of the five is
 refused, whatever its value, with the sentence of
-:func:`~meho_backplane.policy.limits.not_read_mistake`.
+:func:`~meho_backplane.policy.limits.not_read_mistake`. One exception:
+with the ``CUSTOM_POLICY`` switch on, the import reads ``risk_levels``
+(:mod:`meho_backplane.policy.risk_levels`).
 
 The parser uses the strict YAML loader of the settings file
 (:mod:`meho_backplane.instance_settings.schema`): a repeated key, a YAML
@@ -375,13 +377,20 @@ def _repeated_match_mistakes(model: PolicyFile) -> list[str]:
     return mistakes
 
 
-def parse_policy_file(content: bytes, *, custom_policy: bool = True) -> ParsedPolicy:
+def parse_policy_file(
+    content: bytes, *, custom_policy: bool = True, read_risk_levels: bool = False
+) -> ParsedPolicy:
     """Parse and check *content*; collect every mistake as one sentence each.
 
     With *custom_policy* false (the ``CUSTOM_POLICY`` switch is off), the
     key ``agents`` is refused here like the five refused keys, so its
     sentence comes back also when the file has other mistakes. True keeps
     the part for :func:`~meho_backplane.policy.validate.check_document`.
+
+    *read_risk_levels* true (the import with the switch on) does not refuse
+    the key ``risk_levels``; the model never holds it, and
+    :func:`~meho_backplane.policy.risk_levels.risk_levels_mistakes` checks
+    it against the stored edits.
     """
     if len(content) > MAX_POLICY_BYTES:
         return ParsedPolicy(None, [f"The file is larger than {MAX_POLICY_BYTES // 1024} KiB."])
@@ -412,7 +421,11 @@ def parse_policy_file(content: bytes, *, custom_policy: bool = True) -> ParsedPo
     refused = _REFUSED_KEYS if custom_policy else ("agents", *_REFUSED_KEYS)
     if not custom_policy and "agents" in raw:
         mistakes.append(AGENTS_NEED_CUSTOM_POLICY)
-    mistakes.extend(not_read_mistake(key) for key in _REFUSED_KEYS if key in raw)
+    mistakes.extend(
+        not_read_mistake(key)
+        for key in _REFUSED_KEYS
+        if key in raw and not (read_risk_levels and key == "risk_levels")
+    )
     model: PolicyFile | None = None
     try:
         model = PolicyFile.model_validate({k: v for k, v in raw.items() if k not in refused})

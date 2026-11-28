@@ -37,6 +37,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations import run_step_rules
@@ -54,6 +55,7 @@ _DESTRUCTIVE = {"level": "destructive", "typed": True}
 _L1 = pytest.param(_DESTRUCTIVE, None, id="L1-destructive-on-the-built-in-row")
 _L2 = pytest.param(_SAFE, _DESTRUCTIVE, id="L2-destructive-on-the-tenant-row")
 _L3 = pytest.param(_SAFE, _SAFE, id="L3-safe-on-both-rows")
+_MEMBER_ADD = Step("probe.things.member_add", "safe", False)
 _BOTH_PATHS = pytest.mark.parametrize("child", [False, True], ids=["step", "child-call"])
 
 
@@ -170,3 +172,38 @@ async def test_on_the_step_rule_reads_the_stored_level_and_the_card_keeps_the_de
     [(declared, levels)] = seen
     assert declared == "safe"
     assert sorted(levels) == sorted(stored)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+async def test_a_step_whose_stored_row_changes_rights_waits_with_the_switch_on(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    on: bool,
+) -> None:
+    """A ``safe`` step whose stored row has ``changes_rights`` waits by ``target_rights_waits``.
+
+    A tenant admin approves the run, so only the rule for a change of rights
+    in a target system can make the step wait.
+    """
+    c.switch(monkeypatch, on=on)
+    rights = {"level": "safe", "typed": True, "changes_rights": True}
+    result = await r.run_remote(
+        session,
+        stub_embedding_service,
+        _MEMBER_ADD,
+        rights,
+        None,
+        approver_role=TenantRole.TENANT_ADMIN,
+    )
+    if on:
+        assert result.status == "awaiting_approval", result
+        await c.assert_waits(
+            _MEMBER_ADD,
+            child=False,
+            wait_reason=c.STEP_RULE_WAIT.format("floor:target_rights_waits"),
+            run_op_id=r.REMOTE_RUN,
+        )
+    else:
+        assert result.status == "ok", result.error
+        await c.assert_went_ahead(_MEMBER_ADD, child=False, run_op_id=r.REMOTE_RUN)

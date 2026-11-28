@@ -215,6 +215,7 @@ def _with_stored_facts(step: EndpointDescriptor, stored: EndpointDescriptor) -> 
         tags=stored.tags,
         op_class=stored.op_class,
         hard_to_undo=stored.hard_to_undo,
+        changes_rights=stored.changes_rights,
     )
     row.policy_always_wait = step.policy_always_wait
     row.credential_call = step.credential_call

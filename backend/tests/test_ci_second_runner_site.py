@@ -1219,7 +1219,8 @@ def test_pick_step_can_never_break_the_changes_job() -> None:
     assert step["env"]["RUN_ATTEMPT"] == "${{ github.run_attempt }}"
     assert step["env"]["ACTOR"] == "${{ github.actor }}"
     assert step["env"]["COVERAGE_LABEL"] == (
-        "${{ contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate') }}"
+        "${{ contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')"
+        " && 'true' || 'false' }}"
     )
     # The token only needs to read the run history, which the job could already.
     assert changes["permissions"] == {"contents": "read", "actions": "read"}

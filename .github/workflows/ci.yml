@@ -49,8 +49,8 @@
 #
 # Docs-only fast path (#3252): the `changes` detector also classifies a PR
 # whose diff is PURELY documentation (every path under `docs/` or ending in
-# `.md`). On such a PR the heavy Python lanes — `python-lint`, the six
-# `python-unit-shard` legs, and the four `python-integration-shard` legs —
+# `.md`). On such a PR the heavy Python lanes — `python-lint` and the six
+# `python-unit-shard` legs —
 # skip via their own job-level `if:` (skipped-by-`if:` == Success per
 # #2140), so a changelog roll / guide edit / README fix finishes CI in
 # minutes instead of paying the ~17-19-min Python tax for zero signal. The
@@ -70,6 +70,11 @@
 # the backend tests that read files outside `backend/` (the Helm chart, the Go
 # CLI, the workflows, the docs). The fan-in requires that job to pass on this
 # path. merge_group and the nightly run always run everything.
+#
+# Integration shards: the four `python-integration-shard` legs run
+# only in the merge queue and in the nightly run, never on a pull request.
+# On a pull request the fan-in `Python (integration testcontainers)` still
+# reports and passes, with a summary line that says so.
 #
 # Test map run (#5642): a PR that would otherwise run all the unit shards
 # runs one unit job with only the tests its change can break. The nightly
@@ -218,8 +223,8 @@ jobs:
     #                required `python-migration-tests` job runs only then.
     #   docs_only  — `true` when a PR's diff is PURELY documentation (every
     #                changed path is under `docs/` or ends in `.md`), so the
-    #                heavy Python lanes (`python-lint`, the `python-unit-shard`
-    #                matrix, and the `python-integration-shard` matrix) skip
+    #                heavy Python lanes (`python-lint` and the
+    #                `python-unit-shard` matrix) skip
     #                via their own `if:` and report success-by-skip (#3252).
     #   backend_python — `false` when a PR changes no file under `backend/`
     #                (except `.md`), does not change this file and does not
@@ -3131,7 +3136,12 @@ jobs:
     # the same shape as python-unit-shard + python-unit-lane (#5384).
     # Holds the container-heavy tests/integration/ subtree
     # (pgvector/valkey/k3d testcontainers). Kept apart from the unit shards so the required
-    # lint+mypy+unit gate stays fast while integration runs on every PR.
+    # lint+mypy+unit gate stays fast.
+    #
+    # Not on a pull request: the shards run in the merge queue and in
+    # the nightly run only. They were 30 percent of the runner minutes of a
+    # pull request run, and the queue ran them again before every merge. The
+    # fan-in `python-integration` still reports on every pull request.
     # The fan-in has been a required merge gate since 2026-05-20 (#698):
     # it was the structural corrective to the v0.2 / G3.4
     # green-but-hollow incidents (#634 / #697) — the lane that
@@ -3144,26 +3154,14 @@ jobs:
     # the test files, split by measured time (see the pytest step), so the
     # wall is about the slowest shard instead of the sum.
     #
-    # #3252 docs-only skip — SAME shape as the python-migration-tests gate
-    # below (plain `needs: changes` + an `if:` that ANDs in the detect
-    # output), deliberately NOT `always()`: these are HEAVY legs, so keeping
-    # cancel-in-progress (a force-push must cancel them) matters. If the
-    # detect job hard-CRASHES, `needs: changes` skip-cascades these legs to
-    # `skipped`, and the fan-in fails the required context CLOSED (it
-    # checks that `changes` succeeded). The CLASSIFIER itself is fail-safe:
-    # only a proven-docs-only diff sets `docs_only=true`, so a code PR is
-    # never skipped here.
-    #
-    # #5296: the legs also skip when `backend_python` is `false` (a PR that
-    # changes no file under backend/ and not this file), and the fan-in
-    # accepts the skipped legs on that path. A few integration tests read
-    # files outside backend/ (the Keycloak sub-chart, examples/, the CLI);
-    # they need containers, so on such a PR only the merge queue runs them.
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-       needs.changes.outputs.docs_only != 'true' &&
-       needs.changes.outputs.backend_python != 'false')
+    # Plain `needs: changes`, deliberately NOT `always()`: these are HEAVY
+    # legs, so keeping cancel-in-progress matters. If the detect job
+    # hard-CRASHES, `needs: changes` skip-cascades these legs to `skipped`,
+    # and the fan-in fails the required context CLOSED (it checks that
+    # `changes` succeeded, and needs strict success outside a pull request).
+    # The `if:` holds no `||`, so no pull request event, also not from a
+    # fork, can start a leg (test_ci_fork_runner_isolation.py).
+    if: github.event_name != 'pull_request'
     needs: changes
     # The normal internal pool, not the heavy one: the tests run serially
     # (no xdist) and mostly wait on containers.
@@ -3554,22 +3552,17 @@ jobs:
     #     failed (a skipped required check counts as Success, #2140), and
     #     the step FAILS on any shard result that is not allowed. A hung
     #     shard hits its own timeout → `cancelled` → this gate fails.
-    #  2. Fork PRs: this job skips by its own `if:`, which reports the
-    #     required context as Success, exactly as the old serial job did.
-    #  3. Docs-only PRs: every shard skips by its detect-gated `if:` and
-    #     this step accepts `skipped` ONLY when `changes` succeeded and
-    #     said docs_only=true. On every other run it needs strict success.
-    #  4. No-backend PRs (#5296): the shards skip the same way when
-    #     `backend_python` is `false`, and this step accepts `skipped` then
-    #     too. The merge queue runs the shards on the merged result.
+    #  2. Pull requests, also from a fork: the shards never start,
+    #     and this step passes with one summary line that says the
+    #     integration tests run in the merge queue. A failed or cancelled
+    #     shard result still fails it.
+    #  3. Merge queue and nightly run: every shard must succeed. A failed,
+    #     cancelled or skipped shard fails this step.
     # GitHub-hosted runner (#4626): one bash step, no setup. Merge-queue runs
     # use the internal pool instead (#6325), so the queue never waits for
     # GitHub-hosted runners.
     needs: [changes, python-integration-shard]
-    if: >-
-      always() &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+    if: always()
     # Short job: it stays hosted in the merge queue too (#6350). It is on the
     # allowlist in test_ci_fork_runner_isolation.py, with its reason.
     runs-on: ubuntu-latest
@@ -3579,33 +3572,28 @@ jobs:
         # needs.python-integration-shard.result is the AGGREGATE of the
         # matrix: success only if every leg succeeded.
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CHANGES_RESULT: ${{ needs.changes.result }}
-          CHANGES_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          CHANGES_BACKEND_PYTHON: ${{ needs.changes.outputs.backend_python }}
           SHARDS_RESULT: ${{ needs.python-integration-shard.result }}
         run: |
           detect="${CHANGES_RESULT}"
-          docs_only="${CHANGES_DOCS_ONLY}"
-          backend_python="${CHANGES_BACKEND_PYTHON}"
           shards="${SHARDS_RESULT}"
-          echo "changes (detect): result=${detect}, docs_only=${docs_only}, backend_python=${backend_python}"
+          echo "event: ${EVENT_NAME}"
+          echo "changes (detect): result=${detect}"
           echo "python-integration-shard (aggregate of all 4 shard legs): ${shards}"
 
           if [ "${detect}" != "success" ]; then
-            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}', so the docs-only classification cannot be trusted. Failing the required integration lane closed."
+            echo "::error title=Integration lane — detector not green::the change-detector ('changes') result is '${detect}'. Failing the required integration lane closed."
             exit 1
           fi
 
-          if [ "${docs_only}" = "true" ]; then
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            # PULL REQUEST — the shards never start on a pull
+            # request; the merge queue runs them on the merged result.
             case "${shards}" in
-              success|skipped) echo "Integration lane GREEN (docs-only fast path #3252) — all 4 shards skipped-by-detect." ;;
-              *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
-            esac
-          elif [ "${backend_python}" = "false" ]; then
-            # NO-BACKEND PATH (#5296) — the shards were skipped by their
-            # `if:`; the merge queue runs them on the merged result.
-            case "${shards}" in
-              success|skipped) echo "Integration lane GREEN (no backend change, #5296) — all 4 shards skipped-by-detect." ;;
+              success|skipped)
+                echo "The integration tests run in the merge queue." >> "${GITHUB_STEP_SUMMARY}"
+                echo "Integration lane GREEN for a pull request — the integration tests run in the merge queue." ;;
               *) echo "::error title=Integration lane red::an integration shard did not pass (${shards}). Open the 'Python integration shard N/4' jobs above for the detail."; exit 1 ;;
             esac
           elif [ "${shards}" = "success" ]; then

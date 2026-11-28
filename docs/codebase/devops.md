@@ -1900,6 +1900,26 @@ to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
+### What runs on a pull request, in the merge queue and at night
+
+The full set of tests runs once before a merge: in the merge queue. A pull
+request run is lighter.
+
+| Run | What runs |
+| --- | --- |
+| Pull request | Lint and type checks, the unit shards (or the one-connector run, or the tests the test map picked), the timing tests, Go, Helm, the snapshot check, the template check, the compare job, and the migration tests when migrations change. The four integration shards do **not** run. The required check `Python (integration testcontainers)` still reports and passes, and its summary says: "The integration tests run in the merge queue." |
+| Merge queue group | Everything, with the four integration shards, for every group: a docs-only group and a group with no backend change too. The `changes` job reads no diff in the queue. |
+| Nightly run | Everything, always. The detector never reads a diff. |
+
+The four integration shards were 52 of the 175 runner minutes of a pull
+request run (30 percent), and the queue ran them again before every merge.
+The number to watch: merge queue runs that fail in an integration shard
+for a pull request whose own run did not run them. The goal is under 1 in
+25 merges.
+
+Tests: `backend/tests/test_ci_integration_in_merge_queue.py` checks the job
+gates for each event and runs the real fan-in step and the real detect step.
+
 ### When a test runner dies (memory lines in the job log)
 
 Sometimes a test job ends with "lost communication with the server" and no
@@ -2073,8 +2093,8 @@ changed by a maintainer, never by a pull request.
 | `python-unit-shard` (`Python unit shard N/6`) | `backend/` unit + acceptance subtree, split 6 ways | `pytest -n 3 --dist loadscope --maxfail=1 --timeout=180 --timeout-method=signal` over a deterministic file set split by measured time (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). A pull request that changes one connector runs one leg instead (`Python unit tests for connector <name>`, see [One-connector unit run](#one-connector-unit-run-5297)). Another pull request may run one leg with the tests the test map picked (`Python unit tests picked by the test map`, see [Test map run](#test-map-run-5642)). |
 | `python-outside-backend` (`Python tests that read files outside backend`) | the backend tests that read files outside `backend/` | Runs only on a PR with no `backend/` change (`backend_python=false`) that is not docs-only. `pytest -n 3` over the fixed list in `backend/tests/_outside_backend_tests.py`, on a GitHub-hosted runner. Non-required; the fan-in requires it on that path (#5296). See [No-backend path (#5296)](#no-backend-path-5296). |
 | `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard, python-outside-backend]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252); on a no-backend diff it requires `python-outside-backend` to pass (#5296). |
-| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). |
-| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Fails when any shard failed or was cancelled, or the detector is not green; reports success-by-skip on a docs-only diff and on a no-backend diff (#5296). Same rules as `python-unit-lane` (#5384). |
+| `python-integration-shard` (`Python integration shard N/4`) | `backend/tests/integration/`, split 4 ways | `uv sync --locked --all-groups` -> `pytest -x -rs` over a file set split by measured time, against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. No xdist inside a shard. Non-required matrix (#5384). Runs only in the merge queue and in the nightly run, never on a pull request. |
+| `python-integration` (`Python (integration testcontainers)`) | fan-in | `needs: [changes, python-integration-shard]`; **required check (#698)** so the lane that exercises real connector dispatch can no longer ship red. Runs on every event, also on a fork PR. On a pull request it passes with the summary line "The integration tests run in the merge queue." In the merge queue and at night it fails when any shard failed, was cancelled or skipped, or the detector is not green. |
 | `python-timing-tests` (`Python timing tests (non-blocking)`) | test files with a `slow_runner_tolerant` test | Runs only the tests that compare real elapsed time with a wide fixed limit (`tests/_time_limits.py`). The required unit and integration shards set `MEHO_SKIP_TIME_LIMITS=1`: those tests still run there, but their time limit does not fail the job. Not a required check, and `continue-on-error`, so a busy runner cannot block a merge with a time limit (#6270). |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v9 action, golangci-lint v2) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
@@ -2405,11 +2425,10 @@ split it the same way as the unit lane:
   green run with `--measure`, as for the unit file.
 - **`python-integration`** — the **fan-in** with the exact required
   name `Python (integration testcontainers)`, so branch protection and
-  the rulesets need no change. Same rules as `python-unit-lane`:
-  `if: always() && <fork guard>`, fails closed when `changes` did not
-  succeed, accepts `skipped` shards only on a docs-only diff or a
-  no-backend diff (#5296), and needs strict `success` on every other run.
-  It runs on `ubuntu-latest`.
+  the rulesets need no change. `if: always()`, fails closed when
+  `changes` did not succeed. On a pull request the shards never start
+  and it passes with one summary line. In the merge queue and at
+  night it needs strict `success`. It runs on `ubuntu-latest`.
 
 The first measurements (`tests/_integration_shard_durations.json`) are
 the median of four green merge-queue runs of the serial job (29 October
@@ -2455,12 +2474,13 @@ completes CI in minutes.
   line that says why. Tests: `backend/tests/test_ci_backend_python_skip.py`.
   `merge_group` and `push` NEVER fast-path (a queue batch may mix docs +
   code; a `main` push must always run the full matrix).
-- **What skips.** `python-lint`, the six `python-unit-shard` legs, and
-  the four `python-integration-shard` legs gain `needs: changes` and an
+- **What skips.** `python-lint` and the six `python-unit-shard` legs
+  gain `needs: changes` and an
   `if:` that skips them when `docs_only == 'true'` (same #2140 shape as the
   `python-migration-tests` gate). The required contexts `Python (ruff +
   mypy + pytest)` and `Python (integration testcontainers)` come from
-  fan-ins that still run and pass on these skips.
+  fan-ins that still run and pass on these skips. The integration shards
+  do not run on any pull request.
 - **What still runs.** `go-lint-test`, `helm-lint-template`, and the sibling
   workflows' required contexts (`Semgrep SAST`, `TruffleHog Secret Scan`,
   `Python License Check`, `NPM License Check`, `helm install + helm test`)
@@ -2496,10 +2516,9 @@ runs one short job instead.
   quotes a path that holds a double quote, a backslash or a control
   character; such a line keeps every fail-safe default (full run and
   migration gate on).
-- **What skips.** `python-lint`, the six `python-unit-shard` legs and
-  the four `python-integration-shard` legs skip by their own `if:` when
-  `backend_python` is `false`, the same way as on a docs-only PR. The
-  `python-integration` fan-in accepts the skipped legs on this path.
+- **What skips.** `python-lint` and the six `python-unit-shard` legs skip
+  by their own `if:` when `backend_python` is `false`, the same way as on a
+  docs-only PR. The integration shards do not run on any pull request.
 - **What runs instead.** Some backend tests read files outside `backend/`:
   the Helm chart, the Go CLI, the workflows, the docs and the examples. A PR
   that changes no backend file can still break them. The job

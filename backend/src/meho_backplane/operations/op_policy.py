@@ -707,6 +707,8 @@ class _TenantScope:
     code_safety: str
     code_approval: bool
     own: list[OperationPolicyOverride]
+    #: The tenant's own copy of the operation; ``None`` when it has none.
+    copy_row: EndpointDescriptor | None = None
 
 
 def _key_clause(model: type[EndpointDescriptor] | type[OperationPolicyOverride], key: OpKey) -> Any:
@@ -757,6 +759,7 @@ async def _tenant_scopes(
                 code_safety=copy.safety_level if copy is not None else code_safety,
                 code_approval=copy.requires_approval if copy is not None else code_approval,
                 own=own.get(tenant_id, []),
+                copy_row=copy,
             )
         )
     return scopes
@@ -786,13 +789,15 @@ def _refuse_unless_may_end_approval(
     new: EffectivePolicy,
     lost: Sequence[UUID],
     who: _Requester,
+    tenants: Sequence[_TenantScope] = (),
 ) -> None:
     """Run the approval-off checks when approval ends in any scope the edit reaches.
 
     That is the edited scope itself (*old* to *new*) or a tenant in
     *lost*. A level of ``destructive`` always keeps approval, so when
     approval ends anywhere, *new* is not destructive. *row* is the
-    operation's row, or ``None`` when it is gone.
+    operation's row, or ``None`` when it is gone. The fixed rules are also
+    asked for the own copy of each tenant in *lost* (from *tenants*).
     """
     if not (old.requires_approval and not new.requires_approval) and not lost:
         return
@@ -800,6 +805,9 @@ def _refuse_unless_may_end_approval(
         raise _edit_tool_cannot_loosen()
     if row is not None:
         _refuse_for_fixed_rule(row)
+    for scope in tenants:
+        if scope.tenant_id in lost and scope.copy_row is not None:
+            _refuse_for_fixed_rule(scope.copy_row)
     _check_may_turn_approval_off(op_id, new.safety_level, who)
 
 
@@ -1026,7 +1034,9 @@ async def apply_policy_edit(
     # only removes an override or lowers a raised risk level, and one that
     # ends approval for a tenant's own copy of a built-in operation.
     lost = _tenants_losing_approval(tenants, before=mine, after=candidate)
-    _refuse_unless_may_end_approval(row, row.op_id, old=old, new=new, lost=lost, who=who)
+    _refuse_unless_may_end_approval(
+        row, row.op_id, old=old, new=new, lost=lost, who=who, tenants=tenants
+    )
     await _store(
         session,
         key=key,
@@ -1103,7 +1113,9 @@ async def remove_override(
         )
     lost = _tenants_losing_approval(tenants, before=mine, after=None)
     who = _Requester(operator, reason, person_present, False, max_age_seconds)
-    _refuse_unless_may_end_approval(descriptor, key.op_id, old=old, new=new, lost=lost, who=who)
+    _refuse_unless_may_end_approval(
+        descriptor, key.op_id, old=old, new=new, lost=lost, who=who, tenants=tenants
+    )
     await session.delete(mine)
     await session.flush()
     return PolicyEditResult(

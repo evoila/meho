@@ -14,6 +14,8 @@ other check, so only the fixed rules decide.
 * With the switch off, the edit is refused exactly where it was refused
   before (a ``destructive`` operation, an address the caller gives, a
   change of rights), and allowed everywhere else.
+* An install-wide edit also asks the fixed rules of each tenant's own
+  copy of the operation that loses approval by it.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -28,7 +31,7 @@ import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 
 from meho_backplane.api.v1.connectors_ingest import router as connectors_ingest_router
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -43,6 +46,7 @@ from meho_backplane.op_classes import (
     declare_credential_capable,
     declare_root_shell,
 )
+from meho_backplane.operations import op_policy as op_policy_module
 from meho_backplane.operations.caller_address import CALLER_ADDRESS_MARKER
 from meho_backplane.operations.grant_approval import _RIGHTS_CHANGE_OPS
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -94,7 +98,21 @@ _CASES: dict[str, tuple[str, dict[str, Any], str, str | None]] = {
         "target_rights_waits",
         None,
     ),
+    "lowered_destructive": (
+        "rulepets.pet.shred",
+        {"safety_level": "destructive"},
+        "destructive_waits",
+        "approval_off_destructive",
+    ),
+    "policy_change": (
+        "policy.apply",
+        {},
+        "policy_change_waits",
+        "approval_off_rights_change",
+    ),
 }
+#: Cases whose effective level is lowered to ``dangerous``; the code's level stays.
+_LOWERED = {"lowered_destructive"}
 _PLAIN_OP = "rulepets.pet.rename"
 
 
@@ -113,7 +131,12 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     declare_root_shell((_CASES["root_shell"][0],))
     # A change of rights with no per-call mark of its own.
     _RIGHTS_CHANGE_OPS.add(_CASES["rights_change"][0])
+    policy_op = _CASES["policy_change"][0]
+    policy_marked = policy_op in _RIGHTS_CHANGE_OPS
+    _RIGHTS_CHANGE_OPS.add(policy_op)
     yield
+    if not policy_marked:
+        _RIGHTS_CHANGE_OPS.discard(policy_op)
     _CREDENTIAL_CAPABLE.discard(_CASES["credential"][0])
     _ROOT_SHELL.discard(_CASES["root_shell"][0])
     _RIGHTS_CHANGE_OPS.discard(_CASES["rights_change"][0])
@@ -154,6 +177,44 @@ async def _register(op_id: str, **extra: Any) -> None:
         embedding_service=embedding,
         **kwargs,
     )
+
+
+def _lower_to_dangerous(monkeypatch: pytest.MonkeyPatch, op_id: str) -> None:
+    """Make the effective level of *op_id* ``dangerous``, with approval off.
+
+    That is what an admin's lowering of the level would give. The code's own
+    level stays ``destructive``.
+    """
+    real = op_policy_module.effective_policy_map
+
+    async def lowered(*args: Any, **kwargs: Any) -> Any:
+        policies = await real(*args, **kwargs)
+        return {
+            key: replace(policy, safety_level="dangerous", requires_approval=False)
+            if key.op_id == op_id
+            else policy
+            for key, policy in policies.items()
+        }
+
+    monkeypatch.setattr(op_policy_module, "effective_policy_map", lowered)
+
+
+async def _add_tenant_copy(op_id: str, **facts: Any) -> None:
+    """Store a tenant's own copy of the built-in row of *op_id*, with *facts* changed."""
+    async with get_sessionmaker()() as session, session.begin():
+        built_in = (
+            await session.scalars(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == op_id, EndpointDescriptor.tenant_id.is_(None)
+                )
+            )
+        ).one()
+        values = {
+            attr.key: getattr(built_in, attr.key)
+            for attr in inspect(EndpointDescriptor).column_attrs
+            if attr.key != "id"
+        }
+        session.add(EndpointDescriptor(**{**values, "tenant_id": uuid.uuid4(), **facts}))
 
 
 def _turn_off(op_id: str) -> Any:
@@ -201,6 +262,8 @@ async def test_with_the_switch_on_approval_off_is_refused_with_the_rule_id(
     op_id, extra, rule, _ = _CASES[case]
     _switch(monkeypatch, on=True)
     await _register(op_id, **extra)
+    if case in _LOWERED:
+        _lower_to_dangerous(monkeypatch, op_id)
 
     response = _turn_off(op_id)
 
@@ -219,6 +282,8 @@ async def test_with_the_switch_off_approval_off_is_refused_only_where_it_was(
     op_id, extra, _, old_code = _CASES[case]
     _switch(monkeypatch, on=False)
     await _register(op_id, **extra)
+    if case in _LOWERED:
+        _lower_to_dangerous(monkeypatch, op_id)
 
     response = _turn_off(op_id)
 
@@ -259,3 +324,36 @@ def test_a_lowered_destructive_operation_keeps_its_rule(monkeypatch: pytest.Monk
     )
     row.code_safety_level = "destructive"
     assert fixed_rule_of_operation(row) == "destructive_waits"
+
+
+#: A tenant's own copy of a plain built-in operation -> the fixed rule that holds it.
+_COPIES = {
+    "destructive_tag": ({"tags": ["destructive"]}, "delete_waits"),
+    "caller_address": ({"parameter_schema": _ADDRESS_SCHEMA}, "caller_address_waits"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("copy", sorted(_COPIES))
+async def test_an_install_wide_approval_off_asks_the_rule_of_each_tenant_copy(
+    monkeypatch: pytest.MonkeyPatch, copy: str
+) -> None:
+    """With the switch on, the edit is refused with the copy's rule id; with it off, allowed."""
+    facts, rule = _COPIES[copy]
+    await _register(_PLAIN_OP)
+    await _add_tenant_copy(_PLAIN_OP, **facts)
+
+    _switch(monkeypatch, on=True)
+    response = _turn_off(_PLAIN_OP)
+
+    assert response.status_code == 400, response.text
+    assert f"the fixed rule {rule} holds" in response.json()["detail"]
+    assert await _stored(_PLAIN_OP) == ([], [])
+
+    _switch(monkeypatch, on=False)
+    response = _turn_off(_PLAIN_OP)
+
+    assert response.status_code == 200, response.text
+    overrides, edits = await _stored(_PLAIN_OP)
+    assert [o.requires_approval for o in overrides] == [False]
+    assert len(edits) == 1

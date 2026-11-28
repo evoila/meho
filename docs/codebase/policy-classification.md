@@ -415,8 +415,12 @@ A create, enable or disable of a login counts too.
 - Both are stored on the operation's row: `endpoint_descriptor.hard_to_undo`
   (a CHECK allows only the three words) and
   `endpoint_descriptor.changes_rights` (migration `0190`). NULL means no.
-  Each start writes the values from the code again. Operations from an
-  imported API spec leave both NULL.
+  Each start writes the values from the code again. An import of an API
+  spec writes both as NULL on each row it writes: on a fresh import, on a
+  re-import (a value stored on the row before goes away) and on an import
+  into one tenant. An import never changes a built-in typed row.
+  `backend/tests/test_imported_operation_marks.py` checks this through the
+  real import.
 - `backend/tests/test_operation_marks_stored.py` checks that each start
   stores the values of the code for every built-in operation, also on an
   upgraded database. It reads the values from the definitions in code, so

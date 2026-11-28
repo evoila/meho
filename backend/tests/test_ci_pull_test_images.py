@@ -172,7 +172,10 @@ def test_the_step_pulls_every_image_the_job_sets(job_id: str, tmp_path: Path) ->
 
 
 def test_the_outside_backend_job_pulls_the_chart_postgres_image() -> None:
-    step = next(s for s in jobs("ci.yml")["python-outside-backend"]["steps"] if s["name"] == _STEP)
+    job = jobs("ci.yml")["python-outside-backend"]
+    # testcontainers starts its Ryuk image first; the pull step reads the variable.
+    assert job.get("env", {}).get("RYUK_CONTAINER_IMAGE") == "testcontainers/ryuk:0.8.1"
+    step = next(s for s in job["steps"] if s["name"] == _STEP)
     assert "pgvector_test_image()" in step["run"]
     assert 'pull_test_images.sh" "$image"' in step["run"]
 

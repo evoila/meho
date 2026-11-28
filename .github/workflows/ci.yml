@@ -1826,6 +1826,10 @@ jobs:
     runs-on: ubuntu-latest
     # About 2 minutes of pytest plus setup; the cap is a hang backstop.
     timeout-minutes: 20
+    env:
+      # The cleanup container that testcontainers starts first. The pull
+      # step and pytest read the same value.
+      RYUK_CONTAINER_IMAGE: testcontainers/ryuk:0.8.1
     defaults:
       run:
         working-directory: backend

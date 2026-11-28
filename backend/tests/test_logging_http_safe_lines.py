@@ -127,6 +127,7 @@ def test_each_kind_writes_its_fixed_line_once(
     events = _events(out)
     assert len([e for e in events if e.startswith(f"{event}:")]) == 1
     assert len(events) == 1
+    assert json.loads(out)["event"].startswith(f"{event}: {name}: ")
     assert json.loads(out)["level"] == "warning"
     assert "exception" not in json.loads(out)
     _assert_clean(out, values)

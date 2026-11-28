@@ -138,7 +138,7 @@ def _hold_record(record: logging.LogRecord) -> None:
         return
     safe = _SAFE_LINES.get((record.name, record.msg)) if isinstance(record.msg, str) else None
     if safe is not None:
-        record.msg = f"{safe[0]}: {safe[1]}"
+        record.msg = f"{safe[0]}: {record.name}: {safe[1]}"
         record.levelno = logging.WARNING
         record.levelname = logging.getLevelName(logging.WARNING)
         setattr(record, _SAFE_EVENT_ATTR, safe[0])

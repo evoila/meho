@@ -97,6 +97,7 @@ __all__ = [
     "get_resource_for_uri",
     "get_tool",
     "has_addon_gated_tools",
+    "plain_role_refusal",
     "register_mcp_resource",
     "register_mcp_tool",
     "registered_resource_templates",
@@ -105,6 +106,7 @@ __all__ = [
     "surface_visible",
     "tool_for_settings",
     "tool_role_gate_met",
+    "tool_role_refusal",
     "tool_surface",
 ]
 
@@ -1014,6 +1016,35 @@ def tool_role_gate_met(operator: Operator, defn: ToolDefinition) -> bool:
     if role_at_least(operator.tenant_role, defn.required_role):
         return True
     return defn.approver_may_call and operator.approver and is_human_principal(operator)
+
+
+#: Tool classes that only read. Any other class asks for a change.
+_READ_TOOL_CLASSES: Final[frozenset[str]] = frozenset({"read", "audit_query"})
+
+
+def plain_role_refusal(name: str) -> str:
+    """The error text of a role refusal that is not about a change."""
+    return f"forbidden: {name!r} requires a higher role"
+
+
+def tool_role_refusal(name: str, defn: ToolDefinition, operator: Operator) -> str:
+    """The error text when *operator*'s role is below the role of the tool *defn*.
+
+    A Reader who calls a tool that asks for a change (a write tool that
+    needs the ``operator`` role) gets the code and the plain sentence of
+    :func:`~meho_backplane.operations.role_floors.reader_change_refusal`.
+    Any other refusal is :func:`plain_role_refusal`.
+    """
+    from meho_backplane.operations.role_floors import READER_CHANGE_CODE, reader_change_refusal
+
+    sentence = reader_change_refusal(
+        operator.tenant_role,
+        is_change=defn.required_role is TenantRole.OPERATOR
+        and defn.op_class not in _READ_TOOL_CLASSES,
+    )
+    if sentence is not None:
+        return f"{READER_CHANGE_CODE}: {sentence}"
+    return plain_role_refusal(name)
 
 
 def has_addon_gated_tools() -> bool:

@@ -107,6 +107,7 @@ from meho_backplane.auth.rbac import (
     require_fresh_approval_sign_in,
     require_human_principal,
 )
+from meho_backplane.auth.role_refusal import RoleRefusedError
 from meho_backplane.connectors.linux.script_preview import ScriptPageOutOfRangeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
@@ -190,6 +191,7 @@ from meho_backplane.operations.grant_approval import is_rights_change
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.people_behind import entries_of, people_behind_line
 from meho_backplane.operations.platform_admin_card import card_for_reader
+from meho_backplane.operations.role_floors import READER_CHANGE_CODE, reader_change_refusal
 from meho_backplane.operations.uncertain_outcome import UNCERTAIN_OUTCOME, envelope_is_uncertain
 from meho_backplane.policy.routing_floor import current_install_floor, load_install_floor
 from meho_backplane.settings import get_settings
@@ -1781,7 +1783,8 @@ async def rerun_approval_request(
 
     * 200 — the request ran again. ``dispatch_status`` is the run's status.
     * 403 — the caller did not make the request, the caller's role is too
-      low (``insufficient_role``), or a new call of the caller made now
+      low (``insufficient_role``; a Reader also gets the plain sentence in
+      ``message``), or a new call of the caller made now
       would be refused (``approval_rerun_refused``).
     * 404 — request not found (or belongs to another tenant).
     * 409 — the last run did not fail, another re-run is running, or
@@ -1818,6 +1821,9 @@ async def rerun_approval_request(
             detail=f"approval_rerun_needs_new_approval: {exc}",
         ) from exc
     except RerunRoleTooLowError as exc:
+        sentence = reader_change_refusal(operator.tenant_role, is_change=True)
+        if sentence is not None:
+            raise RoleRefusedError(READER_CHANGE_CODE, sentence) from exc
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail="insufficient_role",

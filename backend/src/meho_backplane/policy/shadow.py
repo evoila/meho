@@ -118,12 +118,14 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
     from meho_backplane.op_classes import is_root_shell, needs_per_call_approval
     from meho_backplane.operations.grant_approval import is_rights_change_op
     from meho_backplane.operations.rights_change_console import params_write_credential
+    from meho_backplane.operations.role_floors import asks_for_change
     from meho_backplane.operations.service_grants import (
         _sandbox_delete_exception,
         delete_grant_reason,
         descriptor_credential_reason,
         descriptor_credential_waits,
     )
+    from meho_backplane.policy.floors import ASKS_FOR_CHANGE
 
     op_id = descriptor.op_id
     patterns = get_settings().service_grant_delete_shaped_patterns
@@ -140,6 +142,7 @@ def _op_class(descriptor: EndpointDescriptor, params: dict[str, Any] | None) -> 
             op_id, getattr(descriptor, "op_class", None), descriptor
         ),
         "rights_change": is_rights_change_op(op_id),
+        ASKS_FOR_CHANGE: asks_for_change(descriptor, params),
     }
     return frozenset(name for name, on in marks.items() if on)
 

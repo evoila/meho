@@ -98,7 +98,7 @@ ALWAYS_SKIPPED = [
     + "it needs a sensor change and an AI model on the install",
     "check 11 (the runner executor): not run: it needs a satellite runner",
     "check 7 (the owner's own approval of the request of check 10, web console and command "
-    + "line): not run: waits for #7132",
+    + "line): not run: MEHO's explain answer says it only while the switch is on",
 ]
 
 #: The params of the policy import (policy.apply): the scope, the whole file,

@@ -168,10 +168,14 @@ Decide only that request. With no terminal, or when the person answers no:
 These lines are always `[skip]`, also in a run where every check passes:
 
 - `check 7 (the owner's own approval of the request of check 10, web
-  console and command line): not run: waits for #7132`. Check 7 does not
-  compare whether the owner may approve their own request until #7132 is
-  merged, because MEHO's answer does not say it yet. Check 10 tests it
-  while the switch is on.
+  console and command line): not run: MEHO's explain answer says it only
+  while the switch is on`. Check 7 runs with the switch off. With the
+  switch off, MEHO's explain answer does not say whether the owner may
+  approve their own request. This is on purpose: with the switch off, the
+  explain answer stays the same as without the switch. So check 7 cannot
+  compare it. Check 10 tests it while the switch is on. With the switch
+  off, the approve step is MEHO's code without the switch, and MEHO's
+  backend tests cover it.
 - `check 8 (an Admin, a person, web console, the reason of the write rule):
   not run: waits for #6966`. For a `caution` write, the console refuses
   the lowering because the level is lower than the classification. The
@@ -250,11 +254,12 @@ exit code 1, and the `[left]` lines are printed.
 Exit code 0 needs the three open parts of check 11 (the event intake, the
 findings investigator and the runner executor, which wait for #7073 and the
 logins it names), the two parts of check 8 that need the write rule's own
-reason (#6966), the owner's own approval in check 7 (#7132), and the
-caller kind on the audit row (#6962). Until
+reason (#6966), and the caller kind on the audit row (#6962). Until
 those are done, a run where every check passes ends with exit code 3. So does a run
 where the person did checks 4 and 5, while MEHO has no route that reads
-the agent rule and the custom role.
+the agent rule and the custom role. The `[skip]` line of check 7 for the
+owner's own approval prints in every run, so today every run where all
+checks pass ends with exit code 3.
 
 ## The checks
 
@@ -376,9 +381,9 @@ same way in (web console or token), and every operation of checks 1 to 6,
 takes no parameters. A preview that answers `status: "error"` (for example
 `invalid_params`) is no valid answer. It passes only with HTTP 200, a valid
 answer, its audit rows, and the same three values as the baseline. It
-does not compare whether the owner may approve their own request until
-#7132 is merged: that line is always `[skip]`, and check 10 tests it while
-the switch is on.
+does not compare whether the owner may approve their own request: that
+line is always `[skip]`, because MEHO's explain answer says it only while
+the switch is on. Check 10 tests it while the switch is on.
 
 ## The start of a run
 

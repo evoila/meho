@@ -3856,12 +3856,19 @@ async def _refuse_resume_params_unavailable(
 
 
 def requester_of(request: ApprovalRequest) -> ResumeRequester:
-    """The requester saved on *request* (#4217), with its ``client`` block and record."""
-    from meho_backplane.operations._preview import stored_requester_record
+    """The requester saved on *request*, with its ``client`` block and record.
+
+    The record is the card's requester record, else the record a person's
+    or a service login's request keeps under
+    :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`.
+    """
+    from meho_backplane.operations._preview import REQUESTER_RECORD_KEY, stored_requester_record
 
     effect = request.proposed_effect or {}
     client = effect.get(CLIENT_PAYLOAD_KEY)
     subject = stored_requester_record(effect)
+    if not isinstance(subject, dict):
+        subject = effect.get(REQUESTER_RECORD_KEY)
     return ResumeRequester(
         request.principal_sub,
         request.principal_act,
@@ -3876,7 +3883,7 @@ def requester_of(request: ApprovalRequest) -> ResumeRequester:
 def _with_requester_record(
     proposed_effect: dict[str, Any], operator: Operator, requester: ResumeRequester | None
 ) -> dict[str, Any]:
-    """Put the agent requester's record on the card (#6314), when there is one.
+    """Put the requester's record on the card.
 
     An approvals surface runs the approved call as the person who approved
     it. It rebuilds the agent from this record to check the agent's grants
@@ -3890,13 +3897,24 @@ def _with_requester_record(
     The REST and MCP approval tools leave it out.
     While ``AGENT_GRANT_REQUIRED`` is not ``off``, the card also shows it
     under ``permission_preflight["requester"]``.
+
+    A person's or a service login's own request keeps its record only under
+    :data:`~meho_backplane.operations._preview.REQUESTER_RECORD_KEY`, which
+    only a re-run of the approved call reads (:func:`requester_of`). So a call
+    that waits during the re-run is checked as the caller who started the run.
     """
-    from meho_backplane.operations._preview import AGENT_REQUESTER_RECORD_KEY
+    from meho_backplane.operations._preview import (
+        AGENT_REQUESTER_RECORD_KEY,
+        REQUESTER_RECORD_KEY,
+    )
     from meho_backplane.operations.approved_step_check import requester_record
+    from meho_backplane.operations.secondary_target_policy import requester_subject
     from meho_backplane.settings import get_settings
 
     record = requester_record(operator) if requester is None else requester.subject
     if record is None:
+        if requester is None:
+            return {REQUESTER_RECORD_KEY: requester_subject(operator), **proposed_effect}
         return proposed_effect
     effect = {AGENT_REQUESTER_RECORD_KEY: record, **proposed_effect}
     if get_settings().agent_grant_required == "off":

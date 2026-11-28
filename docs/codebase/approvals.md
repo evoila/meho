@@ -1137,7 +1137,10 @@ model, or resume endpoint):
    (`approval_rule` `token_call_self_approval`). The same approval on the
    command line or REST is refused with `SelfApprovalForbiddenError`,
    which points to the web interface. A change marked `requires_approval`
-   never carries the reason and keeps the group rules below.
+   never carries the reason and keeps the group rules below. A call that
+   waits during the re-run of an approved call (`resume_requester_var` is
+   bound) never carries the reason: the login that runs the re-run is not
+   the caller who asked.
 2. **Self-approval guard (requester != approver).** `approve_request`
    raises `SelfApprovalForbiddenError` (→ HTTP 403 `self_approval_forbidden`
    on REST; the console shows the plain text) when `operator.sub ==
@@ -6110,7 +6113,15 @@ Because the request names the caller who started the run:
   the run. That caller may not approve the waiting child call of their own
   run, unless an Admin's self-approval rule covers it. The person who
   approved an earlier step may approve it like any other approver of that
-  risk level.
+  risk level;
+- the card's requester record (`permission_preflight["requester"]`, the
+  check of a write on a second target) is the record of the caller who
+  started the run. `requester_policy_preflight` rebuilds that caller from
+  the run's requester record and checks their policy, not the policy of the
+  login that runs the re-run. An agent's request keeps its record under
+  `agent_requester_record`; a person's or a service login's request keeps
+  it under `requester_record`, which only `requester_of` reads. Both keys
+  are internal: the REST and MCP approval tools leave them out.
 
 **The risk, and the two checks that limit it.** With the guard relaxed, safety
 depends on the composite: its re-run must really skip every earlier write.

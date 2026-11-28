@@ -110,6 +110,7 @@ __all__ = [
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_CREDENTIAL_USE_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
+    "REQUESTER_RECORD_KEY",
     "SWITCHED_EFFECT_KEYS",
     "PreviewContext",
     "approved_preview",
@@ -655,13 +656,19 @@ SWITCHED_OBJECT_FIELDS: Final[dict[str, tuple[str, str]]] = {
 #: (:mod:`~meho_backplane.operations.approved_run_rights`).
 AGENT_REQUESTER_RECORD_KEY: Final[str] = "agent_requester_record"
 
+#: The key of the record of a person or a service login that asked. A re-run
+#: of the approved call reads it, so a call that waits during the re-run is
+#: checked as the caller who started the run
+#: (:func:`~meho_backplane.operations.approval_queue.requester_of`).
+REQUESTER_RECORD_KEY: Final[str] = "requester_record"
+
 #: Top-level keys of a stored ``proposed_effect`` that MEHO keeps for its own
 #: checks: where a change of rights was asked
 #: (:data:`~meho_backplane.operations.grant_approval.ASKED_IN_WEB_CONSOLE`),
-#: and the record of the agent that asked. The REST and MCP approval tools
+#: and the record of the caller that asked. The REST and MCP approval tools
 #: leave them out.
 INTERNAL_EFFECT_KEYS: Final[frozenset[str]] = frozenset(
-    {"asked_in_web_console", AGENT_REQUESTER_RECORD_KEY}
+    {"asked_in_web_console", AGENT_REQUESTER_RECORD_KEY, REQUESTER_RECORD_KEY}
 )
 
 

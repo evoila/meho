@@ -30,8 +30,10 @@ import pytest
 
 import meho_backplane.operations.dispatcher as dispatcher
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.models import PermissionVerdict
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog, PermissionVerdict
 from meho_backplane.operations import dispatch
+from meho_backplane.operations._audit import audit_safe
 from meho_backplane.settings import get_settings
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000f1")
@@ -185,19 +187,22 @@ def _no_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("custom_policy", [False, True], ids=["switch-off", "switch-on"])
-async def test_unexpected_verdict_denial_returns_its_audit_id(
+async def test_unexpected_verdict_denial_stores_its_audit_row(
     stub_dispatch_seams: dict[str, AsyncMock],
     monkeypatch: pytest.MonkeyPatch,
     custom_policy: bool,
 ) -> None:
     """The fail-closed deny for a verdict the gate should never return (#4669).
 
-    With ``CUSTOM_POLICY`` on too: the unknown verdict counts as ``deny``
-    for the row's rule, so the call still writes its row.
+    The real audit writer stores the row in the migrated test database. The
+    table takes only the three known verdicts, so the row says ``deny``. With
+    ``CUSTOM_POLICY`` on too: the unknown verdict counts as ``deny`` for the
+    row's rule.
     """
     monkeypatch.setenv("CUSTOM_POLICY", "true" if custom_policy else "false")
     get_settings.cache_clear()
     _no_limits(monkeypatch)
+    monkeypatch.setattr(dispatcher, "audit_safe", audit_safe)
     stub_dispatch_seams["gate"].return_value = (SimpleNamespace(value="weird"), None)
 
     result = await dispatch(
@@ -210,8 +215,13 @@ async def test_unexpected_verdict_denial_returns_its_audit_id(
 
     assert result.status == "denied"
     assert "unexpected policy verdict" in (result.error or "")
-    assert result.audit_id == _RECEIPT
-    assert stub_dispatch_seams["audit"].await_args.kwargs["result_status"] == "denied"
+    assert result.audit_id is not None
+    async with get_sessionmaker()() as session:
+        row = await session.get(AuditLog, result.audit_id)
+    assert row is not None
+    assert row.payload["result_status"] == "denied"
+    assert row.status_code == 403
+    assert row.policy_decision == PermissionVerdict.DENY.value
 
 
 @pytest.mark.asyncio

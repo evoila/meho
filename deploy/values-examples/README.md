@@ -453,7 +453,9 @@ Credential-write approvals need a dedicated Fernet key. **This is REQUIRED**
 on any deployment where a credential-write operation may wait for approval:
 leaving `approvalHandoff` disabled (the chart default) means MEHO denies every
 such operation instead of letting it wait (#3712). `GET /ready` shows the state
-under `features.approval_custody`. Create the key with
+under `features.approval_custody`. With `metricsAuth.enabled` on (the default),
+it shows the state only to a caller that sends the metrics token. The command
+is in the part "The approval hand-off key" of the install guide. Create the key with
 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
 It is unrelated to the optional browser-console session key, and the chart
 accepts only a Kubernetes `secretKeyRef`:

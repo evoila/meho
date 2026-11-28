@@ -34,6 +34,7 @@ from meho_backplane.connectors.keycloak._paths import (
     _REQUIRED_ACTIONS_PATH,
     fill_path,
 )
+from meho_backplane.connectors.keycloak.managed_realm_check import read_managed_realm
 from meho_backplane.connectors.keycloak.ops_authflow import get_admin_list_strict
 from meho_backplane.connectors.keycloak.ops_read import KeycloakOp
 from meho_backplane.connectors.keycloak.ops_write_delete_lookup import (
@@ -89,8 +90,8 @@ def _pick(row: Any, fields: tuple[str, ...], what: str) -> dict[str, Any]:
 async def _browser_flow_alias(
     connector: KeycloakConnector, operator: Operator, target: KeycloakTargetLike, realm: str
 ) -> str:
-    realm_row = await connector._get_admin_json(
-        target, fill_path(_ADMIN_REALM_PATH, {"realm": realm}), operator=operator
+    realm_row = await read_managed_realm(
+        connector, target, operator, fill_path(_ADMIN_REALM_PATH, {"realm": realm})
     )
     check_answered_realm("keycloak.auth_flow.step.list", realm_row, target)
     alias = realm_row.get("browserFlow")

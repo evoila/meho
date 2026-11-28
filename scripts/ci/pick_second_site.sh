@@ -13,6 +13,8 @@
 #   EVENT_NAME           github.event_name
 #   HEAD_REPO            github.event.pull_request.head.repo.full_name
 #   ACTOR                github.actor
+#   COVERAGE_LABEL       `false` when the pull request does not have the label
+#                        ci-coverage-validate; any other value keeps today's pool
 #   RUN_ATTEMPT          github.run_attempt
 #   DOCS_ONLY, BACKEND_PYTHON, SINGLE_CONNECTOR, TEST_MAP
 #                        the outputs of the `changes` job; the site is used
@@ -51,6 +53,11 @@ if [[ "${EVENT_NAME:-}" != "pull_request" ]]; then
 fi
 if [[ -z "${HEAD_REPO:-}" || "${HEAD_REPO}" != "${GITHUB_REPOSITORY:-}" ]]; then
   decide "" "today's pool: a pull request from a fork never uses the second site"
+fi
+# The coverage job joins the coverage files of all shards and works in the
+# checked-out code, so with this label every shard stays on today's pool.
+if [[ "${COVERAGE_LABEL:-}" != "false" ]]; then
+  decide "" "today's pool: a pull request with the label ci-coverage-validate keeps all unit shards on today's pool"
 fi
 # The token of a Dependabot run cannot cancel a run, so the second-site
 # watchdog could not stop shards that wait on a dead site.

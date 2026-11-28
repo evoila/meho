@@ -63,6 +63,7 @@ from pydantic import (
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.targets.extras_limits import check_extras_size
 from meho_backplane.targets.field_rules import check_target_host, check_target_name
+from meho_backplane.targets.keycloak_realm_warnings import shown_fingerprint
 from meho_backplane.targets.ssrf_guard import assert_public_destination
 
 if TYPE_CHECKING:
@@ -216,6 +217,11 @@ class TargetSummary(BaseModel):
     updated_at: datetime
     deleted_at: datetime | None = None
 
+    @field_validator("fingerprint")
+    @classmethod
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
+
 
 class TargetListResponse(BaseModel):
     """Unified list envelope for ``GET /api/v1/targets``.
@@ -355,6 +361,11 @@ class Target(BaseModel):
     # observed the target through an audit-history surface, not a
     # live registry probe.
     deleted_at: datetime | None = None
+
+    @field_validator("fingerprint")
+    @classmethod
+    def _shown_fingerprint(cls, value: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        return shown_fingerprint(value)
 
 
 class TargetWriteResult(Target):
@@ -610,6 +621,11 @@ class TargetUpdate(BaseModel):
         default=None, max_length=2 * SECRET_FIELD_MAP_MAX_ENTRIES
     )
     extras: dict[str, Any] | None = None
+    # The merge form of ``extras``: a value sets or replaces that key and keeps
+    # its JSON type, ``null`` removes the key, a key that is not named stays.
+    # The merge runs when the change runs (``merge_extras_changes``). It cannot
+    # be sent together with ``extras``.
+    extras_changes: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
     # #3272 / #3212 (F1). Patchable per-target capture override, **tri-state** --
@@ -630,6 +646,22 @@ class TargetUpdate(BaseModel):
     @classmethod
     def _check_extras_size(cls, value: Any) -> Any:
         return check_extras_size(value)
+
+    @field_validator("extras_changes")
+    @classmethod
+    def _check_extras_changes(cls, value: dict[str, Any] | None) -> dict[str, Any]:
+        if not value:
+            raise ValueError("extras_changes must name at least one key")
+        return check_extras_size(value)
+
+    @model_validator(mode="after")
+    def _extras_or_extras_changes(self) -> TargetUpdate:
+        if "extras" in self.model_fields_set and "extras_changes" in self.model_fields_set:
+            raise ValueError(
+                "send either extras (replaces the whole map) or extras_changes "
+                "(changes single keys), not both; nothing was changed"
+            )
+        return self
 
     @field_validator("aliases")
     @classmethod

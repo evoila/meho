@@ -59,10 +59,17 @@ from meho_backplane.connectors.targets.ops import (
     _parse_target_id,
 )
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.op_classes import declare_hidden_stored_map_values
 from meho_backplane.operations._preview import _redact_echoed_params
+from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.operations.role_floors import register_role_floor
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.extras_changes import (
+    apply_extras_changes,
+    extras_change_keys,
+    merge_extras_changes,
+)
 from meho_backplane.targets.keycloak_realm_warnings import keycloak_realm_warnings
 from meho_backplane.targets.resolver import resolve_target_by_id
 from meho_backplane.targets.schemas import TargetUpdate
@@ -178,6 +185,20 @@ TARGETS_UPDATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "New connector-specific metadata. Replaces the stored map.",
         },
+        "extras_changes": {
+            "type": "object",
+            "minProperties": 1,
+            "description": (
+                "Changes single keys of the stored `extras`. A value sets or "
+                "replaces that key and keeps its type (text, number, `true` or "
+                "`false`, list, map). A `null` value removes that key. Keys you "
+                "do not name keep their value. MEHO merges when the change runs, "
+                "so a key added while the call waited stays. Not together with "
+                "`extras`. The answer names the keys set and removed, never a "
+                "value, and a warning names a key, not its value; read the "
+                "target to see the values."
+            ),
+        },
         "notes": {
             "type": _NULLABLE_STRING,
             "description": "New free-text notes. `null` clears them.",
@@ -219,12 +240,28 @@ TARGETS_UPDATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Names of the fields the call changed.",
         },
+        "extras_keys_set": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when the call sent `extras_changes`: the keys of "
+                "`extras` it set. Names only, never a value."
+            ),
+        },
+        "extras_keys_removed": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Only present when the call sent `extras_changes`: the keys of `extras` it removed."
+            ),
+        },
         "warnings": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
                 "Only present when a setting is allowed but risky, for example a "
                 "Keycloak target that manages the realm MEHO itself signs in with. "
+                "With `extras_changes` a line names the key, not its value. "
                 "Tell the person about each line."
             ),
         },
@@ -255,8 +292,17 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
         "target_id": "Required. The target's UUID from list_targets.",
         "secret_ref": "Optional. A Vault path inside your tenant's secret path.",
         "host": "Optional. The new host or IP.",
+        "extras_changes": (
+            "Optional. To change one key of `extras` and keep the others, send "
+            "this map: a value sets the key, `null` removes it. Not together "
+            "with `extras`, which replaces the whole map."
+        ),
     },
-    "output_shape": "{'target_id', 'name', 'product', 'version', 'host', 'updated_fields'}",
+    "output_shape": (
+        "{'target_id', 'name', 'product', 'version', 'host', 'updated_fields'}; "
+        "with `extras_changes` also 'extras_keys_set' and 'extras_keys_removed' "
+        "(key names, no values); 'warnings' when a setting is risky"
+    ),
     "next_step": (
         "The call waits for approval and then runs with the same params. "
         "When you changed the host, port, product or version, call "
@@ -267,6 +313,26 @@ _LLM_INSTRUCTIONS: dict[str, Any] = {
 # The policy gate checks the floor for a person on every path, and the
 # approval queue checks it for the approver.
 register_role_floor(TARGETS_UPDATE_OP_ID, TenantRole.TENANT_ADMIN)
+
+# A value of extras_changes can be secret only next to a stored key (a
+# stored "name": "password"), which the stored request does not show. So
+# when the request runs or ends, every value goes and the key names stay.
+declare_hidden_stored_map_values(TARGETS_UPDATE_OP_ID, "extras_changes")
+
+
+def _extras_or_extras_changes(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse ``extras`` with ``extras_changes`` before a call can wait for approval."""
+    if "extras" in params and "extras_changes" in params:
+        return params_problem(
+            "extras_changes",
+            "either extras or extras_changes, not both",
+            "Send extras_changes to change single keys, or extras to replace "
+            "the whole map. Nothing was changed.",
+        )
+    return None
+
+
+register_params_check(TARGETS_UPDATE_OP_ID, _extras_or_extras_changes)
 
 
 def _update_fields(params: dict[str, Any]) -> dict[str, Any]:
@@ -306,7 +372,13 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     try:
         body = TargetUpdate(**_update_fields(params))
     except ValidationError as exc:
-        raise ValueError(f"invalid target parameters: {exc}") from exc
+        # The text names the field, the kind and the message, never the input:
+        # the error reaches the answer, the stored result and the audit row.
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'body'}: {e['msg']} ({e['type']})"
+            for e in exc.errors(include_input=False, include_url=False)
+        )
+        raise ValueError(f"invalid target parameters: {problems}") from None
 
     sessionmaker = get_sessionmaker()
     try:
@@ -324,7 +396,11 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
     except HTTPException as exc:
         raise ValueError(_http_exception_message(exc)) from exc
 
-    warnings = keycloak_realm_warnings(updated.product, updated.extras)
+    # With extras_changes the answer holds no value of the extras, so a
+    # warning names the key, not the realm.
+    warnings = keycloak_realm_warnings(
+        updated.product, updated.extras, name_realm=body.extras_changes is None
+    )
     return {
         "target_id": str(updated.id),
         "name": updated.name,
@@ -332,6 +408,9 @@ async def targets_update(operator: Operator, target: Any, params: dict[str, Any]
         "version": updated.version,
         "host": updated.host,
         "updated_fields": sorted(body.model_fields_set),
+        # Key names only: this answer is stored with the audit row and the
+        # approval request, so it holds no value of the extras.
+        **(extras_change_keys(body.extras_changes) if body.extras_changes else {}),
         **({"warnings": warnings} if warnings else {}),
     }
 
@@ -345,14 +424,44 @@ def _preview_changes(row: Any, params: dict[str, Any], ctx: PreviewContext) -> d
     changes = {
         field: {"from": _stored_value(getattr(row, field, None)), "to": value}
         for field, value in params.items()
-        if field != "target_id"
+        if field not in ("target_id", "extras_changes")
     }
-    return _redact_echoed_params(
+    shown = _redact_echoed_params(
         changes,
         connector_id=ctx.connector_id,
         tenant=str(ctx.operator.tenant_id),
         op_id=TARGETS_UPDATE_OP_ID,
     )
+    if isinstance(params.get("extras_changes"), dict):
+        shown["extras_changes"] = _extras_changes_card(row, params["extras_changes"], ctx)
+    return shown
+
+
+def _extras_changes_card(
+    row: Any, extras_changes: dict[str, Any], ctx: PreviewContext
+) -> dict[str, Any]:
+    """Each named key with its stored value and its new value (``null`` = removed).
+
+    The hiding runs on the whole stored map and the whole map after the
+    change, in the shape of the card of a full ``extras`` change, and only
+    then the named keys are picked. So a value is hidden here when the card
+    of a full ``extras`` change hides it, also when the key that makes it
+    secret (for example ``"name": "password"`` next to ``"value"``) is not
+    named. The map after the change is the map the change stores (the same
+    merge), so a stored key with a ``null`` value stays in it.
+    """
+    stored = dict(row.extras or {})
+    merged = apply_extras_changes(stored, extras_changes)
+    hidden = _redact_echoed_params(
+        {"extras": {"from": stored, "to": merged}},
+        connector_id=ctx.connector_id,
+        tenant=str(ctx.operator.tenant_id),
+        op_id=TARGETS_UPDATE_OP_ID,
+    )["extras"]
+    return {
+        key: {"from": hidden["from"].get(key), "to": hidden["to"].get(key)}
+        for key in extras_changes
+    }
 
 
 def _stored_value(value: Any) -> Any:
@@ -403,7 +512,8 @@ async def build_targets_update_preview(ctx: PreviewContext) -> dict[str, Any] | 
 async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
     """The realm warnings for the target as it will be after ``targets.update``.
 
-    A sent ``product`` or ``extras`` replaces the stored one; a field that is
+    A sent ``product`` or ``extras`` replaces the stored one; ``extras_changes``
+    is merged into it; a field that is
     not sent keeps its stored value. No live target gives no warning: the
     call would fail.
     """
@@ -413,9 +523,13 @@ async def targets_update_card_warnings(ctx: PreviewContext) -> list[str]:
         row = await resolve_target_by_id(session, ctx.operator.tenant_id, target_id)
     if row is None:
         return []
-    return keycloak_realm_warnings(
-        ctx.params.get("product", row.product), ctx.params.get("extras", row.extras)
-    )
+    extras = ctx.params.get("extras", row.extras)
+    if isinstance(ctx.params.get("extras_changes"), dict):
+        try:
+            extras = merge_extras_changes(row.extras, ctx.params["extras_changes"])
+        except HTTPException:
+            return []
+    return keycloak_realm_warnings(ctx.params.get("product", row.product), extras)
 
 
 async def register_targets_update_operation(

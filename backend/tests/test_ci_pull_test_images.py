@@ -11,7 +11,8 @@ skip limit check then failed the run. So:
    ``scripts/ci/pull_test_images.sh``, which pulls every image the job sets.
 2. The script tries each image at most 3 times, 10 s apart, and never
    prints Docker's own output (the logs of this repository are public).
-   After 3 failed tries it passes only when the image is on the runner.
+   After a failed pull it uses the image at once when it is on the runner;
+   a missing image fails after 3 tries.
 3. Under CI (``GITHUB_ACTIONS`` set) a fixture whose container does not
    start fails the test instead of skipping it.
 
@@ -207,6 +208,16 @@ def test_three_failed_pulls_pass_when_the_image_is_on_the_runner(tmp_path: Path)
     assert result.returncode == 0
     assert "image inspect example/image:1" in calls
     assert "The copy on the runner is used." in result.stdout
+    assert _NOISE not in result.stdout + result.stderr
+
+
+def test_images_on_the_runner_need_one_pull_each_and_no_pause(tmp_path: Path) -> None:
+    images = [f"example/image:{n}" for n in range(1, 6)]
+    result, calls = _run(tmp_path, {}, *images, pull_fails=99, on_runner=True)
+    assert result.returncode == 0, result.stdout
+    assert [c for c in calls if c.startswith("pull")] == [f"pull --quiet {i}" for i in images]
+    assert not [c for c in calls if c.startswith("sleep")]
+    assert result.stdout.count("The copy on the runner is used.") == 5
     assert _NOISE not in result.stdout + result.stderr
 
 

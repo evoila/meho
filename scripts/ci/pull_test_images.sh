@@ -16,9 +16,11 @@
 # Each image gets at most 3 tries, 10 s apart. The pull runs quiet and
 # its output is thrown away: the logs of this repository are public, and
 # an error of Docker can name a host. The script prints only the image
-# name, the exit code and a line when it tries again. When an image did
-# not pull after 3 tries, the script passes only if the image is already
-# on the runner. Otherwise it fails with a clear text.
+# name, the exit code and a line when it tries again. After a failed
+# pull, the script looks at once whether the image is on the runner: then
+# it uses that copy and goes on, with no more tries and no pause. An image
+# that is not on the runner gets its 3 tries; then the script fails with a
+# clear text.
 set -uo pipefail
 
 tries=3
@@ -60,28 +62,29 @@ fi
 
 failed=0
 for image in "${unique[@]}"; do
-  pulled=0
+  done_ok=0
   for ((try = 1; try <= tries; try++)); do
     docker pull --quiet "$image" >/dev/null 2>&1
     status=$?
     if [[ $status -eq 0 ]]; then
       echo "Pulled ${image} (try ${try} of ${tries})."
-      pulled=1
+      done_ok=1
       break
     fi
     echo "Pull of ${image} failed with exit code ${status} (try ${try} of ${tries})."
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      echo "::warning title=Test image::${image} did not pull. The copy on the runner is used."
+      done_ok=1
+      break
+    fi
     if ((try < tries)); then
       echo "::warning title=Test image::Trying the pull of ${image} again in ${pause} s."
       sleep "$pause"
     fi
   done
-  ((pulled)) && continue
-  if docker image inspect "$image" >/dev/null 2>&1; then
-    echo "::warning title=Test image::${image} did not pull after ${tries} tries. The copy on the runner is used."
-  else
-    echo "::error title=Test image::SETUP FAILURE, not a test failure: the test image ${image} did not pull after ${tries} tries and is not on the runner."
-    failed=1
-  fi
+  ((done_ok)) && continue
+  echo "::error title=Test image::SETUP FAILURE, not a test failure: the test image ${image} did not pull after ${tries} tries and is not on the runner."
+  failed=1
 done
 
 exit "$failed"

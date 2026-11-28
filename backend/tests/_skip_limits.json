@@ -3,7 +3,7 @@
  "lanes": {
   "unit": {
    "tests/acceptance/test_g41_kb_canary.py": 7,
-   "tests/test_ci_fork_runner_isolation.py": 9,
+   "tests/test_ci_fork_runner_isolation.py": 10,
    "tests/test_connectors_argocd_spec_reconcile.py": {
     "with_secrets": 0,
     "without_secrets": 1

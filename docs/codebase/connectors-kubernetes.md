@@ -939,7 +939,8 @@ gives the preview builder the target's connector. The builder then calls
   is every value that the echo of the manifest hides: Secret values (also
   the base64 text of `data` on one line, also for binary data, and its
   decoded text; line breaks in the base64 text are skipped, as the API
-  server skips them), `env` and `httpHeaders` values, command
+  server skips them; and the base64 text of each `stringData` value,
+  because the API server writes it into `data` as base64), `env` and `httpHeaders` values, command
   lines and the last-applied annotation (`ops_write_apply_dry_run_text.py`).
   The shared params redaction runs over the whole list of documents, as
   for the echo, so a rule for one place in the list (such as

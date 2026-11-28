@@ -14,7 +14,8 @@ Kubernetes client over an HTTP stand-in server are in
   makes no approval request and one audit row of the class read.
 * A Secret value of the manifest is not in the dry-run result of the
   preview, also when the cluster quotes it in a warning or a refusal, and
-  also for base64 ``data`` with line breaks.
+  also for base64 ``data`` with line breaks and for the base64 form of
+  ``stringData``.
 * A value that a redaction rule hides at one place of the list (the second
   document) stays hidden in the texts of the cluster and in the names.
 * ``document`` is the place in the manifest, also across empty documents.
@@ -514,6 +515,29 @@ def test_a_text_that_quotes_base64_data_on_one_line_hides_it(
     assert "breaks the rule" in shown
     assert HIDDEN in shown
     assert encoded not in json.dumps(answer)
+
+
+@pytest.mark.parametrize("quoted_as", ["warning", "refusal"])
+def test_a_text_that_quotes_the_base64_of_string_data_hides_it(
+    monkeypatch: pytest.MonkeyPatch, quoted_as: str
+) -> None:
+    _switch_on(monkeypatch)
+    encoded = base64.b64encode(_SECRET_VALUE.encode()).decode()
+    text = f"the value {encoded} in data breaks the rule"
+    if quoted_as == "warning":
+        cluster = _StandInCluster(warnings=(text,))
+    else:
+        cluster = _StandInCluster(refused_kinds=frozenset({"Secret"}), refusal=text)
+    _setup(monkeypatch, cluster)
+
+    answer = _preview(_secret_manifest())
+
+    document = answer["proposed_effect"]["preview"]["documents"][0]
+    shown = document["warnings"][0] if quoted_as == "warning" else document["error"]
+    assert "in data breaks the rule" in shown
+    assert HIDDEN in shown
+    assert encoded not in json.dumps(answer)
+    assert _SECRET_VALUE not in json.dumps(answer)
 
 
 _HIDDEN_NAME = "hidden-name-b7"

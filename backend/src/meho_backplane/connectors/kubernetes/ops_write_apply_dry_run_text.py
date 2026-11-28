@@ -15,7 +15,9 @@ whole list of documents, as for the echo, so a rule for one place in the
 list (such as ``manifest.1.metadata.name``) counts too. For a Secret's
 ``data`` it also knows the base64 text on one line (also for binary
 data) and the decoded text; line breaks in the base64 text are skipped,
-as the API server skips them.
+as the API server skips them. For a Secret's ``stringData`` it also knows
+the base64 text of each value, because the API server writes that plain
+text into ``data`` as base64.
 
 In a text of the cluster or of MEHO:
 
@@ -124,8 +126,18 @@ def _secret_data_forms(value: Any, out: set[str]) -> None:
         _add(decoded, out)
 
 
+def _string_data_forms(value: Any, out: set[str]) -> None:
+    """Add the base64 text of one Secret ``stringData`` *value*.
+
+    The API server moves ``stringData`` into ``data``, as base64 of the
+    UTF-8 text, so the cluster may quote that form.
+    """
+    if isinstance(value, str):
+        _add(base64.b64encode(value.encode("utf-8")).decode("ascii"), out)
+
+
 def _decoded_secret_data(doc: Any, out: set[str]) -> None:
-    """Add the one-line and decoded forms of each Secret ``data`` value under *doc*."""
+    """Add the other forms of each Secret value under *doc* that the cluster may quote."""
     if isinstance(doc, list):
         for item in doc:
             _decoded_secret_data(item, out)
@@ -135,8 +147,9 @@ def _decoded_secret_data(doc: Any, out: set[str]) -> None:
     if doc.get("kind") == "Secret":
         for field in SECRET_VALUE_FIELDS:
             values = doc.get(field)
+            forms = _string_data_forms if field == "stringData" else _secret_data_forms
             for value in values.values() if isinstance(values, dict) else ():
-                _secret_data_forms(value, out)
+                forms(value, out)
     for item in doc.values():
         _decoded_secret_data(item, out)
 

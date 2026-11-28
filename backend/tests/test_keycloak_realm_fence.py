@@ -441,8 +441,9 @@ async def test_create_works_through_a_target_whose_probe_failed(
 ) -> None:
     """The realm does not exist yet, so the probe found nothing: the create still makes it.
 
-    The realm read answers 404, as for a realm that does not exist, and the
-    realm check really runs.
+    The create runs with the real realm check and sends ``POST /admin/realms``.
+    A realm read, if one is made, answers 404, as for a realm that does not
+    exist.
     """
     async with get_sessionmaker()() as session:
         row = await resolve_target(session, operator.tenant_id, _TARGET_NAME)
@@ -724,6 +725,10 @@ async def test_with_the_switch_off_the_texts_an_agent_reads_give_no_new_advice(
         f"Realm to update (default managed_realm). {_REFUSED}"
     )
     delete = await _described(_DELETE)
+    assert delete.summary == (
+        "Delete a whole Keycloak realm (destructive). "
+        "Approval cannot be turned off for this operation."
+    )
     assert delete.llm_instructions["parameter_hints"]["realm"] == (
         "The exact name of the realm to delete. Required. "
         "Another realm than the target's managed realm is refused."

@@ -12,6 +12,7 @@ plain error type and every vendor field stay hidden as before.
 from __future__ import annotations
 
 import ast
+import json
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -432,6 +433,51 @@ async def test_dispatch_never_shows_the_own_text_of_a_marked_403() -> None:
     assert (result.error or "").startswith("connector_http_403: the upstream returned HTTP 403")
     assert "quokka" not in result.model_dump_json()
     assert "quokka" not in str(payload)
+
+
+_CLASS_SENTENCE = "the MEHO account may not list accounts on this target; check its rights"
+
+
+class _MarkedHttpErrorWithClassSentence(ConnectorOwnMessage, httpx.HTTPStatusError):
+    OWN_TEXT = _CLASS_SENTENCE
+
+
+# Made up at run time. No word here is caught by another hide rule, so only
+# the 403 rule under test can keep these values out of the answer.
+_TAIL = uuid.uuid4().hex[:8]
+_PATH_WORD = f"wombat-{_TAIL}"
+_QUERY_VALUE = f"kiwi-{_TAIL}"
+_MADE_UP_VENDOR_WORDS = f"the platypus-{_TAIL} refused the walrus"
+_URL_WITH_QUERY = f"https://appliance.example.test/api/{_PATH_WORD}?filter={_QUERY_VALUE}"
+
+
+async def _raising_marked_403_with_class_sentence(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> Any:
+    """A marked HTTP 403 whose class names a sentence; its own text holds the URL."""
+    request = httpx.Request("GET", _URL_WITH_QUERY)
+    response = httpx.Response(403, request=request)
+    raise _MarkedHttpErrorWithClassSentence(
+        f"{_URL_WITH_QUERY}: {_MADE_UP_VENDOR_WORDS}", request=request, response=response
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_dispatch_env")
+async def test_dispatch_of_a_marked_403_uses_the_class_sentence_not_the_error_text() -> None:
+    """The 403 ``error`` gives the sentence the error class names, never the error's own text."""
+    result, payload = await _dispatch(
+        _raising_marked_403_with_class_sentence, op_id="demo.account.list", tags=["accounts"]
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_http_403"
+    assert result.error == f"connector_http_403: {_CLASS_SENTENCE}"
+    answer = result.model_dump_json()
+    audit_row = json.dumps(payload)
+    for made_up in (_URL_WITH_QUERY, _PATH_WORD, _QUERY_VALUE, _MADE_UP_VENDOR_WORDS):
+        assert made_up not in answer
+        assert made_up not in audit_row
 
 
 _RKE2_ROTATE = next(op for op in RKE2_OPS if op.op_id == "rke2.token.rotate")

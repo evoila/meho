@@ -397,7 +397,7 @@ direct-access-grant client).
   `secret/tenants/<tenant_id>/keycloak/admin`). The service-account client
   needs the `realm-management` roles to read the managed realm (at
   minimum `view-realm`, `view-clients`, `view-users` for the read
-  ops). MEHO reads the managed realm before every operation. The MEHO
+  ops). MEHO reads the managed realm before every operation, except the one that creates a realm. The MEHO
   login needs at least one `realm-management` role in that realm (the
   documented minimum `view-realm`, `view-clients`, `view-users` has it);
   `keycloak.realm.delete` needs `view-realm` for the realm id. See [credential split](#the-admin-vs-operator-credential-split-load-bearing).

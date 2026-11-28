@@ -1302,7 +1302,12 @@ def _k8s_apply_manifest_only(ctx: PreviewContext) -> list[dict[str, Any]]:
 def _k8s_apply_redactor(
     ctx: PreviewContext,
 ) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]]]:
-    """The shared params redaction, run over a list of manifest dicts of *ctx*."""
+    """The shared params redaction, run over a list of manifest dicts of *ctx*.
+
+    The value-shape engine also reads each ``key: value`` pair of a mapping
+    entry with a text value, as it reads that line in the manifest text
+    (:func:`_hide_secret_pairs`).
+    """
     tenant = str(ctx.operator.tenant_id) if ctx.operator.tenant_id is not None else None
 
     def _redact(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1312,9 +1317,56 @@ def _k8s_apply_redactor(
             tenant=tenant,
             op_id=ctx.descriptor.op_id,
         )
-        return [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        shown = [doc for doc in redacted.get("manifest", []) if isinstance(doc, dict)]
+        _hide_secret_pairs(
+            shown, connector_id=ctx.connector_id, tenant=tenant, op_id=ctx.descriptor.op_id
+        )
+        return shown
 
     return _redact
+
+
+def _text_entries(docs: list[dict[str, Any]]) -> list[tuple[dict[Any, Any], Any]]:
+    """Each ``(mapping, key)`` of *docs*, at any depth, whose value is a text not yet hidden."""
+    entries: list[tuple[dict[Any, Any], Any]] = []
+    stack: list[Any] = list(docs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if not isinstance(value, str):
+                    stack.append(value)
+                elif value != _PARAM_REDACTED:
+                    entries.append((node, key))
+    return entries
+
+
+def _hide_secret_pairs(
+    docs: list[dict[str, Any]], *, connector_id: str | None, tenant: str | None, op_id: str
+) -> None:
+    """Hide in place each text value whose ``key: value`` text the value-shape engine hides.
+
+    Some shapes are known by the key and the value together
+    (``Authorization: Basic ...``, ``key: AQ...==``), so the engine reads
+    the pair as one text, the way it reads the line in the manifest text.
+    When it changes the pair, the value becomes :data:`_PARAM_REDACTED`.
+    """
+    entries = _text_entries(docs)
+    if not entries:
+        return
+    # One mapping entry per pair: the engine reads a list of texts as one
+    # text, so a pair could match together with the pair next to it.
+    pairs = {str(index): f"{key}: {node[key]}" for index, (node, key) in enumerate(entries)}
+    shown = apply_connector_boundary_redaction(
+        pairs, connector_id=connector_id, tenant=tenant, op=op_id
+    ).redacted
+    if not isinstance(shown, dict):
+        shown = {}
+    for index, (node, key) in enumerate(entries):
+        if shown.get(str(index)) != pairs[str(index)]:
+            node[key] = _PARAM_REDACTED
 
 
 def _k8s_apply_failure_keys(ctx: PreviewContext, error: Exception) -> dict[str, Any]:

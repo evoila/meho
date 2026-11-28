@@ -801,7 +801,21 @@ async def test_a_waiting_plain_step_keeps_the_parent_params_off_the_row(op_class
 
     assert result.status == "awaiting_approval", result
     assert _STEPS_RAN == []
-    (request,) = await _requests()
+    approver = _operator("admin-web", role=TenantRole.TENANT_ADMIN, web_session=True)
+    approved_ids: set[uuid.UUID] = set()
+    if op_class == "credential_write":
+        # A call that writes a credential waits for a person first, so the
+        # parent's own request is approved before the plain step's request exists.
+        (parent_request,) = await _requests()
+        assert parent_request.op_id == _PARENTS[op_class]
+        async with get_sessionmaker()() as session:
+            approved_parent = await approve_request(session, parent_request.id, operator=approver)
+            await session.commit()
+        approved_ids.add(parent_request.id)
+        resumed = await resume_dispatch_after_approval(operator=approver, request=approved_parent)
+        assert resumed.status == "awaiting_approval", resumed
+        assert _STEPS_RAN == []
+    (request,) = [r for r in await _requests() if r.id not in approved_ids]
     assert request.op_id == _PLAIN_STEP
     assert request.params is None
     assert request.resume_parent == {"op_id": _PARENTS[op_class]}
@@ -812,7 +826,6 @@ async def test_a_waiting_plain_step_keeps_the_parent_params_off_the_row(op_class
     assert value not in repr(stored)
     assert value not in _approval_view(request, operator=requester).model_dump_json()
 
-    approver = _operator("admin-web", role=TenantRole.TENANT_ADMIN, web_session=True)
     async with get_sessionmaker()() as session:
         approved = await approve_request(session, request.id, operator=approver)
         await session.commit()

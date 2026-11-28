@@ -76,7 +76,7 @@ from meho_backplane.instance_settings.schema import (
 )
 from meho_backplane.policy.agent_rules import AGENTS_NEED_CUSTOM_POLICY, stored_agents
 from meho_backplane.policy.limits import PolicyLimits, not_read_mistake
-from meho_backplane.policy.store import _check_labels
+from meho_backplane.policy.store import _check_labels, classification_enabled
 
 __all__ = [
     "ACCEPTED_KINDS",
@@ -503,9 +503,10 @@ def binding_meaning(binding: dict[str, Any]) -> dict[str, Any]:
 
     A row stored before the old kinds were read as new ones may still say
     ``SA-Operators`` or ``Approvers``; it means ``Operators`` or ``Readers``.
+    With the policy file import off, the kind counts as written, as before.
     """
     kind = binding.get("kind")
-    if not isinstance(kind, str):
+    if not isinstance(kind, str) or not classification_enabled():
         return binding
     return {**binding, "kind": read_kind(kind)}
 

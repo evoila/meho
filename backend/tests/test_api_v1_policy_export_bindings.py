@@ -21,6 +21,8 @@ the stored rows.
 * A stored row with the old kinds ``SA-Operators`` and ``Approvers`` exports
   them as stored, and the import answers "No change.": they mean
   ``Operators`` and ``Readers``.
+* With every switch off, the preview compares an old kind as written, as
+  before: ``SA-Operators`` against ``Operators`` is one changed binding.
 * A file near the import's size limit: the comment gets shorter, so the
   export still imports again with "No change.".
 
@@ -40,7 +42,12 @@ from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, PolicyRevision, TenantPolicy
-from meho_backplane.policy.document import MAX_POLICY_BYTES, document_of, parse_policy_file
+from meho_backplane.policy.document import (
+    MAX_POLICY_BYTES,
+    canonical_sha256,
+    document_of,
+    parse_policy_file,
+)
 from meho_backplane.policy.service import NO_CHANGE, export_policy
 from meho_backplane.settings import get_settings
 
@@ -263,6 +270,45 @@ async def test_a_stored_row_with_the_old_kinds_imports_its_export_with_no_change
     assert await _rows() == before
     assert "  kind: SA-Operators\n" in text
     assert "  kind: Approvers\n" in text
+
+
+@pytest.mark.asyncio
+async def test_with_every_switch_off_the_preview_compares_an_old_kind_as_written(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in _SWITCH_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    old = {"match": {"group": "/T/G"}, "kind": "SA-Operators", "categories": ["*"]}
+    new = {**old, "kind": "Operators"}
+    stored = {**_NO_BINDINGS, "bindings": [old]}
+    await _store(stored)
+    before = await _rows()
+    text = (
+        "policy: v1\ndescription: Network team\nclassifications:\n"
+        "- match:\n    connector: inslim-1.x\n  category: network\n"
+        "bindings:\n- match:\n    group: /T/G\n  kind: Operators\n  categories: ['*']\n"
+    )
+    bearer = h.token(_KEYPAIR, sub="tenant-admin-a", platform_admin=False)
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
+        answer = h.post(client, "import", bearer, text, preview="true")
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["no_change"] is False
+    assert body["message"] is None
+    assert body["mistakes"] == []
+    assert body["diff"]["bindings"] == {
+        "added": [],
+        "changed": [{"before": old, "after": new}],
+        "removed": [],
+    }
+    assert body["based_on"] == canonical_sha256(stored)
+    assert body["based_on"] != canonical_sha256({**_NO_BINDINGS, "bindings": [new]})
+    assert await _rows() == before
 
 
 def _big_document(count: int, description: str = "x") -> dict[str, Any]:

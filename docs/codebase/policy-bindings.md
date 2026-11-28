@@ -172,7 +172,9 @@ What `meho policy export` writes for a tenant (`export_policy` in
   imports again with "No change.". A row stored with an old kind
   (`SA-Operators`, `Approvers`) keeps it; `canonical_sha256` and the
   bindings diff compare a binding by the kind MEHO reads it as
-  (`binding_meaning` in `policy/document.py`).
+  (`binding_meaning` in `policy/document.py`). This holds while the policy
+  file import is on (`classification_enabled()`). With it off, they compare
+  the kind as written, as before.
 - The tenant has no stored bindings and the switch is on: no `bindings`
   part. Where the part would be, a comment block lists the shipped
   bindings that are in force (`_shipped_bindings_note`). The import reads

@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.argocd.op_classes import SYNC_PRUNE_LINE
 from meho_backplane.db.engine import get_sessionmaker
 from tests import _composite_wait_audit_helpers as h
@@ -41,6 +42,8 @@ _SYNC = Step("argocd.app.sync", "dangerous", True)
 _PRUNE: dict[str, Any] = {"name": "web", "prune": True}
 _PLAIN: dict[str, Any] = {"name": "web"}
 _TYPED = {"typed": True}
+#: A tenant Admin may approve a dangerous run, so only the delete sign can make the step wait.
+_ADMIN = TenantRole.TENANT_ADMIN
 _CHILD = pytest.mark.parametrize("child", [False, True], ids=["step-gate", "child-call"])
 
 
@@ -77,7 +80,14 @@ async def test_on_a_step_that_prunes_waits_with_the_delete_line(
 ) -> None:
     c.switch(monkeypatch, on=True)
     result = await r.run_remote(
-        session, stub_embedding_service, _SYNC, _TYPED, None, child=child, params=_PRUNE
+        session,
+        stub_embedding_service,
+        _SYNC,
+        _TYPED,
+        None,
+        child=child,
+        params=_PRUNE,
+        approver_role=_ADMIN,
     )
     assert result.status == "awaiting_approval", result.error
     own = await c.assert_waits(_SYNC, child=child, run_op_id=_run_op(child))
@@ -93,7 +103,14 @@ async def test_on_a_step_without_prune_goes_ahead(
 ) -> None:
     c.switch(monkeypatch, on=True)
     result = await r.run_remote(
-        session, stub_embedding_service, _SYNC, _TYPED, None, child=child, params=_PLAIN
+        session,
+        stub_embedding_service,
+        _SYNC,
+        _TYPED,
+        None,
+        child=child,
+        params=_PLAIN,
+        approver_role=_ADMIN,
     )
     assert result.status == "ok", result.error
     await c.assert_went_ahead(_SYNC, child=child, run_op_id=_run_op(child))
@@ -111,7 +128,14 @@ async def test_off_both_forms_wait_as_on_main(
     """As on main: the step's approval flag makes it wait, and no card has a delete line."""
     c.switch(monkeypatch, on=False)
     result = await r.run_remote(
-        session, stub_embedding_service, _SYNC, _TYPED, None, child=child, params=params
+        session,
+        stub_embedding_service,
+        _SYNC,
+        _TYPED,
+        None,
+        child=child,
+        params=params,
+        approver_role=_ADMIN,
     )
     assert result.status == "awaiting_approval", result.error
     own = await c.assert_waits(_SYNC, child=child, run_op_id=_run_op(child))

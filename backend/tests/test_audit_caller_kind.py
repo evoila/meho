@@ -13,7 +13,8 @@ Whole-path runs through the real gate, then the test reads the audit row:
   ``AUDIT_CLIENT_IDENTITY`` off;
 * an agent token and a service token: ``service_agent``;
 * a runner token: ``runner``;
-* a row under MEHO's own ``system`` name: ``system``.
+* a row under MEHO's own ``system`` name: ``system``
+  (``test_audit_rows_are_orm_objects.py`` keeps every row on that path).
 
 A waiting request stores the requester's kind in
 ``proposed_effect["caller_kind"]``, and the approval card names it. The
@@ -25,11 +26,9 @@ Fixture values are made up.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import re
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -68,7 +67,6 @@ _PARAMS: dict[str, Any] = {"owner": "example-org", "repo": "example-repo", "body
 _PERSON = "example-person"
 _CONSOLE_PERSON = "example-console-person"
 _TOOL = "Example Tool"
-_SRC = Path(__file__).resolve().parent.parent / "src" / "meho_backplane"
 
 
 def _switch(monkeypatch: pytest.MonkeyPatch, *, on: bool) -> None:
@@ -429,48 +427,3 @@ async def test_a_row_under_a_system_name_writes_system(
 
     _switch(monkeypatch, on=False)
     assert (await _system_row(sub)).caller_kind is None
-
-
-_RAW_INSERT = re.compile(r"INSERT\s+INTO\s+audit_log", re.IGNORECASE)
-
-
-def _core_inserts(source: str) -> list[int]:
-    """The lines of *source* that write ``audit_log`` without an ``AuditLog`` object."""
-    lines = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if _RAW_INSERT.search(node.value):
-                lines.append(node.lineno)
-        elif isinstance(node, ast.Attribute) and node.attr == "__table__":
-            if ast.unparse(node.value) == "AuditLog":
-                lines.append(node.lineno)
-        elif (
-            isinstance(node, ast.Call)
-            and ast.unparse(node.func).split(".")[-1] == "insert"
-            and [ast.unparse(arg) for arg in node.args[:1]] == ["AuditLog"]
-        ):
-            lines.append(node.lineno)
-    return lines
-
-
-def test_the_scan_finds_each_core_insert() -> None:
-    for line in (
-        "stmt = sa.insert(AuditLog).values(operator_sub='system:x')",
-        "stmt = AuditLog.__table__.insert()",
-        "text('INSERT INTO audit_log (id) VALUES (:id)')",
-    ):
-        assert _core_inserts(line) == [1], line
-
-
-def test_every_audit_row_is_built_as_an_audit_log_object() -> None:
-    """The kind of a ``system`` row is set when its ``AuditLog`` is built.
-
-    A Core insert into ``audit_log`` builds no object, so such a row would
-    get no kind. No source file may write one.
-    """
-    found = [
-        f"{path.relative_to(_SRC)}:{line}"
-        for path in sorted(_SRC.rglob("*.py"))
-        for line in _core_inserts(path.read_text(encoding="utf-8"))
-    ]
-    assert found == []

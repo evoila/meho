@@ -50,7 +50,6 @@ from .test_ui_settings_file import (
     _seed_tenants,
     _state,
     cutover_on,  # noqa: F401  (fixture)
-    sqlite_transactions,  # noqa: F401  (fixture)
 )
 
 #: What the audit middleware adds to every row; the rest is the attempt.
@@ -59,7 +58,6 @@ _ATTEMPT_PAYLOAD_KEYS = {key.removeprefix("audit_") for key in ATTEMPT_AUDIT_KEY
 _CUTOVER = pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_a_failed_console_apply_keeps_exactly_the_attempt_keys(
     cutover: bool, request: pytest.FixtureRequest
@@ -87,7 +85,6 @@ def test_a_failed_console_apply_keeps_exactly_the_attempt_keys(
     assert row.payload["settings_tenant_ids"] == [str(_TENANT_A)]
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @_CUTOVER
 def test_an_apply_cancelled_while_the_file_is_checked_names_the_attempt(
     cutover: bool, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch

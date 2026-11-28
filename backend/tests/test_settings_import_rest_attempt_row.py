@@ -44,7 +44,6 @@ from ._targets_helpers import (
 from ._vault_fakes import install_fake_vault
 from .test_ui_settings_file import (
     cutover_on,  # noqa: F401  (fixture)
-    sqlite_transactions,  # noqa: F401  (fixture)
 )
 
 _TENANT = uuid.UUID(DEFAULT_TENANT_ID)
@@ -91,7 +90,6 @@ _FILE = yaml.safe_dump(
 )
 
 
-@pytest.mark.usefixtures("sqlite_transactions")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cutover", [False, True], ids=["cutover-off", "cutover-on"])
 async def test_a_failed_rest_import_leaves_one_row_with_the_attempt_keys_only(

@@ -442,7 +442,9 @@ With `metricsAuth.enabled: false`, `/ready` shows the block to every
 caller: `curl -s https://<your-backplane>/ready | jq .features.approval_custody`.
 With your own Secret in `metricsAuth.existingSecret`, put that Secret's
 name in the command, and the key in `metricsAuth.secretKey` in place of
-`token`.
+`token`. When that key holds a dot (for example `metrics.token`), write each
+dot as `\.` in the `jsonpath`: `{.data.metrics\.token}`. Without the `\`,
+kubectl reads nothing.
 
 ### Your own PostgreSQL
 
@@ -515,9 +517,30 @@ DSN at the key `url`, using the **async** driver prefix:
 
 ```bash
 kubectl create namespace meho
-kubectl create secret generic meho-postgres -n meho \
-  --from-literal=url='postgresql+asyncpg://<user>:<password>@<host>:5432/meho'
 ```
+
+Then make the Secret. The password you type is not shown:
+
+```bash
+{
+  printf 'Database password: '; IFS= read -rs DB_PASSWORD; echo
+  if [ -n "$DB_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://<user>:%s@<host>:5432/meho' "$DB_PASSWORD" \
+      | kubectl create secret generic meho-postgres -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_PASSWORD
+}
+```
+
+`read` and `printf` are built into bash and zsh. They start no program,
+so the password is in no process list and in no shell history. The same
+idea holds for every secret in this guide: it comes from a file or from
+standard input, never from an argument of a command.
+
+Each such block is one command in braces (`{` to `}`). Paste the whole
+block, then type the value. An empty value makes nothing.
 
 Three things bite here if missed:
 
@@ -547,13 +570,28 @@ Create the role as a superuser, give it `CONNECT`, and put its DSN in a
 second Secret:
 
 ```sql
-CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '<password>';
+CREATE ROLE meho_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
 GRANT CONNECT ON DATABASE meho TO meho_app;
 ```
 
+Then set the password in `psql`. The command asks for it, so the
+password is not in the SQL text and not in the server log:
+
+```text
+\password meho_app
+```
+
 ```bash
-kubectl create secret generic meho-postgres-app -n meho \
-  --from-literal=url='postgresql+asyncpg://meho_app:<password>@<host>:5432/meho'
+{
+  printf 'Password of meho_app: '; IFS= read -rs APP_PASSWORD; echo
+  if [ -n "$APP_PASSWORD" ]; then
+    printf 'postgresql+asyncpg://meho_app:%s@<host>:5432/meho' "$APP_PASSWORD" \
+      | kubectl create secret generic meho-postgres-app -n meho --from-file=url=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset APP_PASSWORD
+}
 ```
 
 Then name both in the
@@ -678,9 +716,17 @@ password of the Keycloak role to the one in the Secret
 `<release>-core-postgres-keycloak`, which the install makes by itself.
 
 ```bash
-kubectl create secret generic keycloak-db-admin \
-  --from-literal=username=<admin-user> \
-  --from-literal=password=<admin-password>
+{
+  printf 'Admin password: '; IFS= read -rs DB_ADMIN_PASSWORD; echo
+  if [ -n "$DB_ADMIN_PASSWORD" ]; then
+    printf '%s' "$DB_ADMIN_PASSWORD" \
+      | kubectl create secret generic keycloak-db-admin \
+          --from-literal=username=<admin-user> --from-file=password=/dev/stdin
+  else
+    echo 'No password was typed. Nothing was made.'
+  fi
+  unset DB_ADMIN_PASSWORD
+}
 ```
 
 ```yaml

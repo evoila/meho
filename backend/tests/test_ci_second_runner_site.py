@@ -548,7 +548,8 @@ def test_the_steps_that_differ_are_in_the_same_order() -> None:
     for name in ("Install uv", "Restore the spaCy model from the cache"):
         assert names[names.index(name) + 1] == normal[normal.index(name) + 1]
     for steps in (names, normal):
-        assert steps[steps.index(_HIDE_STEP) - 1] == "Pytest (unit shard ${{ matrix.shard }}/6)"
+        assert steps[steps.index(_HIDE_STEP) - 2] == "Pytest (unit shard ${{ matrix.shard }}/6)"
+        assert steps[steps.index(_HIDE_STEP) - 1] == "Check the skipped tests of this shard"
         assert steps[steps.index(_HIDE_STEP) + 1] == (
             "Upload per-test times (input for the shard split)"
         )

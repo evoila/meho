@@ -89,27 +89,28 @@ that user or group (`--user` or `--group` in place of
 
 This makes a kubeconfig file (a login file for `kubectl` and Helm) with a
 token that lasts 8 hours. Give the file to the installer in a safe way.
-The step removes an old file of that name first, so the new file is
-always readable only by you (mode 600).
+The step writes the token only into a new file that only you can read
+(mode 600). If it cannot remove an old file of that name or make the new
+file, it writes nothing and says so.
 
 ```bash
 {
   umask 077
   KC=meho-installer.kubeconfig
   TOKEN=$(kubectl -n meho create token meho-installer --duration=8h)
-  if [ -n "$TOKEN" ]; then
+  if [ -z "$TOKEN" ]; then
+    echo 'No token came back. No login file was made.'
+  elif rm -f $KC && (set -C; printf 'apiVersion: v1\nkind: Config\nusers:\n- name: meho-installer\n  user:\n    token: %s\n' "$TOKEN" > $KC); then
     SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
     kubectl config view --minify --raw \
       -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > cluster-ca.crt
-    rm -f $KC
-    printf 'apiVersion: v1\nkind: Config\nusers:\n- name: meho-installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
     kubectl config --kubeconfig=$KC set-cluster vks --server="$SERVER" \
       --certificate-authority=cluster-ca.crt --embed-certs=true
     kubectl config --kubeconfig=$KC set-context meho --cluster=vks --user=meho-installer --namespace=meho
     kubectl config --kubeconfig=$KC use-context meho
     rm -f cluster-ca.crt
   else
-    echo 'No token came back. No login file was made.'
+    echo 'The login file could not be made new. Nothing was written.'
   fi
   unset TOKEN
 }

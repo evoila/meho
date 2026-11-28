@@ -157,17 +157,18 @@ kubectl -n $NS create rolebinding $NS-installer-admin \
   --clusterrole=admin --serviceaccount=$NS:$NS-installer
 ```
 
-Then make the login file. The step removes an old file of that name
-first, so the new file is always readable only by you (mode 600):
+Then make the login file. The step writes the token only into a new file
+that only you can read (mode 600). If it cannot remove an old file of that
+name or make the new file, it writes nothing and says so:
 
 ```bash
 {
   umask 077
   KC=$W/installer.kubeconfig
   TOKEN=$(kubectl -n $NS create token $NS-installer --duration=8h)
-  if [ -n "$TOKEN" ]; then
-    rm -f $KC
-    printf 'apiVersion: v1\nkind: Config\nusers:\n- name: installer\n  user:\n    token: %s\n' "$TOKEN" > $KC
+  if [ -z "$TOKEN" ]; then
+    echo 'No token came back. No login file was made.'
+  elif rm -f $KC && (set -C; printf 'apiVersion: v1\nkind: Config\nusers:\n- name: installer\n  user:\n    token: %s\n' "$TOKEN" > $KC); then
     kubectl config --kubeconfig=$KC set-cluster ocp --server="$API"
     kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > $W/cluster-ca.crt
     [ -s $W/cluster-ca.crt ] && kubectl config --kubeconfig=$KC set-cluster ocp --certificate-authority=$W/cluster-ca.crt --embed-certs=true
@@ -176,7 +177,7 @@ first, so the new file is always readable only by you (mode 600):
     rm -f $W/cluster-ca.crt
     export KUBECONFIG=$KC
   else
-    echo 'No token came back. No login file was made.'
+    echo 'The login file could not be made new. Nothing was written.'
   fi
   unset TOKEN
 }

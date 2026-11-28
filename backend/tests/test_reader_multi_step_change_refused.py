@@ -18,8 +18,9 @@ REST and MCP call doors:
   After a person approves it, a change step is refused with the Reader
   sentence and is not sent, and a read step is sent once.
 * An Operator's agent login and hosted run keep their answers.
-* A guard: no operation the core registers counts as a read for a Reader
-  while it has a step list.
+* A guard: no operation the core registers with a step list would count
+  as a read for a Reader by its own class and level. So a step list never
+  takes a read away from a Reader without anyone seeing it.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, EndpointDescriptor
 from meho_backplane.op_classes import _DECLARED, declare_op_classes
-from meho_backplane.operations import dispatch
+from meho_backplane.operations import dispatch, governed_subops
 from meho_backplane.operations.approval_queue import approve_request, resume_dispatch_after_approval
 from meho_backplane.operations.governed_subops import (
     governed_subops_for,
@@ -360,11 +361,19 @@ async def _reads_with_a_step_list() -> list[str]:
         stmt = select(EndpointDescriptor).where(EndpointDescriptor.tenant_id.is_(None))
         rows = (await session.execute(stmt)).scalars().all()
     assert rows, "the core registered no operation"
-    return sorted(
-        row.op_id
-        for row in rows
-        if governed_subops_for(row.op_id) is not None and not asks_for_change(row, {})
-    )
+    listed = [row for row in rows if governed_subops_for(row.op_id) is not None]
+    return sorted(row.op_id for row in listed if not _asks_for_change_without_its_list(row))
+
+
+def _asks_for_change_without_its_list(row: EndpointDescriptor) -> bool:
+    """Judge *row* by its own class and level, as if it had no step list.
+
+    With a step list, every multi-step row counts as a change. So the guard
+    hides the list, else it could never name a multi-step read.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(governed_subops, "governed_subops_for", lambda _op_id: None)
+        return asks_for_change(row, {})
 
 
 @pytest.mark.usefixtures("_own_catalog_snapshot")
@@ -380,15 +389,16 @@ async def test_no_operation_of_the_core_with_a_step_list_counts_as_a_read(
 async def test_the_guard_names_a_read_with_a_step_list(stub_embedding_service: AsyncMock) -> None:
     await _register_the_core(stub_embedding_service)
     async with get_sessionmaker()() as session:
-        stmt = select(EndpointDescriptor).where(
-            EndpointDescriptor.tenant_id.is_(None),
-            EndpointDescriptor.source_kind != "composite",
-        )
+        stmt = select(EndpointDescriptor).where(EndpointDescriptor.tenant_id.is_(None))
         rows = (await session.execute(stmt)).scalars().all()
-    read = next(row for row in rows if not asks_for_change(row, {}))
+    reads = [row for row in rows if governed_subops_for(row.op_id) is None]
+    reads = [row for row in reads if not asks_for_change(row, {})]
+    single = next(row for row in reads if row.source_kind != "composite")
+    multi_step = next(row for row in reads if row.source_kind == "composite")
 
-    register_governed_subops(
-        composite_op_id=read.op_id, connector_id=s.CONNECTOR_ID, sub_op_ids=(_CLASS_STEP,)
-    )
+    for read in (single, multi_step):
+        register_governed_subops(
+            composite_op_id=read.op_id, connector_id=s.CONNECTOR_ID, sub_op_ids=(_CLASS_STEP,)
+        )
 
-    assert await _reads_with_a_step_list() == [read.op_id]
+    assert await _reads_with_a_step_list() == sorted([single.op_id, multi_step.op_id])

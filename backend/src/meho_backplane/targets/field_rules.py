@@ -32,6 +32,7 @@ import re
 import unicodedata
 from typing import Final
 
+from meho_backplane.input_refusal import FixedMessageError
 from meho_backplane.targets.ssrf_guard import _dialed_host
 
 __all__ = ["check_target_host", "check_target_name"]
@@ -53,9 +54,9 @@ def check_target_name(value: str, field: str) -> str:
     ``aliases``).
     """
     if not value.strip():
-        raise ValueError(f"{field} must not be blank")
+        raise FixedMessageError(f"{field} must not be blank")
     if any(ch == "/" or ch.isspace() or unicodedata.category(ch) == "Cc" for ch in value):
-        raise ValueError(
+        raise FixedMessageError(
             f'{field} must not contain spaces, tabs, line breaks, control characters or "/"'
         )
     return value
@@ -101,7 +102,9 @@ def check_target_host(value: str, field: str) -> str:
     else:
         return value
     if all(label.isascii() and label.isdigit() for label in host.removesuffix(".").split(".")):
-        raise ValueError(f"{field} looks like an IPv4 address but is not a complete, valid one")
+        raise FixedMessageError(
+            f"{field} looks like an IPv4 address but is not a complete, valid one"
+        )
     if not _is_dns_host_name(host):
-        raise ValueError(error)
+        raise FixedMessageError(error)
     return value

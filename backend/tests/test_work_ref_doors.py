@@ -504,13 +504,15 @@ def test_a_422_with_a_second_error_does_not_show_the_refused_ticket_id() -> None
     assert "hidden" not in response.text
 
 
-def test_a_422_without_a_refused_ticket_id_keeps_the_input() -> None:
+def test_a_422_without_a_refused_ticket_id_has_no_input() -> None:
     response = _filter_app().post(
         "/api/v1/runbooks/runs", json={"template_slug": "tpl", "work_ref": "CHG-7"}
     )
     assert response.status_code == 422, response.text
     (error,) = response.json()["detail"]
-    assert error["input"] == {"template_slug": "tpl", "work_ref": "CHG-7"}
+    assert error["type"] == "missing"
+    assert "input" not in error
+    assert "CHG-7" not in response.text
 
 
 def test_the_audit_body_filter_keeps_its_text_for_the_search() -> None:
@@ -595,50 +597,35 @@ async def test_an_mcp_model_error_does_not_show_the_refused_ticket_id(
 def test_the_mcp_model_error_text_names_the_field_and_the_rule() -> None:
     from pydantic import ValidationError
 
-    from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
+    from meho_backplane.input_refusal import refusal_text
     from meho_backplane.runbooks.runs_schemas import ListRunsFilter
 
     with pytest.raises(ValidationError) as caught:
         ListRunsFilter.model_validate({"work_ref": "CHG-hidden" + _ZWSP})
-    text = validation_error_text(caught.value)
-    assert text.startswith("1 validation error(s): work_ref: ")
+    text = refusal_text(caught.value)
+    assert text.startswith("work_ref: ")
     assert "control or invisible characters (found U+200B)" in text
+    assert text.endswith("(value_error)")
     assert "hidden" not in text
 
 
-def test_an_mcp_model_error_without_a_ticket_id_error_is_unchanged() -> None:
-    from pydantic import ValidationError
-
-    from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
-    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
-
-    with pytest.raises(ValidationError) as caught:
-        ListRunsFilter.model_validate({"status": "hidden", "work_ref": "CHG-7"})
-    assert validation_error_text(caught.value) == str(caught.value)
-    assert "input_value='hidden'" in validation_error_text(caught.value)
-
-
-async def test_an_mcp_tool_error_without_a_ticket_id_error_keeps_the_text_of_main() -> None:
-    from pydantic import ValidationError
-
+async def test_an_mcp_tool_error_without_a_ticket_id_error_names_no_input() -> None:
     from meho_backplane.mcp.tools import runbook_runs as runbook_tools
     from meho_backplane.mcp.tools import scheduler as scheduler_tools
-    from meho_backplane.runbooks.runs_schemas import ListRunsFilter
-    from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
 
-    create = {"name": "n", "kind": "nope", "agent_name": "a", "work_ref": "CHG-7"}
-    with pytest.raises(ValidationError) as model_error:
-        ScheduledTriggerCreate.model_validate(create)
+    create = {"name": "n", "kind": "zz-hidden", "agent_name": "a", "work_ref": "CHG-7"}
     with pytest.raises(McpInvalidParamsError) as caught:
         await scheduler_tools._create_handler(_admin_operator(), create)
-    assert str(caught.value) == f"invalid arguments: {model_error.value}"
+    assert str(caught.value).startswith("invalid arguments: kind: Input should be")
+    assert "(enum)" in str(caught.value)
+    assert "zz-hidden" not in str(caught.value)
 
-    listing = {"status": "nope", "work_ref": "CHG-7"}
-    with pytest.raises(ValidationError) as model_error:
-        ListRunsFilter.model_validate(listing)
+    listing = {"status": "zz-hidden", "work_ref": "CHG-7"}
     with pytest.raises(McpInvalidParamsError) as caught:
         await runbook_tools._list_runs_handler(_admin_operator(), listing)
-    assert str(caught.value).endswith(f": {model_error.value}")
+    assert "status: " in str(caught.value)
+    assert "zz-hidden" not in str(caught.value)
+    assert "input_value" not in str(caught.value)
 
 
 def test_the_broadcast_history_filter_is_checked_or_refused() -> None:

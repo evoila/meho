@@ -155,8 +155,7 @@ def test_path_keeps_the_json_path_shape() -> None:
 def test_path_under_an_oversized_key_is_capped() -> None:
     schema = {"type": "object", "additionalProperties": {"type": "integer"}}
     (entry,) = validate_params(schema, {"k" * 10_000: "not an int"})
-    assert len(entry["path"]) < 300
-    assert entry["path"].endswith("...<truncated>")
+    assert entry["path"] == "$['" + "k" * 39 + "…']"
 
 
 def test_dependent_required_names_the_missing_partner() -> None:

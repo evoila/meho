@@ -95,6 +95,7 @@ from meho_backplane.agent.meta_tool import MetaToolSpec, _MetaToolHandler
 from meho_backplane.auth.corpus import CorpusUnavailable
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.docs_search import CollectionNotReadyError
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.registry import (
     ToolDefinition,
     ToolSurface,
@@ -276,7 +277,7 @@ def _governed_handler(definition: ToolDefinition, handler: _MetaToolHandler) -> 
                 format_checker=jsonschema.Draft202012Validator.FORMAT_CHECKER,
             )
         except jsonschema.ValidationError as exc:
-            raise ModelRetry(f"{name}: invalid arguments: {exc.message}") from exc
+            raise ModelRetry(f"{name}: invalid arguments: {refusal_text(exc)}") from exc
         try:
             return await handler(operator, arguments)
         except (McpInvalidParamsError, McpRateLimitedError) as exc:

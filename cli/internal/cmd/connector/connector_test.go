@@ -3731,3 +3731,33 @@ func TestRunEnableReadsForbiddenRendersInsufficientRole(t *testing.T) {
 		t.Fatalf("403 output missing role hint: %q", errBuf.String())
 	}
 }
+
+func TestRenderRequestErrorLeavesOutTheURLQuery(t *testing.T) {
+	cmd := &cobra.Command{}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	err := &url.Error{
+		Op:  "Delete",
+		URL: "https://backplane.example/api/v1/connectors/c/ops/o/override?reason=zz-made-up-reason",
+		Err: errors.New("connection refused"),
+	}
+	_ = renderRequestError(cmd, "https://backplane.example", err, false)
+	out := stderr.String()
+	if strings.Contains(out, "zz-made-up-reason") || strings.Contains(out, "reason=") {
+		t.Fatalf("the shown error holds the query: %q", out)
+	}
+	if !strings.Contains(out, "/api/v1/connectors/c/ops/o/override") || !strings.Contains(out, "connection refused") {
+		t.Fatalf("the shown error lost the path or the cause: %q", out)
+	}
+}
+
+func TestWithoutURLQueryKeepsOtherErrors(t *testing.T) {
+	plain := errors.New("boom")
+	if got := withoutURLQuery(plain); got != plain {
+		t.Fatalf("a plain error changed: %v", got)
+	}
+	noQuery := &url.Error{Op: "Get", URL: "https://backplane.example/x", Err: plain}
+	if got := withoutURLQuery(noQuery); got != error(noQuery) {
+		t.Fatalf("an error with no query changed: %v", got)
+	}
+}

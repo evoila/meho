@@ -314,9 +314,30 @@ func renderRequestError(
 		)
 	}
 	return output.RenderError(cmd.ErrOrStderr(),
-		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
+		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, withoutURLQuery(err))),
 		jsonOut,
 	)
+}
+
+// withoutURLQuery returns err with the query string taken out of the
+// request URL it names. A command can send a free text (a --reason) in
+// the query, and the shown error names only the path.
+func withoutURLQuery(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	u, parseErr := url.Parse(urlErr.URL)
+	if parseErr != nil {
+		return &url.Error{Op: urlErr.Op, URL: "<request URL>", Err: urlErr.Err}
+	}
+	if u.RawQuery == "" && u.Fragment == "" {
+		return err
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return &url.Error{Op: urlErr.Op, URL: u.String(), Err: urlErr.Err}
 }
 
 // renderHTTPStatus classifies a non-2xx response (or 401 after a

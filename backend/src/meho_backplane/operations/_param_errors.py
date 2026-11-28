@@ -19,7 +19,9 @@ need to fix the call. A key name can still look like a secret, so every
 name runs through the credential redactor *raw*, before it is quoted or
 escaped: JSON or JSON-path escaping turns a quote inside the name into
 ``\\"`` or ``\\'`` and a newline into ``\\n``, and the redactor's
-patterns no longer match the escaped text. As defense in depth, every
+patterns do not match the escaped text. Each name is then cut to
+:data:`~meho_backplane.input_refusal.PATH_PART_CAP` characters
+(:func:`~meho_backplane.input_refusal.cut_key`). As defense in depth, every
 built string then runs through the same redactor and length cap the
 other error builders use.
 """
@@ -33,6 +35,7 @@ from typing import Any, Final
 
 from jsonschema.exceptions import ValidationError
 
+from meho_backplane.input_refusal import cut_key
 from meho_backplane.operations._errors import _sanitize_free_text
 
 __all__ = ["describe_violation"]
@@ -54,7 +57,7 @@ def _render(value: Any) -> str:
 
 def _name(name: str) -> str:
     """Render one property name: redact the raw name first, then quote it."""
-    return _render(_sanitize_free_text(name))
+    return _render(cut_key(_sanitize_free_text(name)))
 
 
 def _listing(rendered: list[str]) -> str:
@@ -88,7 +91,7 @@ def _json_path(err: ValidationError) -> str:
         if isinstance(step, int):
             path += f"[{step}]"
             continue
-        key = _sanitize_free_text(str(step))
+        key = cut_key(_sanitize_free_text(str(step)))
         if _PLAIN_KEY.match(key):
             path += f".{key}"
         else:

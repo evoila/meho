@@ -46,8 +46,11 @@ import httpx
 import pytest
 import respx
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from meho_backplane.api.request_validation import request_validation_exception_handler
 from meho_backplane.api.v1.targets import _screen_sent_destination
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import (
@@ -67,6 +70,15 @@ from meho_backplane.targets.ssrf_guard import (
     assert_public_destination,
     is_allowlisted,
     screen_and_resolve,
+)
+
+from ._oidc_jwt_helpers import make_rsa_keypair, mock_discovery_and_jwks, public_jwks
+from ._targets_helpers import (
+    _admin_token,
+    _build_app,
+    _empty_connector_registry,  # noqa: F401
+    _isolated_jwks_cache,  # noqa: F401
+    _settings_env,  # noqa: F401
 )
 
 # 93.184.216.34 (example.com's long-stable A record) — a public, globally
@@ -130,6 +142,32 @@ def test_target_create_rejects_non_public_host_literal(
     with pytest.raises(ValidationError) as excinfo:
         TargetCreate(**_create_kwargs(host=host))
     assert "not a public address" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("host", "reason"),
+    [
+        (_NON_PUBLIC_HOSTS[0], "target destination is not a public address"),
+        (_REFUSED_STRUCTURE_HOSTS[0], "target host must not embed URL structure"),
+    ],
+)
+def test_the_rest_422_keeps_the_destination_reason(
+    _guard_live: pytest.MonkeyPatch, host: str, reason: str
+) -> None:
+    app = _build_app()
+    app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = TestClient(app).post(
+            "/api/v1/targets",
+            json=_create_kwargs(host=host),
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+
+    assert response.status_code == 422, response.text
+    assert host not in response.text
+    assert any(reason in error["msg"] for error in response.json()["detail"]), response.text
 
 
 def _screened_update(**fields: Any) -> TargetUpdate:

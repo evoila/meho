@@ -4516,6 +4516,24 @@ async def _dispatch_now(
         secret_read = secret_read or op_class == "credential_read"
         makes_new_secret = op_class == "credential_mint"
     params_error = _params_error(descriptor, op_id, params, started)
+    if params_error is not None and _approved:
+        # A run that a person approved has an audit row, also when its
+        # params are refused now. A new call is refused with no row and
+        # nothing stored. The row records the approval as its decision.
+        decision_token = policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
+        try:
+            return await _audit_error_and_return(
+                params_error,
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params=params,
+                params_hash=params_hash,
+                duration_ms=params_error.duration_ms,
+            )
+        finally:
+            policy_decision_var.reset(decision_token)
     if params_error is not None:
         return params_error
 

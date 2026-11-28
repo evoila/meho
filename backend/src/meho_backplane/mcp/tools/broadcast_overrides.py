@@ -82,6 +82,7 @@ from meho_backplane.api.v1.broadcast_overrides import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
@@ -194,7 +195,7 @@ async def _set_handler(
     try:
         payload = BroadcastOverrideCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {refusal_text(exc)}") from exc
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session, session.begin():
         try:

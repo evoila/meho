@@ -31,6 +31,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
+from meho_backplane.input_refusal import FixedMessageError
 from meho_backplane.operations._secret_values import REVEAL_SECRET_PARAM
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 from meho_backplane.settings import get_settings
@@ -100,7 +101,7 @@ def _refuse_reveal_secret(params: dict[str, object]) -> dict[str, object]:
     each run.
     """
     if REVEAL_SECRET_PARAM in params:
-        raise ValueError(
+        raise FixedMessageError(
             f"a sensor cannot use {REVEAL_SECRET_PARAM}; remove it from params. "
             "A sensor always reads the default view, with secret values hidden"
         )

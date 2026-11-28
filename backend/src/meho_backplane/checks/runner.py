@@ -167,6 +167,7 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorStatus
+from meho_backplane.input_refusal import error_text
 from meho_backplane.metrics import note_loop_tick
 from meho_backplane.op_classes import call_always_waits, is_safe_write
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
@@ -546,7 +547,7 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
     except Exception as exc:
         # Never-raises contract: a corrupt persisted spec or an unexpected
         # evaluator failure is an ``unknown`` outcome, not a crashed task.
-        return _unknown_outcome("assertion_evaluation_error", error=str(exc))
+        return _unknown_outcome("assertion_evaluation_error", error=error_text(exc))
 
 
 def _evaluate_result(

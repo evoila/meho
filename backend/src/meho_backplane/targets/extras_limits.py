@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from meho_backplane.input_refusal import FixedMessageError
+
 __all__ = ["EXTRAS_MAX_DEPTH", "EXTRAS_MAX_NODES", "check_extras_size"]
 
 EXTRAS_MAX_NODES: Final[int] = 2000
@@ -34,10 +36,10 @@ def check_extras_size[T](value: T) -> T:
         else:
             continue
         if size and depth >= EXTRAS_MAX_DEPTH:
-            raise ValueError(f"extras may be at most {EXTRAS_MAX_DEPTH} levels deep")
+            raise FixedMessageError(f"extras may be at most {EXTRAS_MAX_DEPTH} levels deep")
         seen += size
         if seen > EXTRAS_MAX_NODES:
-            raise ValueError(f"extras may hold at most {EXTRAS_MAX_NODES} values")
+            raise FixedMessageError(f"extras may hold at most {EXTRAS_MAX_NODES} values")
         children = [*item.keys(), *item.values()] if isinstance(item, dict) else item
         stack.extend((child, depth + 1) for child in children)
     return value

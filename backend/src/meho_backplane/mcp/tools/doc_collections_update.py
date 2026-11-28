@@ -55,6 +55,7 @@ from meho_backplane.docs_collections import (
     resolve_doc_collection,
     update_doc_collection,
 )
+from meho_backplane.input_refusal import refusal_entries
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 
@@ -212,7 +213,7 @@ async def _update_doc_collections_handler(
     except ValidationError as exc:
         raise McpInvalidParamsError(
             "invalid update_doc_collections arguments",
-            data={"errors": exc.errors(include_url=False)},
+            data={"errors": refusal_entries(exc.errors(include_url=False))},
         ) from exc
 
     sessionmaker = get_sessionmaker()

@@ -24,6 +24,8 @@ from functools import lru_cache
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from meho_backplane.input_refusal import refusal_text
+
 __all__ = [
     "DEFAULT_KEY_DIR",
     "DEFAULT_SPOOL_DIR",
@@ -153,4 +155,4 @@ def get_runner_settings() -> RunnerSettings:
             spool_max_files=_env_int("MEHO_RUNNER_SPOOL_MAX_FILES", DEFAULT_SPOOL_MAX_FILES),
         )
     except ValidationError as exc:
-        raise RunnerConfigError(f"invalid runner configuration: {exc}") from exc
+        raise RunnerConfigError(f"invalid runner configuration: {refusal_text(exc)}") from exc

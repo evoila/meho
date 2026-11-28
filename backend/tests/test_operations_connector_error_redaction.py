@@ -290,4 +290,5 @@ def test_a_model_refusal_names_the_field_and_rule_never_the_input() -> None:
     assert "not-a-port" not in text
     msg = result.extras["exception_message"]
     assert "port: Input should be a valid integer" in msg
-    assert "notes: Value error, notes may hold at most one key (value_error)" in msg
+    assert "notes: the value is not valid (value_error)" in msg
+    assert "at most one key" not in msg

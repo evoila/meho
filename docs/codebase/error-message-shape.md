@@ -288,13 +288,37 @@ the envelope verbatim. Redaction runs first so a secret straddling
 the cap boundary cannot survive truncation as a cleartext fragment
 the patterns no longer match. See `docs/codebase/redaction.md`.
 
-**A model's refusal names the field and the rule, never the input.**
-When a handler lets a `pydantic.ValidationError` through,
-`result_connector_error` builds `extras.exception_message` with
-`validation_error_text`: for each error the field path, the message and
-the kind (`extras.depth: Value error, ... (value_error)`). `str()` of a
-`ValidationError` is never used, because it shows the start and the end
-of the refused input, and the input can hold a sent value.
+**A refused input names the field and the kind of error, never the input.**
+One module builds every refusal of an input: `input_refusal.py`.
+
+- `refusal_text(exc)` makes one line from a pydantic or a JSON Schema
+  refusal: for each error the field path and the kind, for example
+  `port: Input should be a valid integer (int_type)` or
+  `port: type: integer or null (type)`.
+- `refusal_entries(errors)` makes the error list of a pydantic or FastAPI
+  refusal without `input`. The REST 422 body uses it, so the body keeps
+  its list of `loc`, `msg` and `type`.
+- The field path keeps at most 40 characters of each part and 120 in all
+  (`refusal_path`, `cut_key`), because a part can be a map key that the
+  caller sent.
+- A message stays only when the library builds it from the schema alone.
+  A custom check (`value_error`, `assertion_error`) and a tagged union
+  (`union_tag_invalid`) get the fixed text `the value is not valid`, because
+  their message can quote the value. A check whose message is fixed text
+  raises `FixedMessageError` (a `ValueError`); its message stays. The target
+  model checks (`targets/field_rules.py`, `targets/extras_limits.py`,
+  `targets/schemas.py`), the ticket id rule (`work_ref.py`), and some checks
+  of sensors, dashboards, schedules, broadcast overrides and service read
+  scopes do this.
+
+The users: the MCP tool input check (`mcp/handlers.py`), the REST 422 body
+(`api/request_validation.py`), the `invalid_params` entries of a call
+(`operations/_param_errors.py`), `result_connector_error`, the target
+operations, and every MCP tool, settings reader and catalog reader that
+turns a `ValidationError` into text. `str()` of a validation error is never
+used. A target operation that a service check refuses names the kind of
+error and the valid choices (`connectors/targets/ops.py`,
+`_http_exception_message`), not the sent product or `secret_ref`.
 
 **An operation that sends a secret keeps no vendor text (#4854).** Some
 operations send a secret: a licence key, a new password, a secret value.

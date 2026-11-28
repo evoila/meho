@@ -37,6 +37,8 @@ from typing import Annotated, Any, Final
 
 from pydantic import BeforeValidator
 
+from meho_backplane.input_refusal import FixedMessageError
+
 __all__ = [
     "WORK_REF_FIELD_DESCRIPTION",
     "WORK_REF_FILTER_DESCRIPTION",
@@ -74,7 +76,7 @@ WORK_REF_FILTER_DESCRIPTION: Final[str] = (
 _REFUSED_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
-class WorkRefError(ValueError):
+class WorkRefError(FixedMessageError):
     """A ticket id breaks the rule. The message names the rule.
 
     ``rule`` is a short code for the rule that failed (``empty``,

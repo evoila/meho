@@ -41,6 +41,7 @@ from meho_backplane.checks.dashboard_service import (
 from meho_backplane.checks.service import _is_unique_violation
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import CheckDashboard, CheckDashboardSensor
+from meho_backplane.input_refusal import FixedMessageError
 
 __all__ = [
     "DashboardEditInvalidError",
@@ -84,11 +85,11 @@ class DashboardUpdate(BaseModel):
     @model_validator(mode="after")
     def _check_body(self) -> DashboardUpdate:
         if not self.model_dump(exclude_none=True):
-            raise ValueError("set at least one field to change")
+            raise FixedMessageError("set at least one field to change")
         both = set(self.add_sensor_ids or []) & set(self.remove_sensor_ids or [])
         if both:
             joined = ", ".join(sorted(str(sid) for sid in both))
-            raise ValueError(f"a sensor id cannot be added and removed at once: {joined}")
+            raise FixedMessageError(f"a sensor id cannot be added and removed at once: {joined}")
         return self
 
 

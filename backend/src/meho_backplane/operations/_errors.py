@@ -45,7 +45,6 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
-from pydantic import ValidationError
 
 from meho_backplane.auth.tenant_admins import LOGIN_REALM_APPROVER
 from meho_backplane.connectors import OperationResult, ResultHandle
@@ -71,6 +70,7 @@ from meho_backplane.connectors.base import (
     ConnectorResourceNotFoundError,
     ConnectorUpstreamError,
 )
+from meho_backplane.input_refusal import error_text
 from meho_backplane.operations._left_out import left_out_op
 from meho_backplane.operations.deny_reasons import (
     AGENT_NO_GRANT,
@@ -151,7 +151,6 @@ __all__ = [
     "result_write_capability_denied",
     "status_code_for_result",
     "unknown_connector_message",
-    "validation_error_text",
     "wrap_ok_result",
 ]
 
@@ -1694,18 +1693,6 @@ def result_composite_terminal_error(
     )
 
 
-def validation_error_text(exc: ValidationError) -> str:
-    """Each field, message and kind of a model's refusal, never the refused input.
-
-    ``str()`` of a :class:`pydantic.ValidationError` shows the start and the
-    end of the input, which can hold a sent value.
-    """
-    return "; ".join(
-        f"{'.'.join(map(str, e['loc'])) or 'params'}: {e['msg']} ({e['type']})"
-        for e in exc.errors(include_input=False, include_url=False)
-    )
-
-
 def result_connector_error(
     op_id: str,
     exc: BaseException,
@@ -1752,9 +1739,7 @@ def result_connector_error(
     host name only.
     """
     msg = _sanitize_free_text(
-        redirect_status_text(exc)
-        or followed_redirect_status_text(exc)
-        or (validation_error_text(exc) if isinstance(exc, ValidationError) else str(exc))
+        redirect_status_text(exc) or followed_redirect_status_text(exc) or error_text(exc)
     )
     withheld = isinstance(exc, httpx.HTTPStatusError) and redirect_text_withheld(
         exc.response.status_code

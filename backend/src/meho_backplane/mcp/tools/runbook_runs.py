@@ -85,6 +85,7 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.registry import (
     READ_ONLY,
     ToolDefinition,
@@ -94,7 +95,6 @@ from meho_backplane.mcp.registry import (
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.mcp.short_texts import with_short_text
 from meho_backplane.mcp.tools._short_tool_texts import RUNBOOK_NEXT_SHORT
-from meho_backplane.mcp.tools._work_ref_argument import validation_error_text
 from meho_backplane.runbooks.engine import (
     PreviousStepNotVerifiedError,
     VerifyResponseMismatchError,
@@ -174,7 +174,7 @@ def _to_invalid_params(tool: str, exc: Exception) -> McpInvalidParamsError:
     if isinstance(exc, NotRunAssigneeError):
         return McpPermissionDeniedError(f"{tool}: {exc}")
     if isinstance(exc, ValidationError):
-        return McpInvalidParamsError(f"{tool}: {validation_error_text(exc)}")
+        return McpInvalidParamsError(f"{tool}: {refusal_text(exc)}")
     return McpInvalidParamsError(f"{tool}: {exc}")
 
 

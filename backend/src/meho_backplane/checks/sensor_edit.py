@@ -62,6 +62,7 @@ from meho_backplane.checks.service import (
 from meho_backplane.db.connector_usage_lock import lock_connector_usage_shared
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorSeverity, SensorStatus
+from meho_backplane.input_refusal import FixedMessageError, refusal_lines
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 
 __all__ = [
@@ -128,7 +129,7 @@ class SensorUpdate(BaseModel):
     def _require_a_change(self) -> SensorUpdate:
         changes = self.model_dump(exclude_none=True)
         if not changes:
-            raise ValueError("set at least one field to change")
+            raise FixedMessageError("set at least one field to change")
         if "status" in changes and len(changes) > 1:
             raise ValueError("status cannot be changed together with other fields")
         return self
@@ -205,7 +206,7 @@ def _merge(row: Sensor, patch: SensorUpdate) -> SensorCreate:
     try:
         return SensorCreate.model_validate(merged)
     except ValidationError as exc:
-        raise SensorEditInvalidError([str(err["msg"]) for err in exc.errors()]) from exc
+        raise SensorEditInvalidError(refusal_lines(exc)) from exc
 
 
 def _changed_fields(row: Sensor, merged: SensorCreate) -> tuple[dict[str, Any], dict[str, Any]]:

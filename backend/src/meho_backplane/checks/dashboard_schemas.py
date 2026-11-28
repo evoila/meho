@@ -36,6 +36,7 @@ from pydantic.json_schema import SkipJsonSchema
 from meho_backplane.checks.acknowledgement import SensorAcknowledgementRead
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import SensorSeverity, SensorStatus
+from meho_backplane.input_refusal import FixedMessageError
 
 __all__ = [
     "DashboardCreate",
@@ -173,11 +174,11 @@ def normalise_notify_email(value: str) -> str:
     """
     entries = [part.strip() for part in value.split(",") if part.strip()]
     if not entries:
-        raise ValueError(
+        raise FixedMessageError(
             "notify_email must carry at least one address; omit the field to disable notifications"
         )
     if len(entries) > _MAX_NOTIFY_RECIPIENTS:
-        raise ValueError(
+        raise FixedMessageError(
             f"notify_email accepts at most {_MAX_NOTIFY_RECIPIENTS} recipients; got {len(entries)}"
         )
     validated: list[str] = []
@@ -185,7 +186,9 @@ def normalise_notify_email(value: str) -> str:
         try:
             validated.append(_EMAIL_ADAPTER.validate_python(entry))
         except ValidationError as exc:
-            raise ValueError(f"{entry!r} is not a valid email address") from exc
+            raise FixedMessageError(
+                "notify_email holds an entry that is not a valid email address"
+            ) from exc
     return ",".join(validated)
 
 

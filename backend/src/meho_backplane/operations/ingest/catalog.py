@@ -99,6 +99,7 @@ from pydantic import (
     field_validator,
 )
 
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.operations.ingest.schemas import SafetyLevel
 
 _log = structlog.get_logger(__name__)
@@ -713,7 +714,9 @@ def parse_catalog(raw: str, *, package: str | None = None) -> ConnectorSpecCatal
     try:
         catalog = ConnectorSpecCatalog.model_validate(data)
     except ValidationError as exc:
-        raise CatalogError(f"connector-spec catalog failed schema validation: {exc}") from exc
+        raise CatalogError(
+            f"connector-spec catalog failed schema validation: {refusal_text(exc)}"
+        ) from exc
     if package is not None:
         for entry in catalog.entries:
             entry._source_package = package

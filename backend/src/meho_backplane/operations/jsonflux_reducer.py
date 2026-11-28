@@ -81,6 +81,7 @@ from meho_backplane.connectors.schemas import (
     ResultHandle,
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
+from meho_backplane.input_refusal import refusal_entries
 from meho_backplane.jsonflux.query.json_pointer import json_type
 from meho_backplane.jsonflux.query.result_catalog import (
     AdmissionGuard,
@@ -2460,6 +2461,6 @@ def _resolve_pagination_hint(context: dict[str, Any] | None) -> PaginationHint |
         _log.warning(
             "jsonflux_pagination_hint_validation_failed",
             op_id=context.get("op_id"),
-            errors=exc.errors(),
+            errors=refusal_entries(exc.errors()),
         )
         return None

@@ -23,8 +23,8 @@ per-test SQLite + ``alembic upgrade head``.
 
 from __future__ import annotations
 
-import asyncio
 import json
+import math
 import time
 import uuid
 from datetime import timedelta
@@ -45,6 +45,7 @@ from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME
 from meho_backplane.ui.auth.session_store import create_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, mint_csrf_token
+from meho_backplane.ui.routes.operations import routes as operations_routes
 
 from . import _agent_rules_helpers as a
 from . import _install_limits_helpers as h
@@ -245,8 +246,11 @@ async def _console_run(client: TestClient, params: dict[str, Any], *, sub: str) 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("switch_on")
 async def test_an_admin_import_in_the_web_console_run_window_runs_at_once(
-    client: TestClient, embedding: AsyncMock
+    client: TestClient, embedding: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The Run window answers when the background run ends, however slow the
+    # machine is. Its wait wakes as soon as the run's task ends.
+    monkeypatch.setattr(operations_routes, "ANSWER_WAIT_SECONDS", math.inf)
     await h.setup_ops(embedding)
     await a.set_limit("dangerous")
     async with get_sessionmaker()() as session:
@@ -267,11 +271,7 @@ async def test_an_admin_import_in_the_web_console_run_window_runs_at_once(
         mock_discovery_and_jwks(r, public_jwks(_KEYPAIR))
         page = await _console_run(client, params, sub="tenant-admin-a")
     assert page.status_code == 200, page.text
-    for _ in range(100):
-        stored = await a.stored_tenant()
-        if stored is not None:
-            break
-        await asyncio.sleep(0.05)
+    stored = await a.stored_tenant()
     assert stored is not None, page.text
     assert [rule["name"] for rule in stored["agents"]] == ["helper"]
     assert await h.requests() == []

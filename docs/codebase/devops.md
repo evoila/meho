@@ -2022,9 +2022,8 @@ these workflows:
     sweep. The reads and the cancel are separate calls, so a wrong cancel
     is very unlikely, not impossible. Only the sweep job may cancel; the
     dry run on a pull request has a read-only token.
-  - No job of a merge-queue run waits on a runner only to watch the run
-    (#7105). Until #7105, a `merge-queue-watchdog` job in `ci.yml` did
-    that. It held a runner of the main pool for the whole queue run (about
+  - No job of a merge-queue run waits on a runner only to watch the run.
+    Before, a `merge-queue-watchdog` job in `ci.yml` did that. It held a runner of the main pool for the whole queue run (about
     1,040 runner-minutes a day), and once it cancelled a run whose other
     jobs had passed, so the pull request fell out of the queue.
     `test_no_merge_group_job_only_watches_the_run` in

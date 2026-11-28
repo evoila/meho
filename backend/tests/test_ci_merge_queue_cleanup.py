@@ -330,7 +330,7 @@ def test_a_failed_cancel_does_not_stop_the_others(tmp_path: Path) -> None:
     assert "Could not cancel run 2 (CI)" in outcome.output
 
 
-# --- No queue job only watches the run (#7105) ------------------------------------
+# --- No queue job only watches the run ------------------------------------------
 
 
 def _queue_workflows() -> dict[str, dict[Any, Any]]:

@@ -148,7 +148,7 @@
 # is scoped to pull_request refs only so PR force-pushes still cancel
 # their predecessors cleanly. A push to `main` starts no run (#6387).
 #
-# Dropped queue groups (#7105): the queue drops a group as soon as one of
+# Dropped queue groups: the queue drops a group as soon as one of
 # its required checks fails, and GitHub does not stop the group's run. The
 # sweep in merge-queue-cleanup.yml cancels such runs every 5 minutes, on a
 # GitHub-hosted runner. No job of this file waits on a runner only to watch

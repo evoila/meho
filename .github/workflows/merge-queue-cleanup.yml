@@ -22,7 +22,7 @@
 # own branch, so a dropped group never gets a new run that cancels the old
 # one.
 #
-# This sweep is the only thing that cancels a dropped group's run (#7105).
+# This sweep is the only thing that cancels a dropped group's run.
 # The `merge-queue-watchdog` job of ci.yml did it for the CI run, but it
 # held a runner for the whole queue run. A dropped group's run now goes on
 # until the next sweep cancels it.

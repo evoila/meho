@@ -13,9 +13,8 @@ the preview hides in its echo of this manifest
 each value the shared params redaction hides. The redaction runs over the
 whole list of documents, as for the echo, so a rule for one place in the
 list (such as ``manifest.1.metadata.name``) counts too. For a Secret's
-``data`` it also knows the base64 text on one line (also for binary
-data) and the decoded text; line breaks in the base64 text are skipped,
-as the API server skips them.
+``data`` it also knows the decoded text; line breaks in the base64 text
+are skipped, as the API server skips them.
 
 In a text of the cluster or of MEHO:
 
@@ -93,39 +92,23 @@ def _hidden_leaves(raw: Any, shown: Any, out: set[str]) -> None:
         _add(raw, out)
 
 
-def _one_line(value: str) -> str:
-    """The base64 *value* without line breaks, as the API server reads it."""
-    return value.replace("\r", "").replace("\n", "")
-
-
-def _decoded(value: str) -> str | None:
+def _decoded(value: Any) -> str | None:
     """The text that the base64 *value* holds, or ``None``.
 
     The API server skips line breaks in base64 text (a YAML block value
     ends with one), so they are taken out first.
     """
+    if not isinstance(value, str):
+        return None
     try:
-        return base64.b64decode(_one_line(value), validate=True).decode("utf-8") or None
+        plain = value.replace("\r", "").replace("\n", "")
+        return base64.b64decode(plain, validate=True).decode("utf-8") or None
     except (binascii.Error, ValueError):
         return None
 
 
-def _secret_data_forms(value: Any, out: set[str]) -> None:
-    """Add the forms the cluster may quote of one Secret ``data`` *value*.
-
-    That is the base64 text on one line, also for binary data, and the
-    decoded text when it is UTF-8.
-    """
-    if not isinstance(value, str):
-        return
-    _add(_one_line(value), out)
-    decoded = _decoded(value)
-    if decoded is not None:
-        _add(decoded, out)
-
-
 def _decoded_secret_data(doc: Any, out: set[str]) -> None:
-    """Add the one-line and decoded forms of each Secret ``data`` value under *doc*."""
+    """Add the decoded text of each Secret ``data`` value under *doc*."""
     if isinstance(doc, list):
         for item in doc:
             _decoded_secret_data(item, out)
@@ -135,8 +118,9 @@ def _decoded_secret_data(doc: Any, out: set[str]) -> None:
     if doc.get("kind") == "Secret":
         for field in SECRET_VALUE_FIELDS:
             values = doc.get(field)
-            for value in values.values() if isinstance(values, dict) else ():
-                _secret_data_forms(value, out)
+            for decoded in map(_decoded, values.values() if isinstance(values, dict) else ()):
+                if decoded is not None:
+                    _add(decoded, out)
     for item in doc.values():
         _decoded_secret_data(item, out)
 

@@ -65,6 +65,7 @@ import ast
 import contextvars
 import functools
 import importlib
+import importlib.util
 import inspect
 import linecache
 import os
@@ -73,6 +74,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field, fields, is_dataclass
+from pathlib import Path
 from types import FrameType, ModuleType
 from typing import Any
 
@@ -1011,3 +1013,70 @@ async def test_each_start_stores_the_marks_of_the_code(_a_real_start: _Tracked) 
     assert emptied.rowcount > 500
     _a_real_start.clear()
     _assert_rows_match_code(await _built_in_rows(), _a_real_start)
+
+
+_CASE_MODULE = """
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class _Op:
+    op_id: str
+    handler: object
+
+
+async def _handler():
+    return None
+
+
+async def register_typed_operation(**kwargs):
+    return None
+
+
+OPS = (_Op("zz.loop", _handler),)
+
+
+async def register_loop():
+    rights = {{"changes_rights": True}}
+    for op in OPS:
+        await register_typed_operation(op_id=op.op_id, handler=op.handler{passed})
+
+
+async def register_local_name():
+    enabled = True
+    rights = {{"changes_rights": enabled}}
+    await register_typed_operation(op_id="zz.plain", handler=_handler{passed})
+"""
+
+
+@pytest.mark.parametrize("passes_the_mark", [False, True], ids=["dropped", "passed"])
+def test_a_local_mark_that_a_register_call_drops_is_a_problem(
+    passes_the_mark: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both register functions keep ``changes_rights`` in a local dict.
+
+    One loops over records and passes ``op_id=op.op_id``, so the call has no
+    plain op id. The other sets the dict value from a local name. A call
+    that drops the dict is a problem for each function; ``**rights`` is not.
+    """
+    name = f"zz_marks_case_{'passed' if passes_the_mark else 'dropped'}"
+    path = tmp_path / f"{name}.py"
+    path.write_text(_CASE_MODULE.format(passed=", **rights" if passes_the_mark else ""))
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+
+    found = _Definitions()
+    _read_module("zz", module, _Tracked(), found)
+
+    if passes_the_mark:
+        assert found.problems == []
+    else:
+        functions = sorted(
+            function
+            for function in ("register_loop", "register_local_name")
+            if any(f"register function {function} " in line for line in found.problems)
+        )
+        assert functions == ["register_local_name", "register_loop"], found.problems

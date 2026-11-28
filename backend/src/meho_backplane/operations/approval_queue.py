@@ -85,7 +85,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Final, Literal, NamedTuple, cast
+from typing import Any, ClassVar, Final, Literal, NamedTuple, cast
 
 import structlog
 from sqlalchemy import CursorResult, and_, or_, select, text, update
@@ -217,6 +217,7 @@ from meho_backplane.operations.reducer import handle_owner_sub_var
 from meho_backplane.operations.role_floors import role_floor_denial
 from meho_backplane.operations.shutdown_drain import is_draining, shutting_down_result
 from meho_backplane.operations.uncertain_outcome import envelope_is_uncertain
+from meho_backplane.policy.fixed_rules import AGENT_NEVER_APPROVES
 from meho_backplane.policy.routing import (
     ROUTING_INVALID_RULE,
     group_names,
@@ -707,6 +708,9 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
     same human-only policy.
     """
 
+    #: The fixed rule of this refusal, as ``source:rule_id``.
+    rule: ClassVar[str] = f"floor:{AGENT_NEVER_APPROVES}"
+
     def __init__(self, *, operator_sub: str, principal_kind: str) -> None:
         self.operator_sub = operator_sub
         self.principal_kind = principal_kind
@@ -720,7 +724,7 @@ class NonHumanApprovalError(UnauthorizedApprovalError):
             self,
             f"principal {operator_sub!r} of kind {principal_kind!r} may not "
             "decide an approval request — approval is a human decision "
-            "(v0.1-spec §7)",
+            f"(v0.1-spec §7; rule {self.rule})",
         )
 
 

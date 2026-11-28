@@ -76,6 +76,7 @@ References
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final
@@ -200,6 +201,9 @@ RUNBOOK_NEXT_TOOL: Final[str] = "meho_runbook_next"
 #: :func:`_initialize` references it for the over-budget warning the
 #: preamble assembler emits on dropped slugs.
 _log = structlog.get_logger()
+
+#: The form of an MCP protocol version (a date). Any other header value is not logged.
+_PROTOCOL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 # A handler receives the validated :class:`Operator` (so it can apply
@@ -907,6 +911,11 @@ def _parse_request_body(raw_body: bytes) -> dict[str, Any] | JSONResponse:
     return payload
 
 
+def _protocol_header_for_log(value: str) -> str:
+    """Return ``value`` when it has the date form of a protocol version, else ``"malformed"``."""
+    return value if _PROTOCOL_DATE.fullmatch(value) else "malformed"
+
+
 def _validate_protocol_version_header(
     request: Request,
     method: str,
@@ -936,7 +945,7 @@ def _validate_protocol_version_header(
     _log.warning(
         "mcp_unsupported_protocol_version",
         method=method,
-        header=protocol_header,
+        header=_protocol_header_for_log(protocol_header),
         supported=PROTOCOL_VERSION,
     )
     return _error_response(
@@ -1178,7 +1187,7 @@ def _bind_mcp_session_id(
     try:
         session_id = uuid.UUID(session_header)
     except ValueError:
-        _log.warning("mcp_malformed_session_id", header=session_header)
+        _log.warning("mcp_malformed_session_id", header="malformed")
         return None
 
     structlog.contextvars.bind_contextvars(mcp_session_id=str(session_id))

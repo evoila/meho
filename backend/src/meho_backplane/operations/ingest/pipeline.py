@@ -91,6 +91,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.audit_cutover import note_preview
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.log_host import spec_source_for_log
 from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
@@ -680,7 +681,7 @@ class IngestionPipelineService:
                 # shows we skipped a check rather than passed one.
                 log.info(
                     "connector_ingest_version_check_skipped",
-                    spec_uri=spec.uri,
+                    spec_source=spec_source_for_log(spec.uri),
                     reason="spec_info_version_missing",
                 )
                 continue
@@ -694,7 +695,7 @@ class IngestionPipelineService:
                 # bypass fired with which patterns and values.
                 log.info(
                     "connector_ingest_version_label_decoupled",
-                    spec_uri=spec.uri,
+                    spec_source=spec_source_for_log(spec.uri),
                     spec_info_version=info_version,
                     requested_version=requested_version,
                     compatibility_patterns=list(spec_info_versions_compatible),
@@ -710,7 +711,7 @@ class IngestionPipelineService:
                 # under the corrected label after the fact.
                 log.warning(
                     "connector_ingest_version_drift",
-                    spec_uri=spec.uri,
+                    spec_source=spec_source_for_log(spec.uri),
                     spec_info_version=info_version,
                     requested_version=requested_version,
                     match="compatible",

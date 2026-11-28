@@ -44,7 +44,7 @@ with a token waits for approval. When you send such a file with a token
 (the CLI, a script or an AI tool), MEHO saves nothing and answers `403`:
 
 ```json
-{"detail": "A settings file that adds or changes targets is applied in the web console. A call with a token cannot write targets at once."}
+{"detail": "A settings file that adds or changes targets is applied on the settings file page of the web console (/ui/settings). A call with a token cannot write targets at once."}
 ```
 
 - The preview still works with a token. It shows the target changes.
@@ -52,8 +52,7 @@ with a token waits for approval. When you send such a file with a token
   the file that is the same as the stored one is no change.
 - Two policies change only in the web console:
   `run_approval_target_kinds` turned on and `announce_gate_enabled`
-  turned off. Apply such a file on the **Settings file** page of the web
-  console. See
+  turned off. See
   [Approval policies change only in the web console](#approval-policies-change-only-in-the-web-console).
   The other policies and the conventions apply with a token.
 

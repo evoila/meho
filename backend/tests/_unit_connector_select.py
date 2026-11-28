@@ -130,6 +130,8 @@ CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_custom_policy_switch.py",
     # Core inserts into the audit table, read from every module in the package.
     "tests/test_audit_rows_are_orm_objects.py",
+    # Log calls that hold a web address, read from every module in the package.
+    "tests/test_log_lines_hold_scheme_and_host.py",
 )
 
 _DOTTED = re.compile(r"\bmeho_backplane(?:\.[A-Za-z0-9_]+)+")

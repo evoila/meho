@@ -23,10 +23,10 @@ from meho_backplane.auth.current_tenant import tenant_role_source_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditEventClass, AuditLog, EndpointDescriptor, RunApproval
-from meho_backplane.op_classes import is_root_shell
 from meho_backplane.operations.run_approval_schemas import RunApprovalEntry
 from meho_backplane.operations.run_approvals import as_utc, target_kinds_enabled
 from meho_backplane.operations.service_grants import never_covered_reason
+from meho_backplane.policy.fixed_rules import root_shell_rule
 
 __all__ = ["consult_and_record_run_approval"]
 
@@ -74,12 +74,18 @@ def _never_covered(descriptor: EndpointDescriptor) -> bool:
     """True when no run approval covers *descriptor*.
 
     The rule of a standing grant (:func:`never_covered_reason`), plus an
-    operation that runs a command as root on the host.
+    operation that runs a command as root on the host (the fixed rule
+    ``root_shell_waits``, :func:`root_shell_rule`).
     """
     never = never_covered_reason(descriptor)
     if never is not None and never[0] == "credential":
         _log.info("run_approval_refused_credential", op_id=descriptor.op_id, reason=never[1])
-    return never is not None or is_root_shell(descriptor.op_id)
+    if never is not None:
+        return True
+    rule = root_shell_rule(descriptor.op_id)
+    if rule is not None:
+        _log.info("run_approval_refused_fixed_rule", op_id=descriptor.op_id, fixed_rule=rule)
+    return rule is not None
 
 
 async def _find_covering(

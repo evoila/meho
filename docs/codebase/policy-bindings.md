@@ -165,16 +165,39 @@ matches a shipped binding only notes its kind and categories
 (`bound_kind`, `bound_categories`). `test_policy_bindings_parity.py` pins
 this for every login shape it lists.
 
-`meho policy export` writes them into a tenant's file when the tenant has
-no stored bindings and the switch is on. After an import, the file holds
-the bindings. They are then stored bindings: they count for a login with
-a tenant list too, and the group alone gives the flags of the kind. In a
-setup with tenant lists, remove the shipped bindings from the exported
-file before the import (`test_policy_bindings_stored.py`).
+What `meho policy export` writes for a tenant (`export_policy` in
+`policy/service.py`):
+
+- The tenant has stored bindings: the `bindings` part, as stored. The file
+  imports again with "No change.". A row stored with an old kind
+  (`SA-Operators`, `Approvers`) keeps it; `canonical_sha256` and the
+  bindings diff compare a binding by the kind MEHO reads it as
+  (`binding_meaning` in `policy/document.py`). This holds while the policy
+  file import is on (`classification_enabled()`). With it off, they compare
+  the kind as written, as before.
+- The tenant has no stored bindings and the switch is on: no `bindings`
+  part. Where the part would be, a comment block lists the shipped
+  bindings that are in force (`_shipped_bindings_note`). The import reads
+  no comment, so the file imports again with "No change." and stores no
+  binding (`test_api_v1_policy_export_bindings.py`). When the block
+  would make the file larger than the import accepts
+  (`MAX_POLICY_BYTES`), the comment is a short list of the shipped groups
+  and their kinds, one per line, written by the same YAML writer as the
+  full block. When even that list does not fit, the file has no
+  comment: it must import again.
+- The tenant has no stored bindings and the switch is off: no `bindings`
+  part and no comment, as before.
+
+An admin who wants the shipped bindings as the tenant's own removes the
+`# ` in front of the listed lines and imports the file. They are then
+stored bindings: they count for a login with a tenant list too, and the
+group alone gives the flags of the kind (`test_policy_bindings_stored.py`).
+In a setup with tenant lists, do not do this: a login's groups may belong
+to another tenant.
 
 The import diff (and `meho policy diff`) compares the file with the
-**stored** bindings, not with the shipped ones. So the first import of an
-exported file lists the shipped bindings as `added`, although they were
+**stored** bindings, not with the shipped ones. So a file with the
+shipped bindings written out lists them as `added`, although they were
 already in effect. A file without `bindings` removes every stored binding,
 and the shipped bindings are back in effect.
 
@@ -257,6 +280,9 @@ attribute values with the tenant's name in them.
   stored bindings changes no answer, role or approve flag of any listed
   login shape),
   `backend/tests/test_policy_bindings_stored.py` (exported shipped
-  bindings after an import; a binding and the routing together) and
+  bindings, written out and imported; a binding and the routing together),
+  `backend/tests/test_api_v1_policy_export_bindings.py` (export, then
+  import of the same tenant file through REST is "No change.", with and
+  without stored bindings, with each switch set) and
   `backend/tests/integration/test_keycloak_role_groups_e2e.py` (the
   claims of a real Keycloak with full paths and the `meho-groups` mapper).

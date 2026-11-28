@@ -2768,6 +2768,12 @@ pool, outside this repo; tracked here as #1983). Until that lands,
 do not raise `-n` above the current value to chase wall-clock gains — the
 heartbeat failures will return.
 
+### Runner allow list
+
+`backend/tests/test_ci_runner_allow_list.py` fails when a workflow job names a runner
+that is not on its short allow list (the standard GitHub-hosted runners we use and our
+own runner sets), because larger GitHub runners are billed also for a public repository.
+
 ### Vendor spec shelf in CI (#2949)
 
 The real-spec lanes check ingest and op_id reconciliation against **real**

@@ -306,7 +306,7 @@ import hvac.exceptions
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from meho_backplane.auth.caller_record import caller_columns
+from meho_backplane.auth.caller_record import apply_caller_block, caller_columns
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import agent_no_grant_log_scope
 from meho_backplane.auth.principal_block import PrincipalBlockedStepError, raise_if_send_refused
@@ -4334,6 +4334,8 @@ async def dispatch(
             if is_draining() and not _approved:
                 _log.info("dispatch_refused_shutting_down", op_id=op_id, operator_sub=operator.sub)
                 return shutting_down_result(op_id)
+            caller_payload: dict[str, Any] = {}
+            apply_caller_block(caller_payload, operator)
             with agent_no_grant_log_scope(new=True):
                 async with track_operation(
                     op_id=op_id,
@@ -4342,6 +4344,7 @@ async def dispatch(
                     tenant_id=operator.tenant_id,
                     approved_run=_approved,
                     caller=caller_columns(operator),
+                    caller_payload=caller_payload,
                 ):
                     return await _dispatch_now(
                         operator=operator,

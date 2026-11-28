@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import time
 import uuid
 from collections.abc import Iterator
@@ -37,8 +38,9 @@ import respx
 from pydantic_ai.messages import ToolCallPart
 from sqlalchemy import select
 
+from meho_backplane.auth.caller_record import bind_mcp_tool_name
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.checks.runner import _run_evaluation, _SensorSnapshot
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentRunStatus, AuditLog
@@ -212,22 +214,38 @@ async def test_a_check_of_the_check_runner_writes_system(
     assert [(row.operator_sub, row.caller_kind) for row in rows] == [("__sensor__", "system")]
 
 
+@pytest.mark.parametrize(
+    ("principal_kind", "kind", "block"),
+    [
+        (PrincipalKind.USER, "personal_agent", {"azp": "meho-cli", "tool": "Claude Code"}),
+        (PrincipalKind.SERVICE, "service_agent", None),
+    ],
+)
 async def test_a_call_stopped_at_shutdown_keeps_its_kind(
     monkeypatch: pytest.MonkeyPatch,
+    principal_kind: PrincipalKind,
+    kind: str,
+    block: dict[str, Any] | None,
 ) -> None:
     person = Operator(
         sub="person-token",
         raw_jwt="<test-raw-jwt>",
         tenant_id=_TENANT_A,
         tenant_role=TenantRole.OPERATOR,
+        principal_kind=principal_kind,
         token_checked=True,
+        azp="meho-cli",
     )
     shutdown_drain.reset_drain_state()
     entered, _release = _block_body(monkeypatch)
+    # The call runs in an MCP session whose client said its name.
+    call_context = contextvars.copy_context()
+    call_context.run(bind_mcp_tool_name, "Claude Code")
     running = asyncio.create_task(
         dispatcher.dispatch(
             operator=person, connector_id="demo-1.x", op_id="demo.slow", target=None, params={}
-        )
+        ),
+        context=call_context,
     )
     try:
         await entered.wait()
@@ -242,4 +260,5 @@ async def test_a_call_stopped_at_shutdown_keeps_its_kind(
 
     (row,) = await _rows(path="demo.slow")
     assert row.payload["result_status"] == "unfinished"
-    assert (row.operator_sub, row.caller_kind) == ("person-token", "personal_agent")
+    assert (row.operator_sub, row.caller_kind) == ("person-token", kind)
+    assert row.payload.get("caller") == block

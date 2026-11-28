@@ -757,8 +757,8 @@ less.
 - **Rows with no login bound for the request** take the kind from the
   login the writer holds: the auto-approval row of a standing grant or a
   run approval (`caller_columns(operator)`), and the "unfinished" row of a
-  call that MEHO stopped at shutdown (`track_operation` saves the kind
-  when the call starts).
+  call that MEHO stopped at shutdown (`track_operation` saves the kind,
+  and the `caller` block of a personal agent, when the call starts).
 - **A waiting request** stores the requester's kind in
   `proposed_effect["caller_kind"]` (`_with_caller_kind`). A re-park for an
   earlier requester keeps that requester's kind (`ResumeRequester.caller_kind`).
@@ -767,7 +767,7 @@ less.
   personal agent of <person> asked." for another approver, and "The
   service agent `agent:<name>` asked." for an agent: the acting agent of
   a run for a person, else the client id of the stored requester record,
-  else the login.
+  else the stored name of the login (`principal_name`), else the login.
 - **The audit API** (`AuditEntry.caller_kind`) sends the kind for a row
   that has one, and leaves the field out for a row without one.
 

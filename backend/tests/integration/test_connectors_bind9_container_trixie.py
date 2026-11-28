@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from meho_backplane.connectors.bind9 import Bind9Connector
+from tests._container_ready import run_docker_step, start_test_container
 from tests.integration.test_connectors_bind9_container import (
     _CONTAINER_SECRET_PATH,
     _DEFAULT_BOOKWORM_IMAGE,
@@ -52,20 +53,28 @@ def bind9_920_target() -> Iterator[_Bind9Target]:
     with tempfile.TemporaryDirectory() as build_dir:
         (Path(build_dir) / "Dockerfile").write_text(_TRIXIE_DOCKERFILE)
         tag = os.environ.get("MEHO_TEST_BIND9_920_TAG", "meho-test-bind9:9.20-trixie")
-        DockerImage(
-            path=build_dir,
-            tag=tag,
-            buildargs={
-                "DEBIAN_IMAGE": os.environ.get(
-                    "MEHO_TEST_DEBIAN_TRIXIE_IMAGE", _DEFAULT_TRIXIE_IMAGE
-                )
-            },
-        ).build()
+        run_docker_step(
+            lambda: DockerImage(
+                path=build_dir,
+                tag=tag,
+                buildargs={
+                    "DEBIAN_IMAGE": os.environ.get(
+                        "MEHO_TEST_DEBIAN_TRIXIE_IMAGE", _DEFAULT_TRIXIE_IMAGE
+                    )
+                },
+            ).build(),
+            what="bind9",
+            image=tag,
+            failed="image build failed",
+        )
 
-        container = DockerContainer(tag).with_exposed_ports(22)
-        container.start()
+        container = start_test_container(
+            lambda: DockerContainer(tag).with_exposed_ports(22),
+            image=tag,
+            what="bind9",
+            probe=lambda c: wait_for_log_message(c, "Server listening on", timeout=30.0),
+        )
         try:
-            wait_for_log_message(container, "Server listening on", timeout=30.0)
             # named starts just before sshd; give it a moment to be seen.
             import time
 

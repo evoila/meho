@@ -52,6 +52,7 @@ import pytest
 from fastapi import HTTPException
 
 from meho_backplane.auth.operator import TenantRole
+from tests._container_ready import start_test_container
 from tests.integration.test_keycloak_customer_idp_e2e import (  # noqa: F401 -- fixtures
     _OurSite,
     network,
@@ -167,24 +168,26 @@ def ldap(network: Network) -> Iterator[_Ldap]:  # noqa: F811 -- fixture
     from tests._strategies import wait_for_log_message
 
     admin_password = secrets.token_urlsafe(18)
-    container = (
-        DockerContainer(_LDAP_IMAGE)
-        .with_network(network)
-        .with_network_aliases(_LDAP_HOST)
-        .with_env("LDAP_ORGANISATION", "Example")
-        .with_env("LDAP_DOMAIN", "example.org")
-        .with_env("LDAP_ADMIN_PASSWORD", admin_password)
-        .with_env("LDAP_TLS", "false")
+
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(_LDAP_IMAGE)
+            .with_network(network)
+            .with_network_aliases(_LDAP_HOST)
+            .with_env("LDAP_ORGANISATION", "Example")
+            .with_env("LDAP_DOMAIN", "example.org")
+            .with_env("LDAP_ADMIN_PASSWORD", admin_password)
+            .with_env("LDAP_TLS", "false")
+        )
+
+    container = start_test_container(
+        make,
+        image=_LDAP_IMAGE,
+        what="OpenLDAP",
+        probe=lambda c: wait_for_log_message(c, "slapd starting", timeout=120),
+        timeout=120,
     )
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"OpenLDAP container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(container, "slapd starting", timeout=120)
         directory = _Ldap(container, admin_password)
         deadline = time.monotonic() + 60
         while True:

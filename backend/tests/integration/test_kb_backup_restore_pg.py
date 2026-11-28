@@ -41,6 +41,7 @@ from meho_backplane.db.engine import (
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.kb.schemas import KB_PASSAGE_SOURCE
 from meho_backplane.kb.service import KbService
+from tests._container_ready import start_test_container
 from tests._pgvector_image import pgvector_test_image
 
 from .conftest import DOCKER_AVAILABLE, SKIP_REASON, _async_url_from
@@ -77,8 +78,8 @@ def cluster() -> Iterator[_Cluster]:
     """A migrated pgvector database in a container, with its tools."""
     from testcontainers.postgres import PostgresContainer
 
-    pg = PostgresContainer(pgvector_test_image())
-    pg.start()
+    image = pgvector_test_image()
+    pg = start_test_container(lambda: PostgresContainer(image), image=image, what="pgvector")
     try:
         source_url = _async_url_from(pg.get_connection_url())
         restored_url = source_url.rsplit("/", 1)[0] + f"/{RESTORED_DB}"

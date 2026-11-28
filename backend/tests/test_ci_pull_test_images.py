@@ -375,13 +375,15 @@ def test_a_fixture_fails_in_ci_when_its_container_does_not_start(
     vault_fixture: Callable[[], Iterator[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    with pytest.raises(pytest.fail.Exception, match="vault dev container failed to start"):
+    with pytest.raises(pytest.fail.Exception, match="container did not start: vault") as excinfo:
         next(vault_fixture())
+    assert "image not found" not in str(excinfo.value)
 
 
 def test_the_same_fixture_skips_outside_ci(
     vault_fixture: Callable[[], Iterator[str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    with pytest.raises(pytest.skip.Exception, match="vault dev container failed to start"):
+    with pytest.raises(pytest.skip.Exception, match="container did not start: vault") as excinfo:
         next(vault_fixture())
+    assert "image not found" not in str(excinfo.value)

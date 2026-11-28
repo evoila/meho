@@ -112,6 +112,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.approval_object_check import live_card
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
+from tests._container_ready import start_test_container
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -221,34 +222,31 @@ def vault_dev_addr(request: pytest.FixtureRequest) -> Iterator[str]:
 
     _server_id, image_var, default_image, expected_product = request.param
     image = os.environ.get(image_var, default_image)
-    container = DockerContainer(image).with_exposed_ports(8200)
-    if expected_product == "openbao":
-        # Same flags as Vault; given on the command line so the test does
-        # not depend on which environment variable names the image reads.
-        container = container.with_command(
-            f"server -dev -dev-root-token-id={_DEV_ROOT_TOKEN} -dev-listen-address=0.0.0.0:8200"
-        )
-    else:
-        container = container.with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN).with_env(
-            "VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200"
-        )
-    container = container.with_kwargs(cap_add=["IPC_LOCK"])
-    try:
-        container.start()
-    except Exception as exc:
-        # Any boot failure (privileged denied, image pull rate-limit,
-        # cgroup refusal) → clean skip on a laptop. Under CI the test
-        # fails instead, so a broken image or proxy cannot hide it.
-        reason = f"{expected_product} dev container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
 
+    def make() -> DockerContainer:
+        container = DockerContainer(image).with_exposed_ports(8200)
+        if expected_product == "openbao":
+            # Same flags as Vault; given on the command line so the test does
+            # not depend on which environment variable names the image reads.
+            container = container.with_command(
+                f"server -dev -dev-root-token-id={_DEV_ROOT_TOKEN} -dev-listen-address=0.0.0.0:8200"
+            )
+        else:
+            container = container.with_env("VAULT_DEV_ROOT_TOKEN_ID", _DEV_ROOT_TOKEN).with_env(
+                "VAULT_DEV_LISTEN_ADDRESS", "0.0.0.0:8200"
+            )
+        container = container.with_kwargs(cap_add=["IPC_LOCK"])
+        return container
+
+    # Vault logs this line once the dev server is unsealed and serving;
+    # testcontainers polls the log stream until it appears or the timeout trips.
+    container = start_test_container(
+        make,
+        image=image,
+        what=expected_product,
+        probe=lambda c: wait_for_log_message(c, "server started!", timeout=60),
+    )
     try:
-        # Vault logs this line once the dev server is unsealed and
-        # serving; testcontainers polls the log stream until it appears
-        # or the timeout trips.
-        wait_for_log_message(container, "server started!", timeout=60)
         host = container.get_container_host_ip()
         port = container.get_exposed_port(8200)
         addr = f"http://{host}:{port}"

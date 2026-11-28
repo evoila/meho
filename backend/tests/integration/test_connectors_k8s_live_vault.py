@@ -92,6 +92,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 
 # ---------------------------------------------------------------------------
 # Opt-in gates: Docker AND the explicit MEHO_RUN_LIVE_K3D_VAULT=1 signal.
@@ -151,14 +152,7 @@ def k3s_kubeconfig_text() -> Iterator[str]:
         pytest.skip(f"testcontainers.k3s unavailable: {exc}")
 
     image = os.environ.get("MEHO_TEST_K3S_IMAGE", "rancher/k3s:v1.32.5-k3s1")
-    try:
-        container = K3SContainer(image=image)
-        container.start()
-    except Exception as exc:
-        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+    container = start_test_container(lambda: K3SContainer(image=image), image=image, what="k3s")
 
     try:
         yield container.config_yaml()
@@ -182,14 +176,9 @@ def vault_container_and_token() -> Iterator[tuple[str, str]]:
 
     root_token = os.environ.get("MEHO_TEST_VAULT_ROOT_TOKEN", "meho-test-root-token")
     image = os.environ.get("MEHO_TEST_VAULT_IMAGE", "hashicorp/vault:1.18.4")
-    try:
-        container = VaultContainer(image=image, root_token=root_token)
-        container.start()
-    except Exception as exc:
-        reason = f"Vault container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+    container = start_test_container(
+        lambda: VaultContainer(image=image, root_token=root_token), image=image, what="Vault"
+    )
 
     try:
         yield container.get_connection_url(), root_token

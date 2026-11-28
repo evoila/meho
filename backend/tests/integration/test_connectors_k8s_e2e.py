@@ -101,6 +101,7 @@ from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import call_operation, search_operations
 from meho_backplane.operations.reducer import PassThroughReducer
+from tests._container_ready import start_test_container
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -195,14 +196,7 @@ def k3s_kubeconfig_and_target() -> Iterator[tuple[dict[str, Any], _K3sTarget]]:
         pytest.skip(f"testcontainers.k3s unavailable: {exc}")
 
     image = os.environ.get("MEHO_TEST_K3S_IMAGE", "rancher/k3s:v1.32.5-k3s1")
-    try:
-        container = K3SContainer(image=image)
-        container.start()
-    except Exception as exc:
-        reason = f"k3s container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+    container = start_test_container(lambda: K3SContainer(image=image), image=image, what="k3s")
 
     try:
         kubeconfig_text = container.config_yaml()

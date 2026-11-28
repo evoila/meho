@@ -55,6 +55,7 @@ from meho_backplane.connectors.postgres.session import (
     connect_read_only,
 )
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 
 from .._vault_fakes import install_fake_client
 from ._image_tags import ImageRun, image_param, major_of_image
@@ -143,22 +144,13 @@ class _Container:
 @pytest.fixture(scope="module", params=_PG_IMAGES)
 def pg_container(request: pytest.FixtureRequest) -> Iterator[_Container]:
     """Boot a stock Postgres, create a populated + ANALYZEd table, yield coords."""
-    from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
     run: ImageRun = request.param
     image = run.image
-    pg = PostgresContainer(image)
-    try:
-        pg.start()
-    except _DockerAPIError as exc:
-        msg = str(exc).lower()
-        if "rate limit" in msg or "too many requests" in msg or "429" in msg:
-            reason = f"image pull rate-limited for {run.label}; set MEHO_TEST_POSTGRES_IMAGE"
-            if os.environ.get("GITHUB_ACTIONS"):
-                pytest.fail(reason)
-            pytest.skip(reason)
-        raise
+    pg = start_test_container(
+        lambda: PostgresContainer(image), image=image, what=f"postgres {run.label}"
+    )
     try:
         coords = _Container(
             host=pg.get_container_host_ip(),

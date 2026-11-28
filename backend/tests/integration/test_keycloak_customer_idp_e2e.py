@@ -54,6 +54,7 @@ from meho_backplane.core.keycloak import (
     HttpAdmin,
     finish_realm,
 )
+from tests._container_ready import run_docker_step, start_test_container
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 from tests.integration.test_core_bootstrap_keycloak import _FakeStore, _plan
 from tests.integration.test_core_keycloak_realm_import import _subchart_image, _wait_for_realm
@@ -438,8 +439,13 @@ def network() -> Iterator[Network]:
         pytest.skip(SKIP_REASON)
     from testcontainers.core.network import Network
 
-    with Network() as net:
+    net = run_docker_step(
+        lambda: Network().create(), what="test network", failed="network create failed"
+    )
+    try:
         yield net
+    finally:
+        net.remove()
 
 
 @pytest.fixture(scope="module")
@@ -468,35 +474,38 @@ def site(network: Network) -> Iterator[_OurSite]:
         "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET": secrets.token_hex(16),
     }
     image = os.environ.get("MEHO_TEST_CORE_KEYCLOAK_IMAGE") or _subchart_image()
-    container = (
-        DockerContainer(image)
-        .with_command("start-dev --import-realm")
-        .with_network(network)
-        .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
-        .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", env[BOOTSTRAP_ID_ENV])
-        .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", env[BOOTSTRAP_SECRET_ENV])
-        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "kcadmin")
-        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", master_admin_password)
-        .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
-        .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
-        .with_env("MEHO_REALM_TENANT_NAME", "main")
-        .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", env[ADMIN_SECRET_ENV])
-        .with_env("MEHO_REALM_WEB_CLIENT_SECRET", env["MEHO_REALM_WEB_CLIENT_SECRET"])
-        .with_env(
-            "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", env["MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET"]
+
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_command("start-dev --import-realm")
+            .with_network(network)
+            .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
+            .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", env[BOOTSTRAP_ID_ENV])
+            .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", env[BOOTSTRAP_SECRET_ENV])
+            .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "kcadmin")
+            .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", master_admin_password)
+            .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
+            .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+            .with_env("MEHO_REALM_TENANT_NAME", "main")
+            .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", env[ADMIN_SECRET_ENV])
+            .with_env("MEHO_REALM_WEB_CLIENT_SECRET", env["MEHO_REALM_WEB_CLIENT_SECRET"])
+            .with_env(
+                "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET",
+                env["MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET"],
+            )
+            .with_volume_mapping(str(Path(_REALM_FILE).parent), "/opt/keycloak/data/import", "ro")
+            .with_exposed_ports(8080)
         )
-        .with_volume_mapping(str(Path(_REALM_FILE).parent), "/opt/keycloak/data/import", "ro")
-        .with_exposed_ports(8080)
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="Keycloak",
+        probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=240),
+        timeout=240,
     )
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(container, "Listening on:", timeout=240)
         host = container.get_container_host_ip()
         base_url = f"http://{host}:{container.get_exposed_port(8080)}/auth"
         _wait_for_realm(base_url)
@@ -542,24 +551,26 @@ def customer(site: _OurSite, network: Network) -> Iterator[_Customer]:
 
     admin_password = secrets.token_urlsafe(18)
     image = os.environ.get("MEHO_TEST_CORE_KEYCLOAK_IMAGE") or _subchart_image()
-    container = (
-        DockerContainer(image)
-        .with_command("start-dev")
-        .with_network(network)
-        .with_network_aliases(_CUSTOMER_HOST)
-        .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
-        .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", admin_password)
-        .with_exposed_ports(8080)
+
+    def make() -> DockerContainer:
+        return (
+            DockerContainer(image)
+            .with_command("start-dev")
+            .with_network(network)
+            .with_network_aliases(_CUSTOMER_HOST)
+            .with_env("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
+            .with_env("KC_BOOTSTRAP_ADMIN_PASSWORD", admin_password)
+            .with_exposed_ports(8080)
+        )
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="customer Keycloak",
+        probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=240),
+        timeout=240,
     )
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"customer Keycloak container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(container, "Listening on:", timeout=240)
         base_url = f"http://{container.get_container_host_ip()}:{container.get_exposed_port(8080)}"
         customer = _Customer(
             base_url=base_url,

@@ -54,6 +54,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt_for_audience
 from meho_backplane.auth.keycloak_admin import KeycloakAdminClient
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
+from tests._container_ready import start_test_container
 from tests.integration.conftest import DOCKER_AVAILABLE, SKIP_REASON
 
 _SUBCHART = (
@@ -129,35 +130,40 @@ def _run_keycloak(**extra_env: str) -> Iterator[_Keycloak]:
             "meho-check-runner": secrets.token_hex(16),
         },
     )
+
     # Same values the StatefulSet sets, except the database (the built-in
     # dev store is enough here) and, unless *extra_env* sets them, the
     # fixed public hostname.
-    container = (
-        DockerContainer(image)
-        .with_command("start-dev --import-realm")
-        .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
-        .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", kc.bootstrap_id)
-        .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", kc.bootstrap_secret)
-        .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
-        .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
-        .with_env("MEHO_REALM_TENANT_NAME", "main")
-        .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", kc.client_secrets["meho-admin"])
-        .with_env("MEHO_REALM_WEB_CLIENT_SECRET", kc.client_secrets["meho-web"])
-        .with_env("MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", kc.client_secrets["meho-check-runner"])
-        .with_volume_mapping(str(_SUBCHART / "files"), "/opt/keycloak/data/import", "ro")
-        .with_exposed_ports(8080)
+    def make() -> DockerContainer:
+        container = (
+            DockerContainer(image)
+            .with_command("start-dev --import-realm")
+            .with_env("KC_HTTP_RELATIVE_PATH", "/auth")
+            .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_ID", kc.bootstrap_id)
+            .with_env("KC_BOOTSTRAP_ADMIN_CLIENT_SECRET", kc.bootstrap_secret)
+            .with_env("MEHO_REALM_PUBLIC_URL", _PUBLIC_URL)
+            .with_env("MEHO_REALM_TENANT_ID", _TENANT_ID)
+            .with_env("MEHO_REALM_TENANT_NAME", "main")
+            .with_env("MEHO_REALM_ADMIN_CLIENT_SECRET", kc.client_secrets["meho-admin"])
+            .with_env("MEHO_REALM_WEB_CLIENT_SECRET", kc.client_secrets["meho-web"])
+            .with_env(
+                "MEHO_REALM_CHECK_RUNNER_CLIENT_SECRET", kc.client_secrets["meho-check-runner"]
+            )
+            .with_volume_mapping(str(_SUBCHART / "files"), "/opt/keycloak/data/import", "ro")
+            .with_exposed_ports(8080)
+        )
+        for name, value in extra_env.items():
+            container = container.with_env(name, value)
+        return container
+
+    container = start_test_container(
+        make,
+        image=image,
+        what="Keycloak",
+        probe=lambda c: wait_for_log_message(c, "Listening on:", timeout=240),
+        timeout=240,
     )
-    for name, value in extra_env.items():
-        container = container.with_env(name, value)
     try:
-        container.start()
-    except Exception as exc:
-        reason = f"Keycloak container failed to start ({type(exc).__name__}): {exc}"
-        if os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail(reason)
-        pytest.skip(reason)
-    try:
-        wait_for_log_message(container, "Listening on:", timeout=240)
         host = container.get_container_host_ip()
         base_url = f"http://{host}:{container.get_exposed_port(8080)}/auth"
         _wait_for_realm(base_url)

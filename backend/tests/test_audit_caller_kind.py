@@ -383,6 +383,33 @@ def test_the_card_names_a_service_agent_by_its_client_id(
     assert f"The service agent {account} asked." not in modal.text
 
 
+def test_the_card_names_a_service_login_by_its_stored_name(
+    monkeypatch: pytest.MonkeyPatch, tokens: _Tokens
+) -> None:
+    _switch(monkeypatch, on=True)
+    _seed()
+    # A service token: an account id as ``sub``, the client id ``svc-reporter``,
+    # and the helper's name claim, which the stored name keeps.
+    account = str(uuid.uuid4())
+    token = tokens.token(account, kind="service", azp="svc-reporter", client_id="svc-reporter")
+    result = tokens.call(_CAUTION_OP, token)
+    assert result["status"] == "awaiting_approval"
+
+    (request,) = _requests()
+    assert request.principal_act is None
+    assert request.principal_name == "Alice"
+    assert request.proposed_effect["caller_kind"] == "service_agent"
+    clear_jwks_cache()
+    client, mock, _ = _client_with_role_and_csrf(
+        tenant_id=_TENANT_A, operator_sub=_CONSOLE_PERSON, role=TenantRole.TENANT_ADMIN
+    )
+    with mock:
+        modal = client.get(f"/ui/approvals/{request.id}")
+    assert modal.status_code == 200, modal.text
+    assert "The service agent Alice asked." in modal.text
+    assert f"The service agent {account} asked." not in modal.text
+
+
 # ----------------------------------------------------------- the switch off
 
 

@@ -305,13 +305,15 @@ def _service_agent_name(row: ApprovalRequest) -> str:
 
     The acting agent of a delegated call, else the client id of the stored
     requester record (a direct agent token's ``sub`` is an account id),
-    else the login.
+    else the stored name of the login, else the login.
     """
     if row.principal_act:
         return row.principal_act
     record = stored_requester_record(row.proposed_effect)
     client_id = record.get("client_id") if isinstance(record, dict) else None
-    return client_id if isinstance(client_id, str) and client_id else row.principal_sub
+    if isinstance(client_id, str) and client_id:
+        return client_id
+    return row.principal_name or row.principal_sub
 
 
 def _project_expiry(row: ApprovalRequest) -> dict[str, Any]:

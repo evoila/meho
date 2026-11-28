@@ -16,7 +16,8 @@ see ``docs/codebase/policy.md``. The work is in
   Nothing changes yet. 202 with the request id; 200 "No change." when the file changes
   nothing; 422 with the mistakes; 409 while the ``POLICY_CLASSIFICATION``
   switch is off.
-* ``GET /api/v1/policy/export`` -- the stored policy as a file.
+* ``GET /api/v1/policy/export`` -- the stored policy as a file. 409 with
+  ``CUSTOM_POLICY`` on when the file would be too large to import again.
 * ``GET /api/v1/policy/history`` -- the imported files, newest first.
 * ``GET /api/v1/policy/carry-over/dry-run`` -- every saved "always wait"
   and what changes for each one if MEHO reads it as ``destructive``
@@ -75,6 +76,7 @@ from meho_backplane.policy.explain_models import PolicyExplainResponse
 from meho_backplane.policy.service import (
     KEEP_REVISIONS,
     NO_CHANGE,
+    PolicyExportError,
     PolicyPlan,
     build_plan,
     export_policy,
@@ -325,15 +327,21 @@ async def export(
     session: Annotated[AsyncSession, Depends(get_session)],
     scope: Annotated[PolicyScope, Query()] = "tenant",
 ) -> Response:
-    """The stored policy of *scope* as a ``policy: v1`` file."""
+    """The stored policy of *scope* as a ``policy: v1`` file.
+
+    409 when the file would be too large for the import to read again.
+    """
     _bind_audit("policy.file.export", "read")
     _check_scope(operator, scope)
-    text = await export_policy(
-        session,
-        scope=scope,
-        tenant_id=operator.tenant_id,
-        custom_policy=custom_policy_on(get_settings()),
-    )
+    try:
+        text = await export_policy(
+            session,
+            scope=scope,
+            tenant_id=operator.tenant_id,
+            custom_policy=custom_policy_on(get_settings()),
+        )
+    except PolicyExportError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return Response(
         content=text,
         media_type="application/yaml",

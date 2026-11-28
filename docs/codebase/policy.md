@@ -121,6 +121,20 @@ routing:
   set it and when. The import reads the part only to compare it: the same
   edits (in any order) change nothing, and any other part is refused with
   the line named. The stored document never holds the part.
+- So that an unchanged export always imports as "No change." (all with
+  `CUSTOM_POLICY` on):
+  - The compare checks each value and its type: `requires_approval: 1`
+    or `'true'` is not `true`.
+  - The reason is compared with the stored text, character by character.
+    The export writes a text in double quotes when YAML would read it
+    back changed (U+0085 becomes `\N`; `represent_exact_text`).
+  - A mistake in the part is named next to the mistakes of the other
+    parts, also when the parser already refused the file.
+  - A part that comes in through a merge key (`<<`) is refused at the line
+    of the last merge key that brings it in.
+  - An export larger than the import reads (`MAX_POLICY_BYTES`) is
+    refused with a 409 and `POLICY_TOO_LARGE_TO_EXPORT`, so no edit is
+    left out without a word.
 - `limits` (the install's file only) is the outer limit of the tenants'
   policies: `limits.personal_agent_up_to` is the highest risk level
   (`safe`, `caution` or `dangerous`) that a tenant's rule for personal

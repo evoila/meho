@@ -41,6 +41,7 @@ Each `AuditEntry` carries the forensic fields you filter and pivot on:
 | `op_id` / `op_class` | the operation and its sensitivity class |
 | `result_status` | `ok` / `error` / `denied`; `pending` when the run stopped to wait for approval (the row stays `pending` after the decision); or `withdrawn` when the sender took its approval request back (the operation never ran) |
 | `policy_decision` | the gate verdict: `auto-execute`, `needs-approval`, or `deny` |
+| `policy_rule` | the rule behind the verdict, as `<source>:<rule id>`, for example `floor:destructive_waits`. With `CUSTOM_POLICY` on, it names the rule that decided. When the policy evaluator gave another answer, it is `gate:<verdict>` (`run`, `wait` or `deny`), and `payload.policy_rule_shadow` holds the evaluator's rule. With `CUSTOM_POLICY` off, it is filled only while `POLICY_ENGINE_SHADOW` is on, and then ends with `(shadow)`: the evaluator matched the rule, but it did not decide. All rule ids: [`docs/codebase/policy-evaluator.md`](https://github.com/evoila/meho/blob/main/docs/codebase/policy-evaluator.md#the-rule-ids-on-the-audit-row) |
 | `agent_session_id` | the originating agent's MCP session id — the key for session tracing |
 | `parent_audit_id` | the id of the row that caused this one. An approval's decision row and run row point at the approval request row. |
 | `work_ref` | an external change-ticket reference, when one was stamped |

@@ -131,6 +131,7 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     policy_rule_columns,
+    policy_rule_payload,
     policy_rule_var,
     resolve_audit_session_id,
     run_id_var,
@@ -1967,6 +1968,7 @@ async def _write_audit_row(
     # row while the retry's own rule is bound.
     if path in _CALLER_PATHS:
         policy_kwargs.update(_request_row_columns())
+        payload.update(policy_rule_payload())
     # Session-replay lineage (#2086), off the request row — the durable
     # source of truth, same discipline as ``work_ref`` below. The
     # "request" row and the "decision" rows are written on *different*

@@ -24,7 +24,8 @@ With the switch off, nothing here runs.
 :func:`shadow_call` also keeps the rule the evaluator matched
 (:func:`~meho_backplane.policy.stamp.take_rule`). The dispatcher takes it right after the gate
 and writes it on the audit row and the approval request, marked as a rule
-that did not decide (#6044).
+that did not decide (#6044). With ``CUSTOM_POLICY`` on, the dispatcher
+names the deciding rule instead (:func:`~meho_backplane.policy.stamp.row_rule`).
 """
 
 from __future__ import annotations
@@ -302,6 +303,7 @@ def _shadow_stamp(decision: Decision) -> RuleStamp:
         text=rule.text,
         policy_version=rule.policy_version,
         decided=False,
+        verdict=decision.verdict.value,
     )
 
 

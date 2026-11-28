@@ -11,28 +11,47 @@ writers and the approval queue read it from there. The gate also runs
 for previews and checks that write no row; their rule is dropped at the
 start of the next gate (:func:`forget_rule`).
 
-Today only the policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``)
-makes a stamp, so ``decided`` is ``False``: the evaluator matched the rule,
-but today's checks decided the call.
+The policy evaluator in shadow mode (``POLICY_ENGINE_SHADOW``) makes the
+stamp, so ``decided`` is ``False``: the evaluator matched the rule, but
+today's checks decided the call. With ``CUSTOM_POLICY`` on, the dispatcher
+turns it into the deciding rule (:func:`deciding_rule`).
 """
 
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-__all__ = ["RuleStamp", "forget_rule", "keep_rule", "take_rule"]
+from meho_backplane.db.models import PermissionVerdict
+from meho_backplane.policy.switches import custom_policy_on
+from meho_backplane.settings import get_settings
+
+__all__ = ["RuleStamp", "deciding_rule", "forget_rule", "keep_rule", "row_rule", "take_rule"]
+
+#: The gate's verdict in the words of the evaluator (``policy.evaluate.Verdict``).
+_EVALUATOR_VERDICT: dict[PermissionVerdict, str] = {
+    PermissionVerdict.AUTO_EXECUTE: "run",
+    PermissionVerdict.NEEDS_APPROVAL: "wait",
+    PermissionVerdict.DENY: "deny",
+}
 
 
 @dataclass(frozen=True)
 class RuleStamp:
-    """The rule that matched a call, as written on the audit row and the approval request."""
+    """The rule that matched a call, as written on the audit row and the approval request.
+
+    ``verdict`` is the evaluator's answer (``run``, ``wait`` or ``deny``)
+    on a stamp the shadow kept. ``shadow`` is set only on a ``gate`` stamp:
+    the evaluator's rule when its answer was another one.
+    """
 
     source: str
     rule_id: str
     text: str
     policy_version: int | None = None
     decided: bool = False
+    verdict: str | None = None
+    shadow: RuleStamp | None = None
 
     def label(self) -> str:
         """The text for ``audit_log.policy_rule``, for example ``default:person.safe (shadow)``."""
@@ -41,12 +60,47 @@ class RuleStamp:
 
     def as_json(self) -> dict[str, object]:
         """The value for ``approval_request.policy_rule``."""
-        return {
+        value: dict[str, object] = {
             "source": self.source,
             "rule_id": self.rule_id,
             "text": self.text,
             "decided": self.decided,
         }
+        if self.shadow is not None:
+            value["shadow"] = self.shadow.as_json()
+        return value
+
+
+def deciding_rule(kept: RuleStamp | None, verdict: str) -> RuleStamp:
+    """The rule for the audit row of a call whose answer is *verdict*.
+
+    *verdict* is ``run``, ``wait`` or ``deny``. When the evaluator's stamp
+    *kept* has the same answer, it is the deciding rule. Otherwise, and
+    when the shadow kept no stamp (it failed), the gate decided:
+    ``gate:<verdict>``, with *kept* as its ``shadow``.
+    """
+    if kept is not None and kept.verdict == verdict:
+        return replace(kept, decided=True)
+    return RuleStamp(
+        source="gate",
+        rule_id=verdict,
+        text=f"the policy gate answered {verdict}",
+        decided=True,
+        shadow=kept,
+    )
+
+
+def row_rule(kept: RuleStamp | None, verdict: PermissionVerdict) -> RuleStamp | None:
+    """The rule for the audit row of a call that the gate answered with *verdict*.
+
+    *kept* is the stamp the shadow kept for the call (:func:`take_rule`).
+    With ``CUSTOM_POLICY`` off it stays as it is: a rule that did not
+    decide, or none. With it on, :func:`deciding_rule` names the rule that
+    decided.
+    """
+    if not custom_policy_on(get_settings()):
+        return kept
+    return deciding_rule(kept, _EVALUATOR_VERDICT[verdict])
 
 
 #: The rule of the last policy gate in this context, until :func:`take_rule`.

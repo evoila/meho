@@ -81,6 +81,7 @@ __all__ = [
     "payload_session_from_client",
     "policy_decision_var",
     "policy_rule_columns",
+    "policy_rule_payload",
     "policy_rule_var",
     "resolve_agent_session_id",
     "resolve_audit_session_id",
@@ -323,6 +324,19 @@ def policy_rule_columns() -> dict[str, Any]:
     if stamp is None:
         return {"policy_rule": None, "policy_version": None}
     return {"policy_rule": stamp.label(), "policy_version": stamp.policy_version}
+
+
+def policy_rule_payload() -> dict[str, str]:
+    """``{"policy_rule_shadow": ...}`` when the gate decided against the evaluator.
+
+    Only with ``CUSTOM_POLICY`` on: the row's ``policy_rule`` is then
+    ``gate:<verdict>``, and this key keeps the evaluator's rule with the
+    ``(shadow)`` mark. Empty for every other row.
+    """
+    stamp = policy_rule_var.get()
+    if stamp is None or stamp.shadow is None:
+        return {}
+    return {"policy_rule_shadow": stamp.shadow.label()}
 
 
 def resolve_audit_session_id() -> uuid.UUID | None:
@@ -678,6 +692,7 @@ def _build_core_payload(
     # correlation, credential_read reveal choice) for the broadcast-event
     # surface; the canonical values live in dedicated ``audit_log`` columns.
     _apply_contextvar_lineage_mirrors(payload)
+    payload.update(policy_rule_payload())
     payload.update(op_id=descriptor.op_id, op_class=descriptor_op_class(descriptor))
     return payload
 

@@ -3398,6 +3398,10 @@ behind a single dispatch — one level below the audit row — see the
 <td>the gate verdict: <code>auto-execute</code>, <code>needs-approval</code>, or <code>deny</code></td>
 </tr>
 <tr>
+<td><code>policy_rule</code></td>
+<td>the rule behind the verdict, as <code>&lt;source&gt;:&lt;rule id&gt;</code>, for example <code>floor:destructive_waits</code>. With <code>CUSTOM_POLICY</code> on, it names the rule that decided. When the policy evaluator gave another answer, it is <code>gate:&lt;verdict&gt;</code> (<code>run</code>, <code>wait</code> or <code>deny</code>), and <code>payload.policy_rule_shadow</code> holds the evaluator's rule. With <code>CUSTOM_POLICY</code> off, it is filled only while <code>POLICY_ENGINE_SHADOW</code> is on, and then ends with <code>(shadow)</code>: the evaluator matched the rule, but it did not decide. All rule ids: <a href="https://github.com/evoila/meho/blob/main/docs/codebase/policy-evaluator.md#the-rule-ids-on-the-audit-row"><code>docs/codebase/policy-evaluator.md</code></a></td>
+</tr>
+<tr>
 <td><code>agent_session_id</code></td>
 <td>the originating agent's MCP session id — the key for session tracing</td>
 </tr>

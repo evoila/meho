@@ -23,6 +23,16 @@ call arrives:
   needs the **tenant_admin** role (registering a target, changing the
   topology), that person needs the **tenant_admin** role too.
 
+**With the switch `CUSTOM_POLICY` on**, the risk level decides, not the
+plain mark. A `safe` or `caution` operation marked `requires_approval`,
+with no other reason to wait, counts as `dangerous`. So it still waits for
+every caller as before, and search, the call contract and the preview show
+`dangerous`. Only an Admin approves another person's request for it. When
+a platform admin turned approval off for the operation, it keeps its
+level. An operation that waits for a reason (it reads or writes a
+credential, changes rights, connects to an address you give, or deletes)
+keeps its level and its wait.
+
 Which kind of caller you are, and its name, is on
 [Who is calling](who-is-calling.md).
 

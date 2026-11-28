@@ -29,7 +29,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane import op_classes
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations import (
@@ -153,9 +153,16 @@ async def _start_and_resume(op_id: str) -> Any:
     """``person-probe-2`` starts *op_id*; ``person-probe-3`` approves its wait; the run goes on."""
     first = await h.run(op_id, h.operator(sub=_STARTER_SUB))
     assert first.status == "awaiting_approval", first.error
-    request = await h.approve(UUID(first.extras["approval_request_id"]), sub=c.APPROVER_SUB)
+    # The first wait has the plain mark, so with the switch on only an Admin approves it.
+    request = await h.approve(
+        UUID(first.extras["approval_request_id"]),
+        sub=c.APPROVER_SUB,
+        role=TenantRole.TENANT_ADMIN,
+    )
     return await resume_dispatch_after_approval(
-        operator=c.token_approver(), request=request, params=None
+        operator=c.token_approver().model_copy(update={"tenant_role": TenantRole.TENANT_ADMIN}),
+        request=request,
+        params=None,
     )
 
 

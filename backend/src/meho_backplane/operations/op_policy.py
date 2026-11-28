@@ -74,6 +74,15 @@ The rules:
   nothing of it is read, and ``category``, ``labels`` and ``rule_ref`` stay
   empty.
 
+* **Plain mark.** With the ``CUSTOM_POLICY`` switch on, the code's plain
+  approval mark (:func:`has_plain_mark`) no longer makes an operation wait
+  by itself. The level does: a ``safe`` or ``caution`` operation with the
+  plain mark counts as ``dangerous``, and the mark is taken out of the
+  approval flag. A ``dangerous`` or ``destructive`` operation keeps its
+  level. When a platform admin turned approval off, the operation keeps
+  its level. An override that turns approval on still makes it wait. With
+  the switch off nothing of it is read.
+
 Dispatch, preview, search and the operation contract all read the
 effective values through :func:`apply_effective_policy` /
 :func:`effective_policy_map`, so they always agree.
@@ -148,6 +157,7 @@ __all__ = [
     "hidden_classification_fields",
     "list_overrides",
     "load_overrides",
+    "plain_mark_counts_as_level",
     "policy_in_force",
     "register_policy_repair_op",
     "remove_override",
@@ -297,12 +307,47 @@ def effective_policy(
     code_safety: str,
     code_approval: bool,
     overrides: Iterable[OperationPolicyOverride | None],
+    *,
+    plain_mark: bool = False,
 ) -> EffectivePolicy:
-    """Return the stricter of the classification and *overrides*."""
+    """Return the stricter of the classification and *overrides*.
+
+    *plain_mark* is :func:`plain_mark_counts_as_level` of the row. When it
+    is ``True`` and approval is still on after the overrides (no platform
+    admin turned it off), :func:`_level_for_plain_mark` sets the level.
+    """
     present = [o for o in overrides if o is not None]
     safety = _max_level([code_safety, *(o.safety_level for o in present if o.safety_level)])
-    approval = _approval(code_approval, present) or safety == "destructive"
-    return EffectivePolicy(safety_level=safety, requires_approval=approval)
+    approval = _approval(code_approval, present)
+    if plain_mark and approval:
+        return _level_for_plain_mark(safety, present)
+    return EffectivePolicy(
+        safety_level=safety, requires_approval=approval or safety == "destructive"
+    )
+
+
+def _level_for_plain_mark(
+    safety: str, overrides: Iterable[OperationPolicyOverride]
+) -> EffectivePolicy:
+    """The one rule for the code's plain approval mark, with ``CUSTOM_POLICY`` on.
+
+    The level is at least ``dangerous``, so the operation waits because of
+    its level. The plain mark itself no longer sets the approval flag. An
+    override that turns approval on still does, and a ``destructive``
+    level always waits.
+    """
+    level = _max_level([safety, "dangerous"])
+    approval = any(o.requires_approval is True for o in overrides) or level == "destructive"
+    return EffectivePolicy(safety_level=level, requires_approval=approval)
+
+
+def plain_mark_counts_as_level(row: EndpointDescriptor) -> bool:
+    """True when ``CUSTOM_POLICY`` is on and *row* has the plain mark (:func:`has_plain_mark`).
+
+    Then the level decides, not the mark (:func:`_level_for_plain_mark`).
+    With the switch off it is always ``False`` and reads nothing else.
+    """
+    return custom_policy_on(get_settings()) and has_plain_mark(row)
 
 
 def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
@@ -313,8 +358,9 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
     call, a field with an address the caller gives, a change of rights,
     "approve each call", or a delete sign (the ``destructive`` level of
     the code, the HTTP verb ``DELETE``, the ``destructive`` tag, a delete
-    name). It reads the code's own values (``code_requires_approval``,
-    ``code_safety_level``, ``code_parameter_schema``), so an admin's edit
+    name, and with ``CUSTOM_POLICY`` on ``hard_to_undo``). It reads the
+    code's own values (``code_requires_approval``, ``code_safety_level``,
+    ``code_parameter_schema``), so an admin's edit
     or a switch that hides a field never looks like the code's mark.
 
     It reads the delete names from the one setting
@@ -343,6 +389,7 @@ def has_plain_mark(descriptor: EndpointDescriptor) -> bool:
         or (descriptor.method or "").upper() == "DELETE"
         or "destructive" in (descriptor.tags or [])
         or delete_grant_reason(op_id, patterns) is not None
+        or (custom_policy_on(get_settings()) and descriptor.hard_to_undo is not None)
     )
     return bool(code_approval) and not (
         delete_sign
@@ -424,8 +471,10 @@ async def effective_policy_map(
 ) -> dict[OpKey, EffectivePolicy]:
     """Return the effective policy of every row in *rows* for *tenant_id*.
 
-    The order: the classification (with the ``POLICY_CLASSIFICATION``
-    switch on) after the overrides, and the floors last: a credential
+    The order: the overrides and, with ``CUSTOM_POLICY`` on, the rule for
+    the code's plain mark (:func:`effective_policy`), then the
+    classification (with the ``POLICY_CLASSIFICATION`` switch on), and
+    the floors last: a credential
     read and an operation with a parameter that holds an address MEHO
     connects to stay at least ``caution`` with approval, and a change of
     rights keeps approval, also when an override turned approval off, and
@@ -437,7 +486,12 @@ async def effective_policy_map(
     """
     overrides = await load_overrides(session, tenant_id=tenant_id, keys=map(OpKey.of, rows))
     policies = [
-        effective_policy(row.safety_level, row.requires_approval, overrides.get(OpKey.of(row), []))
+        effective_policy(
+            row.safety_level,
+            row.requires_approval,
+            overrides.get(OpKey.of(row), []),
+            plain_mark=plain_mark_counts_as_level(row),
+        )
         for row in rows
     ]
     if classification_enabled():
@@ -493,7 +547,12 @@ def policy_in_force(
     overrides, the classification, then the floors. The dry run of a
     classification edit shows it for the values before and after.
     """
-    base = effective_policy(row.safety_level, row.requires_approval, overrides)
+    base = effective_policy(
+        row.safety_level,
+        row.requires_approval,
+        overrides,
+        plain_mark=plain_mark_counts_as_level(row),
+    )
     return _with_floors(row, _with_classification(base, classified))
 
 
@@ -598,12 +657,17 @@ async def apply_step_policy(
     step. The category and labels of an override row count too, so the
     step's approval request is routed like a direct call's.
 
+    With ``CUSTOM_POLICY`` on, a step with the code's plain approval mark
+    gets the same level as a direct call (:func:`_level_for_plain_mark`).
+    No override turns a step's approval off, so the rule always applies.
+
     A step whose operation writes or makes a credential (class
     ``credential_write`` or ``credential_mint``) always gets the approval
     flag, the same as :func:`_with_floors` gives it to a called operation.
     Its risk level stays as it is.
     """
     key = OpKey.of(step)
+    plain_mark = plain_mark_counts_as_level(step)
     async with get_sessionmaker()() as session:
         overrides = (await load_overrides(session, tenant_id=tenant_id, keys=[key])).get(key, [])
         classified = (
@@ -619,6 +683,8 @@ async def apply_step_policy(
         policy = replace(
             raised, requires_approval=step.requires_approval or raised.requires_approval
         )
+    if plain_mark:
+        policy = _level_for_plain_mark(policy.safety_level, overrides)
     if classified is not None:
         policy = _with_classification(policy, classified)
     if writes_a_credential(step.op_id, getattr(step, "op_class", None)):
@@ -776,8 +842,13 @@ def _tenants_losing_approval(
     """The tenants in *scopes* where approval ends when *before* becomes *after*."""
     lost: list[UUID] = []
     for scope in scopes:
-        old = effective_policy(scope.code_safety, scope.code_approval, [before, *scope.own])
-        new = effective_policy(scope.code_safety, scope.code_approval, [after, *scope.own])
+        plain = scope.copy_row is not None and plain_mark_counts_as_level(scope.copy_row)
+        old = effective_policy(
+            scope.code_safety, scope.code_approval, [before, *scope.own], plain_mark=plain
+        )
+        new = effective_policy(
+            scope.code_safety, scope.code_approval, [after, *scope.own], plain_mark=plain
+        )
         if old.requires_approval and not new.requires_approval:
             lost.append(scope.tenant_id)
     return tuple(lost)
@@ -887,10 +958,16 @@ def _new_approval_field(
     if requested:
         turned_off = any(o.requires_approval is False for o in others)
         needed_by_a_tenant = any(
-            not effective_policy(t.code_safety, t.code_approval, t.own).requires_approval
+            not effective_policy(
+                t.code_safety,
+                t.code_approval,
+                t.own,
+                plain_mark=t.copy_row is not None and plain_mark_counts_as_level(t.copy_row),
+            ).requires_approval
             for t in tenants
         )
-        return None if row.requires_approval and not turned_off and not needed_by_a_tenant else True
+        code_flag = row.requires_approval and not plain_mark_counts_as_level(row)
+        return None if code_flag and not turned_off and not needed_by_a_tenant else True
     if who.tighten_only:
         raise _edit_tool_cannot_loosen()
     _refuse_for_fixed_rule(row)

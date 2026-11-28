@@ -4114,6 +4114,52 @@ removals of one operation run one at a time, across all scopes, under
 a per-operation lock (see `spec-ingestion.md`, "Edits of one operation
 run one at a time").
 
+## The plain approval mark counts as `dangerous` (switch `CUSTOM_POLICY`)
+
+The plain mark is `requires_approval` from the code or the import with no
+reason behind it: no credential call, no caller address, no change of
+rights, no "approve each call" and no delete sign (with the switch on,
+`hard_to_undo` is a delete sign too). `op_policy.has_plain_mark` says if
+an operation has it.
+
+With the switch `CUSTOM_POLICY` on, the mark no longer decides by itself.
+The level does:
+
+- A `safe` or `caution` operation with the plain mark counts as
+  `dangerous`. The effective `requires_approval` no longer holds the mark.
+- A `dangerous` or `destructive` operation with the plain mark keeps its
+  level.
+- When a platform admin turned approval off for the operation, it keeps
+  its level and does not wait.
+- An override that turns approval on is not the plain mark. It still makes
+  the operation wait, at the level it has.
+- "Approve each call", "wait when set", a credential call, a change of
+  rights, a caller address and a delete keep their mark and their level.
+
+The one rule is `_level_for_plain_mark` in `operations/op_policy.py`.
+`effective_policy`, `apply_step_policy` and `policy_in_force` apply it, so
+the gate, a step of a multi-step operation, `meho policy explain`, the
+shadow check, search hits, the call contract, `preview_operation` and the
+approval card all see the same level.
+`backend/tests/test_custom_policy_no_plain_mark.py` builds the list of
+re-levelled operations from the registered operations.
+
+What waits stays the same for a direct call: a `dangerous` call waits for
+a person in the web console, for a token and for an agent, and a service
+login waits unless a standing grant covers it, as it does for the mark. Two
+things change:
+
+- **Who may approve.** Another person's `dangerous` request needs an
+  Admin; an Operator no longer approves it. `APPROVAL_ALLOW_SELF_APPROVAL`
+  never covers `dangerous`, so an install with one Operator and no Admin
+  can no longer approve its own requests for these operations.
+- **Steps of an approved multi-step run.** A step whose operation had only
+  the plain mark no longer waits for its own approval inside a run that a
+  person approved (`_covered_by_approved_run`); it runs under the approval
+  of the whole run. A step with a reason to wait keeps its own approval.
+
+With the switch off, every operation keeps its level and its mark.
+
 ## The passkey touch level in Keycloak (#6213)
 
 A later step lets MEHO ask for a passkey touch before a `dangerous` or

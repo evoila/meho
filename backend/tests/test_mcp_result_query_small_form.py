@@ -16,13 +16,11 @@ from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
-import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.handlers import _schema_error_text
 from meho_backplane.mcp.registry import ToolSurface, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.settings import get_settings
@@ -148,12 +146,12 @@ def test_off_contains_is_refused_as_before(
     query = {"filter": [{"field": "name", "op": "contains", "value": "web"}]}
     body = _call(client, {"handle_id": handle, "query": query})
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "is not one of" in body["error"]["message"]
-    assert "query.filter" not in body["error"]["message"]
+    assert "query.filter[0].op: one of:" in body["error"]["message"]
+    assert "(enum)" in body["error"]["message"]
 
 
 @_as_operator
-def test_off_errors_have_no_path(
+def test_off_errors(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     handle: str,
 ) -> None:
@@ -163,8 +161,8 @@ def test_off_errors_have_no_path(
     assert unknown["data"] == {"reason": "invalid_query"}
     extra = _call(client, {"handle_id": handle, "query": _EXTRA_KEY})["error"]["message"]
     assert extra.endswith(
-        "arguments failed inputSchema: Additional properties are not allowed "
-        "('column' was unexpected)"
+        'arguments failed inputSchema: query.filter[0]: undeclared property: "column" '
+        "(not in the op's declared params) (additionalProperties)"
     )
     spec = _call(client, {"handle_id": handle, "query": _PATH_AND_FILTER})["error"]["message"]
     assert spec.startswith("invalid query spec: 1 validation error(s); first: Value error")
@@ -205,7 +203,6 @@ def test_on_registered_tool_is_not_changed(small_form: None) -> None:
     assert found is not None
     registered, _handler = found
     assert "contains" not in str(registered.inputSchema)
-    assert registered.input_error_path is False
 
 
 @_as_operator
@@ -231,12 +228,13 @@ def test_on_input_check_error_names_the_path(
     error = _call(client, {"handle_id": handle, "query": _EXTRA_KEY})["error"]
     assert error["code"] == INVALID_PARAMS
     assert error["message"].endswith(
-        "arguments failed inputSchema: query.filter[0]: Additional properties are not "
-        "allowed ('column' was unexpected)"
+        'arguments failed inputSchema: query.filter[0]: undeclared property: "column" '
+        "(not in the op's declared params) (additionalProperties)"
     )
     bad_op = {"filter": [{"field": "name", "op": "LIKE", "value": "x"}]}
     message = _call(client, {"handle_id": handle, "query": bad_op})["error"]["message"]
-    assert "inputSchema: query.filter[0].op: 'LIKE' is not one of" in message
+    assert "inputSchema: query.filter[0].op: one of:" in message
+    assert "LIKE" not in message
 
 
 @_as_operator
@@ -316,47 +314,6 @@ def test_on_paging_does_not_change(
     payload = _payload(_call(client, {"handle_id": handle, "offset": 1, "limit": 1}))
     assert payload["rows"] == [_ROWS[1]]
     assert "no_match" not in payload
-
-
-# ---------------------------------------------------------------------------
-# Only result_query gets the path in input errors
-# ---------------------------------------------------------------------------
-
-
-def test_schema_error_text_adds_a_path_only_when_asked() -> None:
-    schema = {
-        "type": "object",
-        "properties": {
-            "q": {"type": "array", "items": {"type": "object", "additionalProperties": False}}
-        },
-    }
-    with pytest.raises(jsonschema.ValidationError) as caught:
-        jsonschema.validate({"q": [{"x": 1}]}, schema)
-    plain = _schema_error_text(caught.value)
-    assert plain == "Additional properties are not allowed ('x' was unexpected)"
-    assert _schema_error_text(caught.value, with_path=True) == f"q[0]: {plain}"
-
-
-def test_schema_error_text_without_a_path_has_no_prefix() -> None:
-    with pytest.raises(jsonschema.ValidationError) as caught:
-        jsonschema.validate({}, {"type": "object", "required": ["a"]})
-    assert _schema_error_text(caught.value, with_path=True) == "'a' is a required property"
-
-
-def test_on_other_tools_keep_their_input_errors(small_form: None) -> None:
-    from meho_backplane.mcp.registry import all_tools_for
-
-    operator = Operator(
-        sub="op-test",
-        name="Test",
-        email=None,
-        raw_jwt="fixture-jwt-not-real",
-        tenant_id=OPERATOR_TENANT_ID,
-        tenant_role=TenantRole.TENANT_ADMIN,
-        scopes=frozenset({"mcp:admin"}),
-    )
-    marked = {d.name for d in all_tools_for(operator) if d.input_error_path}
-    assert marked == {"result_query"}
 
 
 # ---------------------------------------------------------------------------

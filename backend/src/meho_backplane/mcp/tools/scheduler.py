@@ -65,9 +65,10 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
-from meho_backplane.mcp.tools._work_ref_argument import validation_error_text, work_ref_argument
+from meho_backplane.mcp.tools._work_ref_argument import work_ref_argument
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
     ScheduledTriggerRead,
@@ -236,7 +237,7 @@ async def _create_handler(
     try:
         payload = ScheduledTriggerCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {validation_error_text(exc)}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {refusal_text(exc)}") from exc
     # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
     # crosses the tenant boundary, which is a platform-level capability --
     # not something tenant-admin *rank* confers. Reuse the REST route's

@@ -100,8 +100,8 @@ from meho_backplane.connectors.result_handle_store import (
     result_profile_var,
 )
 from meho_backplane.db.models import AuditEventClass
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.audit import write_mcp_audit_row
-from meho_backplane.mcp.field_path import field_path
 from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.profiles import (
     profile_admits,
@@ -223,25 +223,6 @@ def _drop_empty_optional_text(arguments: dict[str, Any], schema: dict[str, Any])
         for key, value in arguments.items()
         if key in required or not (isinstance(value, str) and not value.strip())
     }
-
-
-def _schema_error_text(exc: jsonschema.ValidationError, *, with_path: bool = False) -> str:
-    """Return the human-readable part of a schema-violation message.
-
-    ``jsonschema``'s own ``maxLength`` message repeats the whole offending
-    value (``'xxxx…' is too long``) and never names the limit. A too-long
-    free-text argument is the one case where that is both useless and
-    costly — the value can be tens of kilobytes — so it is rendered as
-    ``<field>: at most <n> characters`` instead. Every other violation keeps
-    the library's message. With *with_path* (the tool's
-    ``input_error_path``), that message starts with the path of the wrong
-    input, for example ``query.filter[0].op: ...`` (#4174).
-    """
-    if exc.validator != "maxLength":
-        path = field_path(exc.absolute_path) if with_path else ""
-        return f"{path}: {exc.message}" if path else exc.message
-    field = ".".join(str(part) for part in exc.path) or "value"
-    return f"{field}: at most {exc.validator_value} characters"
 
 
 #: MCP-defined error code for "Resource not found" per spec
@@ -617,7 +598,8 @@ async def handle_tools_call(
         # dependency — jsonschema registers that checker only when the
         # package is importable (a guard test pins the registration).
         # ``jsonschema.validate`` raises ``ValidationError`` on the
-        # first failure; we surface it as INVALID_PARAMS.
+        # first failure; we surface it as INVALID_PARAMS, worded by
+        # :func:`refusal_text` (the field path and the kind, never the value).
         try:
             jsonschema.validate(
                 instance=arguments,
@@ -628,8 +610,7 @@ async def handle_tools_call(
         except jsonschema.ValidationError as exc:
             status_code = 400
             raise McpInvalidParamsError(
-                f"tools/call {name!r}: arguments failed inputSchema: "
-                f"{_schema_error_text(exc, with_path=defn.input_error_path)}",
+                f"tools/call {name!r}: arguments failed inputSchema: {refusal_text(exc)}",
             ) from exc
 
         # #6099: a stored result keeps the session's profile when it has a

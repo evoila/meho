@@ -95,6 +95,7 @@ from meho_backplane.broadcast.overrides import invalidate_tenant_cache
 from meho_backplane.db.after_commit import clear_now_and_after_commit
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import BroadcastOverride
+from meho_backplane.input_refusal import FixedMessageError
 
 __all__ = ["router"]
 
@@ -158,7 +159,7 @@ class BroadcastOverrideCreate(BaseModel):
     @model_validator(mode="after")
     def _scope_pair_must_be_consistent(self) -> BroadcastOverrideCreate:
         if (self.scope_field is None) ^ (self.scope_value is None):
-            raise ValueError(
+            raise FixedMessageError(
                 "scope_field and scope_value must both be set or both be NULL",
             )
         return self
@@ -167,7 +168,7 @@ class BroadcastOverrideCreate(BaseModel):
     def _op_id_pattern_must_not_be_regex(self) -> BroadcastOverrideCreate:
         bad = sorted({c for c in self.op_id_pattern if c in _REGEX_LIKE_CHARS})
         if bad:
-            raise ValueError(
+            raise FixedMessageError(
                 f"op_id_pattern must be glob, not regex; rejected chars: {bad}",
             )
         return self

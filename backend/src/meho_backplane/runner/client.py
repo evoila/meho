@@ -39,6 +39,7 @@ from typing import Final
 import httpx
 import structlog
 
+from meho_backplane.input_refusal import error_text
 from meho_backplane.runner import wire
 from meho_backplane.runner.login import (
     RunnerLoginError,
@@ -214,7 +215,7 @@ class RunnerClient:
         try:
             return RunnerAssignment.model_validate(resp.json())
         except ValueError as exc:
-            raise RunnerClientError(f"assignment payload invalid: {exc}") from exc
+            raise RunnerClientError(f"assignment payload invalid: {error_text(exc)}") from exc
 
     async def post_results(self, batch: RunnerResultBatch) -> list[RefusedResult]:
         """POST a result batch and return the results MEHO refused.

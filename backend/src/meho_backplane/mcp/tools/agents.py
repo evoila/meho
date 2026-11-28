@@ -73,6 +73,7 @@ from meho_backplane.agents.service import (
     with_live_grants,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -229,7 +230,7 @@ async def _create_handler(
     try:
         payload = AgentDefinitionCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {refusal_text(exc)}") from exc
     structlog.contextvars.bind_contextvars(
         audit_agent_name=payload.name,
         **audit_fields(payload.starting_grants, agent=payload.identity_ref),
@@ -360,7 +361,7 @@ async def _edit_handler(
     try:
         payload = AgentDefinitionUpdate.model_validate(update_args)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {refusal_text(exc)}") from exc
     if payload.identity_ref is not None:
         structlog.contextvars.bind_contextvars(
             **audit_fields(payload.starting_grants, agent=payload.identity_ref)

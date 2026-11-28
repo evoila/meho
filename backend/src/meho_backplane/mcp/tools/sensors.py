@@ -56,6 +56,7 @@ from meho_backplane.checks.service import (
     SensorRequiresSafeOperationError,
     SensorResultsCursorError,
 )
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpPermissionDeniedError
 from meho_backplane.settings import get_settings
@@ -188,7 +189,7 @@ async def _create_handler(
     try:
         payload = SensorCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid arguments: {refusal_text(exc)}") from exc
     # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
     # crosses the tenant boundary, which is a platform-level capability --
     # not something tenant-admin *rank* confers. Reuse the REST route's
@@ -494,7 +495,7 @@ async def _results_handler(
     try:
         query = SensorResultsQuery.model_validate(filter_args)
     except ValidationError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
+        raise McpInvalidParamsError(refusal_text(exc)) from exc
     service = SensorAdminService()
     try:
         page = await service.list_results(operator.tenant_id, sensor_id, query)

@@ -76,6 +76,7 @@ from meho_backplane.agents.grants import (
     GrantValidationError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -250,7 +251,7 @@ async def _create_grant_handler(
     try:
         payload = AgentGrantCreate.model_validate(arguments)
     except ValidationError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
+        raise McpInvalidParamsError(refusal_text(exc)) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_GRANT_OP_IDS["create"],
         audit_op_class="write",

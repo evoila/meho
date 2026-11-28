@@ -61,6 +61,7 @@ from pydantic import (
 )
 
 from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.input_refusal import FixedMessageError
 from meho_backplane.targets.extras_limits import check_extras_size
 from meho_backplane.targets.field_rules import check_target_host, check_target_name
 from meho_backplane.targets.keycloak_realm_warnings import shown_fingerprint
@@ -138,7 +139,7 @@ def validate_ca_pin_pem(value: str | None) -> str | None:
         ctx.load_verify_locations(cadata=value)
     except (ssl.SSLError, TypeError) as exc:
         # TypeError: the stdlib refuses non-ASCII text in cadata.
-        raise ValueError(f"tls_ca_pin is not a valid PEM certificate bundle: {exc}") from exc
+        raise FixedMessageError(f"tls_ca_pin is not a valid PEM certificate bundle: {exc}") from exc
     return value
 
 
@@ -540,7 +541,7 @@ class TargetCreate(BaseModel):
         API boundary so the contradiction never reaches the connector.
         """
         if self.tls_ca_pin is not None and not self.verify_tls:
-            raise ValueError(
+            raise FixedMessageError(
                 "tls_ca_pin and verify_tls=false are mutually exclusive: a "
                 "CA-pin already reaches a self-signed / internal-CA endpoint "
                 "securely (verification stays on against the pinned CA), so "
@@ -668,13 +669,13 @@ class TargetUpdate(BaseModel):
     @classmethod
     def _check_extras_changes(cls, value: dict[str, Any] | None) -> dict[str, Any]:
         if not value:
-            raise ValueError("extras_changes must name at least one key")
+            raise FixedMessageError("extras_changes must name at least one key")
         return check_extras_size(value)
 
     @model_validator(mode="after")
     def _extras_or_extras_changes(self) -> TargetUpdate:
         if "extras" in self.model_fields_set and "extras_changes" in self.model_fields_set:
-            raise ValueError(
+            raise FixedMessageError(
                 "send either extras (replaces the whole map) or extras_changes "
                 "(changes single keys), not both; nothing was changed"
             )
@@ -730,7 +731,7 @@ class TargetUpdate(BaseModel):
         only sees the request body.
         """
         if self.tls_ca_pin is not None and self.verify_tls is False:
-            raise ValueError(
+            raise FixedMessageError(
                 "tls_ca_pin and verify_tls=false are mutually exclusive: a "
                 "CA-pin already reaches a self-signed / internal-CA endpoint "
                 "securely, so disabling verification as well is contradictory. "

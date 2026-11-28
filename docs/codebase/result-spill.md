@@ -295,13 +295,11 @@ With `RESULT_QUERY_SMALL_FORM=true`, the MCP tool changes like this
 (`mcp/tools/_result_query_small_form.py`):
 
 - **An error names the wrong place** as a path. Examples:
-  `query.filter[0].field: unknown field 'state': ...`,
-  `query.filter[0]: Additional properties are not allowed ('column' was
-  unexpected)`, `query.path: ...`. The compiler keeps the place on
-  `QueryContractError.loc`, beside the text, so the REST text does not
-  change. The `tools/call` input check adds the path only for a tool whose
-  `ToolDefinition.input_error_path` is true; only `result_query` sets it,
-  and only while the switch is on.
+  `query.filter[0].field: unknown field 'state': ...`, `query.path: ...`.
+  The compiler keeps the place on `QueryContractError.loc`, beside the
+  text, so the REST text does not change. The `tools/call` input check
+  names the path for every tool, with the switch on or off
+  (`input_refusal.py`, see `error-message-shape.md`).
 - **A filter that matches no row** adds `no_match` to the answer:
   `values` has up to 10 values each filter field has in the stored rows,
   in stored order (longer texts cut to 64 characters), and `note` says

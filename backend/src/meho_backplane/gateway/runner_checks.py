@@ -93,6 +93,7 @@ from meho_backplane.db.models import (
     SensorStatus,
 )
 from meho_backplane.gateway.repository import ingest_new_results, lock_assignment_row
+from meho_backplane.input_refusal import error_text
 from meho_backplane.metrics import RUNNER_CHECK_RESULTS_TOTAL
 from meho_backplane.operations._errors import _sanitize_free_text
 from meho_backplane.runner.result_clean import clean_result
@@ -271,7 +272,7 @@ def _outcome_for(
         spec = AssertionSpec.model_validate(sensor.assertion)
         return evaluate_assertion(spec, item.result, now=received_at)
     except Exception as exc:
-        return _unknown("assertion_evaluation_error", error=_sanitize_free_text(str(exc)))
+        return _unknown("assertion_evaluation_error", error=_sanitize_free_text(error_text(exc)))
 
 
 def _cleaned(item: RunnerResult, sensor: Sensor | None, tenant_id: uuid.UUID) -> RunnerResult:

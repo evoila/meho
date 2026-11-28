@@ -27,6 +27,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.input_refusal import FixedMessageError
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 from meho_backplane.work_ref import WORK_REF_FIELD_DESCRIPTION, WorkRef
 
@@ -287,7 +288,7 @@ class ScheduledTriggerCreate(BaseModel):
         if self.kind in (ScheduledTriggerKind.CRON, ScheduledTriggerKind.ONE_OFF) and (
             not _payload_yields_prompt(self.inputs)
         ):
-            raise ValueError(
+            raise FixedMessageError(
                 "cron and one_off triggers require inputs that render a "
                 "non-empty user prompt: set inputs.prompt to a non-empty "
                 "string, or provide a non-empty inputs payload (an input-less "

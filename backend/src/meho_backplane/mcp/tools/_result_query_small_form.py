@@ -11,8 +11,9 @@ off by default; with it off, the tool and its answers do not change.
 With the switch on:
 
 * an error in ``query`` starts with the path of the wrong input, for
-  example ``query.filter[0].field: unknown field 'state' ...``. This holds
-  for the ``tools/call`` input check too (``input_error_path``);
+  example ``query.filter[0].field: unknown field 'state' ...``. The
+  ``tools/call`` input check names the path with the switch on or off
+  (:func:`~meho_backplane.input_refusal.refusal_text`);
 * a filter that matches no stored row adds ``no_match`` to the answer, with
   a few values each filter field really has
   (:mod:`meho_backplane.operations.result_query_no_match`);
@@ -79,9 +80,7 @@ def small_form_for_settings(definition: ToolDefinition) -> ToolDefinition:
     op["description"] = _OP_DESCRIPTION
     output = copy.deepcopy(definition.outputSchema or {})
     output.setdefault("properties", {})["no_match"] = _NO_MATCH_SCHEMA
-    return definition.model_copy(
-        update={"inputSchema": schema, "outputSchema": output, "input_error_path": True}
-    )
+    return definition.model_copy(update={"inputSchema": schema, "outputSchema": output})
 
 
 def spec_error_text(exc: ValidationError) -> str:

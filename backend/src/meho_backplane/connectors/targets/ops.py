@@ -106,8 +106,8 @@ from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import PermissionVerdict
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.input_refusal import refusal_entries, refusal_path, refusal_text
 from meho_backplane.operations._audit import policy_decision_var
-from meho_backplane.operations._errors import validation_error_text
 from meho_backplane.operations._preview import _redact_echoed_params
 from meho_backplane.operations._validate import params_problem, register_params_check
 from meho_backplane.operations.role_floors import register_role_floor
@@ -208,7 +208,7 @@ def model_refusal(exc: ValidationError) -> str:
     The text reaches the answer, the stored result and the audit row, and
     the input can hold a value of ``extras``.
     """
-    return f"invalid target parameters: {validation_error_text(exc)}"
+    return f"invalid target parameters: {refusal_text(exc)}"
 
 
 def model_params_problem(model: type[BaseModel], fields: dict[str, Any]) -> dict[str, Any] | None:
@@ -222,9 +222,9 @@ def model_params_problem(model: type[BaseModel], fields: dict[str, Any]) -> dict
     try:
         model.model_validate(fields, context={NO_DESTINATION_SCREEN: True})
     except ValidationError as exc:
-        first = exc.errors(include_input=False, include_url=False)[0]
+        first = refusal_entries(exc.errors(include_input=False, include_url=False))[0]
         return params_problem(
-            ".".join(map(str, first["loc"])) or "params",
+            refusal_path(first["loc"]),
             f"{first['msg']} ({first['type']})",
             "Fix this field and send the call again. Nothing was stored.",
         )
@@ -355,19 +355,47 @@ def _probe_next_step(name: str) -> str:
     )
 
 
+#: Kinds of a structured service ``detail`` whose other keys quote a sent value.
+_KINDS_THAT_QUOTE_INPUT: frozenset[str] = frozenset(
+    {
+        "unknown_product",
+        "unknown_preferred_impl_id",
+        "secret_ref_outside_tenant_scope",
+        "secret_ref_project_not_allowed",
+    }
+)
+
+#: Keys of a structured service ``detail`` that hold no sent value. Any other
+#: key (``product``, ``secret_ref``, ``message``, ...) can quote the input.
+_DETAIL_KEYS_WITHOUT_INPUT: tuple[str, ...] = (
+    "kind",
+    "error",
+    "field",
+    "setting",
+    "valid_products",
+    "valid_impl_ids",
+    "tenant_prefix",
+    "expected_secret_ref",
+)
+
+
 def _http_exception_message(exc: HTTPException) -> str:
     """Flatten a service ``HTTPException`` to a single operator-facing line.
 
     ``create_target`` raises structured 422s (``detail`` is a dict for the
     unknown-product and out-of-scope-``secret_ref`` cases) and plain-string
-    409/422s. Return the string detail verbatim; render a structured detail
-    prefixed with its status so the cause is still legible in the ``-32602``
-    message.
+    409/422s. A string detail is returned as it is. A structured detail of a
+    kind in :data:`_KINDS_THAT_QUOTE_INPUT` is its status and the keys of
+    :data:`_DETAIL_KEYS_WITHOUT_INPUT`: the text reaches the answer and the
+    stored result of an approved run, so it names the kind of error and the
+    valid choices, never the sent value. Any other structured detail is shown
+    with its status.
     """
     detail = exc.detail
-    if isinstance(detail, str):
-        return detail
-    return f"{exc.status_code}: {detail}"
+    if not isinstance(detail, dict) or detail.get("kind") not in _KINDS_THAT_QUOTE_INPUT:
+        return detail if isinstance(detail, str) else f"{exc.status_code}: {detail}"
+    parts = [f"{key}={detail[key]!r}" for key in _DETAIL_KEYS_WITHOUT_INPUT if key in detail]
+    return f"{exc.status_code}: {', '.join(parts) or 'invalid target parameters'}"
 
 
 async def register_targets_registry_operations(

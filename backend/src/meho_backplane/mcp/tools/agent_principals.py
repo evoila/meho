@@ -67,6 +67,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.input_refusal import refusal_text
 from meho_backplane.mcp.human_only import ensure_human_mcp_caller
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpExecutionFailedError, McpInvalidParamsError
@@ -103,7 +104,7 @@ def _parse_starting_grants(raw: object) -> StartingGrants | None:
     try:
         return StartingGrants.model_validate(raw)
     except ValidationError as exc:
-        raise McpInvalidParamsError(f"invalid starting_grants: {exc}") from exc
+        raise McpInvalidParamsError(f"invalid starting_grants: {refusal_text(exc)}") from exc
 
 
 # ---------------------------------------------------------------------------

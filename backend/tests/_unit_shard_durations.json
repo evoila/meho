@@ -781,6 +781,7 @@
   "tests/test_ingest_health_benchmark.py": 3.29,
   "tests/test_ingest_large_spec_event_loop.py": 3.92,
   "tests/test_ingest_refuses_short_kubernetes_paths.py": 3.07,
+  "tests/test_input_refusal.py": 36.0,
   "tests/test_instance_settings_keycloak_realm.py": 1.15,
   "tests/test_instance_settings_schema.py": 1.59,
   "tests/test_instance_settings_secret_check_time.py": 2.2,

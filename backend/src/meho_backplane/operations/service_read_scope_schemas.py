@@ -23,6 +23,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from meho_backplane.input_refusal import FixedMessageError
+
 __all__ = [
     "ReadScopeEntry",
     "ServiceReadScopeRead",
@@ -69,7 +71,7 @@ class ReadScopeEntry(BaseModel):
         has_id = self.target_id is not None
         has_selector = self.target_product is not None or self.target_name_pattern is not None
         if [has_id, has_selector, self.no_target].count(True) != 1:
-            raise ValueError(
+            raise FixedMessageError(
                 "an entry is exactly one of: target_id, a selector "
                 "(target_product and/or target_name_pattern), or no_target=true"
             )

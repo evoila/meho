@@ -406,12 +406,13 @@ def test_body_422_for_a_blank_ticket_id_names_the_rule() -> None:
     assert "must not be empty" in error["msg"]
 
 
-def test_body_422_keeps_the_input_of_other_fields() -> None:
+def test_body_422_of_other_fields_has_no_input() -> None:
     response = _body_app().post("/call", json={"connector_id": 7, "op_id": "o"})
     assert response.status_code == 422
     (error,) = response.json()["detail"]
     assert error["loc"] == ["body", "connector_id"]
-    assert error["input"] == 7
+    assert error["type"] == "string_type"
+    assert "input" not in error
 
 
 def test_app_uses_the_safe_422_handler() -> None:

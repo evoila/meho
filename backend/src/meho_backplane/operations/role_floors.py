@@ -29,7 +29,12 @@ all (:func:`reader_change_denial`). This holds for every kind of login in
 a new call, and in a re-run of an approved request by the requester
 (``POST /api/v1/approvals/{id}/rerun``), checked with the role in the
 caller's token at the re-run. The REST, MCP and console doors give the
-same code and sentence (:func:`reader_change_refusal`).
+same code and sentence (:func:`reader_change_refusal`). A multi-step
+operation is a change when one of its listed steps is
+(:func:`holds_change_step`), so an agent of a Reader is refused before the
+call waits for approval. In a run after an approval, a step that asks for
+a change is refused when the Reader's agent asked for the run
+(:func:`requester_change_denial`).
 
 The floor applies to people. An agent login parks or is refused by the
 policy gate as before, and a service login parks or runs under a grant a
@@ -64,10 +69,12 @@ __all__ = [
     "RequesterCheck",
     "asks_for_change",
     "has_requester_check",
+    "holds_change_step",
     "reader_change_denial",
     "reader_change_refusal",
     "register_requester_check",
     "register_role_floor",
+    "requester_change_denial",
     "requester_check_denial",
     "role_floor_denial",
     "role_floor_for",
@@ -158,7 +165,9 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     That is a call at any risk level above ``safe`` (a write, a delete, a
     multi-step operation that changes something), an operation that always
     waits for approval, a write (class ``write``, or marked by its connector
-    as a safe write), a credential write or mint, and a change of rights.
+    as a safe write), a credential write or mint, a change of rights, and a
+    multi-step operation whose step list has a change step
+    (:func:`holds_change_step`).
 
     A ``safe`` read is not a change. A credential read is raised to at least
     ``caution`` when the operation is looked up, so it counts as a change,
@@ -178,7 +187,64 @@ def asks_for_change(descriptor: EndpointDescriptor, params: dict[str, Any] | Non
     op_class = resolve_op_class(op_id, getattr(descriptor, "op_class", None))
     if op_class in _CHANGE_CLASSES or is_safe_write(op_id) or is_credential_capable(op_id):
         return True
-    return is_rights_change_op(op_id) or params_write_credential(op_id, params)
+    if is_rights_change_op(op_id) or params_write_credential(op_id, params):
+        return True
+    return descriptor.source_kind == "composite" and holds_change_step(op_id)
+
+
+def holds_change_step(op_id: str) -> bool:
+    """True when the step list of the multi-step operation *op_id* has a change step.
+
+    The list is the one the connector registers for the operation
+    (:func:`~meho_backplane.operations.governed_subops.register_governed_subops`).
+    A listed step can be a multi-step operation with its own list; it
+    counts by the steps of that list, at every level. An operation with no
+    list has no known steps, so this is ``False`` for it.
+    """
+    from meho_backplane.operations.governed_subops import governed_subops_for
+
+    seen: set[str] = {op_id}
+    pending: list[str] = [op_id]
+    while pending:
+        surface = governed_subops_for(pending.pop(0))
+        if surface is None:
+            continue
+        for step_op_id in surface.sub_op_ids:
+            if step_op_id in seen:
+                continue
+            seen.add(step_op_id)
+            if governed_subops_for(step_op_id) is not None:
+                # A step with its own list counts by its steps.
+                pending.append(step_op_id)
+            elif _step_asks_for_change(step_op_id):
+                return True
+    return False
+
+
+def _step_asks_for_change(op_id: str) -> bool:
+    """True when a listed step may change something.
+
+    The list names only op ids, not the risk level of each step. So a step
+    counts as a change unless its class says it reads: an ingested ``GET``
+    or ``HEAD``, a read name such as ``.list``, or a class its connector
+    declared. A credential read counts as a change, as for a called
+    operation, unless its connector marks it as a read whose answer holds
+    no secret value.
+    """
+    from meho_backplane.broadcast.events import resolve_op_class
+    from meho_backplane.op_classes import (
+        is_credential_capable,
+        is_safe_write,
+        returns_no_secret_value,
+    )
+    from meho_backplane.operations.grant_approval import is_rights_change_op
+
+    op_class = resolve_op_class(op_id)
+    if op_class == "credential_read":
+        return not returns_no_secret_value(op_id)
+    if op_class not in _READ_CLASSES:
+        return True
+    return is_safe_write(op_id) or is_credential_capable(op_id) or is_rights_change_op(op_id)
 
 
 def reader_change_denial(
@@ -197,5 +263,31 @@ def reader_change_denial(
     return None if sentence is None else f"{READER_CHANGE_CODE}: {sentence}"
 
 
+def requester_change_denial(
+    descriptor: EndpointDescriptor, params: dict[str, Any] | None
+) -> str | None:
+    """The deny reason for a step that the Reader who asked may not run, or ``None``.
+
+    Inside a run after a person's approval, a step is checked with the
+    rights of the person who runs it. When an agent asked for the run (an
+    agent login, or a hosted agent run) and the one who asked has the
+    Reader role, a step that asks for a change is refused too. This holds
+    for a multi-step operation whose steps MEHO could not read before the
+    run started.
+    """
+    from meho_backplane.operations.composite import runs_after_approval
+    from meho_backplane.operations.secondary_target_policy import approved_agent_requester
+
+    if not runs_after_approval():
+        return None
+    requester = approved_agent_requester()
+    if requester is None or requester[0] is None:
+        return None
+    return reader_change_denial(requester[0], descriptor, params)
+
+
 #: The op classes that change something (a read is not one).
 _CHANGE_CLASSES: Final[frozenset[str]] = frozenset({"write", "credential_write", "credential_mint"})
+
+#: The op classes of a listed step that only reads.
+_READ_CLASSES: Final[frozenset[str]] = frozenset({"read", "audit_query"})

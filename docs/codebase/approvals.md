@@ -948,7 +948,11 @@ plain sentence next to the code `insufficient_role`. MEHO stores nothing and
 runs nothing. The same check covers a new call and a re-run by the
 requester (`POST /api/v1/approvals/{id}/rerun`), checked with the role in
 the caller's token at the re-run: a requester whose role is now Reader is
-refused, and the operation does not run. A preview is not a change. The rule, the sentence and the places MEHO checks it:
+refused, and the operation does not run. A multi-step operation is a
+change when its step list has a change step, so a Reader's agent login or
+hosted run is refused before the call waits, and in a run after an
+approval a change step of a Reader's agent is refused and not sent. A
+preview is not a change. The rule, the sentence and the places MEHO checks it:
 [agent-permission-model.md](agent-permission-model.md#a-reader-cannot-ask-for-a-change-operationsrole_floorspy).
 
 ## A credential call always waits for a person

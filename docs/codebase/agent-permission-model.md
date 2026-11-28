@@ -442,7 +442,13 @@ login, an agent login, and a hosted agent run that a Reader started.
   (`resolve_op_class`), or one that its connector marks as a safe write
   (`declare_safe_writes`, `is_safe_write`);
 - a credential write or mint;
-- a change of rights.
+- a change of rights;
+- a multi-step operation whose step list has a change step
+  (`holds_change_step`). The list is the one its connector registers
+  (`register_governed_subops`), read at every level. The list names only
+  op ids, so a listed step counts as a change unless its class says it
+  reads (`GET` / `HEAD`, a read name such as `.list`, or a declared
+  class). An operation with only read steps is not a change.
 
 A `safe` read is not a change. A credential read is at least `caution` and
 waits for a person's approval (`operations/credential_read.py`), so it
@@ -467,6 +473,13 @@ Where MEHO checks it:
   and its `reason_code` is `insufficient_role`. The policy evaluator has
   the same rule (`policy/floors.py`, `reader_change_floor`, with the mark
   `asks_for_change`).
+- **The steps of a run after an approval.** A multi-step operation that
+  lists no steps has no known steps before it runs, so an agent of a
+  Reader waits for approval as for a read. After a person approves the
+  run, each step is checked with the rights of the person who runs it,
+  and also with the role of the one who asked
+  (`requester_change_denial`). A step that asks for a change is refused
+  with the same code and sentence, and it is not sent.
 - **The requester's own run of an approved request.** A re-run by the
   requester (`POST /api/v1/approvals/{id}/rerun`) is checked with the role
   in the caller's token at the re-run. A requester whose role is now Reader

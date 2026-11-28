@@ -56,6 +56,7 @@ from meho_backplane.operations.rights_change_console import (
 )
 from meho_backplane.operations.role_floors import (
     reader_change_denial,
+    requester_change_denial,
     requester_check_denial,
     role_floor_denial,
 )
@@ -1074,9 +1075,14 @@ def _reader_change_denial(
 
     See :func:`~meho_backplane.operations.role_floors.reader_change_denial`.
     It holds for every kind of login, so the call is ``DENY`` before an
-    approval request or its preview is built.
+    approval request or its preview is built. In a run after an approval,
+    a step that asks for a change is also refused when the Reader's agent
+    asked for the run
+    (:func:`~meho_backplane.operations.role_floors.requester_change_denial`).
     """
-    denial = reader_change_denial(operator, descriptor, params)
+    denial = reader_change_denial(operator, descriptor, params) or requester_change_denial(
+        descriptor, params
+    )
     if denial is not None:
         _log.info(
             "policy_gate_reader_change_denied",
